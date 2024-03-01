@@ -3207,9 +3207,7 @@ automatically create an implementation for you.</p>
   {:added &quot;0.35.0&quot;, :arglists '([driver query context respond])}
   dispatch-on-initialized-driver
   :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Set of all features a driver can support.</p>
-
-<p>TODO -- I think we should rename this to <code>features</code> since <code>driver/driver-features</code> is a bit redundant.</p>
-</td><td class="codes"><pre class="brush: clojure">(def driver-features
+</td><td class="codes"><pre class="brush: clojure">(def features
   #{
     ;; Does this database support foreign key relationships?
     :foreign-keys
@@ -3299,21 +3297,7 @@ automatically create an implementation for you.</p>
     ;; Does the driver require specifying a collection (table) for native queries? (mongo)
     :native-requires-specified-collection
     ;; Does the driver support column(s) support storing index info
-    :index-info})</pre></td></tr><tr><td class="docs"><p>Does this driver support a certain <code>feature</code>? (A feature is a keyword, and can be any of the ones listed above in
-[[driver-features]].)</p>
-
-<p>  (supports? :postgres :set-timezone) ; -> true</p>
-
-<p>DEPRECATED — [[database-supports?]] should be used instead. This function will be removed in Metabase version 0.50.0.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti supports?
-  {:added &quot;0.32.0&quot;, :arglists '([driver feature]), :deprecated &quot;0.47.0&quot;}
-  (fn [driver feature]
-    (when-not (driver-features feature)
-      (throw (Exception. (tru &quot;Invalid driver feature: {0}&quot; feature))))
-    [(dispatch-on-initialized-driver driver) feature])
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod supports? :default [_ _] false)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod supports? [::driver :schemas] [_ _] true)</pre></td></tr><tr><td class="docs"><p>Does this driver and specific instance of a database support a certain <code>feature</code>?
+    :index-info})</pre></td></tr><tr><td class="docs"><p>Does this driver and specific instance of a database support a certain <code>feature</code>?
 (A feature is a keyword, and can be any of the ones listed above in <code>driver-features</code>.
 Note that it's the same set of <code>driver-features</code> with respect to
 both database-supports? and [[supports?]])</p>
@@ -3331,16 +3315,18 @@ you can determine whether a feature is supported for this particular database.</
 </td><td class="codes"><pre class="brush: clojure">(defmulti database-supports?
   {:arglists '([driver feature database]), :added &quot;0.41.0&quot;}
   (fn [driver feature _database]
-    (when-not (driver-features feature)
+    (when-not (features feature)
       (throw (Exception. (tru &quot;Invalid driver feature: {0}&quot; feature))))
     [(dispatch-on-initialized-driver driver) feature])
   :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod database-supports? :default [driver feature _] (supports? driver feature))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(doseq [[feature supported?] {:basic-aggregations                     true
+</td><td class="codes"><pre class="brush: clojure">(defmethod database-supports?
+  :default [_driver _feature _] false)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(doseq [[feature supported?] {:convert-timezone                       false
+                              :basic-aggregations                     true
                               :case-sensitivity-string-filter-options true
                               :date-arithmetics                       true
                               :temporal-extract                       true
-                              :convert-timezone                       false
+                              :schemas                                true
                               :test/jvm-timezone-setting              true}]
   (defmethod database-supports? [::driver feature] [_driver _feature _db] supported?))</pre></td></tr><tr><td class="docs"><p>Escape a <code>column-or-table-alias</code> string in a way that makes it valid for your database. This method is used for
 existing columns; aggregate functions and other expressions; joined tables; and joined subqueries; be sure to return
@@ -3442,10 +3428,8 @@ default implementation is an identity function.</p>
 specifically relevant in the event that the driver was doing some caching or connection pooling; the driver should
 release ALL related resources when this is called.</p>
 
-<p>TODO - we should just have some sort of <code>core.async</code> channel to handle DB update notifications instead</p>
-
 <p>TODO -- shouldn't this be called <code>notify-database-updated!</code>, since the expectation is that it is done for side
-effects?</p>
+effects? issue: https://github.com/metabase/metabase/issues/39367</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti notify-database-updated
   {:added &quot;0.32.0&quot; :arglists '([driver database])}
   dispatch-on-initialized-driver
@@ -3516,7 +3500,8 @@ this method.`Driver-agnostic end-to-end native parameter tests live in
   :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod default-field-order ::driver [_] :database)</pre></td></tr><tr><td class="docs"><p>Return the day that is considered to be the start of week by <code>driver</code>. Should return a keyword such as <code>:sunday</code>.</p>
 
-<p>TODO -- this can vary based on session variables or connection options</p>
+<p>TODO -- this can vary based on session variables or connection options
+Issue: https://github.com/metabase/metabase/pull/39386</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti db-start-of-week
   {:added &quot;0.37.0&quot; :arglists '([driver])}
   dispatch-on-initialized-driver
@@ -3539,9 +3524,10 @@ unchanged). This multimethod will only be called if <code>:details</code> is act
 <p>TODO:</p>
 
 <ol>
-<li><p>We definitely should not be asking drivers to "update the value for <code>:details</code>". Drivers shouldn't touch the
-application database.</p></li>
-<li><p>Something that is done for side effects like updating the application DB NEEDS TO END IN AN EXCLAMATION MARK!</p></li>
+<li>We definitely should not be asking drivers to "update the value for <code>:details</code>". Drivers shouldn't touch the
+application database.</li>
+<li>Something that is done for side effects like updating the application DB NEEDS TO END IN AN EXCLAMATION MARK!
+Issue: https://github.com/metabase/metabase/issues/39392</li>
 </ol>
 </td><td class="codes"><pre class="brush: clojure">(defmulti normalize-db-details
   {:added &quot;0.41.0&quot; :arglists '([driver database])}
