@@ -2865,23 +2865,89 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.automagic-dashboards.core" name="metabase.automagic-dashboards.core"><h1 class="project-name">metabase.automagic-dashboards.core</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Automatically generate questions and dashboards based on predefined heuristics.</p>
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.automagic-dashboards.core" name="metabase.automagic-dashboards.core"><h1 class="project-name">metabase.automagic-dashboards.core</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><h1>Automagic Dashboards</h1>
+
+<p>Automatically generate questions and dashboards based on predefined heuristics.</p>
+
+<p>Note that the primary entry point into this namespace is <code>automagic-analysis</code>. This function primarily gathers
+needed data about the input value and any special options then calls into <code>automagic-dashboard</code>, where most of
+the work occurs.</p>
 
 <p>There are two key inputs to this algorithm:
 - An entity to generate the dashboard for. The primary data needed from this entity is:
   - The entity type itself
   - The field information, especially the metadata about these fields
-- A set of potential dashboard templates from which a dashboard can be realized based on the entity and field data</p>
+  - This data gathering happens in the <code>-&gt;root</code> function
+- A dashboard template from which a dashboard can be realized based on the entity and field data</p>
 
-<p>The first step in the base <code>automagic-dashboard</code> is to select dashboard templates that match the entity type of
-the entity to be x-rayed. A simple entity might match only to a GenericTable template while a more complicated
-entity might match to a TransactionTable or EventTable template.</p>
+<h2>Template Selection</h2>
 
-<p>Once potential templates are selected, the following process is attempted for each template in order of most
-specialized template to least:
-- Determine which entity fields map to dimensions and metrics described in the template.
-- Match these selected dimensions and metrics to required dimensions and metrics for cards specified in the template.
-- If any cards match, we successfully return a dashboard generated with the created cards.</p>
+<p>Within the <code>automagic-dashboard</code> function, a template is selected based on the entity type being analyzed unless a
+dashboard template is specified in the argument. This is a critically important fact:</p>
+
+<p><em>* The template selection is based on the entity type of the item being x-rayed.  *</em></p>
+
+<p>Example: X-raying the "ORDERS" table will result in matching the template
+<code>resources/automagic_dashboards/table/TransactionTable.yaml</code>.</p>
+
+<p>This is because the <code>:entity_type</code> of the table is <code>:entity/TransactionTable</code> as can be seen here:</p>
+
+<p>```clojure
+(t2/select-one-fn :entity_type :model/Table :name "ORDERS")
+;=> :entity/TransactionTable
+```</p>
+
+<p><em>Most</em> tables and <em>all</em> models (as of this writing) will bottom out at <code>:entity/GenericTable</code> and thus, use the
+<code>resources/automagic_dashboards/table/GenericTable.yaml</code> template. <code>:entity_type</code> for a given table type is made in
+the <code>metabase.sync.analyze.classifiers.name/infer-entity-type</code> function, where the primary logic is table naming
+based on the <code>prefix-or-postfix</code> var in that ns.</p>
+
+<p>ProTip: If you want to introduce a new template type, do the following:</p>
+
+<ol>
+<li>Update <code>prefix-or-postfix</code> to include the match logic and new entity type</li>
+<li>Add a template file, <code>resources/automagic_dashboards/table/NewEntityType.yaml</code>, where NewEntityType is the new
+entity type (e.g. <code>:entity/NewEntityType</code>).</li>
+</ol>
+
+<h2>Template Files</h2>
+
+<p>Template files define a potential dashboard, potentially including titles, seconds, cards, filters, and more.
+They are found in <code>resources/automagic_dashboards</code>. Once you've read through several, the format should be fairly
+self-explanatory, but here are a few critical details:</p>
+
+<ul>
+<li>Templated strings are matched with <code>[[double square brackets]]</code></li>
+<li><code>title</code>, <code>transient_title</code>, and <code>description</code> should be self-explanatory</li>
+<li>The fundamental "dynamic" building blocks are:
+<ul><li>dimensions - The base building block in the process. Dimensions map to the columns of the entity being x-rayed
+and are matched by dimension field_type to entity type (semantic, effective, etc.). These form the x-axis in a
+card and the breakout column of a query.</li>
+<li>metrics - Metrics form the y-axis in a card and are the aggregates in a query. They are always defined in terms
+of 0 or more dimensions. Metrics can be dimensionless quantities (e.g. count), based on a single value (e.g.
+average of a column), or a more complicated expression (e.g. ratio of average of column 1 and average of column 2).</li>
+<li>filters - Filters add a filter clause to a query and are also defined in terms of dimensions.</li>
+<li>cards - The final product of the dynamic process. Cards are built from predefined metrics, dimensions, and
+filters as discussed above along with preferences such as display type and title.</li>
+<li>groups - Dashboard sections in which matching cards are added.</li></ul></li>
+</ul>
+
+<h2>The Dynamic Binding and Dashboard Generation Process</h2>
+
+<p>Once data has been accreted in <code>automagic-analysis</code>, <code>automagic-dashboard</code> will first select a template as described
+above. It then calls <code>metabase.automagic-dashboards.interesting/identify</code> which takes the actual column data and
+dimension, metric, and filter definitions from the template and matches all potential columns to potential dimensions,
+metrics, and filters. The resulting "grounded-values" are now passed into <code>generate-dashboard</code>, which matches all
+of these values to card templates to produce a dashboard. The majority of the card generation work is done in
+<code>metabase.automagic-dashboards.combination/grounded-metrics-&gt;dashcards</code>.</p>
+
+<p>Note that if a card template's dimensions, metrics, and filters are not matched to grounded values the card will not
+be generated. Conversely, if a card template can be matched by multiple combinations of dimensions, multiple cards
+may be generated.</p>
+
+<p>Once a selection of cards have been generated, the top N are selected (default 15), added to the dashboard, and grouped.</p>
+
+<h2>Example</h2>
 
 <p>The following example is provided to better illustrate the template process and how dimensions and metrics work.</p>
 
@@ -2929,10 +2995,10 @@ Avg  |    __/                  Total | #     #                 | *    *      *
  - A field from an unspecified table with semantic type <code>:type/Income</code> and score of 90
  - A field from a Sales table with semantic type <code>:type/Number</code> and score of 50</p>
 
-<p> When matched with actual fields from an x-rayed entity, the highest matching field is selected to be "bound" to
- the Income dimensions. Suppose you have an entity of type SalesTable and fields of INCOME (semantic type Income),
- TAX (type Float), and TOTAL (Float). In this case, the INCOME field would match best (score 100) and be bound to the
- Income dimension.</p>
+<p> When matched with actual fields from an x-rayed entity, the highest matching field, by score, is selected to be
+ "bound" to the Income dimensions. Suppose you have an entity of type SalesTable and fields of INCOME (semantic
+ type Income), TAX (type Float), and TOTAL (Float). In this case, the INCOME field would match best (score 100)
+ and be bound to the Income dimension.</p>
 
 <p> The other specified dimensions will have similar matching rules. Note that X &amp; Y are, like all other dimensions,
  <em>named</em> dimensions. In our above example the Income dimension matched to the INCOME field of type <code>:type/Income</code>.
@@ -3521,6 +3587,12 @@ create dashboard.</p>
                            :metric-specs    template-metrics
                            :filter-specs    template-filters})]
     (generate-dashboard base-context template grounded-values)))</pre></td></tr><tr><td class="docs"><p>Create a transient dashboard analyzing given entity.</p>
+
+<p>This function eventually calls out to <code>automagic-dashboard</code> with two primary arguments:
+- The item to be analyzed. This entity is a 'decorated' version of the raw input that has been
+  passed through the <code>-&gt;root</code> function, which is an aggregate including the original entity, its
+  source, what dashboard template categories to apply, etc.
+- Additional options such as how many cards to show, a cell query (a drill through), etc.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti automagic-analysis
   {:arglists '([entity opts])}
   (fn [entity _]
