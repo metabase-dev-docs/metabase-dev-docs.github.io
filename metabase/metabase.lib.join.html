@@ -3596,23 +3596,28 @@ options for the other parts, but hopefully we can implement this in the future -
           (mapv (fn [fk]
                   (filter-clause (::target fk) fk))
                 fks)))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- add-join-alias-to-joinable-columns [cols a-join]
-  (let [join-alias     (lib.join.util/current-join-alias a-join)
-        unique-name-fn (lib.util/unique-name-generator)]
-    (mapv (fn [col]
-            (as-&gt; col col
-              (with-join-alias col join-alias)
-              (add-source-and-desired-aliases a-join unique-name-fn col)))
-          cols)))</pre></td></tr><tr><td class="docs"><p>Mark the column metadatas in <code>cols</code> as <code>:selected</code> if they appear in <code>a-join</code>'s <code>:fields</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- mark-selected-joinable-columns
-  [cols a-join]
+</td><td class="codes"><pre class="brush: clojure">(defn- xform-add-join-alias [a-join]
+  (let [join-alias (lib.join.util/current-join-alias a-join)]
+    (fn [xf]
+      (let [unique-name-fn (lib.util/unique-name-generator)]
+        (fn
+          ([] (xf))
+          ([result] (xf result))
+          ([result input]
+           (as-&gt; input col
+             (with-join-alias col join-alias)
+             (assoc col :source-alias join-alias)
+             (add-source-and-desired-aliases a-join unique-name-fn col)
+             (xf result col))))))))</pre></td></tr><tr><td class="docs"><p>Mark the column metadatas in <code>cols</code> as <code>:selected</code> if they appear in <code>a-join</code>'s <code>:fields</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- xform-mark-selected-joinable-columns
+  [a-join]
   (let [j-fields (join-fields a-join)]
     (case j-fields
-      :all        (mapv #(assoc % :selected? true)
-                        cols)
-      (:none nil) (mapv #(assoc % :selected? false)
-                        cols)
-      (lib.equality/mark-selected-columns cols j-fields))))</pre></td></tr><tr><td class="docs">
+      :all        (map #(assoc % :selected? true))
+      (:none nil) (map #(assoc % :selected? false))
+      (mapcat #(lib.equality/mark-selected-columns [%] j-fields)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private xform-fix-source-for-joinable-columns
+  (map #(assoc % :lib/source :source/joins)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn joinable-columns :- [:sequential ::lib.schema.metadata/column]
   &quot;Return information about the fields that you can pass to [[with-join-fields]] when constructing a join against
   something [[Joinable]] (i.e., a Table or Card) or manipulating an existing join. When passing in a join, currently
@@ -3626,9 +3631,13 @@ options for the other parts, but hopefully we can implement this in the future -
                  (joined-thing query join-or-joinable)
                  join-or-joinable)
         cols   (lib.metadata.calculation/returned-columns query stage-number source)]
-    (cond-&gt; cols
-      a-join (add-join-alias-to-joinable-columns a-join)
-      a-join (mark-selected-joinable-columns a-join))))</pre></td></tr><tr><td class="docs">
+    (into []
+          (if a-join
+            (comp xform-fix-source-for-joinable-columns
+                  (xform-add-join-alias a-join)
+                  (xform-mark-selected-joinable-columns a-join))
+            identity)
+          cols)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- join-lhs-display-name-from-condition-lhs
   [query stage-number join-or-joinable condition-lhs-column-or-nil]
   (when-let [condition-lhs-column (or condition-lhs-column-or-nil
