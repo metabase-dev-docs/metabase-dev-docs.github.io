@@ -2867,13 +2867,13 @@ net.brehaut.ClojureTools = (function (SH) {
 })(SyntaxHighlighter);
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.upload" name="metabase.upload"><h1 class="project-name">metabase.upload</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.upload
+  (:refer-clojure :exclude [derive make-hierarchy parents])
   (:require
    [clj-bom.core :as bom]
    [clojure.data :as data]
    [clojure.data.csv :as csv]
    [clojure.string :as str]
    [flatland.ordered.map :as ordered-map]
-   [flatland.ordered.set :as ordered-set]
    [java-time.api :as t]
    [medley.core :as m]
    [metabase.analytics.snowplow :as snowplow]
@@ -2900,6 +2900,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.util.i18n :refer [tru]]
    [metabase.util.malli :as mu]
    [metabase.util.malli.schema :as ms]
+   [metabase.util.ordered-hierarchy :as ordered-hierarchy :refer [derive make-hierarchy]]
    [toucan2.core :as t2])
   (:import
    (java.io File)))</pre></td></tr><tr><td class="docs">
@@ -2939,44 +2940,32 @@ if there is a column with a boolean-or-int value and a boolean value, the column
 if there is a column with only boolean-or-int values, the column will be parsed as if it were boolean</p>
 
 <p></code></pre></p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private type+parent-pairs
-  ;; listed in depth-first order
-  '([::boolean-or-int ::boolean]
-    [::boolean-or-int ::int]
-    [::auto-incrementing-int-pk ::int]
-    [::int ::float]
-    [::date ::datetime]
-    [::boolean ::varchar-255]
-    [::offset-datetime ::varchar-255]
-    [::datetime ::varchar-255]
-    [::float ::varchar-255]
-    [::varchar-255 ::text]))</pre></td></tr><tr><td class="docs"><p>Returns the type of a column given the lowest common ancestor type of the values in the column.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ^:private column-type
-  [type]
-  (case type
-    ::boolean-or-int ::boolean
-    type))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private type-&gt;parents
-  (reduce
-   (fn [m [type parent]]
-     (update m type conj parent))
-   {}
-   type+parent-pairs))</pre></td></tr><tr><td class="docs"><p>All value types including the root type, ::text</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>This hierarchy defines a relationship between value types and their specializations.
+We use an [[metabase.util.ordered-hierarchy]] for its topological sorting, which simplify writing efficient and
+consistent implementations for of our type inference, parsing, and relaxation.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private h
+  (-&gt; (make-hierarchy)
+      (derive ::boolean-or-int ::boolean)
+      (derive ::boolean-or-int ::int)
+      (derive ::auto-incrementing-int-pk ::int)
+      (derive ::int ::float)
+      (derive ::date ::datetime)
+      (derive ::boolean ::varchar-255)
+      (derive ::offset-datetime ::varchar-255)
+      (derive ::datetime ::varchar-255)
+      (derive ::float ::varchar-255)
+      (derive ::varchar-255 ::text)))</pre></td></tr><tr><td class="docs"><p>Not all value types correspond to database types. For those that don't, this maps to their concrete ancestor.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private abstract-&gt;concrete
+  {::boolean-or-int ::boolean})</pre></td></tr><tr><td class="docs"><p>All type tags which values can be inferred as. An ordered set from most to least specialized.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private value-types
-  (conj (keys type-&gt;parents) ::text))</pre></td></tr><tr><td class="docs"><p>All column types</p>
+  (ordered-hierarchy/sorted-tags h))</pre></td></tr><tr><td class="docs"><p>All type tags that correspond to concrete column types.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private column-types
-  (map column-type value-types))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- bfs-ancestors [type]
-  (loop [visit   (list type)
-         visited (ordered-set/ordered-set)]
-    (if (empty? visit)
-      visited
-      (let [parents (mapcat type-&gt;parents visit)]
-        (recur parents (into visited parents))))))</pre></td></tr><tr><td class="docs"><p>A map from each type to an ordered set of its ancestors, in breadth-first order</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private type-&gt;bfs-ancestors
-  (into {} (for [type value-types]
-             [type (bfs-ancestors type)])))</pre></td></tr><tr><td class="docs"><p>[[value->type]] helpers</p>
+  (into #{} (remove abstract-&gt;concrete) value-types))</pre></td></tr><tr><td class="docs"><p>The most specific column type corresponding to the given value type.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn ^:private column-type
+  [value-type]
+  (or (abstract-&gt;concrete value-type value-type)
+      ;; If we know nothing about the value type, treat it as an arbitrary string.
+      ::text))</pre></td></tr><tr><td class="docs"><p>[[value->type]] helpers</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Returns a regex that matches the argument, with or without surrounding parentheses.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- with-parens
   [number-regex]
@@ -3020,66 +3009,51 @@ if there is a column with only boolean-or-int values, the column will be parsed 
 </td><td class="codes"><pre class="brush: clojure">(defn- boolean-string? [s]
   (boolean (re-matches #&quot;(?i)true|t|yes|y|1|false|f|no|n|0&quot; s)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- boolean-or-int-string? [s]
-  (boolean (#{&quot;0&quot; &quot;1&quot;} s)))</pre></td></tr><tr><td class="docs"><p>end [[value->type]] helpers</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>The most-specific possible type for a given value. Possibilities are:</p>
-
-<ul>
-<li><code>::boolean</code></li>
-<li><code>::int</code></li>
-<li><code>::float</code></li>
-<li><code>::varchar-255</code></li>
-<li><code>::date</code></li>
-<li><code>::datetime</code></li>
-<li><code>::offset-datetime</code></li>
-<li><code>::text</code> (the catch-all type)</li>
-</ul>
-
-<p>NB: There are currently the following gotchas:
-  1. ints/floats are assumed to use the separators and decimal points corresponding to the locale defined in the
-     application settings
-  2. 0 and 1 are assumed to be booleans, not ints.</p>
+  (contains? #{&quot;0&quot; &quot;1&quot;} s))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- varchar-255? [s]
+  (&lt;= (count s) 255))</pre></td></tr><tr><td class="docs"><p>end [[value->type]] helpers</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private non-inferable-types
+  #{::auto-incrementing-int-pk})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- assert-all-types-checks-present
+  [type-&gt;check]
+  (assert (every? type-&gt;check (remove non-inferable-types value-types))
+          &quot;Every value-type must be registered in settings-&gt;type-&gt;check&quot;)
+  type-&gt;check)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- settings-&gt;type-&gt;check [{:keys [number-separators] :as _settings}]
+  (assert-all-types-checks-present
+   {::boolean-or-int  boolean-or-int-string?
+    ::boolean         boolean-string?
+    ::offset-datetime offset-datetime-string?
+    ::date            date-string?
+    ::datetime        datetime-string?
+    ::int             (partial re-matches (int-regex number-separators))
+    ::float           (partial re-matches (float-regex number-separators))
+    ::varchar-255     varchar-255?
+    ::text            (constantly true)}))</pre></td></tr><tr><td class="docs"><p>Determine the most specific type that is compatible with the given value.
+Numbers are assumed to use separators corresponding to the locale defined in the application settings</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- value-&gt;type
-  [value {:keys [number-separators] :as _settings}]
-  (let [trimmed (str/trim value)]
-    (cond
-      (str/blank? value)                                        nil
-      (boolean-or-int-string? trimmed)                          ::boolean-or-int
-      (boolean-string? trimmed)                                 ::boolean
-      (offset-datetime-string? trimmed)                         ::offset-datetime
-      (datetime-string? trimmed)                                ::datetime
-      (date-string? trimmed)                                    ::date
-      (re-matches (int-regex number-separators) trimmed)        ::int
-      (re-matches (float-regex number-separators) trimmed)      ::float
-      (&lt;= (count trimmed) 255)                                  ::varchar-255
-      :else                                                     ::text)))</pre></td></tr><tr><td class="docs">
+  [type-&gt;check value]
+  (when-not (str/blank? value)
+    (let [trimmed (str/trim value)]
+      (-&gt;&gt; (remove non-inferable-types value-types)
+           (filter #((type-&gt;check %) trimmed))
+           first))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- row-&gt;value-types
-  [row settings]
-  (map #(value-&gt;type % settings) row))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- lowest-common-member [[x &amp; xs :as all-xs] ys]
-  (cond
-    (empty? all-xs)  (throw (IllegalArgumentException. (tru &quot;Could not find a common type for {0} and {1}&quot; all-xs ys)))
-    (contains? ys x) x
-    :else            (recur xs ys)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- lowest-common-ancestor [type-a type-b]
-  (cond
-    (nil? type-a) type-b
-    (nil? type-b) type-a
-    (= type-a type-b) type-a
-    (contains? (type-&gt;bfs-ancestors type-a) type-b) type-b
-    (contains? (type-&gt;bfs-ancestors type-b) type-a) type-a
-    :else (lowest-common-member (type-&gt;bfs-ancestors type-a) (type-&gt;bfs-ancestors type-b))))</pre></td></tr><tr><td class="docs"><p>like map with two args except it continues to apply f until ALL of the colls are
-exhausted. if colls are of uneven length, nils are supplied.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- map-with-nils
-  [f c1 c2]
-  (lazy-seq
-   (let [s1 (seq c1) s2 (seq c2)]
-     (when (or s1 s2)
-       (cons (f (first s1) (first s2))
-             (map-with-nils f (rest s1) (rest s2)))))))</pre></td></tr><tr><td class="docs"><p>compares types-a and types-b pairwise, finding the lowest-common-ancestor for each pair.
-types-a and types-b can be different lengths.</p>
+  [type-&gt;check row]
+  (map (partial value-&gt;type type-&gt;check) row))</pre></td></tr><tr><td class="docs"><p>Return the first "ancestor" of <code>base-type</code> which is also an "ancestor" of <code>new-type</code>.
+We use a more relaxed definition of "ancestor" here than usual, which includes the tag itself.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- most-specific-common-ancestor
+  [base-type new-type]
+  (when (or base-type new-type)
+    (or (ordered-hierarchy/first-common-ancestor h base-type new-type)
+        (throw (IllegalArgumentException. (tru &quot;Could not find a common type for {0} and {1}&quot;
+                                               base-type
+                                               new-type))))))</pre></td></tr><tr><td class="docs"><p>Given two collections of type tags, find the most specific common ancestor for each pair.
+If one of the collections is longer, we return its existing tags for the remaining length.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- coalesce-types
   [types-a types-b]
-  (map-with-nils lowest-common-ancestor types-a types-b))</pre></td></tr><tr><td class="docs">
+  (u/map-all most-specific-common-ancestor types-a types-b))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- normalize-column-name
   [raw-name]
   (if (str/blank? raw-name)
@@ -3096,14 +3070,11 @@ types-a and types-b can be different lengths.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn column-types-from-rows :- [:sequential (into [:enum] column-types)]
   &quot;Returns a sequence of types, given the unparsed rows in the CSV file&quot;
   [settings column-count rows]
-  (-&gt;&gt; rows
-       (map #(row-&gt;value-types % settings))
-       (reduce coalesce-types (repeat column-count nil))
-       (map (fn [type]
-              ;; if there's no values in the column, assume it's a string
-              (if (nil? type)
-                ::text
-                (column-type type))))))</pre></td></tr><tr><td class="docs"><p>Consumes the header and rows from a CSV file.</p>
+  (let [type-&gt;check (settings-&gt;type-&gt;check settings)]
+    (-&gt;&gt; rows
+         (map (partial row-&gt;value-types type-&gt;check))
+         (reduce coalesce-types (repeat column-count nil))
+         (map column-type))))</pre></td></tr><tr><td class="docs"><p>Consumes the header and rows from a CSV file.</p>
 
 <p> Returns a map with two keys:
    - <code>:extant-columns</code>: an ordered map of columns found in the CSV file, excluding columns that have the same normalized name as the generated columns.
@@ -3172,13 +3143,13 @@ just the first n).</p>
   (if (str/blank? schema)
     name
     (str schema &quot;.&quot; name)))</pre></td></tr><tr><td class="docs"><p>Returns a lazy seq of parsed rows, given a sequence of upload types for each column.
-Replaces empty strings with nil.</p>
+Empty strings are parsed as nil.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- parse-rows
   [col-upload-types rows]
   (let [settings (upload-parsing/get-settings)
         parsers  (map #(upload-parsing/upload-type-&gt;parser % settings) col-upload-types)]
     (for [row rows]
-      (for [[value parser] (map-with-nils vector row parsers)]
+      (for [[value parser] (u/map-all vector row parsers)]
         (when-not (str/blank? value)
           (parser value))))))</pre></td></tr><tr><td class="docs"><p>Removes the elements at the given indices from the collection. Indices is a set.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- remove-indices
