@@ -2868,43 +2868,81 @@ net.brehaut.ClojureTools = (function (SH) {
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.domain-entities.specs" name="metabase.domain-entities.specs"><h1 class="project-name">metabase.domain-entities.specs</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.domain-entities.specs
   (:require
+   [malli.core :as mc]
+   [malli.transform :as mtx]
    [medley.core :as m]
    [metabase.mbql.normalize :as mbql.normalize]
    [metabase.mbql.util :as mbql.u]
-   [metabase.util.yaml :as yaml]
-   [schema.coerce :as sc]
-   [schema.core :as s]))</pre></td></tr><tr><td class="docs"><p>MBQL clause (ie. a vector starting with a keyword)</p>
+   [metabase.util.yaml :as yaml]))</pre></td></tr><tr><td class="docs"><p>MBQL clause (ie. a vector starting with a keyword)</p>
 </td><td class="codes"><pre class="brush: clojure">(def MBQL
-  (s/pred mbql.u/mbql-clause?))</pre></td></tr><tr><td class="docs"><p>Field type designator -- a keyword derived from <code>type/*</code></p>
+  [:fn
+   {:decode/domain-entity-spec mbql.normalize/normalize
+    :decode/transform-spec     mbql.normalize/normalize
+    :error/message             &quot;valid MBQL clause&quot;}
+   mbql.u/mbql-clause?])</pre></td></tr><tr><td class="docs"><p>Field type designator -- a keyword derived from <code>type/*</code></p>
 </td><td class="codes"><pre class="brush: clojure">(def FieldType
-  (s/constrained s/Keyword
-                                        ;#(isa? % :type/*)
-                 identity))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private DomainEntityReference s/Str)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private DomainEntityType (s/isa :DomainEntity/*))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private Identifier s/Str)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private Description s/Str)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private Attributes [{(s/optional-key :field)         FieldType
-                            (s/optional-key :domain_entity) DomainEntityReference
-                            (s/optional-key :has_many)      {:domain_entity DomainEntityReference}}])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private BreakoutDimensions [MBQL])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private Metrics {Identifier {(s/required-key :aggregation) MBQL
-                                    (s/required-key :name)        Identifier
-                                    (s/optional-key :breakout)    BreakoutDimensions
-                                    (s/optional-key :filter)      MBQL
-                                    (s/optional-key :description) Description}})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private Segments {Identifier {(s/required-key :filter)      MBQL
-                                     (s/required-key :name)        Identifier
-                                     (s/optional-key :description) Description}})</pre></td></tr><tr><td class="docs"><p>Domain entity spec</p>
+  [:keyword
+   (letfn [(decoder [k]
+             (keyword &quot;type&quot; (name k)))]
+     {:decode/domain-entity-spec decoder
+      :decode/transform-spec     decoder})])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private DomainEntityReference :string)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private DomainEntityType
+  [:and
+   :keyword
+   [:fn
+    {:error/message &quot;Valid DomainEntity&quot;}
+    #(isa? % :DomainEntity/*)]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private Identifier :string)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private Description :string)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private Attributes
+  [:sequential
+   [:map
+    [:field         {:optional true} FieldType]
+    [:domain_entity {:optional true} DomainEntityReference]
+    [:has_many      {:optional true} [:map
+                                      [:domain_entity DomainEntityReference]]]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private BreakoutDimensions
+  [:sequential
+   {:decode/domain-entity-spec (fn [breakout-dimensions]
+                                 (for [dimension breakout-dimensions]
+                                   (if (string? dimension)
+                                     (do
+                                       (mc/assert FieldType (keyword &quot;type&quot; dimension))
+                                       [:dimension dimension])
+                                     dimension)))}
+   MBQL])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([m])} add-name-from-key
+  (partial m/map-kv-vals (fn [k v]
+                           (assoc v :name k))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private Metrics
+  [:map-of
+   {:decode/domain-entity-spec add-name-from-key}
+   Identifier
+   [:map
+    [:aggregation MBQL]
+    [:name        Identifier]
+    [:breakout    {:optional true} BreakoutDimensions]
+    [:filter      {:optional true} MBQL]
+    [:description {:optional true} Description]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private Segments
+  [:map-of
+   {:decode/domain-entity-spec add-name-from-key}
+   Identifier
+   [:map
+    [:filter MBQL]
+    [:name   Identifier]
+    [:description {:optional true} Description]]])</pre></td></tr><tr><td class="docs"><p>Domain entity spec</p>
 </td><td class="codes"><pre class="brush: clojure">(def DomainEntitySpec
-  {(s/required-key :name)                DomainEntityReference
-   (s/required-key :type)                DomainEntityType
-   (s/optional-key :description)         Description
-   (s/required-key :required_attributes) Attributes
-   (s/optional-key :optional_attributes) Attributes
-   (s/optional-key :metrics)             Metrics
-   (s/optional-key :segments)            Segments
-   (s/optional-key :breakout_dimensions) BreakoutDimensions})</pre></td></tr><tr><td class="docs">
+  [:map
+   [:name                DomainEntityReference]
+   [:type                DomainEntityType]
+   [:required_attributes Attributes]
+   [:description         {:optional true} Description]
+   [:optional_attributes {:optional true} Attributes]
+   [:metrics             {:optional true} Metrics]
+   [:segments            {:optional true} Segments]
+   [:breakout_dimensions {:optional true} BreakoutDimensions]])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- add-to-hiearchy!
   [{:keys [name refines] :as spec}]
   (let [spec-type (keyword &quot;DomainEntity&quot; name)
@@ -2913,28 +2951,16 @@ net.brehaut.ClojureTools = (function (SH) {
     (-&gt; spec
         (dissoc :refines)
         (assoc :type spec-type))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([m])} add-name-from-key
-  (partial m/map-kv-vals (fn [k v]
-                           (assoc v :name k))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private domain-entity-spec-parser
-  (sc/coercer!
-   DomainEntitySpec
-   {MBQL                  mbql.normalize/normalize
-    Segments              add-name-from-key
-    Metrics               add-name-from-key
-    BreakoutDimensions    (fn [breakout-dimensions]
-                            (for [dimension breakout-dimensions]
-                              (if (string? dimension)
-                                (do
-                                  (s/validate FieldType (keyword &quot;type&quot; dimension))
-                                  [:dimension dimension])
-                                dimension)))
-    FieldType             (partial keyword &quot;type&quot;)
-    ;; Some map keys are names (ie. strings) while the rest are keywords, a distinction lost in YAML
-    s/Str                 name}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- coerce-to-domain-entity-spec [spec]
+  (mc/coerce DomainEntitySpec
+             spec
+             (mtx/transformer
+              mtx/string-transformer
+              mtx/json-transformer
+              (mtx/transformer {:name :domain-entity-spec}))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private domain-entities-dir &quot;domain_entity_specs/&quot;)</pre></td></tr><tr><td class="docs"><p>List of registered domain entities.</p>
 </td><td class="codes"><pre class="brush: clojure">(def domain-entity-specs
-  (delay (into {} (for [spec (yaml/load-dir domain-entities-dir (comp domain-entity-spec-parser
+  (delay (into {} (for [spec (yaml/load-dir domain-entities-dir (comp coerce-to-domain-entity-spec
                                                                       add-to-hiearchy!))]
                     [(:name spec) spec]))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();

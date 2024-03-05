@@ -2876,37 +2876,43 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.models.interface :as mi]
    [metabase.models.table :as table :refer [Table]]
    [metabase.util :as u]
-   [schema.core :as s]
+   [metabase.util.malli :as mu]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs"><p>Return the most specific type of a given field.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([field])} field-type
   (some-fn :semantic_type :base_type))</pre></td></tr><tr><td class="docs"><p>A reference to a <code>SourceEntity</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(def SourceName
-  s/Str)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private DimensionReference s/Str)</pre></td></tr><tr><td class="docs"><p>Mapping from dimension name to the corresponding instantiated MBQL snippet</p>
+  :string)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private DimensionReference :string)</pre></td></tr><tr><td class="docs"><p>Mapping from dimension name to the corresponding instantiated MBQL snippet</p>
 </td><td class="codes"><pre class="brush: clojure">(def DimensionBindings
-  {DimensionReference MBQL})</pre></td></tr><tr><td class="docs"><p>A source for a card. Can be either a table or another card.</p>
+  [:map-of DimensionReference MBQL])</pre></td></tr><tr><td class="docs"><p>A source for a card. Can be either a table or another card.</p>
 </td><td class="codes"><pre class="brush: clojure">(def SourceEntity
-  #_{:clj-kondo/ignore [:deprecated-var]}
-  (s/cond-pre (mi/InstanceOf:Schema Table) (mi/InstanceOf:Schema Card)))</pre></td></tr><tr><td class="docs"><p>Top-level lexical context mapping source names to their corresponding entity and constituent dimensions. See also
+  [:or (mi/InstanceOf Table) (mi/InstanceOf Card)])</pre></td></tr><tr><td class="docs"><p>Top-level lexical context mapping source names to their corresponding entity and constituent dimensions. See also
 <code>DimensionBindings</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(def Bindings
-  {SourceName {(s/optional-key :entity)     SourceEntity
-               (s/required-key :dimensions) DimensionBindings}})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/defn ^:private get-dimension-binding :- MBQL
-  [bindings :- Bindings, source :- SourceName, dimension-reference :- DimensionReference]
+  [:map-of
+   SourceName
+   [:map
+    [:dimensions DimensionBindings]
+    [:entity {:optional true} SourceEntity]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private get-dimension-binding :- MBQL
+  [bindings            :- Bindings
+   source              :- SourceName
+   dimension-reference :- DimensionReference]
   (let [[table-or-dimension maybe-dimension] (str/split dimension-reference #&quot;\.&quot;)]
     (if maybe-dimension
       (let [field-clause (get-in bindings [table-or-dimension :dimensions maybe-dimension])]
         (cond-&gt; field-clause
           (not= source table-or-dimension) (mbql.u/assoc-field-options :join-alias table-or-dimension)))
       (get-in bindings [source :dimensions table-or-dimension]))))</pre></td></tr><tr><td class="docs"><p>Instantiate all dimension reference in given (nested) structure</p>
-</td><td class="codes"><pre class="brush: clojure">(s/defn resolve-dimension-clauses
-  [bindings :- Bindings, source :- SourceName, obj]
+</td><td class="codes"><pre class="brush: clojure">(mu/defn resolve-dimension-clauses
+  [bindings :- Bindings
+   source   :- SourceName
+   obj]
   (mbql.u/replace obj
     [:dimension dimension] (-&gt;&gt; dimension
                                 (get-dimension-binding bindings source)
                                 (resolve-dimension-clauses bindings source))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/defn mbql-reference :- MBQL
+</td><td class="codes"><pre class="brush: clojure">(mu/defn mbql-reference :- MBQL
   &quot;Return MBQL clause for a given field-like object.&quot;
   [{:keys [id name base_type]}]
   (if id

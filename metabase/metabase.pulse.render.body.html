@@ -2885,8 +2885,8 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.types :as types]
    [metabase.util :as u]
    [metabase.util.i18n :refer [trs tru]]
-   [metabase.util.ui-logic :as ui-logic]
-   [schema.core :as s])
+   [metabase.util.malli :as mu]
+   [metabase.util.ui-logic :as ui-logic])
   (:import
    (java.text DecimalFormat DecimalFormatSymbols)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Default rendered-info map when there is an error running a card on the card run.
@@ -2921,8 +2921,8 @@ Is a delay due to the call to <code>trs</code>.</p>
   (and (not (isa? semantic_type :type/Description))
        (not (contains? #{:details-only :retired :sensitive} visibility_type))))</pre></td></tr><tr><td class="docs"><p>--------------------------------------------------- Formatting ---------------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/defn ^:private format-cell
-  [timezone-id :- (s/maybe s/Str) value col visualization-settings]
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private format-cell
+  [timezone-id :- [:maybe :string] value col visualization-settings]
   (cond
     (types/temporal-field? col)
     (datetime/format-temporal-str timezone-id value col)
@@ -2972,8 +2972,8 @@ should be replaced with</p>
     (* (- (double bar-value) min-value)
        100)
     (- max-value min-value))))</pre></td></tr><tr><td class="docs"><p>Returns a seq of stringified formatted rows that can be rendered into HTML</p>
-</td><td class="codes"><pre class="brush: clojure">(s/defn ^:private query-results-&gt;row-seq
-  [timezone-id :- (s/maybe s/Str)
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private query-results-&gt;row-seq
+  [timezone-id :- [:maybe :string]
    remapping-lookup
    cols
    rows
@@ -2995,10 +2995,14 @@ should be replaced with</p>
                                                 [fmt-fn maybe-remapped-row-cell])]]
               (fmt-fn row-cell))})))</pre></td></tr><tr><td class="docs"><p>Convert the query results (<code>cols</code> and <code>rows</code>) into a formatted seq of rows (list of strings) that can be rendered as
 HTML</p>
-</td><td class="codes"><pre class="brush: clojure">(s/defn ^:private prep-for-html-rendering
-  ([timezone-id :- (s/maybe s/Str) card data]
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private prep-for-html-rendering
+  ([timezone-id :- [:maybe :string]
+    card
+    data]
    (prep-for-html-rendering timezone-id card data {}))
-  ([timezone-id :- (s/maybe s/Str) card {:keys [cols rows viz-settings]}
+  ([timezone-id :- [:maybe :string]
+    card
+    {:keys [cols rows viz-settings], :as _data}
     {:keys [bar-column] :as data-attributes}]
    (let [remapping-lookup (create-remapping-lookup cols)]
      (cons
@@ -3034,7 +3038,8 @@ HTML</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Render a Pulse as <code>chart-type</code> (e.g. <code>:bar</code>, <code>:scalar</code>, etc.) and <code>render-type</code> (either <code>:inline</code> or <code>:attachment</code>).</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti render
   {:arglists '([chart-type render-type timezone-id card dashcard data])}
-  (fn [chart-type _ _ _ _ _] chart-type))</pre></td></tr><tr><td class="docs">
+  (fn [chart-type _render-type _timezone-id _card _dashcard _data]
+    chart-type))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- order-data [data viz-settings]
   (if (some? (::mb.viz/table-columns viz-settings))
     (let [[ordered-cols output-order] (qp.streaming/order-cols (:cols data) viz-settings)
@@ -3045,8 +3050,13 @@ HTML</p>
           ordered-rows                (map keep-filtered-idx (:rows data))]
       [ordered-cols ordered-rows])
     [(:cols data) (:rows data)]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/defmethod render :table :- formatter/RenderedPulseCard
-  [_ _ timezone-id :- (s/maybe s/Str) card _dashcard {:keys [rows viz-settings] :as data}]
+</td><td class="codes"><pre class="brush: clojure">(mu/defmethod render :table :- formatter/RenderedPulseCard
+  [_chart-type
+   _render-type
+   timezone-id :- [:maybe :string]
+   card
+   _dashcard
+   {:keys [rows viz-settings] :as data}]
   (let [[ordered-cols ordered-rows] (order-data data viz-settings)
         data                        (-&gt; data
                                         (assoc :rows ordered-rows)
@@ -3265,8 +3275,13 @@ value 25 for 25%) into a single category as "Other". </p>
             (assoc row 0 &quot;(empty)&quot;)
             row))
         rows))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/defmethod render :categorical/donut :- formatter/RenderedPulseCard
-  [_ render-type timezone-id :- (s/maybe s/Str) card _dashcard {:keys [rows cols viz-settings] :as data}]
+</td><td class="codes"><pre class="brush: clojure">(mu/defmethod render :categorical/donut :- formatter/RenderedPulseCard
+  [_chart-type
+   render-type
+   timezone-id :- [:maybe :string]
+   card
+   _dashcard
+   {:keys [rows cols viz-settings] :as data}]
   (let [[x-axis-rowfn y-axis-rowfn] (formatter/graphing-column-row-fns card data)
         rows                        (map (juxt (comp str x-axis-rowfn) y-axis-rowfn)
                                          (formatter/row-preprocess x-axis-rowfn y-axis-rowfn (replace-nils rows)))
@@ -3301,8 +3316,13 @@ value 25 for 25%) into a single category as "Other". </p>
                                  viz-settings)
                                 label)}))
              rows))]}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/defmethod render :progress :- formatter/RenderedPulseCard
-  [_ render-type _timezone-id _card _dashcard {:keys [cols rows viz-settings] :as _data}]
+</td><td class="codes"><pre class="brush: clojure">(mu/defmethod render :progress :- formatter/RenderedPulseCard
+  [_chart-type
+   render-type
+   _timezone-id
+   _card
+   _dashcard
+   {:keys [cols rows viz-settings] :as _data}]
   (let [value        (ffirst rows)
         goal         (:progress.goal viz-settings)
         color        (:progress.color viz-settings)
@@ -3584,26 +3604,31 @@ This can have really high cardinality of series but the JS viz will complain abo
     (image-bundle/make-image-bundle
      render-type
      (js-svg/combo-chart series-seqs settings))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/defmethod render :multiple
-  [_ render-type _timezone-id card dashcard data]
+</td><td class="codes"><pre class="brush: clojure">(mu/defmethod render :multiple
+  [_chart-type
+   render-type
+   _timezone-id
+   card
+   dashcard
+   data]
   ((if (= :scalar (:display card))
      render-multiple-scalars
      render-multiple-lab-chart)
    render-type card dashcard data))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/defmethod render :line :- formatter/RenderedPulseCard
-  [_ render-type timezone-id card _dashcard data]
+</td><td class="codes"><pre class="brush: clojure">(mu/defmethod render :line :- formatter/RenderedPulseCard
+  [_chart-type render-type timezone-id card _dashcard data]
   (attach-image-bundle (lab-image-bundle :line render-type timezone-id card data)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/defmethod render :area :- formatter/RenderedPulseCard
-  [_ render-type timezone-id card _dashcard data]
+</td><td class="codes"><pre class="brush: clojure">(mu/defmethod render :area :- formatter/RenderedPulseCard
+  [_chart-type render-type timezone-id card _dashcard data]
   (attach-image-bundle (lab-image-bundle :area render-type timezone-id card data)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/defmethod render :bar :- formatter/RenderedPulseCard
-  [_chart-type render-type timezone-id :- (s/maybe s/Str) card _dashcard data]
+</td><td class="codes"><pre class="brush: clojure">(mu/defmethod render :bar :- formatter/RenderedPulseCard
+  [_chart-type render-type timezone-id :- [:maybe :string] card _dashcard data]
   (attach-image-bundle (lab-image-bundle :bar render-type timezone-id card data)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/defmethod render :combo :- formatter/RenderedPulseCard
-  [_chart-type render-type timezone-id :- (s/maybe s/Str) card _dashcard data]
+</td><td class="codes"><pre class="brush: clojure">(mu/defmethod render :combo :- formatter/RenderedPulseCard
+  [_chart-type render-type timezone-id :- [:maybe :string] card _dashcard data]
   (attach-image-bundle (lab-image-bundle :combo render-type timezone-id card data)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/defmethod render :gauge :- formatter/RenderedPulseCard
-  [_chart-type render-type _timezone-id :- (s/maybe s/Str) card _dashcard data]
+</td><td class="codes"><pre class="brush: clojure">(mu/defmethod render :gauge :- formatter/RenderedPulseCard
+  [_chart-type render-type _timezone-id :- [:maybe :string] card _dashcard data]
   (let [image-bundle (image-bundle/make-image-bundle
                       render-type
                       (js-svg/gauge card data))]
@@ -3614,8 +3639,8 @@ This can have really high cardinality of series but the JS viz will complain abo
      [:div
       [:img {:style (style/style {:display :block :width :100%})
              :src   (:image-src image-bundle)}]]}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/defmethod render :row :- formatter/RenderedPulseCard
-  [_ render-type _timezone-id card _dashcard {:keys [rows cols] :as _data}]
+</td><td class="codes"><pre class="brush: clojure">(mu/defmethod render :row :- formatter/RenderedPulseCard
+  [_chart-type render-type _timezone-id card _dashcard {:keys [rows cols] :as _data}]
   (let [viz-settings (get card :visualization_settings)
         data {:rows rows
               :cols cols}
@@ -3635,7 +3660,7 @@ This can have really high cardinality of series but the JS viz will complain abo
          (some (fn [[idx col]]
                  (when (= col-name (:name col))
                    [idx col])))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/defmethod render :scalar :- formatter/RenderedPulseCard
+</td><td class="codes"><pre class="brush: clojure">(mu/defmethod render :scalar :- formatter/RenderedPulseCard
   [_chart-type _render-type timezone-id _card _dashcard {:keys [cols rows viz-settings]}]
   (let [field-name    (:scalar.field viz-settings)
         [row-idx col] (or (when field-name
@@ -3650,8 +3675,8 @@ This can have really high cardinality of series but the JS viz will complain abo
      [:div {:style (style/style (style/scalar-style))}
       (h value)]
      :render/text (str value)}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/defmethod render :javascript_visualization :- formatter/RenderedPulseCard
-  [_ render-type _timezone-id card dashcard data]
+</td><td class="codes"><pre class="brush: clojure">(mu/defmethod render :javascript_visualization :- formatter/RenderedPulseCard
+  [_chart-type render-type _timezone-id card dashcard data]
   (let [combined-cards-results (pu/execute-multi-card card dashcard)
         cards-with-data        (map (fn [c d] {:card c :data d})
                                     (cons card (map :card combined-cards-results))
@@ -3672,7 +3697,7 @@ This can have really high cardinality of series but the JS viz will complain abo
                  :src   (:image-src image-bundle)}]]})
       :html
       {:content [:div content] :attachments nil})))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/defmethod render :smartscalar :- formatter/RenderedPulseCard
+</td><td class="codes"><pre class="brush: clojure">(mu/defmethod render :smartscalar :- formatter/RenderedPulseCard
   [_chart-type _render-type timezone-id _card _dashcard {:keys [cols insights viz-settings]}]
   (letfn [(col-of-type [t c] (or (isa? (:effective_type c) t)
                                  ;; computed and agg columns don't have an effective type
@@ -3718,8 +3743,8 @@ This can have really high cardinality of series but the JS viz will complain abo
                         (trs &quot;Nothing to compare to.&quot;)]]
          :render/text (str (format-cell timezone-id last-value metric-col viz-settings)
                            &quot;\n&quot; (trs &quot;Nothing to compare to.&quot;))}))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/defmethod render :waterfall :- formatter/RenderedPulseCard
-  [_ render-type _timezone-id card _dashcard {:keys [rows cols viz-settings] :as data}]
+</td><td class="codes"><pre class="brush: clojure">(mu/defmethod render :waterfall :- formatter/RenderedPulseCard
+  [_chart-type render-type _timezone-id card _dashcard {:keys [rows cols viz-settings] :as data}]
   (let [[x-axis-rowfn
          y-axis-rowfn] (formatter/graphing-column-row-fns card data)
         [x-col y-col]  ((juxt x-axis-rowfn y-axis-rowfn) cols)
@@ -3752,8 +3777,8 @@ This can have really high cardinality of series but the JS viz will complain abo
      [:div
       [:img {:style (style/style {:display :block :width :100%})
              :src   (:image-src image-bundle)}]]}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/defmethod render :funnel :- formatter/RenderedPulseCard
-  [_ render-type _timezone-id card _dashcard {:keys [rows cols viz-settings] :as data}]
+</td><td class="codes"><pre class="brush: clojure">(mu/defmethod render :funnel :- formatter/RenderedPulseCard
+  [_chart-type render-type _timezone-id card _dashcard {:keys [rows cols viz-settings] :as data}]
   (let [[x-axis-rowfn
          y-axis-rowfn] (formatter/graphing-column-row-fns card data)
         funnel-rows    (:funnel.rows viz-settings)
@@ -3775,8 +3800,8 @@ This can have really high cardinality of series but the JS viz will complain abo
      [:div
       [:img {:style (style/style {:display :block :width :100%})
              :src   (:image-src image-bundle)}]]}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/defmethod render :empty :- formatter/RenderedPulseCard
-  [_ render-type _ _ _ _]
+</td><td class="codes"><pre class="brush: clojure">(mu/defmethod render :empty :- formatter/RenderedPulseCard
+  [_chart-type render-type _timezone-id _card _dashcard _data]
   (let [image-bundle (image-bundle/no-results-image-bundle render-type)]
     {:attachments
      (image-bundle/image-bundle-&gt;attachment image-bundle)
@@ -3790,8 +3815,8 @@ This can have really high cardinality of series but the JS viz will complain abo
                       :color      style/color-gray-4})}
        (trs &quot;No results&quot;)]]
      :render/text (trs &quot;No results&quot;)}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/defmethod render :attached :- formatter/RenderedPulseCard
-  [_ render-type _ _ _ _]
+</td><td class="codes"><pre class="brush: clojure">(mu/defmethod render :attached :- formatter/RenderedPulseCard
+  [_chart-type render-type _timezone-id _card _dashcard _data]
   (let [image-bundle (image-bundle/attached-image-bundle render-type)]
     {:attachments
      (image-bundle/image-bundle-&gt;attachment image-bundle)
@@ -3804,8 +3829,8 @@ This can have really high cardinality of series but the JS viz will complain abo
                      {:margin-top :8px
                       :color      style/color-gray-4})}
        (trs &quot;This question has been included as a file attachment&quot;)]]}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/defmethod render :unknown :- formatter/RenderedPulseCard
-  [_ _ _ _ _ _]
+</td><td class="codes"><pre class="brush: clojure">(mu/defmethod render :unknown :- formatter/RenderedPulseCard
+  [_chart-type _render-type _timezone-id _card _dashcard _data]
   {:attachments
    nil
    :content
@@ -3816,11 +3841,11 @@ This can have really high cardinality of series but the JS viz will complain abo
     (trs &quot;We were unable to display this Pulse.&quot;)
     [:br]
     (trs &quot;Please view this card in Metabase.&quot;)]})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/defmethod render :card-error :- formatter/RenderedPulseCard
-  [_ _ _ _ _ _]
+</td><td class="codes"><pre class="brush: clojure">(mu/defmethod render :card-error :- formatter/RenderedPulseCard
+  [_chart-type _render-type _timezone-id _card _dashcard _data]
   @card-error-rendered-info)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/defmethod render :render-error :- formatter/RenderedPulseCard
-  [_ _ _ _ _ _]
+</td><td class="codes"><pre class="brush: clojure">(mu/defmethod render :render-error :- formatter/RenderedPulseCard
+  [_chart-type _render-type _timezone-id _card _dashcard _data]
   @error-rendered-info)</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 

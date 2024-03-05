@@ -2879,8 +2879,8 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.shared.models.visualization-settings :as mb.viz]
    [metabase.util.i18n :refer [trs tru]]
    [metabase.util.log :as log]
-   [metabase.util.urls :as urls]
-   [schema.core :as s]))</pre></td></tr><tr><td class="docs"><p>Should the rendered pulse include buttons? (default: <code>false</code>)</p>
+   [metabase.util.malli :as mu]
+   [metabase.util.urls :as urls]))</pre></td></tr><tr><td class="docs"><p>Should the rendered pulse include buttons? (default: <code>false</code>)</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *include-buttons*
   false)</pre></td></tr><tr><td class="docs"><p>Should the rendered pulse include a title? (default: <code>false</code>)</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *include-title*
@@ -2890,7 +2890,7 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defn- card-href
   [card]
   (h (urls/card-url (:id card))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/defn ^:private make-title-if-needed :- (s/maybe formatter/RenderedPulseCard)
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private make-title-if-needed :- [:maybe formatter/RenderedPulseCard]
   [render-type card dashcard]
   (when *include-title*
     (let [card-name    (or (-&gt; dashcard :visualization_settings :card.title)
@@ -2916,7 +2916,7 @@ net.brehaut.ClojureTools = (function (SH) {
                           [:img {:style (style/style {:width :16px})
                                  :width 16
                                  :src   (:image-src image-bundle)}])]]]]})))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/defn ^:private make-description-if-needed :- (s/maybe formatter/RenderedPulseCard)
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private make-description-if-needed :- [:maybe formatter/RenderedPulseCard]
   [dashcard card]
   (when *include-description*
     (when-let [description (or (get-in dashcard [:visualization_settings :card.description])
@@ -2975,8 +2975,12 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defn- is-attached?
   [card]
   ((some-fn :include_csv :include_xls) card))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/defn ^:private render-pulse-card-body :- formatter/RenderedPulseCard
-  [render-type timezone-id :- (s/maybe s/Str) card dashcard {:keys [data error] :as results}]
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private render-pulse-card-body :- formatter/RenderedPulseCard
+  [render-type
+   timezone-id :- [:maybe :string]
+   card
+   dashcard
+   {:keys [data error] :as results}]
   (try
     (when error
       (throw (ex-info (tru &quot;Card has errors: {0}&quot; error) (assoc results :card-error true))))
@@ -2994,13 +2998,17 @@ net.brehaut.ClojureTools = (function (SH) {
         (do
           (log/error e (trs &quot;Pulse card render error&quot;))
           (body/render :render-error nil nil nil nil nil))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/defn render-pulse-card :- formatter/RenderedPulseCard
+</td><td class="codes"><pre class="brush: clojure">(mu/defn render-pulse-card :- formatter/RenderedPulseCard
   &quot;Render a single `card` for a `Pulse` to Hiccup HTML. `result` is the QP results. Returns a map with keys
 - attachments
 - content (a hiccup form suitable for rendering on rich clients or rendering into an image)
 - render/text : raw text suitable for substituting on clients when text is preferable. (Currently slack uses this for
   scalar results where text is preferable to an image of a div of a single result.&quot;
-  [render-type timezone-id :- (s/maybe s/Str) card dashcard results]
+  [render-type
+   timezone-id :- [:maybe :string]
+   card
+   dashcard
+   results]
   (let [{title             :content
          title-attachments :attachments} (make-title-if-needed render-type card dashcard)
         {description :content}           (make-description-if-needed dashcard card)
@@ -3037,9 +3045,10 @@ attachments</p>
 </td><td class="codes"><pre class="brush: clojure">(defn render-pulse-card-for-display
   [timezone-id card results]
   (:content (render-pulse-card :inline timezone-id card nil results)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/defn render-pulse-section :- formatter/RenderedPulseCard
+</td><td class="codes"><pre class="brush: clojure">(mu/defn render-pulse-section :- formatter/RenderedPulseCard
   &quot;Render a single Card section of a Pulse to a Hiccup form (representating HTML).&quot;
-  [timezone-id {card :card, dashcard :dashcard, result :result}]
+  [timezone-id
+   {card :card, dashcard :dashcard, result :result}]
   (let [{:keys [attachments content]} (binding [*include-title*       true
                                                 *include-description* true]
                                         (render-pulse-card :attachment timezone-id card dashcard result))]
@@ -3047,13 +3056,13 @@ attachments</p>
      :content     [:div {:style (style/style {:margin-top    :20px
                                               :margin-bottom :20px})}
                    content]}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/defn render-pulse-card-to-png :- bytes
+</td><td class="codes"><pre class="brush: clojure">(mu/defn render-pulse-card-to-png :- bytes?
   &quot;Render a `pulse-card` as a PNG. `data` is the `:data` from a QP result.&quot;
-  [timezone-id :- (s/maybe s/Str) pulse-card result width]
+  ^bytes [timezone-id :- [:maybe :string] pulse-card result width]
   (png/render-html-to-png (render-pulse-card :inline timezone-id pulse-card nil result) width))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/defn png-from-render-info :- bytes
+</td><td class="codes"><pre class="brush: clojure">(mu/defn png-from-render-info :- bytes?
   &quot;Create a PNG file (as a byte array) from rendering info.&quot;
-  [rendered-info :- formatter/RenderedPulseCard width]
+  ^bytes [rendered-info :- formatter/RenderedPulseCard width]
   (png/render-html-to-png rendered-info width))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
