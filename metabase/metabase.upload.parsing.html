@@ -2873,7 +2873,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.public-settings :as public-settings]
    [metabase.util.i18n :refer [tru]])
   (:import
-   (java.text NumberFormat)
+   (java.text NumberFormat ParsePosition)
    (java.time LocalDate)
    (java.time.format DateTimeFormatter DateTimeFormatterBuilder ResolverStyle)
    (java.util Locale)))</pre></td></tr><tr><td class="docs">
@@ -2986,11 +2986,19 @@ already a built-in DateTimeFormatter for that: [[DateTimeFormatter/ISO<em>LOCAL<
   (defn- parse-plain-number [number-separators s]
     (let [has-parens?       (re-matches #&quot;\(.*\)&quot; s)
           deparenthesized-s (str/replace s #&quot;[()]&quot; )
+          parse-pos         (ParsePosition. 0)
           parsed-number     (case number-separators
-                              (&quot;.&quot; &quot;.,&quot;) (. us parse deparenthesized-s)
-                              &quot;,.&quot;       (. de parse deparenthesized-s)
-                              &quot;, &quot;       (. fr parse (str/replace deparenthesized-s \space \u00A0)) ; \u00A0 is a non-breaking space
-                              &quot;.’&quot;       (. ch parse deparenthesized-s))]
+                              (&quot;.&quot; &quot;.,&quot;) (. us parse deparenthesized-s parse-pos)
+                              &quot;,.&quot;       (. de parse deparenthesized-s parse-pos)
+                              &quot;, &quot;       (. fr parse (str/replace deparenthesized-s \space \u00A0) parse-pos) ; \u00A0 is a non-breaking space
+                              &quot;.’&quot;       (. ch parse deparenthesized-s parse-pos))]
+      (let [parsed-idx (.getIndex parse-pos)]
+        (when-not (= parsed-idx (count deparenthesized-s))
+          (throw (ex-info &quot;Unexpected trailing characters - this is probably not a number&quot;
+                          {:full-string    s
+                           :parsed-number  parsed-number
+                           :parsed-string  (.substring deparenthesized-s 0 parsed-idx)
+                           :ignored-string (.substring deparenthesized-s parsed-idx)}))))
       (if has-parens?
         (- parsed-number)
         parsed-number))))</pre></td></tr><tr><td class="docs"><p>Parse an integer or float</p>
@@ -3001,8 +3009,8 @@ already a built-in DateTimeFormatter for that: [[DateTimeFormatter/ISO<em>LOCAL<
          (str/trim)
          (remove-currency-signs)
          (parse-plain-number number-separators))
-    (catch Exception _
-      (throw (IllegalArgumentException. (tru &quot;''{0}'' is not a recognizable number&quot; s))))))</pre></td></tr><tr><td class="docs"><p>Parses a string representing a number as a java.math.BigInteger, rounding down if necessary.</p>
+    (catch Exception e
+      (throw (IllegalArgumentException. (tru &quot;''{0}'' is not a recognizable number&quot; s) e)))))</pre></td></tr><tr><td class="docs"><p>Parses a string representing a number as a java.math.BigInteger, rounding down if necessary.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- parse-as-biginteger
   [number-separators s]
   (let [n (parse-number number-separators s)]
