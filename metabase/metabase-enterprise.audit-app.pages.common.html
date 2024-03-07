@@ -2870,9 +2870,7 @@ net.brehaut.ClojureTools = (function (SH) {
   (:require
    [clojure.core.memoize :as memoize]
    [clojure.walk :as walk]
-   [honey.sql :as sql]
    [honey.sql.helpers :as sql.helpers]
-   [java-time.api :as t]
    [medley.core :as m]
    [metabase-enterprise.audit-app.query-processor.middleware.handle-audit-queries
     :as qp.middleware.audit]
@@ -2881,14 +2879,12 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.db.query :as mdb.query]
    [metabase.driver.sql-jdbc.execute :as sql-jdbc.execute]
    [metabase.driver.sql-jdbc.sync :as sql-jdbc.sync]
-   [metabase.driver.sql.query-processor :as sql.qp]
    [metabase.query-processor.schema :as qp.schema]
    [metabase.query-processor.timezone :as qp.timezone]
    [metabase.util :as u]
    [metabase.util.honey-sql-2 :as h2x]
    [metabase.util.i18n :refer [tru]]
-   [metabase.util.malli :as mu]
-   [metabase.util.urls :as urls]))</pre></td></tr><tr><td class="docs">
+   [metabase.util.malli :as mu]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private ^:const default-limit Integer/MAX_VALUE)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- add-default-params [honeysql-query]
@@ -3027,51 +3023,10 @@ directly as a series of maps (the 'legacy results' format as described in
      [:or [:= nil first-name] [:= nil last-name]]
      (h2x/concat [:coalesce first-name &quot;&quot;] [:coalesce last-name &quot;&quot;])
      :else
-     (h2x/concat [:coalesce first-name &quot;&quot;] (h2x/literal &quot; &quot;) [:coalesce last-name &quot;&quot;])]))</pre></td></tr><tr><td class="docs"><p>Map of datetime unit strings (possible params for queries that accept a datetime <code>unit</code> param) to the <code>:base_type</code> we
-should use for that column in the results.</p>
-</td><td class="codes"><pre class="brush: clojure">(def datetime-unit-str-&gt;base-type
-  {&quot;quarter&quot;         :type/Date
-   &quot;day&quot;             :type/Date
-   &quot;hour&quot;            :type/DateTime
-   &quot;week&quot;            :type/Date
-   &quot;default&quot;         :type/DateTime
-   &quot;day-of-week&quot;     :type/Integer
-   &quot;hour-of-day&quot;     :type/Integer
-   &quot;month&quot;           :type/Date
-   &quot;month-of-year&quot;   :type/Integer
-   &quot;day-of-month&quot;    :type/Integer
-   &quot;year&quot;            :type/Integer
-   &quot;day-of-year&quot;     :type/Integer
-   &quot;week-of-year&quot;    :type/Integer
-   &quot;quarter-of-year&quot; :type/Integer
-   &quot;minute-of-hour&quot;  :type/Integer
-   &quot;minute&quot;          :type/DateTime})</pre></td></tr><tr><td class="docs"><p>Scheme for a valid QP DateTime unit as a string (the format they will come into the audit QP). E.g. something
-like <code>day</code> or <code>day-of-week</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(def DateTimeUnitStr
-  (into [:enum] (keys datetime-unit-str-&gt;base-type)))</pre></td></tr><tr><td class="docs"><p>Group a datetime expression by <code>unit</code> using the appropriate SQL QP <code>date</code> implementation for our application
-database.</p>
-
-<p>  (grouped-datetime :day :timestamp) ;; -> <code>cast(timestamp AS date)</code> [honeysql equivalent]</p>
-</td><td class="codes"><pre class="brush: clojure">(defn grouped-datetime
-  [unit expr]
-  (sql.qp/date (mdb/db-type) (keyword unit) expr))</pre></td></tr><tr><td class="docs"><p>Build a <code>CASE</code> statement that returns the first non-<code>NULL</code> of <code>exprs</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn first-non-null
-  [&amp; exprs]
-  (into [:case]
-        (mapcat (fn [expr] [[:not= expr nil] expr]))
-        exprs))</pre></td></tr><tr><td class="docs"><p>Build a <code>CASE</code> statement that will replace results of <code>expr</code> with <code>0</code> when it's <code>NULL</code>, perfect for things like
-counts.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn zero-if-null
-  [expr]
-  [:case [:not= expr nil] expr :else 0])</pre></td></tr><tr><td class="docs"><p>Lowercase a SQL field, to enter into honeysql query</p>
+     (h2x/concat [:coalesce first-name &quot;&quot;] (h2x/literal &quot; &quot;) [:coalesce last-name &quot;&quot;])]))</pre></td></tr><tr><td class="docs"><p>Lowercase a SQL field, to enter into honeysql query</p>
 </td><td class="codes"><pre class="brush: clojure">(defn lowercase-field
   [field]
-  [:lower field])</pre></td></tr><tr><td class="docs"><p>Add an appropriate <code>WHERE</code> clause to limit query to 45 days</p>
-</td><td class="codes"><pre class="brush: clojure">(defn add-45-days-clause
-  [query date_column]
-  (sql.helpers/where query [:&gt;
-                            (h2x/cast :date date_column)
-                            (h2x/cast :date (h2x/literal (t/format &quot;yyyy-MM-dd&quot; (t/minus (t/local-date) (t/days 45)))))]))</pre></td></tr><tr><td class="docs"><p>Add an appropriate <code>WHERE</code> clause to <code>query</code> to see if any of the <code>fields-to-search</code> match <code>query-string</code>.</p>
+  [:lower field])</pre></td></tr><tr><td class="docs"><p>Add an appropriate <code>WHERE</code> clause to <code>query</code> to see if any of the <code>fields-to-search</code> match <code>query-string</code>.</p>
 
 <p>(add-search-clause {} "birds" :t.name :db.name)</p>
 </td><td class="codes"><pre class="brush: clojure">(defn add-search-clause
@@ -3086,38 +3041,7 @@ counts.</p>
 <p>Most queries will just have explicit default <code>ORDER BY</code> clauses</p>
 </td><td class="codes"><pre class="brush: clojure">(defn add-sort-clause
   [query sort-column sort-direction]
-  (sql.helpers/order-by query [(keyword sort-column) (keyword sort-direction)]))</pre></td></tr><tr><td class="docs"><p>Return HoneySQL for a <code>CASE</code> statement to return a Card's public URL if the <code>public_uuid</code> <code>field</code> is non-NULL.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn card-public-url
-  [field]
-  [:case
-   [:not= field nil]
-   (h2x/concat (urls/public-card-prefix) field)])</pre></td></tr><tr><td class="docs"><p>Return HoneySQL for a <code>CASE</code> statement to format the QueryExecution <code>:native</code> column as either <code>Native</code> or <code>GUI</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn native-or-gui
-  [query-execution-table]
-  [:case [:= (keyword (name query-execution-table) &quot;native&quot;) true] (h2x/literal &quot;Native&quot;) :else (h2x/literal &quot;GUI&quot;)])</pre></td></tr><tr><td class="docs"><p>HoneySQL for a <code>CASE</code> statement to return the name of a Card, or <code>Ad-hoc</code> if Card name is <code>NULL</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn card-name-or-ad-hoc
-  [card-table]
-  (first-non-null (keyword (name card-table) &quot;name&quot;) (h2x/literal &quot;Ad-hoc&quot;)))</pre></td></tr><tr><td class="docs"><p>HoneySQL for a <code>WHERE</code> clause to restrict QueryExecution rows to downloads (i.e. executions returned in CSV/JSON/XLS
-format).</p>
-</td><td class="codes"><pre class="brush: clojure">(defn query-execution-is-download
-  [query-execution-table]
-  [:in (keyword (name query-execution-table) &quot;context&quot;) #{&quot;csv-download&quot; &quot;xlsx-download&quot; &quot;json-download&quot;}])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- format-separator
-  [_separator [x y]]
-  (let [[x-sql &amp; x-args] (sql/format-expr x {:nested true})
-        [y-sql &amp; y-args] (sql/format-expr y {:nested true})]
-    (into [(format &quot;%s SEPARATOR %s&quot; x-sql y-sql)]
-          cat
-          [x-args
-           y-args])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(sql/register-fn!
- ::separator
- format-separator)</pre></td></tr><tr><td class="docs"><p>Portable MySQL <code>group_concat</code>/Postgres <code>string_agg</code></p>
-</td><td class="codes"><pre class="brush: clojure">(defn group-concat
-  [expr separator]
-  (if (= (mdb/db-type) :mysql)
-    [:group_concat [::separator expr (h2x/literal separator)]]
-    [:string_agg expr (h2x/literal separator)]))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+  (sql.helpers/order-by query [(keyword sort-column) (keyword sort-direction)]))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
