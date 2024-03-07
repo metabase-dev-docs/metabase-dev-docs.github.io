@@ -2865,140 +2865,664 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.config" name="metabase.config"><h1 class="project-name">metabase.config</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.config
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.models.data-permissions" name="metabase.models.data-permissions"><h1 class="project-name">metabase.models.data-permissions</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.models.data-permissions
   (:require
-   [cheshire.core :as json]
-   [clojure.java.io :as io]
+   [clojure.set :as set]
    [clojure.string :as str]
-   [environ.core :as env]
-   [metabase.plugins.classloader :as classloader])
+   [malli.core :as mc]
+   [medley.core :as m]
+   [metabase.api.common :as api]
+   [metabase.config :as config]
+   [metabase.models.interface :as mi]
+   [metabase.util :as u]
+   [metabase.util.i18n :refer [tru]]
+   [metabase.util.malli :as mu]
+   [methodical.core :as methodical]
+   [toucan2.core :as t2])
   (:import
-   (clojure.lang Keyword)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Indicates whether Enterprise Edition extensions are available</p>
+   (clojure.lang PersistentVector)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(doto :model/DataPermissions
+  (derive :metabase/model))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/table-name :model/DataPermissions [_model] :data_permissions)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(t2/deftransforms :model/DataPermissions
+  {:perm_type  mi/transform-keyword
+   :perm-type  mi/transform-keyword
+   :perm_value mi/transform-keyword
+   ;; define keyword transformation for :type and :value as well so that we can use them as aliases
+   :type       mi/transform-keyword
+   :value      mi/transform-keyword})</pre></td></tr><tr><td class="docs"><p>---------------------------------------- Permission definitions ---------------------------------------------------</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>IMPORTANT: If you add a new permission type, <code>:values</code> must be ordered from <em>most</em> permissive to <em>least</em> permissive.</p>
 
-<p>this existed long before 0.39.0, but that's when it was made public</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^{:doc  :added &quot;0.39.0&quot;} ee-available?
-  (try
-    (classloader/require 'metabase-enterprise.core)
-    true
-    (catch Throwable _
-      false)))</pre></td></tr><tr><td class="docs"><p>Whether code from <code>./test</code> is available. This is mainly to facilitate certain things like test QP middleware that we
-want to load only when test code is present.</p>
-</td><td class="codes"><pre class="brush: clojure">(def tests-available?
-  (try
-    (classloader/require 'metabase.test.core)
-    true
-    (catch Throwable _
-      false)))</pre></td></tr><tr><td class="docs"><p>Are we running on a Windows machine?</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^Boolean is-windows?
-  #_{:clj-kondo/ignore [:discouraged-var]}
-  (str/includes? (str/lower-case (System/getProperty &quot;os.name&quot;)) &quot;win&quot;))</pre></td></tr><tr><td class="docs"><p>Global application defaults</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private app-defaults
-  {:mb-run-mode                     &quot;prod&quot;
-   ;; DB Settings
-   :mb-db-type                      &quot;h2&quot;
-   :mb-db-file                      &quot;metabase.db&quot;
-   :mb-db-automigrate               &quot;true&quot;
-   :mb-db-logging                   &quot;true&quot;
-   ;; Jetty Settings. Full list of options is available here: https://github.com/ring-clojure/ring/blob/master/ring-jetty-adapter/src/ring/adapter/jetty.clj
-   :mb-jetty-port                   &quot;3000&quot;
-   :mb-jetty-join                   &quot;true&quot;
-   ;; other application settings
-   :mb-password-complexity          &quot;normal&quot;
-   :mb-version-info-url             &quot;https://static.metabase.com/version-info.json&quot;
-   :mb-version-info-ee-url          &quot;https://static.metabase.com/version-info-ee.json&quot;
-   :mb-ns-trace                     &quot;&quot;                      ; comma-separated namespaces to trace
-   :max-session-age                 &quot;20160&quot;                 ; session length in minutes (14 days)
-   :mb-colorize-logs                (str (not is-windows?)) ; since PowerShell and cmd.exe don't support ANSI color escape codes or emoji,
-   :mb-emoji-in-logs                (str (not is-windows?)) ; disable them by default when running on Windows. Otherwise they're enabled
-   :mb-qp-cache-backend             &quot;db&quot;
-   :mb-jetty-async-response-timeout (str (* 10 60 1000))})  ; 10m</pre></td></tr><tr><td class="docs"><p>separate map for EE stuff so merge conflicts aren't annoying.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ee-app-defaults
-  {:embed-max-session-age &quot;1440&quot;}) ; how long a FULL APP EMBED session is valid for. One day, by default</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(alter-var-root #'app-defaults merge ee-app-defaults)</pre></td></tr><tr><td class="docs"><p>Retrieve value for a single configuration key.  Accepts either a keyword or a string.</p>
+<ul>
+<li><p>When fetching a user's permissions, the default behavior is to return the <em>most</em> permissive value from any group the
+user is in. This can be overridden by definding a custom implementation of <code>coalesce</code>.</p></li>
+<li><p>If a user does not have any value for the permission when it is fetched, the <em>least</em> permissive value is used as a
+fallback.</p></li>
+</ul>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Permissions which apply to individual databases or tables</p>
+</td><td class="codes"><pre class="brush: clojure">(def Permissions
+  {:perms/data-access           {:model :model/Table :values [:unrestricted :no-self-service :block]}
+   :perms/download-results      {:model :model/Table :values [:one-million-rows :ten-thousand-rows :no]}
+   :perms/manage-table-metadata {:model :model/Table :values [:yes :no]}
+   :perms/native-query-editing  {:model :model/Database :values [:yes :no]}
+   :perms/manage-database       {:model :model/Database :values [:yes :no]}})</pre></td></tr><tr><td class="docs"><p>Malli spec for valid permission types.</p>
+</td><td class="codes"><pre class="brush: clojure">(def PermissionType
+  (into [:enum {:error/message &quot;Invalid permission type&quot;}]
+        (keys Permissions)))</pre></td></tr><tr><td class="docs"><p>Malli spec for a keyword that matches any value in [[Permissions]].</p>
+</td><td class="codes"><pre class="brush: clojure">(def PermissionValue
+  (into [:enum {:error/message &quot;Invalid permission value&quot;}]
+        (distinct (mapcat :values (vals Permissions)))))</pre></td></tr><tr><td class="docs"><p>------------------------------------------- Misc Utils ------------------------------------------------------------</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>The <em>least</em> permissive value for a given perm type. This value is used as a fallback when a user does not have a
+value for the permission in the database.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn least-permissive-value
+  [perm-type]
+  (-&gt; Permissions perm-type :values last))</pre></td></tr><tr><td class="docs"><p>The <em>most</em> permissive value for a given perm type. This is the default value for superusers.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn most-permissive-value
+  [perm-type]
+  (-&gt; Permissions perm-type :values first))</pre></td></tr><tr><td class="docs"><p>Returns true if value1 is at least as permissive as value2 for the given permission type.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn at-least-as-permissive?
+  [perm-type :- PermissionType
+   value1    :- PermissionValue
+   value2    :- PermissionValue]
+  (let [^PersistentVector values (-&gt; Permissions perm-type :values)]
+    (&lt;= (.indexOf values value1)
+        (.indexOf values value2))))</pre></td></tr><tr><td class="docs"><p>A map from permission types directly to model identifiers (or <code>nil</code>).</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private model-by-perm-type
+  (update-vals Permissions :model))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- assert-value-matches-perm-type
+  [perm-type perm-value]
+  (when-not (contains? (set (get-in Permissions [perm-type :values])) perm-value)
+    (throw (ex-info (tru &quot;Permission type {0} cannot be set to {1}&quot; perm-type perm-value)
+                    {perm-type (Permissions perm-type)}))))</pre></td></tr><tr><td class="docs"><p>---------------------------------------- Caching ------------------------------------------------------------------</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Returns all relevant rows for permissions for the user</p>
+</td><td class="codes"><pre class="brush: clojure">(defn relevant-permissions-for-user
+  [user-id]
+  (-&gt;&gt; (t2/select :model/DataPermissions
+                  {:select [:p.* [:pgm.user_id :user_id]]
+                   :from [[:permissions_group_membership :pgm]]
+                   :join [[:permissions_group :pg] [:= :pg.id :pgm.group_id]
+                          [:data_permissions :p] [:= :p.group_id :pg.id]]
+                   :where [:= :pgm.user_id user-id]})
+       (reduce (fn [m {:keys [user_id perm_type db_id] :as row}]
+                 (update-in m [user_id perm_type db_id] (fnil conj []) row))
+               {})))</pre></td></tr><tr><td class="docs"><p>Returns all relevant rows for a given user, permission type, and db_id</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- relevant-permissions-for-user-perm-and-db
+  [user-id perm-type db-id]
+  (t2/select :model/DataPermissions
+             {:select [:p.* [:pgm.user_id :user_id]]
+              :from [[:permissions_group_membership :pgm]]
+              :join [[:permissions_group :pg] [:= :pg.id :pgm.group_id]
+                     [:data_permissions :p] [:= :p.group_id :pg.id]]
+              :where [:and
+                      [:= :pgm.user_id user-id]
+                      [:= :p.perm_type (u/qualified-name perm-type)]
+                      [:= :p.db_id db-id]]}))</pre></td></tr><tr><td class="docs"><p>Filled by <code>with-relevant-permissions-for-user</code> with the output of <code>(relevant-permissions-for-user [user-id])</code>. A map
+with keys like <code>[user_id perm_type db_id]</code>, the latter two because nearly always we want to get permissions for a
+particular permission type and database id, <code>user_id</code> because we want to be VERY sure that we never accidentally use
+the cache for the wrong user (e.g. if we were checking whether <em>another</em> user could perform some action for some
+reason). Of course, we also won't use the cache if we're not checking for the current user - but better safe than
+sorry. The values are collections of rows of DataPermissions.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *permissions-for-user*
+  (delay nil))</pre></td></tr><tr><td class="docs"><p>Populates the <code>*permissions-for-user*</code> dynamic var for use by the cache-aware functions in this namespace.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro with-relevant-permissions-for-user
+  [user-id &amp; body]
+  `(binding [*permissions-for-user* (delay (relevant-permissions-for-user ~user-id))]
+     ~@body))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- get-permissions [user-id perm-type db-id]
+  (if (and (= user-id api/*current-user-id*)
+           (get @*permissions-for-user* user-id))
+    (get-in @*permissions-for-user* [user-id perm-type db-id])
+    (relevant-permissions-for-user-perm-and-db user-id perm-type db-id)))</pre></td></tr><tr><td class="docs"><p>---------------------------------------- Fetching a user's permissions --------------------------------------------</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Coalesce a set of permission values into a single value. This is used to determine the permission to enforce for a
+user in multiple groups with conflicting permissions. By default, this returns the <em>most</em> permissive value that the
+user has in any group.</p>
 
-<p> We resolve properties from these places:</p>
+<p>For instance,
+- Given an empty set, we return the most permissive.
+  (coalesce :settings-access #{}) => :yes
+- Given a set with values, we select the most permissive option in the set.
+  (coalesce :settings-access #{:view :no-access}) => :view</p>
+</td><td class="codes"><pre class="brush: clojure">(defmulti coalesce
+  {:arglists '([perm-type perm-values])}
+  (fn [perm-type _perm-values] perm-type))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod coalesce :default
+  [perm-type perm-values]
+  (let [ordered-values (-&gt; Permissions perm-type :values)]
+    (first (filter (set perm-values) ordered-values))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod coalesce :perms/data-access
+  [perm-type perm-values]
+  (let [perm-values    (set perm-values)
+        ordered-values (-&gt; Permissions perm-type :values)]
+    (if (and (perm-values :block)
+             (not (perm-values :unrestricted)))
+      ;; Block in one group overrides no-self-service in another, but not unrestricted
+      :block
+      (first (filter perm-values ordered-values)))))</pre></td></tr><tr><td class="docs"><p>In some cases (fetching schema permissions) we need to coalesce permissions using the most restrictive option.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn coalesce-most-restrictive
+  [perm-type perm-values]
+  (let [ordered-values (-&gt; Permissions perm-type :values reverse)]
+    (first (filter (set perm-values) ordered-values))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- is-superuser?
+  [user-id]
+  (if (= user-id api/*current-user-id*)
+    api/*is-superuser?*
+    (t2/select-one-fn :is_superuser :model/User :id user-id)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn database-permission-for-user :- PermissionValue
+  &quot;Returns the effective permission value for a given user, permission type, and database ID. If the user has
+  multiple permissions for the given type in different groups, they are coalesced into a single value.
+  For permissions which can be set at the table-level or the database-level, this function will return the database-level
+  permission if the user has it.&quot;
+  [user-id perm-type database-id]
+  (when (not= :model/Database (model-by-perm-type perm-type))
+    (throw (ex-info (tru &quot;Permission type {0} is a table-level permission.&quot; perm-type)
+                    {perm-type (Permissions perm-type)})))
+  (if (is-superuser? user-id)
+    (most-permissive-value perm-type)
+    (let [perm-values (-&gt;&gt; (get-permissions user-id perm-type database-id)
+                           (map :perm_value)
+                           (into #{}))]
+      (or (coalesce perm-type perm-values)
+          (least-permissive-value perm-type)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn user-has-permission-for-database? :- :boolean
+  &quot;Returns a Boolean indicating whether the user has the specified permission value for the given database ID and table ID,
+   or a more permissive value.&quot;
+  [user-id perm-type perm-value database-id]
+  (at-least-as-permissive? perm-type
+                           (database-permission-for-user user-id perm-type database-id)
+                           perm-value))</pre></td></tr><tr><td class="docs"><p>See the <code>with-additional-table-permission</code> macro below.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *additional-table-permissions*
+  {})</pre></td></tr><tr><td class="docs"><p>Sometimes, for sandboxing, we need to run something in a context with additional permissions - for example, so that a
+user can read a table to which they have only sandboxed access.</p>
 
-<ol>
-<li>environment variables (ex: MB<em>DB</em>TYPE -> :mb-db-type)</li>
-<li>jvm options (ex: -Dmb.db.type -> :mb-db-type)</li>
-<li>hard coded <code>app-defaults</code></li>
-</ol>
-</td><td class="codes"><pre class="brush: clojure">(defn config-str
-  [k]
-  (let [k       (keyword k)
-        env-val (k env/env)]
-    (or (when-not (str/blank? env-val) env-val)
-        (k app-defaults))))</pre></td></tr><tr><td class="docs"><p>Fetch a configuration key and parse it as an integer.</p>
+<p>I intentionally did <em>not</em> build this as a general-purpose 'add an additional context' macro, because supporting it
+for every function in the DataPermission API will be challenging, and the API is still in flux. Instead, for now,
+this is a very tightly constrained macro that only adds an additional <em>table</em> level permission, and only affects the
+output of <code>table-permission-for-user</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro with-additional-table-permission
+  [perm-type database-id table-id perm-value &amp; form]
+  `(binding [*additional-table-permissions* (assoc-in *additional-table-permissions*
+                                                      [~database-id ~table-id ~perm-type]
+                                                      ~perm-value)]
+     ~@form))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- get-additional-table-permission! [{:keys [db-id table-id]} perm-type]
+  (get-in *additional-table-permissions* [db-id table-id perm-type]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn table-permission-for-group :- PermissionValue
+  &quot;Returns the effective permission value for a given *group*, permission type, and database ID, and table ID.&quot;
+  [group-id perm-type database-id table-id]
+  (when (not= :model/Table (model-by-perm-type perm-type))
+    (throw (ex-info (tru &quot;Permission type {0} is a table-level permission.&quot; perm-type)
+                    {perm-type (Permissions perm-type)})))
+  (let [perm-values (t2/select-fn-set :value
+                                      :model/DataPermissions
+                                      {:select [[:p.perm_value :value]]
+                                       :from [[:data_permissions :p]]
+                                       :where [:and
+                                               [:= :p.group_id group-id]
+                                               [:= :p.perm_type (u/qualified-name perm-type)]
+                                               [:= :p.db_id database-id]
+                                               [:or
+                                                [:= :table_id table-id]
+                                                [:= :table_id nil]]]})]
+    (or (coalesce perm-type (conj perm-values (get-additional-table-permission! {:db-id database-id :table-id table-id}
+                                                                                perm-type)))
+        (least-permissive-value perm-type))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn table-permission-for-user :- PermissionValue
+  &quot;Returns the effective permission value for a given user, permission type, and database ID, and table ID. If the user
+  has multiple permissions for the given type in different groups, they are coalesced into a single value.&quot;
+  [user-id perm-type database-id table-id]
+  (when (not= :model/Table (model-by-perm-type perm-type))
+    (throw (ex-info (tru &quot;Permission type {0} is a database-level permission.&quot; perm-type)
+                    {perm-type (Permissions perm-type)})))
+  (if (is-superuser? user-id)
+    (most-permissive-value perm-type)
+    (let [perm-values (-&gt;&gt; (get-permissions user-id perm-type database-id)
+                           (filter #(or (= (:table_id %) table-id)
+                                        (nil? (:table_id %))))
+                           (map :perm_value)
+                           (into #{}))]
+      (or (coalesce perm-type (conj perm-values (get-additional-table-permission! {:db-id database-id :table-id table-id}
+                                                                            perm-type)))
+          (least-permissive-value perm-type)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn user-has-permission-for-table? :- :boolean
+  &quot;Returns a Boolean indicating whether the user has the specified permission value for the given database ID and table ID,
+   or a more permissive value.&quot;
+  [user-id perm-type perm-value database-id table-id]
+  (at-least-as-permissive? perm-type
+                           (table-permission-for-user user-id perm-type database-id table-id)
+                           perm-value))</pre></td></tr><tr><td class="docs"><p>Given a perm-type and a collection of maps that look like <code>{:group-id 1 :value :permission-value}</code>, returns a set
+containing the most restrictive permission value in each group.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- most-restrictive-per-group
+  [perm-type perms]
+  (-&gt;&gt; perms
+       (group-by :group-id)
+       (m/map-vals (fn [ps]
+                     (-&gt;&gt; ps (map :value) set (coalesce-most-restrictive perm-type))))
+       vals
+       set))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn full-schema-permission-for-user :- PermissionValue
+  &quot;Returns the effective *schema-level* permission value for a given user, permission type, and database ID, and
+  schema name. If the user has multiple permissions for the given type in different groups, they are coalesced into a
+  single value. The schema-level permission is the *most* restrictive table-level permission within that schema.&quot;
+  [user-id perm-type database-id schema-name]
+  (when (not= :model/Table (model-by-perm-type perm-type))
+    (throw (ex-info (tru &quot;Permission type {0} is not a table-level permission.&quot; perm-type)
+                    {perm-type (Permissions perm-type)})))
+  (if (is-superuser? user-id)
+    (most-permissive-value perm-type)
+    ;; The schema-level permission is the most-restrictive table-level permission within a schema. So for each group,
+    ;; select the most-restrictive table-level permission. Then use normal coalesce logic to select the *least*
+    ;; restrictive group permission.
+    (let [perm-values (most-restrictive-per-group
+                       perm-type
+                       (-&gt;&gt; (get-permissions user-id perm-type database-id)
+                            (filter #(or (= (:schema_name %) schema-name)
+                                         (nil? (:table_id %))))
+                            (map #(set/rename-keys % {:group_id :group-id
+                                                      :perm_value :value}))
+                            (map #(select-keys % [:group-id :value]))))]
+      (or (coalesce perm-type perm-values)
+          (least-permissive-value perm-type)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn full-db-permission-for-user :- PermissionValue
+  &quot;Returns the effective *db-level* permission value for a given user, permission type, and database ID. If the user
+  has multiple permissions for the given type in different groups, they are coalesced into a single value. The
+  db-level permission is the *most* restrictive table-level permission within that schema.&quot;
+  [user-id perm-type database-id]
+  (when (not= :model/Table (model-by-perm-type perm-type))
+    (throw (ex-info (tru &quot;Permission type {0} is not a table-level permission.&quot; perm-type)
+                    {perm-type (Permissions perm-type)})))
+  (if (is-superuser? user-id)
+    (most-permissive-value perm-type)
+    ;; The schema-level permission is the most-restrictive table-level permission within a schema. So for each group,
+    ;; select the most-restrictive table-level permission. Then use normal coalesce logic to select the *least*
+    ;; restrictive group permission.
+    (let [perm-values (most-restrictive-per-group
+                       perm-type
+                       (-&gt;&gt; (get-permissions user-id perm-type database-id)
+                            (map #(set/rename-keys % {:group_id :group-id
+                                                      :perm_value :value}))
+                            (map #(select-keys % [:group-id :value]))))]
+      (or (coalesce perm-type perm-values)
+          (least-permissive-value perm-type)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn schema-permission-for-user :- PermissionValue
+  &quot;Returns the effective *schema-level* permission value for a given user, permission type, and database ID, and
+  schema name. If the user has multiple permissions for the given type in different groups, they are coalesced into a
+  single value. The schema-level permission is the *least* restrictive table-level permission within that schema.&quot;
+  [user-id perm-type database-id schema-name]
+  (when (not= :model/Table (model-by-perm-type perm-type))
+    (throw (ex-info (tru &quot;Permission type {0} is not a table-level permission.&quot; perm-type)
+                    {perm-type (Permissions perm-type)})))
+  (if (is-superuser? user-id)
+    (most-permissive-value perm-type)
+    ;; The schema-level permission is the most-restrictive table-level permission within a schema. So for each group,
+    ;; select the most-restrictive table-level permission. Then use normal coalesce logic to select the *least*
+    ;; restrictive group permission.
+    (let [perm-values (-&gt;&gt; (get-permissions user-id perm-type database-id)
+                           (filter #(or (= (:schema_name %) schema-name)
+                                        (nil? (:table_id %))))
+                           (map :perm_value)
+                           (into #{}))]
+      (or (coalesce perm-type perm-values)
+          (least-permissive-value perm-type)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn user-has-permission-for-schema? :- :boolean
+  &quot;Returns a Boolean indicating whether the user has the specified permission value for the given database ID and schema,
+   or a more permissive value.&quot;
+  [user-id perm-type perm-value database-id schema]
+  (at-least-as-permissive? perm-type
+                           (schema-permission-for-user user-id perm-type database-id schema)
+                           perm-value))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn most-permissive-database-permission-for-user :- PermissionValue
+  &quot;Similar to checking _partial_ permissions with permissions paths - what is the *most permissive* permission the
+  user has on any of the tables within this database?&quot;
+  [user-id perm-type database-id]
+  (when (not= :model/Table (model-by-perm-type perm-type))
+    (throw (ex-info (tru &quot;Permission type {0} is not a table-level permission.&quot; perm-type)
+                    {perm-type (Permissions perm-type)})))
+  (if (is-superuser? user-id)
+    (most-permissive-value perm-type)
+    (let [perm-values (-&gt;&gt; (get-permissions user-id perm-type database-id)
+                           (map :perm_value)
+                           (into #{}))]
+      (or (coalesce perm-type perm-values)
+          (least-permissive-value perm-type)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn native-download-permission-for-user :- PermissionValue
+  &quot;Returns the effective download permission value for a given user and database ID, for native queries on the database.
+  For each group, the native download permission for a database is equal to the lowest permission level of any table in
+  the database.&quot;
+  [user-id database-id]
+  (if (is-superuser? user-id)
+    (most-permissive-value :perms/download-results)
+    (let [perm-values
+          (-&gt;&gt; (get-permissions user-id :perms/download-results database-id)
+               (map (fn [{:keys [perm_value group_id]}]
+                      {:group_id group_id :value perm_value})))
+          value-by-group
+          (-&gt; (group-by :group_id perm-values)
+              (update-vals (fn [perms]
+                             (let [values (set (map :value perms))]
+                               (coalesce-most-restrictive :perms/download-results values)))))]
+      (or (coalesce :perms/download-results (vals value-by-group))
+          (least-permissive-value :perms/download-results)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn user-has-block-perms-for-database? :- :boolean
+  &quot;Returns a Boolean indicating whether the given user should have block permissions enforced for the given database.
+  This is a standalone function because block perms are only set at the database-level, but :perms/data-access is
+  generally checked at the table-level, except in the case of block perms.&quot;
+  [user-id database-id]
+  (if (is-superuser? user-id)
+    false
+    (let [perm-values
+          (-&gt;&gt; (get-permissions user-id :perms/data-access database-id)
+               (map :perm_value)
+               (into #{}))]
+      (= (coalesce :perms/data-access perm-values)
+         :block))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn user-has-any-perms-of-type? :- :boolean
+  &quot;Returns a Boolean indicating whether the user has the highest level of access for the given permission type in any
+  group, for at least one database or table.&quot;
+  [user-id perm-type]
+  (or (is-superuser? user-id)
+      (let [value (most-permissive-value perm-type)]
+        (t2/exists? :model/DataPermissions
+                    {:select [[:p.perm_value :value]]
+                     :from [[:permissions_group_membership :pgm]]
+                     :join [[:permissions_group :pg] [:= :pg.id :pgm.group_id]
+                            [:data_permissions :p]   [:= :p.group_id :pg.id]]
+                     :where [:and
+                             [:= :pgm.user_id user-id]
+                             [:= :p.perm_type (u/qualified-name perm-type)]
+                             [:= :p.perm_value (u/qualified-name value)]]}))))</pre></td></tr><tr><td class="docs"><p>Returns the graph representing admin permissions for all groups</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- admin-permission-graph
+  [&amp; {:keys [db-id perm-type]}]
+  (let [db-ids     (if db-id [db-id] (t2/select-pks-vec :model/Database))
+        perm-types (if perm-type [perm-type] (keys Permissions))]
+    (into {} (map (fn [db-id]
+                    [db-id (into {} (map (fn [perm] [perm (most-permissive-value perm)])
+                                         perm-types))])
+                  db-ids))))</pre></td></tr><tr><td class="docs"><p>Returns a graph representing the permissions for a single user. Can be optionally filtered by database ID and/or permission type.
+Combines permissions from multiple groups into a single value for each DB/table and permission type.</p>
 
-<p>These are convenience functions for accessing config values that ensures a specific return type</p>
-
-<p>TODO - These names are bad. They should be something like <code>int</code>, <code>boolean</code>, and <code>keyword</code>, respectively. See
-https://github.com/metabase/metabase/wiki/Metabase-Clojure-Style-Guide#dont-repeat-namespace-alias-in-function-names
-for discussion</p>
-
-<p>Fetch a configuration key and parse it as a boolean.</p>
-
-<p>Fetch a configuration key and parse it as a keyword.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn config-int   ^Integer [k] (some-&gt; k config-str Integer/parseInt))
-(defn config-bool   ^Boolean [k] (some-&gt; k config-str Boolean/parseBoolean))
-(defn config-kw     ^Keyword [k] (some-&gt; k config-str keyword))</pre></td></tr><tr><td class="docs"><p>Are we running in <code>dev</code> mode (i.e. in a REPL or via <code>clojure -M:run</code>)?</p>
-
-<p>Are we running in <code>prod</code> mode (i.e. from a JAR)?</p>
-
-<p>Are we running in <code>test</code> mode (i.e. via <code>clojure -X:test</code>)?</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^Boolean is-dev?   (= :dev  (config-kw :mb-run-mode)))
-(def ^Boolean is-prod?                        (= :prod (config-kw :mb-run-mode)))
-(def ^Boolean is-test?             (= :test (config-kw :mb-run-mode)))</pre></td></tr><tr><td class="docs"><p>Version stuff</p>
+<p>This is intended to be used for logging and debugging purposes, to see what a user's real permissions are at a glance. Enforcement
+should happen via <code>database-permission-for-user</code> and <code>table-permission-for-user</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn permissions-for-user
+  [user-id &amp; {:keys [db-id perm-type]}]
+  (if (is-superuser? user-id)
+    (admin-permission-graph :db-id db-id :perm-type perm-type)
+    (let [data-perms    (t2/select :model/DataPermissions
+                                   {:select [[:p.perm_type :perm-type]
+                                             [:p.group_id :group-id]
+                                             [:p.perm_value :value]
+                                             [:p.db_id :db-id]
+                                             [:p.table_id :table-id]]
+                                    :from [[:permissions_group_membership :pgm]]
+                                    :join [[:permissions_group :pg] [:= :pg.id :pgm.group_id]
+                                           [:data_permissions :p]   [:= :p.group_id :pg.id]]
+                                    :where [:and
+                                            [:= :pgm.user_id user-id]
+                                            (when db-id [:= :db_id db-id])
+                                            (when perm-type [:= :perm_type (u/qualified-name perm-type)])]})
+          path-&gt;perms     (group-by (fn [{:keys [db-id perm-type table-id]}]
+                                      (if table-id
+                                        [db-id perm-type table-id]
+                                        [db-id perm-type]))
+                                    data-perms)
+          coalesced-perms (reduce-kv
+                           (fn [result path perms]
+                             ;; Combine permissions from multiple groups into a single value
+                             (let [[db-id perm-type] path
+                                   coalesced-perms (coalesce perm-type
+                                                             (concat
+                                                              (map :value perms)
+                                                              (map :value (get path-&gt;perms [db-id perm-type]))))]
+                               (assoc result path coalesced-perms)))
+                           {}
+                           path-&gt;perms)
+          granular-graph  (reduce
+                           (fn [graph [[db-id perm-type table-id] value]]
+                             (let [current-perms (get-in graph [db-id perm-type])
+                                   updated-perms (if table-id
+                                                   (if (keyword? current-perms)
+                                                     {table-id value}
+                                                     (assoc current-perms table-id value))
+                                                   (if (map? current-perms)
+                                                     current-perms
+                                                     value))]
+                               (assoc-in graph [db-id perm-type] updated-perms)))
+                           {}
+                           coalesced-perms)]
+      (reduce (fn [new-graph [db-id perms]]
+                (assoc new-graph db-id
+                       (reduce (fn [new-perms [perm-type value]]
+                                 (if (and (map? value)
+                                          (apply = (vals value)))
+                                   (assoc new-perms perm-type (first (vals value)))
+                                   (assoc new-perms perm-type value)))
+                               {}
+                               perms)))
+              {}
+              granular-graph))))</pre></td></tr><tr><td class="docs"><p>---------------------------------------- Fetching the data permissions graph --------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- version-info-from-properties-file []
-  (when-let [props-file (io/resource &quot;version.properties&quot;)]
-    (with-open [reader (io/reader props-file)]
-      (let [props (java.util.Properties.)]
-        (.load props reader)
-        (into {} (for [[k v] props]
-                   [(keyword k) v]))))))</pre></td></tr><tr><td class="docs"><p>Information about the current version of Metabase. Comes from <code>version.properties</code> which is generated by the build
-script.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private Graph
+  [:map-of [:int {:title &quot;group-id&quot; :min 0}]
+   [:map-of [:int {:title &quot;db-id&quot; :min 0}]
+    [:map-of PermissionType
+     [:or
+      PermissionValue
+      [:map-of [:string {:title &quot;schema&quot;}]
+       [:map-of
+        [:int {:title &quot;table-id&quot; :min 0}]
+        PermissionValue]]]]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn data-permissions-graph :- Graph
+  &quot;Returns a tree representation of all data permissions. Can be optionally filtered by group ID, database ID,
+  and/or permission type. This is intended to power the permissions editor in the admin panel, and should not be used
+  for permission enforcement, as it will read much more data than necessary.&quot;
+  [&amp; {:keys [group-id db-id perm-type audit?]}]
+  (let [data-perms (t2/select [:model/DataPermissions
+                               [:perm_type :type]
+                               [:group_id :group-id]
+                               [:perm_value :value]
+                               [:db_id :db-id]
+                               [:schema_name :schema]
+                               [:table_id :table-id]]
+                              {:where [:and
+                                       (when perm-type [:= :perm_type (u/qualified-name perm-type)])
+                                       (when db-id [:= :db_id db-id])
+                                       (when group-id [:= :group_id group-id])
+                                       (when-not audit? [:not= :db_id config/audit-db-id])]})]
+    (reduce
+     (fn [graph {group-id  :group-id
+                 perm-type :type
+                 value     :value
+                 db-id     :db-id
+                 schema    :schema
+                 table-id  :table-id}]
+       (let [schema (or schema )
+             path   (if table-id
+                      [group-id db-id perm-type schema table-id]
+                      [group-id db-id perm-type])]
+         (assoc-in graph path value)))
+     {}
+     data-perms)))</pre></td></tr><tr><td class="docs"><p>--------------------------------------------- Updating permissions ------------------------------------------------</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- assert-valid-permission
+  [{:keys [perm_type perm_value] :as permission}]
+  (when-not (mc/validate PermissionType perm_type)
+    (throw (ex-info (str/join (mu/explain PermissionType perm_type)) permission)))
+  (assert-value-matches-perm-type perm_type perm_value))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(t2/define-before-insert :model/DataPermissions
+  [permission]
+  (assert-valid-permission permission)
+  permission)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(t2/define-before-update :model/DataPermissions
+  [permission]
+  (assert-valid-permission permission)
+  permission)</pre></td></tr><tr><td class="docs"><p>An ID, or something with an ID.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private TheIdable
+  [:or pos-int? [:map [:id pos-int?]]])</pre></td></tr><tr><td class="docs"><p>Sets a single permission to a specified value for a given group and database. If a permission value already exists
+for the specified group and object, it will be updated to the new value.</p>
 
-<p>   mb-version-info -> {:tag: "v0.11.1", :hash: "afdf863", :date: "2015-10-05"}</p>
+<p>Block permissions (i.e. :perms/data-access :block) can only be set at the database-level, despite :perms/data-access
+being a table-level permission.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn set-database-permission!
+  [group-or-id :- TheIdable
+   db-or-id    :- TheIdable
+   perm-type   :- :keyword
+   value       :- :keyword]
+  (t2/with-transaction [_conn]
+    (let [group-id (u/the-id group-or-id)
+          db-id    (u/the-id db-or-id)]
+      (t2/delete! :model/DataPermissions :perm_type perm-type :group_id group-id :db_id db-id)
+      (t2/insert! :model/DataPermissions {:perm_type  perm-type
+                                          :group_id   group-id
+                                          :perm_value value
+                                          :db_id      db-id})
+      (when (= [:perms/data-access :block] [perm-type value])
+        (set-database-permission! group-or-id db-or-id :perms/native-query-editing :no)
+        (set-database-permission! group-or-id db-or-id :perms/download-results :no)))))</pre></td></tr><tr><td class="docs"><p>Sets table permissions to specified values for a given group. If a permission value already exists for a specified
+group and table, it will be updated to the new value.</p>
 
-<p>TODO - Can we make this <code>^:const</code>, so we don't have to read the file at launch when running from the uberjar?</p>
-</td><td class="codes"><pre class="brush: clojure">(def mb-version-info
-  (or (version-info-from-properties-file)
-      ;; if version info is not defined for whatever reason
-      {:tag &quot;vLOCAL_DEV&quot;
-       :hash &quot;06d1ba2ae111e66253209c01c244d6379acfc6dcb1911fa9ab6012cec9ce52e5&quot;}))</pre></td></tr><tr><td class="docs"><p>A formatted version string representing the currently running application.
- Looks something like <code>v0.25.0-snapshot (1de6f3f nested-queries-icon)</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^String mb-version-string
-  (let [{:keys [tag hash]} mb-version-info]
-    (format &quot;%s (%s)&quot; tag hash)))</pre></td></tr><tr><td class="docs"><p>A formatted version string including the word 'Metabase' appropriate for passing along
- with database connections so admins can identify them as Metabase ones.
- Looks something like <code>Metabase v0.25.0.RC1</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^String mb-app-id-string
-  (str &quot;Metabase &quot; (mb-version-info :tag)))</pre></td></tr><tr><td class="docs"><p>Returns the major version of the running Metabase JAR.
-When the version.properties file is missing (e.g., running in local dev), returns nil.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn current-major-version
-  []
-  (some-&gt; (second (re-find #&quot;\d+\.(\d+)&quot; (:tag mb-version-info)))
-          parse-long))</pre></td></tr><tr><td class="docs"><p>This UUID is randomly-generated upon launch and used to identify this specific Metabase instance during
-              this specifc run. Restarting the server will change this UUID, and each server in a horizontal cluster
-              will have its own ID, making this different from the <code>site-uuid</code> Setting.</p>
-</td><td class="codes"><pre class="brush: clojure">(defonce 
-  local-process-uuid
-  (str (random-uuid)))</pre></td></tr><tr><td class="docs"><p>A string that contains identifying information about the Metabase version and the local process.</p>
-</td><td class="codes"><pre class="brush: clojure">(defonce
-  mb-version-and-process-identifier
-  (format &quot;%s [%s]&quot; mb-app-id-string local-process-uuid))</pre></td></tr><tr><td class="docs"><p>Default user details provided as a JSON string at launch time for first-user setup flow.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn mb-user-defaults
-  []
-  (when-let [user-json (env/env :mb-user-defaults)]
-    (json/parse-string user-json true)))</pre></td></tr><tr><td class="docs"><p>ID of Audit DB which is loaded when running an EE build. ID is placed in OSS code to facilitate permission checks.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:const audit-db-id
-  13371337)</pre></td></tr><tr><td class="docs"><p>The user-id of the internal metabase user.
- This is needed in the OSS edition to filter out users for setup/has-user-setup.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:const internal-mb-user-id
-   13371338)</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+<p><code>table-perms</code> is a map from tables or table ID to the permission value for each table. All tables in the list must
+belong to the same database.</p>
+
+<p>If this permission is currently set at the database-level, the database-level permission
+is removed and table-level rows are are added for all of its tables. Similarly, if setting a table-level permission to a value
+that results in all of the database's tables having the same permission, it is replaced with a single database-level row.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn set-table-permissions!
+  [group-or-id :- TheIdable
+   perm-type   :- :keyword
+   table-perms :- [:map-of TheIdable :keyword]]
+  (when (not= :model/Table (model-by-perm-type perm-type))
+    (throw (ex-info (tru &quot;Permission type {0} cannot be set on tables.&quot; perm-type)
+                    {perm-type (Permissions perm-type)})))
+  (let [values (set (vals table-perms))]
+    (when (values :block)
+      (throw (ex-info (tru &quot;Block permissions must be set at the database-level only.&quot;)
+                      {})))
+    ;; if `table-perms` is empty, there's nothing to do
+    (when (seq table-perms)
+      (t2/with-transaction [_conn]
+        (let [group-id               (u/the-id group-or-id)
+              new-perms              (map (fn [[table value]]
+                                            (let [{:keys [id db_id schema]}
+                                                  (if (map? table)
+                                                    table
+                                                    (t2/select-one [:model/Table :id :db_id :schema] :id table))]
+                                              {:perm_type   perm-type
+                                               :group_id    group-id
+                                               :perm_value  value
+                                               :db_id       db_id
+                                               :table_id    id
+                                               :schema_name schema}))
+                                          table-perms)
+              _                      (when (not= (count (set (map :db_id new-perms))) 1)
+                                       (throw (ex-info (tru &quot;All tables must belong to the same database.&quot;)
+                                                       {:new-perms new-perms})))
+              table-ids              (map :table_id new-perms)
+              db-id                  (:db_id (first new-perms))
+              existing-db-perm       (t2/select-one :model/DataPermissions
+                                                    {:where
+                                                     [:and
+                                                      [:= :perm_type (u/qualified-name perm-type)]
+                                                      [:= :group_id  group-id]
+                                                      [:= :db_id     db-id]
+                                                      [:= :table_id  nil]]})
+              existing-db-perm-value (:perm_value existing-db-perm)]
+          (if existing-db-perm
+            (when (not= values #{existing-db-perm-value})
+              ;; If we're setting any table permissions to a value that is different from the database-level permission,
+              ;; we need to replace it with individual permission rows for every table in the database instead.
+              ;; If the database-level permission was previously `:block`, we set the tables to `:no-self-service`.
+              (let [other-tables    (t2/select :model/Table {:where [:and
+                                                                     [:= :db_id db-id]
+                                                                     [:not [:in :id table-ids]]]})
+                    other-new-perms (map (fn [table]
+                                           {:perm_type   perm-type
+                                            :group_id    group-id
+                                            :perm_value  (if (= :block existing-db-perm-value)
+                                                           :no-self-service
+                                                           existing-db-perm-value)
+                                            :db_id       db-id
+                                            :table_id    (:id table)
+                                            :schema_name (:schema table)})
+                                         other-tables)]
+                (t2/delete! :model/DataPermissions :id (:id existing-db-perm))
+                (t2/insert! :model/DataPermissions (concat other-new-perms new-perms))))
+            (let [existing-table-perms (t2/select :model/DataPermissions
+                                                  :perm_type (u/qualified-name perm-type)
+                                                  :group_id  group-id
+                                                  :db_id     db-id
+                                                  {:where [:and
+                                                           [:not= :table_id nil]
+                                                           [:not [:in :table_id table-ids]]]})
+                  existing-table-values (set (map :perm_value existing-table-perms))]
+              (if (and (= (count existing-table-values) 1)
+                       (= values existing-table-values))
+                ;; If all tables would have the same permissions after we update these ones, we can replace all of the table
+                ;; perms with a DB-level perm instead.
+                (set-database-permission! group-or-id db-id perm-type (first values))
+                ;; Otherwise, just replace the rows for the individual table perm
+                (do
+                  (t2/delete! :model/DataPermissions :perm_type perm-type :group_id group-id {:where [:in :table_id table-ids]})
+                  (t2/insert! :model/DataPermissions new-perms))))))))))</pre></td></tr><tr><td class="docs"><p>Sets permissions for a single table to the specified value for a given group.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn set-table-permission!
+  [group-or-id :- TheIdable
+   table-or-id :- TheIdable
+   perm-type   :- :keyword
+   value       :- :keyword]
+  (set-table-permissions! group-or-id perm-type {table-or-id value}))</pre></td></tr><tr><td class="docs"><p>Infers the permission value for a new table based on existing permissions in the schema.
+Returns the uniform permission value if one exists, otherwise nil.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- schema-permission-value
+  [db-id group-id schema-name perm-type]
+  (let [possible-values    (:values (get Permissions perm-type))
+        schema-perms-check (mapv (fn [value]
+                                   (t2/exists? :model/DataPermissions
+                                               :perm_type   (u/qualified-name perm-type)
+                                               :db_id       db-id
+                                               :group_id    group-id
+                                               :schema_name schema-name
+                                               :perm_value  value))
+                                 possible-values)
+        single-perm-val?   (= (count (filter true? schema-perms-check)) 1)]
+    (when single-perm-val?
+      (nth possible-values (.indexOf ^PersistentVector schema-perms-check true)))))</pre></td></tr><tr><td class="docs"><p>Sets permissions for a single table to the specified value in all the provided groups.
+If all tables in the schema have the same permission value, the new table permission is added with that value.
+Otherwise, the new table permission is added with the provided value.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn set-new-table-permissions!
+  [groups-or-ids :- [:sequential TheIdable]
+   table-or-id   :- TheIdable
+   perm-type     :- :keyword
+   value         :- :keyword]
+  (when (not= :model/Table (model-by-perm-type perm-type))
+    (throw (ex-info (tru &quot;Permission type {0} cannot be set on tables.&quot; perm-type)
+                    {perm-type (Permissions perm-type)})))
+  (when (= value :block)
+    (throw (ex-info (tru &quot;Block permissions must be set at the database-level only.&quot;)
+                    {})))
+  (when (seq groups-or-ids)
+    (t2/with-transaction [_conn]
+      (let [group-ids          (map u/the-id groups-or-ids)
+            table              (if (map? table-or-id)
+                                 table-or-id
+                                 (t2/select-one [:model/Table :id :db_id :schema] :id table-or-id))
+            db-id              (:db_id table)
+            schema-name        (:schema table)
+            db-level-perms     (t2/select :model/DataPermissions
+                                          :perm_type (u/qualified-name perm-type)
+                                          :db_id db-id
+                                          :table_id nil
+                                          {:where [:in :group_id group-ids]})
+            db-level-group-ids (set (map :group_id db-level-perms))
+            granular-group-ids (set/difference (set group-ids) db-level-group-ids)
+            new-perms          (map (fn [group-id]
+                                      {:perm_type   perm-type
+                                       :group_id    group-id
+                                       :perm_value  (or (schema-permission-value db-id group-id schema-name perm-type)
+                                                        value)
+                                       :db_id       db-id
+                                       :table_id    (u/the-id table)
+                                       :schema_name schema-name})
+                                    granular-group-ids)]
+        (t2/insert! :model/DataPermissions new-perms)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

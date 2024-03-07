@@ -3039,6 +3039,7 @@ User has permissions to run the current query. Permissions are as follows:</p>
    [metabase.api.common :refer [*current-user-id*]]
    [metabase.api.permission-graph :as api.permission-graph]
    [metabase.config :as config]
+   [metabase.models.data-permissions.graph :as data-perms.graph]
    [metabase.models.interface :as mi]
    [metabase.models.permissions-group :as perms-group]
    [metabase.models.permissions-revision
@@ -3393,11 +3394,7 @@ somewhat useful?</p>
     (reduce (fn [m {:keys [group-id path]}]
               (update m group-id conj path))
             {}
-            permissions)))</pre></td></tr><tr><td class="docs"><p>Augment the permissions graph with active connection impersonation policies. OSS implementation returns graph as-is.</p>
-</td><td class="codes"><pre class="brush: clojure">(defenterprise add-impersonations-to-permissions-graph
-  metabase-enterprise.advanced-permissions.models.connection-impersonation
-  [graph]
-  graph)</pre></td></tr><tr><td class="docs">
+            permissions)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- post-process-graph [graph]
   (-&gt;&gt;
    graph
@@ -3414,47 +3411,26 @@ somewhat useful?</p>
               (all-permissions db-ids)
               (:db permissions-graph)))))
        post-process-graph
-       add-impersonations-to-permissions-graph))</pre></td></tr><tr><td class="docs"><p>keep v1 paths, implicitly remove v2</p>
+       data-perms.graph/add-sandboxes-to-permissions-graph
+       data-perms.graph/add-impersonations-to-permissions-graph))</pre></td></tr><tr><td class="docs"><p>keep v1 paths, implicitly remove v2</p>
 </td><td class="codes"><pre class="brush: clojure">(defn -&gt;v1-paths
   [group-id-&gt;permissions]
   (m/map-vals (fn [paths]
                 (filter (fn [path] (mc/validate [:re perms.u/path-regex-v1] path)) paths))
               group-id-&gt;permissions))</pre></td></tr><tr><td class="docs"><p>Fetch a graph representing the current <em>data</em> permissions status for every Group and all permissioned databases.
-See [[metabase.models.collection.graph]] for the Collection permissions graph code. Keeps v1 paths, hence implictly removes v2 paths.</p>
-
-<p>What are v1 and v2 permissions? see: [[classify-path]]. In summary:</p>
-
-<pre><code>   v1 permissions
-</code></pre>
-
-<p>|--------------------------------|
-|                                |
-v1-data, block | all-other-paths | v2-data, v2-query
-               |                                   |
-               |-----------------------------------|
-                         v2 permissions</p>
+See [[metabase.models.collection.graph]] for the Collection permissions graph code.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn data-perms-graph
   []
-  (let [db-ids             (delay (t2/select-pks-set 'Database))
-        group-id-&gt;v1-paths (-&gt;&gt; (permissions-by-group-ids [:or
-                                                           [:= :object (h2x/literal &quot;/&quot;)]
-                                                           [:like :object (h2x/literal &quot;%/db/%&quot;)]])
-                                -&gt;v1-paths)]
-    {:revision (perms-revision/latest-id)
-     :groups   (generate-graph @db-ids group-id-&gt;v1-paths)}))</pre></td></tr><tr><td class="docs"><p>Efficiently returns a data permissions graph, which has all the permissions info for <code>db-id</code>.</p>
+  {:revision (perms-revision/latest-id)
+   :groups   (data-perms.graph/api-graph {})})</pre></td></tr><tr><td class="docs"><p>Efficiently returns a data permissions graph, which has all the permissions info for <code>db-id</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn data-graph-for-db
   [db-id]
-  (let [group-id-&gt;permissions (permissions-by-group-ids [:like :object (h2x/literal (str &quot;%/db/&quot; db-id &quot;/%&quot;))])
-        group-id-&gt;v1-paths (-&gt;v1-paths group-id-&gt;permissions)]
-    {:revision (perms-revision/latest-id)
-     :groups (generate-graph [db-id] group-id-&gt;v1-paths)}))</pre></td></tr><tr><td class="docs"><p>Efficiently returns a data permissions graph, which has all the permissions info for the permission group at <code>group-id</code>.</p>
+  {:revision (perms-revision/latest-id)
+   :groups (data-perms.graph/api-graph {:db-id db-id})})</pre></td></tr><tr><td class="docs"><p>Efficiently returns a data permissions graph, which has all the permissions info for the permission group at <code>group-id</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn data-graph-for-group
   [group-id]
-  (let [db-ids (t2/select-pks-set :model/Database)
-        group-id-&gt;permissions (permissions-by-group-ids [:= :group_id group-id])
-        group-id-&gt;paths (select-keys (-&gt;v1-paths group-id-&gt;permissions) [group-id])]
-    {:revision (perms-revision/latest-id)
-     :groups (generate-graph db-ids group-id-&gt;paths)}))</pre></td></tr><tr><td class="docs"><p>Fetch a graph representing the current <em>data</em> permissions status for every Group and all permissioned databases.
+  {:revision (perms-revision/latest-id)
+   :groups (data-perms.graph/api-graph {:group-id group-id})})</pre></td></tr><tr><td class="docs"><p>Fetch a graph representing the current <em>data</em> permissions status for every Group and all permissioned databases.
 See [[metabase.models.collection.graph]] for the Collection permissions graph code. This version of data-perms-graph
 removes v1 paths, implicitly keeping Only v2 style paths.</p>
 
@@ -3680,15 +3656,7 @@ be given some sort of access.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn grant-collection-read-permissions!
   [group-or-id :- MapOrID collection-or-id :- MapOrID]
   (check-not-personal-collection-or-descendant collection-or-id)
-  (grant-permissions! (u/the-id group-or-id) (collection-read-path collection-or-id)))</pre></td></tr><tr><td class="docs"><p>Delete GTAPs (sandboxes) that are no longer needed after the permissions graph is updated. This is EE-specific --
-OSS impl is a no-op, since sandboxes are an EE-only feature.</p>
-</td><td class="codes"><pre class="brush: clojure">(defenterprise ^:private delete-gtaps-if-needed-after-permissions-change!
-  metabase-enterprise.sandbox.models.permissions.delete-sandboxes
-  [_])</pre></td></tr><tr><td class="docs"><p>Delete connection impersonation policies that are no longer needed after the permissions graph is updated. This is
-EE-specific -- OSS impl is a no-op, since connection impersonation is an EE-only feature.</p>
-</td><td class="codes"><pre class="brush: clojure">(defenterprise ^:private delete-impersonations-if-needed-after-permissions-change!
-  metabase-enterprise.advanced-permissions.models.connection-impersonation
-  [_])</pre></td></tr><tr><td class="docs"><p>----------------------------------------------- Graph Updating Fns -----------------------------------------------</p>
+  (grant-permissions! (u/the-id group-or-id) (collection-read-path collection-or-id)))</pre></td></tr><tr><td class="docs"><p>----------------------------------------------- Graph Updating Fns -----------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Exception to throw when a permissions operation fails due to missing Enterprise Edition code, or missing a valid
  token with the advanced-permissions feature.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn ee-permissions-exception
@@ -3931,20 +3899,21 @@ This doesn't do anything if <code>*current-user-id*</code> is unset (e.g. for te
 <p>Code for updating the Collection permissions graph is in [[metabase.models.collection.graph]].</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn update-data-perms-graph!
   ([new-graph :- api.permission-graph/StrictData]
-   (let [old-graph (data-perms-graph)
+   (let [old-graph (data-perms.graph/api-graph {})
          [old new] (data/diff (:groups old-graph) (:groups new-graph))
          old       (or old {})
          new       (or new {})]
      (when (or (seq old) (seq new))
-       (log-permissions-changes old new)
-       (check-revision-numbers old-graph new-graph)
-       (check-audit-db-permissions new)
+       (data-perms.graph/log-permissions-changes old new)
+       (data-perms.graph/check-revision-numbers old-graph new-graph)
+       (data-perms.graph/check-audit-db-permissions new)
        (t2/with-transaction [_conn]
         (doseq [[group-id changes] new]
           (update-group-permissions! group-id changes))
-        (save-perms-revision! PermissionsRevision (:revision old-graph) old new)
-        (delete-impersonations-if-needed-after-permissions-change! new)
-        (delete-gtaps-if-needed-after-permissions-change! new)))))
+        (data-perms.graph/update-data-perms-graph! new)
+        (data-perms.graph/save-perms-revision! PermissionsRevision (:revision old-graph) old new)
+        (data-perms.graph/delete-impersonations-if-needed-after-permissions-change! new)
+        (data-perms.graph/delete-gtaps-if-needed-after-permissions-change! new)))))
   ;; The following arity is provided soley for convenience for tests/REPL usage
   ([ks :- [:vector :any] new-value]
    (update-data-perms-graph! (assoc-in (data-perms-graph) (cons :groups ks) new-value))))</pre></td></tr><tr><td class="docs"><p>Update the <em>execution</em> permissions graph, making any changes necessary to make it match <code>new-graph</code>.

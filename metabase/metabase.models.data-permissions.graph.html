@@ -2865,140 +2865,374 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.config" name="metabase.config"><h1 class="project-name">metabase.config</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.config
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.models.data-permissions.graph" name="metabase.models.data-permissions.graph"><h1 class="project-name">metabase.models.data-permissions.graph</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Code involving reading and writing the API-style data permission graph. This is the graph which we use to represent
+permissions when communicating with the frontend, which has different keys and a slightly different structure
+from the one returned by <code>metabase.models.data-permissions/data-permissions-graph</code>, which is based directly on the
+keys and values stored in the <code>data_permissions</code> table.</p>
+
+<p>Essentially, this is a translation layer between the graph used by the v1 permissions schema and the v2 permissions
+schema.</p>
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.models.data-permissions.graph
   (:require
-   [cheshire.core :as json]
-   [clojure.java.io :as io]
+   [clojure.data :as data]
    [clojure.string :as str]
-   [environ.core :as env]
-   [metabase.plugins.classloader :as classloader])
-  (:import
-   (clojure.lang Keyword)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Indicates whether Enterprise Edition extensions are available</p>
-
-<p>this existed long before 0.39.0, but that's when it was made public</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^{:doc  :added &quot;0.39.0&quot;} ee-available?
-  (try
-    (classloader/require 'metabase-enterprise.core)
-    true
-    (catch Throwable _
-      false)))</pre></td></tr><tr><td class="docs"><p>Whether code from <code>./test</code> is available. This is mainly to facilitate certain things like test QP middleware that we
-want to load only when test code is present.</p>
-</td><td class="codes"><pre class="brush: clojure">(def tests-available?
-  (try
-    (classloader/require 'metabase.test.core)
-    true
-    (catch Throwable _
-      false)))</pre></td></tr><tr><td class="docs"><p>Are we running on a Windows machine?</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^Boolean is-windows?
-  #_{:clj-kondo/ignore [:discouraged-var]}
-  (str/includes? (str/lower-case (System/getProperty &quot;os.name&quot;)) &quot;win&quot;))</pre></td></tr><tr><td class="docs"><p>Global application defaults</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private app-defaults
-  {:mb-run-mode                     &quot;prod&quot;
-   ;; DB Settings
-   :mb-db-type                      &quot;h2&quot;
-   :mb-db-file                      &quot;metabase.db&quot;
-   :mb-db-automigrate               &quot;true&quot;
-   :mb-db-logging                   &quot;true&quot;
-   ;; Jetty Settings. Full list of options is available here: https://github.com/ring-clojure/ring/blob/master/ring-jetty-adapter/src/ring/adapter/jetty.clj
-   :mb-jetty-port                   &quot;3000&quot;
-   :mb-jetty-join                   &quot;true&quot;
-   ;; other application settings
-   :mb-password-complexity          &quot;normal&quot;
-   :mb-version-info-url             &quot;https://static.metabase.com/version-info.json&quot;
-   :mb-version-info-ee-url          &quot;https://static.metabase.com/version-info-ee.json&quot;
-   :mb-ns-trace                     &quot;&quot;                      ; comma-separated namespaces to trace
-   :max-session-age                 &quot;20160&quot;                 ; session length in minutes (14 days)
-   :mb-colorize-logs                (str (not is-windows?)) ; since PowerShell and cmd.exe don't support ANSI color escape codes or emoji,
-   :mb-emoji-in-logs                (str (not is-windows?)) ; disable them by default when running on Windows. Otherwise they're enabled
-   :mb-qp-cache-backend             &quot;db&quot;
-   :mb-jetty-async-response-timeout (str (* 10 60 1000))})  ; 10m</pre></td></tr><tr><td class="docs"><p>separate map for EE stuff so merge conflicts aren't annoying.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ee-app-defaults
-  {:embed-max-session-age &quot;1440&quot;}) ; how long a FULL APP EMBED session is valid for. One day, by default</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(alter-var-root #'app-defaults merge ee-app-defaults)</pre></td></tr><tr><td class="docs"><p>Retrieve value for a single configuration key.  Accepts either a keyword or a string.</p>
-
-<p> We resolve properties from these places:</p>
-
-<ol>
-<li>environment variables (ex: MB<em>DB</em>TYPE -> :mb-db-type)</li>
-<li>jvm options (ex: -Dmb.db.type -> :mb-db-type)</li>
-<li>hard coded <code>app-defaults</code></li>
-</ol>
-</td><td class="codes"><pre class="brush: clojure">(defn config-str
-  [k]
-  (let [k       (keyword k)
-        env-val (k env/env)]
-    (or (when-not (str/blank? env-val) env-val)
-        (k app-defaults))))</pre></td></tr><tr><td class="docs"><p>Fetch a configuration key and parse it as an integer.</p>
-
-<p>These are convenience functions for accessing config values that ensures a specific return type</p>
-
-<p>TODO - These names are bad. They should be something like <code>int</code>, <code>boolean</code>, and <code>keyword</code>, respectively. See
-https://github.com/metabase/metabase/wiki/Metabase-Clojure-Style-Guide#dont-repeat-namespace-alias-in-function-names
-for discussion</p>
-
-<p>Fetch a configuration key and parse it as a boolean.</p>
-
-<p>Fetch a configuration key and parse it as a keyword.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn config-int   ^Integer [k] (some-&gt; k config-str Integer/parseInt))
-(defn config-bool   ^Boolean [k] (some-&gt; k config-str Boolean/parseBoolean))
-(defn config-kw     ^Keyword [k] (some-&gt; k config-str keyword))</pre></td></tr><tr><td class="docs"><p>Are we running in <code>dev</code> mode (i.e. in a REPL or via <code>clojure -M:run</code>)?</p>
-
-<p>Are we running in <code>prod</code> mode (i.e. from a JAR)?</p>
-
-<p>Are we running in <code>test</code> mode (i.e. via <code>clojure -X:test</code>)?</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^Boolean is-dev?   (= :dev  (config-kw :mb-run-mode)))
-(def ^Boolean is-prod?                        (= :prod (config-kw :mb-run-mode)))
-(def ^Boolean is-test?             (= :test (config-kw :mb-run-mode)))</pre></td></tr><tr><td class="docs"><p>Version stuff</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- version-info-from-properties-file []
-  (when-let [props-file (io/resource &quot;version.properties&quot;)]
-    (with-open [reader (io/reader props-file)]
-      (let [props (java.util.Properties.)]
-        (.load props reader)
-        (into {} (for [[k v] props]
-                   [(keyword k) v]))))))</pre></td></tr><tr><td class="docs"><p>Information about the current version of Metabase. Comes from <code>version.properties</code> which is generated by the build
-script.</p>
-
-<p>   mb-version-info -> {:tag: "v0.11.1", :hash: "afdf863", :date: "2015-10-05"}</p>
-
-<p>TODO - Can we make this <code>^:const</code>, so we don't have to read the file at launch when running from the uberjar?</p>
-</td><td class="codes"><pre class="brush: clojure">(def mb-version-info
-  (or (version-info-from-properties-file)
-      ;; if version info is not defined for whatever reason
-      {:tag &quot;vLOCAL_DEV&quot;
-       :hash &quot;06d1ba2ae111e66253209c01c244d6379acfc6dcb1911fa9ab6012cec9ce52e5&quot;}))</pre></td></tr><tr><td class="docs"><p>A formatted version string representing the currently running application.
- Looks something like <code>v0.25.0-snapshot (1de6f3f nested-queries-icon)</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^String mb-version-string
-  (let [{:keys [tag hash]} mb-version-info]
-    (format &quot;%s (%s)&quot; tag hash)))</pre></td></tr><tr><td class="docs"><p>A formatted version string including the word 'Metabase' appropriate for passing along
- with database connections so admins can identify them as Metabase ones.
- Looks something like <code>Metabase v0.25.0.RC1</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^String mb-app-id-string
-  (str &quot;Metabase &quot; (mb-version-info :tag)))</pre></td></tr><tr><td class="docs"><p>Returns the major version of the running Metabase JAR.
-When the version.properties file is missing (e.g., running in local dev), returns nil.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn current-major-version
-  []
-  (some-&gt; (second (re-find #&quot;\d+\.(\d+)&quot; (:tag mb-version-info)))
-          parse-long))</pre></td></tr><tr><td class="docs"><p>This UUID is randomly-generated upon launch and used to identify this specific Metabase instance during
-              this specifc run. Restarting the server will change this UUID, and each server in a horizontal cluster
-              will have its own ID, making this different from the <code>site-uuid</code> Setting.</p>
-</td><td class="codes"><pre class="brush: clojure">(defonce 
-  local-process-uuid
-  (str (random-uuid)))</pre></td></tr><tr><td class="docs"><p>A string that contains identifying information about the Metabase version and the local process.</p>
-</td><td class="codes"><pre class="brush: clojure">(defonce
-  mb-version-and-process-identifier
-  (format &quot;%s [%s]&quot; mb-app-id-string local-process-uuid))</pre></td></tr><tr><td class="docs"><p>Default user details provided as a JSON string at launch time for first-user setup flow.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn mb-user-defaults
-  []
-  (when-let [user-json (env/env :mb-user-defaults)]
-    (json/parse-string user-json true)))</pre></td></tr><tr><td class="docs"><p>ID of Audit DB which is loaded when running an EE build. ID is placed in OSS code to facilitate permission checks.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:const audit-db-id
-  13371337)</pre></td></tr><tr><td class="docs"><p>The user-id of the internal metabase user.
- This is needed in the OSS edition to filter out users for setup/has-user-setup.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:const internal-mb-user-id
-   13371338)</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+   [medley.core :as m]
+   [metabase.api.common :as api]
+   [metabase.api.permission-graph :as api.permission-graph]
+   [metabase.config :as config]
+   [metabase.models.data-permissions :as data-perms]
+   [metabase.models.permissions-group :as perms-group]
+   [metabase.models.permissions-revision :as perms-revision]
+   [metabase.public-settings.premium-features :as premium-features :refer [defenterprise]]
+   [metabase.util :as u]
+   [metabase.util.i18n :refer [trs tru]]
+   [metabase.util.log :as log]
+   [metabase.util.malli :as mu]
+   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs"><p>See also: [[data-perms/Permissions]]</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private -&gt;api-keys
+  {:perms/data-access           :data
+   :perms/download-results      :download
+   :perms/manage-table-metadata :data-model
+   :perms/native-query-editing  :native
+   :perms/manage-database       :details})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private -&gt;api-vals
+  {:perms/data-access           {:unrestricted    :all
+                                 :no-self-service nil
+                                 :block           :block}
+   :perms/download-results      {:one-million-rows  :full
+                                 :ten-thousand-rows :limited
+                                 :no                nil}
+   :perms/manage-table-metadata {:yes :all :no nil}
+   :perms/native-query-editing  {:yes :write :no nil}
+   :perms/manage-database       {:yes :yes :no :no}})</pre></td></tr><tr><td class="docs"><p>Augment the permissions graph with active connection impersonation policies. OSS implementation returns graph as-is.</p>
+</td><td class="codes"><pre class="brush: clojure">(defenterprise add-impersonations-to-permissions-graph
+  metabase-enterprise.advanced-permissions.models.connection-impersonation
+  [graph &amp; [_opts]]
+  graph)</pre></td></tr><tr><td class="docs"><p>Augment the permissions graph with active connection impersonation policies. OSS implementation returns graph as-is.</p>
+</td><td class="codes"><pre class="brush: clojure">(defenterprise add-sandboxes-to-permissions-graph
+  metabase-enterprise.sandbox.models.group-table-access-policy
+  [graph &amp; [_opts]]
+  graph)</pre></td></tr><tr><td class="docs"><p>Given an api permission graph, this returns the groups and db-ids</p>
+</td><td class="codes"><pre class="brush: clojure">(defn get-dbs-and-groups
+  [graph]
+  {:group-ids (-&gt;&gt; graph :groups keys set)
+   :db-ids (-&gt;&gt; graph :groups vals (mapcat keys) set)})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ellide? :- :boolean
+  &quot;If a table has the least permissive value for a perm type, leave it out,
+   Unless it's :data perms, in which case, leave it out only if it's no-self-service&quot;
+  [type :- data-perms/PermissionType
+   value :- data-perms/PermissionValue]
+  (if (= type :perms/data-access)
+    ;; for `:perms/data-access`, `:no-self-service` is the default (block  is a 'negative' permission),  so we should ellide
+    (= value :no-self-service)
+    (= (data-perms/least-permissive-value type) value)))</pre></td></tr><tr><td class="docs"><p>Renames a kv pair from the data-permissions-graph to an API-style data permissions graph (which we send to the client).</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- rename-or-ellide-kv
+  [[type value]]
+  (when-not (ellide? type value)
+    [(-&gt;api-keys type) ((-&gt;api-vals type) value)]))</pre></td></tr><tr><td class="docs"><p>Helper to transform 'leaf' values with table-level schemas in the data permissions graph into an API-style data permissions value.
+ Coalesces permissions at the schema level if all table-level permissions within a schema are identical.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private api-table-perms
+  [type :- data-perms/PermissionType
+   schema-&gt;table-id-&gt;api-val]
+  (let [transform-val         (fn [perm-val] ((-&gt;api-vals type) perm-val))
+        coalesce-or-transform (fn [table-id-&gt;perm]
+                                (let [unique-perms (set (vals table-id-&gt;perm))]
+                                  (if (= 1 (count unique-perms))
+                                    ;; Coalesce to schema-level permission if all table perms are identical
+                                    (transform-val (first unique-perms))
+                                    ;; Otherwise, transform each table-level permission individually
+                                    (into {} (map (fn [[table-id perm-val]]
+                                                    [table-id (transform-val perm-val)])
+                                                  (filter (fn [[_ perm-val]] (not (ellide? type perm-val)))
+                                                          table-id-&gt;perm))))))]
+    (-&gt;&gt; (update-vals schema-&gt;table-id-&gt;api-val coalesce-or-transform)
+         (filter second)
+         (into {}))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- granular-perm-rename [perms perm-key legacy-path]
+  (let [perm-value (get perms perm-key)]
+    (when perm-value
+      (cond
+        (map? perm-value)
+        (assoc-in {} legacy-path (api-table-perms perm-key perm-value))
+        (not (ellide? perm-key perm-value))
+        (assoc-in {} legacy-path ((-&gt;api-vals perm-key) perm-value))))))</pre></td></tr><tr><td class="docs"><p>Transforms a 'leaf' value with db-level or table-level perms in the data permissions graph into an API-style data permissions value.
+There's some tricks in here that ellide table-level and table-level permissions values that are the most-permissive setting.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- rename-perm
+  [perm-map]
+  (let [granular-keys [:perms/native-query-editing :perms/data-access
+                       :perms/download-results :perms/manage-table-metadata]]
+    (m/deep-merge
+     (into {} (keep rename-or-ellide-kv (apply dissoc perm-map granular-keys)))
+     (granular-perm-rename perm-map :perms/data-access [:data :schemas])
+     (granular-perm-rename perm-map :perms/native-query-editing [:data :native])
+     (granular-perm-rename perm-map :perms/download-results [:download :schemas])
+     (granular-perm-rename perm-map :perms/manage-table-metadata [:data-model :schemas]))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- rename-perms [graph]
+  (update-vals graph
+               (fn [db-id-&gt;perms]
+                 (update-vals db-id-&gt;perms rename-perm))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private legacy-admin-perms
+   {:data {:native :write, :schemas :all},
+    :download {:schemas :full},
+    :data-model {:schemas :all},
+    :details :yes})</pre></td></tr><tr><td class="docs"><p>These are not stored in the data-permissions table, but the API expects them to be there (for legacy reasons), so here we populate it.
+For every db in the incoming graph, adds on admin permissions.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- add-admin-perms-to-permissions-graph
+  [api-graph {:keys [db-id group-id audit?]}]
+  (let [admin-group-id (u/the-id (perms-group/admin))
+        db-ids         (if db-id [db-id] (t2/select-pks-vec :model/Database
+                                                            {:where [:and
+                                                                     (when-not audit? [:not= :id config/audit-db-id])]}))]
+    (if (and group-id (not= group-id admin-group-id))
+      ;; Don't add admin perms when we're fetching the perms for a specific non-admin group
+      api-graph
+      (reduce (fn [api-graph db-id]
+                (assoc-in api-graph [admin-group-id db-id] legacy-admin-perms))
+              api-graph
+              db-ids))))</pre></td></tr><tr><td class="docs"><p>Recursively walks a nested map from bottom-up, removing keys with nil or empty map values.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn remove-empty-vals
+  [m]
+  (if (map? m)
+    (-&gt;&gt; m
+         (map (fn [[k v]] [k (remove-empty-vals v)]))
+         (filter (fn [[_ v]] (not (or (nil? v) (and (map? v) (empty? v))))))
+         (into {}))
+    m))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn api-graph :- api.permission-graph/StrictData
+  &quot;Converts the backend representation of the data permissions graph to the representation we send over the API. Mainly
+  renames permission types and values from the names stored in the database to the ones expected by the frontend.
+  - Converts DB key names to API key names
+  - Converts DB value names to API value names
+  - Nesting: see [[rename-perms]] to see which keys in `graph` affect which paths in the api permission-graph
+  - Adds sandboxed entries, and impersonations to graph&quot;
+  ([]
+   (api-graph {}))
+  ([&amp; {:as opts}
+    :- [:map
+        [:group-id {:optional true} [:maybe pos-int?]]
+        [:db-id {:optional true} [:maybe pos-int?]]
+        [:audit? {:optional true} [:maybe :boolean]]
+        [:perm-type {:optional true} [:maybe data-perms/PermissionType]]]]
+   (let [graph (data-perms/data-permissions-graph opts)]
+     {:revision (perms-revision/latest-id)
+      :groups (-&gt; graph
+                  rename-perms
+                  remove-empty-vals
+                  (add-sandboxes-to-permissions-graph opts)
+                  (add-impersonations-to-permissions-graph opts)
+                  (add-admin-perms-to-permissions-graph opts))})))</pre></td></tr><tr><td class="docs"><p>---------------------------------------- Updating permissions -----------------------------------------------------</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Delete GTAPs (sandboxes) that are no longer needed after the permissions graph is updated. This is EE-specific --
+OSS impl is a no-op, since sandboxes are an EE-only feature.</p>
+</td><td class="codes"><pre class="brush: clojure">(defenterprise delete-gtaps-if-needed-after-permissions-change!
+  metabase-enterprise.sandbox.models.permissions.delete-sandboxes
+  [_])</pre></td></tr><tr><td class="docs"><p>Delete connection impersonation policies that are no longer needed after the permissions graph is updated. This is
+EE-specific -- OSS impl is a no-op, since connection impersonation is an EE-only feature.</p>
+</td><td class="codes"><pre class="brush: clojure">(defenterprise delete-impersonations-if-needed-after-permissions-change!
+  metabase-enterprise.advanced-permissions.models.connection-impersonation
+  [_])</pre></td></tr><tr><td class="docs"><p>Exception to throw when a permissions operation fails due to missing Enterprise Edition code, or missing a valid
+ token with the advanced-permissions feature.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn ee-permissions-exception
+  [perm-type]
+  (ex-info
+    (tru &quot;The {0} permissions functionality is only enabled if you have a premium token with the advanced-permissions feature.&quot;
+         (str/replace (name perm-type) &quot;-&quot; &quot; &quot;))
+    {:status-code 402}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- update-table-level-metadata-permissions!
+  [group-id db-id schema new-table-perms]
+  (let [new-table-perms
+        (-&gt; new-table-perms
+            (update-vals (fn [table-perm]
+                           (case table-perm
+                             :all  :yes
+                             :none :no)))
+            (update-keys (fn [table-id] {:id table-id :db_id db-id :schema schema})))]
+    (data-perms/set-table-permissions! group-id :perms/manage-table-metadata new-table-perms)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- update-schema-level-metadata-permissions!
+  [group-id db-id schema new-schema-perms]
+  (if (map? new-schema-perms)
+    (update-table-level-metadata-permissions! group-id db-id schema new-schema-perms)
+    (let [tables (t2/select :model/Table :db_id db-id :schema (not-empty schema))]
+      (when (seq tables)
+        (case new-schema-perms
+          :all
+          (data-perms/set-table-permissions! group-id :perms/manage-table-metadata (zipmap tables (repeat :yes)))
+          :none
+          (data-perms/set-table-permissions! group-id :perms/manage-table-metadata (zipmap tables (repeat :no))))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- update-db-level-metadata-permissions!
+  [group-id db-id new-db-perms]
+  (when-let [schemas (:schemas new-db-perms)]
+    (if (map? schemas)
+      (doseq [[schema schema-changes] schemas]
+        (update-schema-level-metadata-permissions! group-id db-id schema schema-changes))
+      (case schemas
+        :all
+        (data-perms/set-database-permission! group-id db-id :perms/manage-table-metadata :yes)
+        :none
+        (data-perms/set-database-permission! group-id db-id :perms/manage-table-metadata :no)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- update-table-level-download-permissions!
+  [group-id db-id schema new-table-perms]
+  (let [new-table-perms
+        (-&gt; new-table-perms
+            (update-vals (fn [table-perm]
+                           (case table-perm
+                             :full    :one-million-rows
+                             :limited :ten-thousand-rows
+                             :none    :no)))
+            (update-keys (fn [table-id] {:id table-id :db_id db-id :schema schema})))]
+    (data-perms/set-table-permissions! group-id :perms/download-results new-table-perms)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- update-schema-level-download-permissions!
+  [group-id db-id schema new-schema-perms]
+  (if (map? new-schema-perms)
+    (update-table-level-download-permissions! group-id db-id schema new-schema-perms)
+    (let [tables (t2/select :model/Table :db_id db-id :schema (not-empty schema))]
+      (when (seq tables)
+        (case new-schema-perms
+          :full
+          (data-perms/set-table-permissions! group-id :perms/download-results (zipmap tables (repeat :one-million-rows)))
+          :limited
+          (data-perms/set-table-permissions! group-id :perms/download-results (zipmap tables (repeat :ten-thousand-rows)))
+          :none
+          (data-perms/set-table-permissions! group-id :perms/download-results (zipmap tables (repeat :no))))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- update-db-level-download-permissions!
+  [group-id db-id new-db-perms]
+  (when-let [schemas (:schemas new-db-perms)]
+    (if (map? schemas)
+      (doseq [[schema schema-changes] schemas]
+        (update-schema-level-download-permissions! group-id db-id schema schema-changes))
+      (case schemas
+        :full
+        (data-perms/set-database-permission! group-id db-id :perms/download-results :one-million-rows)
+        :limited
+        (data-perms/set-database-permission! group-id db-id :perms/download-results :ten-thousand-rows)
+        :none
+        (data-perms/set-database-permission! group-id db-id :perms/download-results :no)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- update-native-data-access-permissions!
+  [group-id db-id new-native-perms]
+  (data-perms/set-database-permission! group-id db-id :perms/native-query-editing (case new-native-perms
+                                                                                    :write :yes
+                                                                                    :none  :no)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- update-table-level-data-access-permissions!
+  [group-id db-id schema new-table-perms]
+  (let [new-table-perms
+        (-&gt; new-table-perms
+            (update-vals (fn [table-perm]
+                           (if (map? table-perm)
+                             (if (#{:all :segmented} (table-perm :query))
+                               ;; `:segmented` indicates that the table is sandboxed, but we should set :perms/data-access
+                               ;; permissions to :unrestricted and rely on the `sandboxes` table as the source of truth
+                               ;; for sandboxing.
+                               :unrestricted
+                               :no-self-service)
+                             (case table-perm
+                               :all  :unrestricted
+                               :none :no-self-service))))
+            (update-keys (fn [table-id] {:id table-id :db_id db-id :schema schema})))]
+    (data-perms/set-table-permissions! group-id :perms/data-access new-table-perms)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- update-schema-level-data-access-permissions!
+  [group-id db-id schema new-schema-perms]
+  (if (map? new-schema-perms)
+    (update-table-level-data-access-permissions! group-id db-id schema new-schema-perms)
+    (let [tables (t2/select :model/Table :db_id db-id :schema (not-empty schema))]
+      (when (seq tables)
+        (case new-schema-perms
+          :all
+          (data-perms/set-table-permissions! group-id :perms/data-access (zipmap tables (repeat :unrestricted)))
+          :none
+          (data-perms/set-table-permissions! group-id :perms/data-access (zipmap tables (repeat :no-self-service))))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- update-db-level-data-access-permissions!
+  [group-id db-id new-db-perms]
+  (when-let [new-native-perms (:native new-db-perms)]
+    (update-native-data-access-permissions! group-id db-id new-native-perms))
+  (when-let [schemas (:schemas new-db-perms)]
+    (if (map? schemas)
+      (doseq [[schema schema-changes] schemas]
+        (update-schema-level-data-access-permissions! group-id db-id schema schema-changes))
+      (case schemas
+        (:all :impersonated)
+        (data-perms/set-database-permission! group-id db-id :perms/data-access :unrestricted)
+        :none
+        (data-perms/set-database-permission! group-id db-id :perms/data-access :no-self-service)
+        :block
+        (do
+          (when-not (premium-features/has-feature? :advanced-permissions)
+            (throw (ee-permissions-exception :block)))
+          (data-perms/set-database-permission! group-id db-id :perms/data-access :block))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- update-details-perms!
+  [group-id db-id value]
+  (data-perms/set-database-permission! group-id db-id :perms/manage-database value))</pre></td></tr><tr><td class="docs"><p>Check that the changes coming in does not attempt to change audit database permission. Admins should
+change these permissions in application monitoring permissions.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn check-audit-db-permissions
+  [changes]
+  (let [changes-ids (-&gt;&gt; changes
+                         vals
+                         (map keys)
+                         (apply concat))]
+    (when (some #{config/audit-db-id} changes-ids)
+      (throw (ex-info (tru
+                       (str &quot;Audit database permissions can only be changed by updating audit collection permissions.&quot;))
+                      {:status-code 400})))))</pre></td></tr><tr><td class="docs"><p>Log changes to the permissions graph.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn log-permissions-changes
+  [old new]
+  (log/debug
+   (trs &quot;Changing permissions&quot;)
+   &quot;\n&quot; (trs &quot;FROM:&quot;) (u/pprint-to-str 'magenta old)
+   &quot;\n&quot; (trs &quot;TO:&quot;)   (u/pprint-to-str 'blue    new)))</pre></td></tr><tr><td class="docs"><p>Check that the revision number coming in as part of <code>new-graph</code> matches the one from <code>old-graph</code>. This way we can
+make sure people don't submit a new graph based on something out of date, which would otherwise stomp over changes
+made in the interim. Return a 409 (Conflict) if the numbers don't match up.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn check-revision-numbers
+  [old-graph new-graph]
+  (when (not= (:revision old-graph) (:revision new-graph))
+    (throw (ex-info (tru
+                      (str &quot;Looks like someone else edited the permissions and your data is out of date. &quot;
+                           &quot;Please fetch new data and try again.&quot;))
+                    {:status-code 409}))))</pre></td></tr><tr><td class="docs"><p>Save changes made to permission graph for logging/auditing purposes.
+This doesn't do anything if <code>*current-user-id*</code> is unset (e.g. for testing or REPL usage).
+*  <code>model</code>   -- revision model, should be one of
+                [PermissionsRevision, CollectionPermissionGraphRevision, ApplicationPermissionsRevision]
+*  <code>before</code>  -- the graph before the changes
+*  <code>changes</code> -- set of changes applied in this revision.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn save-perms-revision!
+  [model current-revision before changes]
+  (when api/*current-user-id*
+    (first (t2/insert-returning-instances! model
+                                           ;; manually specify ID here so if one was somehow inserted in the meantime in the fraction of a second since we
+                                           ;; called `check-revision-numbers` the PK constraint will fail and the transaction will abort
+                                           :id      (inc current-revision)
+                                           :before  before
+                                           :after   changes
+                                           :user_id api/*current-user-id*))))</pre></td></tr><tr><td class="docs"><p>Takes an API-style perms graph and sets the permissions in the database accordingly.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn update-data-perms-graph!*
+  ([graph]
+   (doseq [[group-id group-changes] graph]
+     (doseq [[db-id db-changes] group-changes
+             [perm-type new-perms] db-changes]
+       (case perm-type
+         :data       (update-db-level-data-access-permissions! group-id db-id new-perms)
+         :download   (update-db-level-download-permissions! group-id db-id new-perms)
+         :data-model (update-db-level-metadata-permissions! group-id db-id new-perms)
+         :details    (update-details-perms! group-id db-id new-perms)))))
+  ;; The following arity is provided soley for convenience for tests/REPL usage
+  ([ks :- [:vector :any] new-value]
+   (update-data-perms-graph!* (assoc-in (-&gt; api-graph :groups) ks new-value))))</pre></td></tr><tr><td class="docs"><p>Takes an API-style perms graph and sets the permissions in the database accordingly. Additionally validates the revision number,
+ logs the changes, and ensures impersonations and sandboxes are consistent.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn update-data-perms-graph!
+  ([new-graph :- api.permission-graph/StrictData]
+   (let [old-graph (api-graph)
+         [old new] (data/diff (:groups old-graph) (:groups new-graph))
+         old       (or old {})
+         new       (or new {})]
+     (when (or (seq old) (seq new))
+       (log-permissions-changes old new)
+       (check-revision-numbers old-graph new-graph)
+       (check-audit-db-permissions new)
+       (t2/with-transaction [_conn]
+         (update-data-perms-graph!* new)
+         (save-perms-revision! :model/PermissionsRevision (:revision old-graph) old new)
+         (delete-impersonations-if-needed-after-permissions-change! new)
+         (delete-gtaps-if-needed-after-permissions-change! new)))))
+  ;; The following arity is provided soley for convenience for tests/REPL usage
+  ([ks :- [:vector :any] new-value]
+   (update-data-perms-graph! (assoc-in (api-graph) (cons :groups ks) new-value))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

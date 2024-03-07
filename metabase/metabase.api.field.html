@@ -2880,11 +2880,11 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.models.interface :as mi]
    [metabase.models.params.chain-filter :as chain-filter]
    [metabase.models.params.field-values :as params.field-values]
-   [metabase.models.permissions :as perms]
-   [metabase.models.table :refer [Table]]
+   [metabase.models.table :as table :refer [Table]]
    [metabase.query-processor :as qp]
    [metabase.related :as related]
    [metabase.server.middleware.offset-paging :as mw.offset-paging]
+   [metabase.server.middleware.session :as mw.session]
    [metabase.sync :as sync]
    [metabase.sync.concurrent :as sync.concurrent]
    [metabase.types :as types]
@@ -2900,17 +2900,7 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private default-max-field-search-limit 1000)</pre></td></tr><tr><td class="docs"><p>Schema for a valid <code>Field</code> visibility type.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private FieldVisibilityType
-  (into [:enum] (map name field/visibility-types)))</pre></td></tr><tr><td class="docs"><p>Does the Current User have segmented query permissions for <code>table</code>?</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- has-segmented-query-permissions?
-  [table]
-  (perms/set-has-full-permissions? @api/*current-user-permissions-set*
-    (perms/table-sandboxed-query-path table)))</pre></td></tr><tr><td class="docs"><p>Validates that the user either has full read permissions for <code>field</code> or segmented permissions on the table
-associated with <code>field</code>. Throws an exception that will return a 403 if not.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- throw-if-no-read-or-segmented-perms
-  [field]
-  (when-not (or (mi/can-read? field)
-                (has-segmented-query-permissions? (field/table field)))
-    (api/throw-403)))</pre></td></tr><tr><td class="docs"><p>/:id</p>
+  (into [:enum] (map name field/visibility-types)))</pre></td></tr><tr><td class="docs"><p>/:id</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
   &quot;Get `Field` with ID.&quot;
   [id include_editable_data_model]
@@ -2931,7 +2921,7 @@ associated with <code>field</code>. Throws an exception that will return a 403 i
     ;; Check for permissions and throw 403 if we don't have them...
     (if include_editable_data_model
       (api/write-check Table (:table_id field))
-      (throw-if-no-read-or-segmented-perms field))
+      (api/check-403 (mi/can-read? field)))
     ;; ...but if we do, return the Field &lt;3
     field))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- clear-dimension-on-fk-change! [{:keys [dimensions], :as _field}]
@@ -3155,11 +3145,11 @@ returns a boolean indicating whether human readable values were found.</p>
   [id]
   {id ms/PositiveInt}
   (let [field (api/write-check (t2/select-one Field :id id))]
-    ;; Override *current-user-permissions-set* so that permission checks pass during sync. If a user has DB detail perms
+    ;; Grant full permissions so that permission checks pass during sync. If a user has DB detail perms
     ;; but no data perms, they should stll be able to trigger a sync of field values. This is fine because we don't
     ;; return any actual field values from this API. (#21764)
-    (binding [api/*current-user-permissions-set* (atom #{&quot;/&quot;})]
-      (field-values/create-or-update-full-field-values! field)))
+    (mw.session/as-admin
+     (field-values/create-or-update-full-field-values! field)))
   {:status :success})</pre></td></tr><tr><td class="docs"><p>/:id/discard_values</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint POST 
   &quot;Discard the FieldValues belonging to this Field. Only applies to fields that have FieldValues. If this Field's
@@ -3241,8 +3231,8 @@ differs slightly based on whether the two Fields are the same Field.</p>
    value     ms/NonBlankString}
   (let [field        (api/check-404 (t2/select-one Field :id id))
         search-field (api/check-404 (t2/select-one Field :id search-id))]
-    (throw-if-no-read-or-segmented-perms field)
-    (throw-if-no-read-or-segmented-perms search-field)
+    (api/check-403 (mi/can-read? field))
+    (api/check-403 (mi/can-read? search-field))
     (search-values field search-field value mw.offset-paging/*limit*)))</pre></td></tr><tr><td class="docs"><p>Search for one specific remapping where the value of <code>field</code> exactly matches <code>value</code>. Returns a pair like</p>
 
 <pre><code>[&lt;value-of-field&gt; &lt;value-of-remapped-field&gt;]

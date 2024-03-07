@@ -2865,140 +2865,107 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.config" name="metabase.config"><h1 class="project-name">metabase.config</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.config
-  (:require
-   [cheshire.core :as json]
-   [clojure.java.io :as io]
-   [clojure.string :as str]
-   [environ.core :as env]
-   [metabase.plugins.classloader :as classloader])
-  (:import
-   (clojure.lang Keyword)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Indicates whether Enterprise Edition extensions are available</p>
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#cache.cljc" name="cache.cljc"><h1 class="project-name">cache.cljc</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.lib.cache
+  #?@(:cljs ((:require [goog.object :as gobject]))))</pre></td></tr><tr><td class="docs"><p>Caching wrapper for use in [[side-channel-cache]].</p>
 
-<p>this existed long before 0.39.0, but that's when it was made public</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^{:doc  :added &quot;0.39.0&quot;} ee-available?
-  (try
-    (classloader/require 'metabase-enterprise.core)
-    true
-    (catch Throwable _
-      false)))</pre></td></tr><tr><td class="docs"><p>Whether code from <code>./test</code> is available. This is mainly to facilitate certain things like test QP middleware that we
-want to load only when test code is present.</p>
-</td><td class="codes"><pre class="brush: clojure">(def tests-available?
-  (try
-    (classloader/require 'metabase.test.core)
-    true
-    (catch Throwable _
-      false)))</pre></td></tr><tr><td class="docs"><p>Are we running on a Windows machine?</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^Boolean is-windows?
-  #_{:clj-kondo/ignore [:discouraged-var]}
-  (str/includes? (str/lower-case (System/getProperty &quot;os.name&quot;)) &quot;win&quot;))</pre></td></tr><tr><td class="docs"><p>Global application defaults</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private app-defaults
-  {:mb-run-mode                     &quot;prod&quot;
-   ;; DB Settings
-   :mb-db-type                      &quot;h2&quot;
-   :mb-db-file                      &quot;metabase.db&quot;
-   :mb-db-automigrate               &quot;true&quot;
-   :mb-db-logging                   &quot;true&quot;
-   ;; Jetty Settings. Full list of options is available here: https://github.com/ring-clojure/ring/blob/master/ring-jetty-adapter/src/ring/adapter/jetty.clj
-   :mb-jetty-port                   &quot;3000&quot;
-   :mb-jetty-join                   &quot;true&quot;
-   ;; other application settings
-   :mb-password-complexity          &quot;normal&quot;
-   :mb-version-info-url             &quot;https://static.metabase.com/version-info.json&quot;
-   :mb-version-info-ee-url          &quot;https://static.metabase.com/version-info-ee.json&quot;
-   :mb-ns-trace                     &quot;&quot;                      ; comma-separated namespaces to trace
-   :max-session-age                 &quot;20160&quot;                 ; session length in minutes (14 days)
-   :mb-colorize-logs                (str (not is-windows?)) ; since PowerShell and cmd.exe don't support ANSI color escape codes or emoji,
-   :mb-emoji-in-logs                (str (not is-windows?)) ; disable them by default when running on Windows. Otherwise they're enabled
-   :mb-qp-cache-backend             &quot;db&quot;
-   :mb-jetty-async-response-timeout (str (* 10 60 1000))})  ; 10m</pre></td></tr><tr><td class="docs"><p>separate map for EE stuff so merge conflicts aren't annoying.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ee-app-defaults
-  {:embed-max-session-age &quot;1440&quot;}) ; how long a FULL APP EMBED session is valid for. One day, by default</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(alter-var-root #'app-defaults merge ee-app-defaults)</pre></td></tr><tr><td class="docs"><p>Retrieve value for a single configuration key.  Accepts either a keyword or a string.</p>
+<p>Uses an <code>(atom {})</code> as the cache and any CLJS value as the <code>subkey</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- atomic-map-cache-fn
+  ([]                      (atom {}))
+  ([cache subkey _x]       (get @cache subkey))
+  ([cache subkey _x value] (swap! cache assoc subkey value)))</pre></td></tr><tr><td class="docs"><p>(CLJS only; this is a pass-through in CLJ.)</p>
 
-<p> We resolve properties from these places:</p>
+<p>Attaches a JS property <code>__mbcache</code> to <code>host</code> (a JS object or CLJS map) if it doesn't already have one.</p>
 
-<ol>
-<li>environment variables (ex: MB<em>DB</em>TYPE -> :mb-db-type)</li>
-<li>jvm options (ex: -Dmb.db.type -> :mb-db-type)</li>
-<li>hard coded <code>app-defaults</code></li>
-</ol>
-</td><td class="codes"><pre class="brush: clojure">(defn config-str
-  [k]
-  (let [k       (keyword k)
-        env-val (k env/env)]
-    (or (when-not (str/blank? env-val) env-val)
-        (k app-defaults))))</pre></td></tr><tr><td class="docs"><p>Fetch a configuration key and parse it as an integer.</p>
+<p>This cache forms a "personal" cache attached to <code>host</code>. <code>subkey</code> is used as the key into that cache, and on a cache
+miss the value is computed with <code>(f x)</code>.</p>
 
-<p>These are convenience functions for accessing config values that ensures a specific return type</p>
+<p>If the <code>host</code> is a CLJS value like a map, the cache is ignored by CLJS since it's a raw JS property. Any change to
+the CLJS map will return a new object, effectively invalidating the cache.</p>
 
-<p>TODO - These names are bad. They should be something like <code>int</code>, <code>boolean</code>, and <code>keyword</code>, respectively. See
-https://github.com/metabase/metabase/wiki/Metabase-Clojure-Style-Guide#dont-repeat-namespace-alias-in-function-names
-for discussion</p>
+<p>If the <code>host</code> is a JS object, it cannot have had <code>Object.freeze()</code> called on it before the first call to
+[[side-channel-cache*]]. The <code>host</code> JS object must also be treated as immutable, since if it is modified the cache will
+contain outdated values. You have been warned.</p>
 
-<p>Fetch a configuration key and parse it as a boolean.</p>
+<p>The caches are passed both <code>subkey</code> and the input value <code>x</code> to use as keys. Which of these are actually used as keys
+is up to the <code>cache-fn</code>.</p>
 
-<p>Fetch a configuration key and parse it as a keyword.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn config-int   ^Integer [k] (some-&gt; k config-str Integer/parseInt))
-(defn config-bool   ^Boolean [k] (some-&gt; k config-str Boolean/parseBoolean))
-(defn config-kw     ^Keyword [k] (some-&gt; k config-str keyword))</pre></td></tr><tr><td class="docs"><p>Are we running in <code>dev</code> mode (i.e. in a REPL or via <code>clojure -M:run</code>)?</p>
+<p>If there is no existing value in the cache for <code>subkey</code> and <code>x</code>, <code>(f x)</code> is called the result is cached for <code>subkey</code>
+and <code>x</code>.</p>
 
-<p>Are we running in <code>prod</code> mode (i.e. from a JAR)?</p>
+<p>Options:
+- The optional <code>:cache-fn</code> option defines how the cache is implemented.
+  It should be a function with 0-arity, 3-arity, and 4-arity forms, and works like this:
+  - <code>(cache-fn)</code> returns a new, empty cache.
+  - <code>(cache-fn cache subkey x)</code> looks up <code>subkey</code> and <code>x</code> (the input value) in the cache.
+    Returns the value, or <code>nil</code>.
+  - <code>(cache-fn cache subkey x value)</code> caches <code>value</code> as the value for <code>subkey</code> and <code>x</code>.
+    Returns nothing - the cache is mutable.</p>
 
-<p>Are we running in <code>test</code> mode (i.e. via <code>clojure -X:test</code>)?</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^Boolean is-dev?   (= :dev  (config-kw :mb-run-mode)))
-(def ^Boolean is-prod?                        (= :prod (config-kw :mb-run-mode)))
-(def ^Boolean is-test?             (= :test (config-kw :mb-run-mode)))</pre></td></tr><tr><td class="docs"><p>Version stuff</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- version-info-from-properties-file []
-  (when-let [props-file (io/resource &quot;version.properties&quot;)]
-    (with-open [reader (io/reader props-file)]
-      (let [props (java.util.Properties.)]
-        (.load props reader)
-        (into {} (for [[k v] props]
-                   [(keyword k) v]))))))</pre></td></tr><tr><td class="docs"><p>Information about the current version of Metabase. Comes from <code>version.properties</code> which is generated by the build
-script.</p>
+<p>  By default, the cache is an <code>(atom {})</code> with <code>get</code> and <code>(swap! ... assoc ...)</code>; see [[atomic-map-cache-fn]].
+- <code>:force? true</code> causes the caching to be used even if the <code>host</code> does not meet the usual safety check of
+  being a vanilla JS object or a CLJS map. (Eg. if the <code>host</code> is an instance of a JS class.)</p>
+</td><td class="codes"><pre class="brush: clojure">#?(:cljs
+   (defn- js-weak-map-cache-fn
+     &quot;Caching wrapper for use in [[side-channel-cache*]].
+     Uses a two-layer cache: the outer layer is a vanilla JS object with string `subkey`s as its keys. The values are
+     `WeakMap`s, using the input value `x` as the key and holding the cached result.
+     For example, this works for caching by `:database-id` and then by legacy query object.&quot;
+     ([]                         #js {})
+     ([^js cache subkey x]       (when-let [inner-cache (gobject/get cache subkey)]
+                                   (.get inner-cache x)))
+     ([^js cache subkey x value] (let [inner-cache (gobject/setWithReturnValueIfNotSet cache subkey #(js/WeakMap.))]
+                                   (.set inner-cache x value)))))
+(defn- side-channel-cache*
+  [subkey host x f {:keys [cache-fn force?]
+                    :or {cache-fn atomic-map-cache-fn}}]
+  (comment subkey, force?, cache-fn, host) ; Avoids lint warning for half-unused inputs.
+  #?(:clj  (f x)
+     :cljs (if (or force? (object? host) (map? host))
+             (do
+               (when-not (.-__mbcache ^js host)
+                 (set! (.-__mbcache ^js host) (cache-fn)))
+               (if-let [cache (.-__mbcache ^js host)]
+                 (if-let [cached (cache-fn cache subkey x)]
+                   cached
+                   ;; Cache miss - generate the value and cache it.
+                   (let [value (f x)]
+                     (cache-fn cache subkey x value)
+                     value))
+                 (f x)))
+             (f x))))</pre></td></tr><tr><td class="docs"><p>(CLJS only; this is a pass-through in CLJ.)</p>
 
-<p>   mb-version-info -> {:tag: "v0.11.1", :hash: "afdf863", :date: "2015-10-05"}</p>
+<p>Attaches a JS property <code>__mbcache</code> to <code>host</code> (a JS object or CLJS map) if it doesn't already have one.</p>
 
-<p>TODO - Can we make this <code>^:const</code>, so we don't have to read the file at launch when running from the uberjar?</p>
-</td><td class="codes"><pre class="brush: clojure">(def mb-version-info
-  (or (version-info-from-properties-file)
-      ;; if version info is not defined for whatever reason
-      {:tag &quot;vLOCAL_DEV&quot;
-       :hash &quot;06d1ba2ae111e66253209c01c244d6379acfc6dcb1911fa9ab6012cec9ce52e5&quot;}))</pre></td></tr><tr><td class="docs"><p>A formatted version string representing the currently running application.
- Looks something like <code>v0.25.0-snapshot (1de6f3f nested-queries-icon)</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^String mb-version-string
-  (let [{:keys [tag hash]} mb-version-info]
-    (format &quot;%s (%s)&quot; tag hash)))</pre></td></tr><tr><td class="docs"><p>A formatted version string including the word 'Metabase' appropriate for passing along
- with database connections so admins can identify them as Metabase ones.
- Looks something like <code>Metabase v0.25.0.RC1</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^String mb-app-id-string
-  (str &quot;Metabase &quot; (mb-version-info :tag)))</pre></td></tr><tr><td class="docs"><p>Returns the major version of the running Metabase JAR.
-When the version.properties file is missing (e.g., running in local dev), returns nil.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn current-major-version
-  []
-  (some-&gt; (second (re-find #&quot;\d+\.(\d+)&quot; (:tag mb-version-info)))
-          parse-long))</pre></td></tr><tr><td class="docs"><p>This UUID is randomly-generated upon launch and used to identify this specific Metabase instance during
-              this specifc run. Restarting the server will change this UUID, and each server in a horizontal cluster
-              will have its own ID, making this different from the <code>site-uuid</code> Setting.</p>
-</td><td class="codes"><pre class="brush: clojure">(defonce 
-  local-process-uuid
-  (str (random-uuid)))</pre></td></tr><tr><td class="docs"><p>A string that contains identifying information about the Metabase version and the local process.</p>
-</td><td class="codes"><pre class="brush: clojure">(defonce
-  mb-version-and-process-identifier
-  (format &quot;%s [%s]&quot; mb-app-id-string local-process-uuid))</pre></td></tr><tr><td class="docs"><p>Default user details provided as a JSON string at launch time for first-user setup flow.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn mb-user-defaults
-  []
-  (when-let [user-json (env/env :mb-user-defaults)]
-    (json/parse-string user-json true)))</pre></td></tr><tr><td class="docs"><p>ID of Audit DB which is loaded when running an EE build. ID is placed in OSS code to facilitate permission checks.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:const audit-db-id
-  13371337)</pre></td></tr><tr><td class="docs"><p>The user-id of the internal metabase user.
- This is needed in the OSS edition to filter out users for setup/has-user-setup.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:const internal-mb-user-id
-   13371338)</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+<p>This cache forms a "personal" cache attached to <code>host</code>. <code>subkey</code> is used as the key into that cache, and on a cache
+miss the value is computed with <code>(f x)</code>.</p>
+
+<p>The 3-arity uses <code>x</code> and both the cache host and the value passed to <code>f</code>. The 5-arity has separate <code>host</code> and <code>x</code>.</p>
+
+<p>If the <code>host</code> is a CLJS value like a map, the cache is ignored by CLJS since it's a raw JS property. Any change to
+the CLJS map will return a new object, effectively invalidating the cache.</p>
+
+<p>If the <code>host</code> is a JS object, it cannot have had <code>Object.freeze()</code> called on it before the first call to
+[[side-channel-cache*]]. The <code>host</code> JS object must also be treated as immutable, since if it is modified the cache will
+contain outdated values. You have been warned.</p>
+
+<p>If there is no existing value at <code>subkey</code> in the cache, this will call <code>(f x)</code> and cache the result at <code>subkey</code>.</p>
+
+<p>The cache is an <code>(atom {})</code> and any CLJS value can be used as the <code>subkey</code>; typically strings are used.</p>
+
+<p>Options:
+- <code>:force? true</code> causes the caching to be used even if the <code>host</code> does not meet the usual safety check of
+  being a vanilla JS object or a CLJS map. (Eg. if the <code>host</code> is an instance of a JS class.)</p>
+</td><td class="codes"><pre class="brush: clojure">(defn side-channel-cache
+  ([subkey x f]
+   (side-channel-cache subkey x f false))
+  ([subkey x f force?]
+   (side-channel-cache* subkey x x f
+                        {:cache-fn atomic-map-cache-fn
+                         :force?   force?}))
+  ([subkey host x f opts]
+   (side-channel-cache* subkey host x f
+                        (merge {:cache-fn atomic-map-cache-fn} opts))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

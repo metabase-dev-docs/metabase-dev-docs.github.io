@@ -2868,16 +2868,14 @@ net.brehaut.ClojureTools = (function (SH) {
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.query-processor.middleware.permissions" name="metabase.query-processor.middleware.permissions"><h1 class="project-name">metabase.query-processor.middleware.permissions</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Middleware for checking that the current user has permissions to run the current query.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.query-processor.middleware.permissions
   (:require
-   [clojure.set :as set]
    [metabase.api.common
     :refer [*current-user-id* *current-user-permissions-set*]]
-   [metabase.config :as config]
    [metabase.lib.metadata.protocols :as lib.metadata.protocols]
    [metabase.lib.schema.id :as lib.schema.id]
+   [metabase.models.data-permissions :as data-perms]
    [metabase.models.interface :as mi]
    [metabase.models.permissions :as perms]
    [metabase.models.query.permissions :as query-perms]
-   [metabase.plugins.classloader :as classloader]
    [metabase.public-settings.premium-features :refer [defenterprise]]
    [metabase.query-processor.error-type :as qp.error-type]
    [metabase.query-processor.middleware.fetch-source-query
@@ -2899,25 +2897,12 @@ Card [Collection] perms checking rather than ad-hoc perms checking.</p>
    (ex-info message
             (merge {:type                 qp.error-type/missing-required-permissions
                     :required-permissions required-perms
-                    :actual-permissions   @*current-user-permissions-set*
+                    :actual-permissions   (data-perms/permissions-for-user *current-user-id*)
                     :permissions-error?   true}
-                   additional-ex-data))))</pre></td></tr><tr><td class="docs"><p>Assert that block permissions are not in effect for Database for a query that's only allowed to run because of
-Collection perms; throw an Exception if they are. Otherwise returns a keyword explaining why the check wasn't done,
-or why it succeeded (this is mostly for test/debug purposes). The query is still allowed to run if the current User
-has appropriate data permissions from another Group. See the namespace documentation
-for [[metabase.models.collection]] for more details.</p>
-
-<p>Note that this feature is Metabase© Enterprise Edition™ only. Actual implementation is
-in [[metabase-enterprise.advanced-permissions.models.permissions.block-permissions/check-block-permissions]] if EE
-code is present. This feature is only enabled if we have a valid Enterprise Edition™ token.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([query])} check-block-permissions
-  (let [dlay (delay
-              (when config/ee-available?
-                (classloader/require 'metabase-enterprise.advanced-permissions.models.permissions.block-permissions)
-                (resolve 'metabase-enterprise.advanced-permissions.models.permissions.block-permissions/check-block-permissions)))]
-    (fn [query]
-      (when-let [f @dlay]
-        (f query)))))</pre></td></tr><tr><td class="docs"><p>Check that the current user has permissions to read Card with <code>card-id</code>, or throw an Exception. </p>
+                   additional-ex-data))))</pre></td></tr><tr><td class="docs"><p>OSS implementation always returns <code>nil</code> because block permissions are an EE-only feature.</p>
+</td><td class="codes"><pre class="brush: clojure">(defenterprise check-block-permissions
+  metabase-enterprise.advanced-permissions.models.permissions.block-permissions
+  [_query])</pre></td></tr><tr><td class="docs"><p>Check that the current user has permissions to read Card with <code>card-id</code>, or throw an Exception. </p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private check-card-read-perms
   [database-id :- ::lib.schema.id/database
    card-id     :- ::lib.schema.id/card]
@@ -2932,51 +2917,45 @@ code is present. This feature is only enabled if we have a valid Enterprise Edit
       (when-not (mi/can-read? card)
         (throw (perms-exception (tru &quot;You do not have permissions to view Card {0}.&quot; card-id)
                                 (mi/perms-objects-set card :read)
-                                {:card-id *card-id*}))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(declare check-query-permissions*)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- required-perms
-  {:arglists '([outer-query])}
-  [{{gtap-perms :gtaps} ::perms, :as outer-query}]
-  (set/difference
-   (query-perms/perms-set outer-query, :throw-exceptions? true, :already-preprocessed? true)
-   gtap-perms))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- has-data-perms? [required-perms]
-  (perms/set-has-full-permissions-for-set? @*current-user-permissions-set* required-perms))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private check-ad-hoc-query-perms
-  [outer-query]
-  (let [required-perms (required-perms outer-query)]
-    (when-not (has-data-perms? required-perms)
-      (throw (perms-exception required-perms))))
-  ;; check perms for any Cards referenced by this query (if it is a native query)
-  (doseq [{query :dataset-query} (qp.u.tag-referenced-cards/tags-referenced-cards outer-query)]
-    (check-query-permissions* query)))</pre></td></tr><tr><td class="docs"><p>Used to allow users looking at a dashboard to view (possibly chained) filters.</p>
+                                {:card-id *card-id*}))))))</pre></td></tr><tr><td class="docs"><p>Used to allow users looking at a dashboard to view (possibly chained) filters.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *param-values-query*
   false)</pre></td></tr><tr><td class="docs"><p>OSS implementation always throws an exception since queries over the audit DB are not permitted.</p>
 </td><td class="codes"><pre class="brush: clojure">(defenterprise check-audit-db-permissions
   metabase-enterprise.audit-app.permissions
   [query]
   (throw (ex-info (tru &quot;Querying this database requires the audit-app feature flag&quot;)
-                  query)))</pre></td></tr><tr><td class="docs"><p>Check that User with <code>user-id</code> has permissions to run <code>query</code>, or throw an exception.</p>
+                  query)))</pre></td></tr><tr><td class="docs"><p>Pre-processing middleware. Removes the <code>::perms</code> key from the query. This is where we store important permissions
+information like perms coming from sandboxing (GTAPs). This is programatically added by middleware when appropriate,
+but we definitely don't want users passing it in themselves. So remove it if it's present.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn remove-permissions-key
+  [query]
+  (dissoc query ::query-perms/perms))</pre></td></tr><tr><td class="docs"><p>Check that User with <code>user-id</code> has permissions to run <code>query</code>, or throw an exception.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn check-query-permissions*
   [{database-id :database, :as outer-query} :- [:map [:database ::lib.schema.id/database]]]
   (when *current-user-id*
-    (log/tracef &quot;Checking query permissions. Current user perms set = %s&quot; (pr-str @*current-user-permissions-set*))
+    (log/tracef &quot;Checking query permissions. Current user permissions = %s&quot;
+                (pr-str (data-perms/permissions-for-user *current-user-id*)))
     (when (= perms/audit-db-id database-id)
-      (check-audit-db-permissions outer-query))
-    (let [card-id (or *card-id* (::fetch-source-query/source-card-id outer-query))]
+     (check-audit-db-permissions outer-query))
+    (let [card-id (or *card-id* (::fetch-source-query/source-card-id outer-query))
+          required-perms (query-perms/required-perms outer-query :already-preprocessed? true)]
       (cond
         card-id
         (do
           (check-card-read-perms database-id card-id)
-          (when-not (has-data-perms? (required-perms outer-query))
+          (when-not (query-perms/check-data-perms outer-query required-perms :throw-exceptions? false)
             (check-block-permissions outer-query)))
         ;; set when querying for field values of dashboard filters, which only require
         ;; collection perms for the dashboard and not ad-hoc query perms
         *param-values-query*
-        (when-not (has-data-perms? (required-perms outer-query))
+        (when-not (query-perms/check-data-perms outer-query required-perms :throw-exceptions? false)
           (check-block-permissions outer-query))
         :else
-        (check-ad-hoc-query-perms outer-query)))))</pre></td></tr><tr><td class="docs"><p>Middleware that check that the current user has permissions to run the current query. This only applies if
+        (do
+          (query-perms/check-data-perms outer-query required-perms :throw-exceptions? true)
+          ;; check perms for any Cards referenced by this query (if it is a native query)
+          (doseq [{query :dataset-query} (qp.u.tag-referenced-cards/tags-referenced-cards outer-query)]
+            (check-query-permissions* query)))))))</pre></td></tr><tr><td class="docs"><p>Middleware that check that the current user has permissions to run the current query. This only applies if
 <code>*current-user-id*</code> is bound. In other cases, like when running public Cards or sending pulses, permissions need to
 be checked separately before allowing the relevant objects to be create (e.g., when saving a new Pulse or
 'publishing' a Card).</p>
@@ -2984,12 +2963,7 @@ be checked separately before allowing the relevant objects to be create (e.g., w
   [qp]
   (fn [query rff]
     (check-query-permissions* query)
-    (qp query rff)))</pre></td></tr><tr><td class="docs"><p>Pre-processing middleware. Removes the <code>::perms</code> key from the query. This is where we store important permissions
-information like perms coming from sandboxing (GTAPs). This is programatically added by middleware when appropriate,
-but we definitely don't want users passing it in themselves. So remove it if it's present.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn remove-permissions-key
-  [query]
-  (dissoc query ::perms))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
+    (qp query rff)))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
 |                                                Writeback fns                                                   |
 +----------------------------------------------------------------------------------------------------------------+</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Check that User with <code>user-id</code> has permissions to run query action <code>query</code>, or throw an exception.</p>
@@ -2998,7 +2972,10 @@ but we definitely don't want users passing it in themselves. So remove it if it'
   (log/tracef &quot;Checking query permissions. Current user perms set = %s&quot; (pr-str @*current-user-permissions-set*))
   (when *card-id*
     (check-card-read-perms database-id *card-id*))
-  (when-not (has-data-perms? (required-perms outer-query))
+  (when-not (query-perms/check-data-perms
+             outer-query
+             (query-perms/required-perms outer-query :already-preprocessed? true)
+             :throw-exceptions? false)
     (check-block-permissions outer-query)))</pre></td></tr><tr><td class="docs"><p>Middleware that check that the current user has permissions to run the current query action.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn check-query-action-permissions
   [qp]
@@ -3015,14 +2992,13 @@ allowed to see the native query before converting the MBQL query to native.)</p>
   [{database-id :database, :as _query}]
   (or
    (not *current-user-id*)
-   (let [required-perms (perms/adhoc-native-query-path database-id)]
-     (perms/set-has-full-permissions? @*current-user-permissions-set* required-perms))))</pre></td></tr><tr><td class="docs"><p>Check that the current user (if bound) has adhoc native query permissions to run <code>query</code>, or throw an
+   (data-perms/user-has-permission-for-database? *current-user-id* :perms/native-query-editing :yes database-id)))</pre></td></tr><tr><td class="docs"><p>Check that the current user (if bound) has adhoc native query permissions to run <code>query</code>, or throw an
 Exception. (This is used by the <code>POST /api/dataset/native</code> endpoint to check perms before converting an MBQL query
 to native.)</p>
 </td><td class="codes"><pre class="brush: clojure">(defn check-current-user-has-adhoc-native-query-perms
   [{database-id :database, :as query}]
   (when-not (current-user-has-adhoc-native-query-perms? query)
-    (throw (perms-exception (perms/adhoc-native-query-path database-id)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+    (throw (perms-exception {database-id {:perms/native-query-editing :yes}}))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

@@ -2874,8 +2874,7 @@ for [[metabase.models.permissions]] for a high-level overview of the Metabase pe
    [medley.core :as m]
    [metabase-enterprise.sandbox.api.util :as mt.api.u]
    [metabase-enterprise.sandbox.models.group-table-access-policy
-    :as gtap
-    :refer [GroupTableAccessPolicy]]
+    :as gtap]
    [metabase.api.common :as api :refer [*current-user* *current-user-id*]]
    [metabase.db.connection :as mdb.connection]
    [metabase.lib.metadata :as lib.metadata]
@@ -2883,16 +2882,11 @@ for [[metabase.models.permissions]] for a high-level overview of the Metabase pe
    [metabase.mbql.schema :as mbql.s]
    [metabase.mbql.util :as mbql.u]
    [metabase.models.card :refer [Card]]
-   [metabase.models.permissions :as perms]
-   [metabase.models.permissions-group-membership
-    :refer [PermissionsGroupMembership]]
    [metabase.models.query.permissions :as query-perms]
-   [metabase.permissions.util :as perms.u]
    [metabase.public-settings.premium-features :refer [defenterprise]]
    [metabase.query-processor.error-type :as qp.error-type]
    [metabase.query-processor.middleware.fetch-source-query
     :as fetch-source-query]
-   [metabase.query-processor.middleware.permissions :as qp.perms]
    [metabase.query-processor.store :as qp.store]
    [metabase.util :as u]
    [metabase.util.i18n :refer [trs tru]]
@@ -2929,12 +2923,7 @@ for [[metabase.models.permissions]] for a high-level overview of the Metabase pe
                      :group-ids (map :group_id gtaps)}))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- tables-&gt;sandboxes [table-ids]
   (qp.store/cached [*current-user-id* table-ids]
-    (let [group-ids           (qp.store/cached *current-user-id*
-                                (t2/select-fn-set :group_id PermissionsGroupMembership :user_id *current-user-id*))
-          sandboxes           (when (seq group-ids)
-                               (t2/select GroupTableAccessPolicy :group_id [:in group-ids]
-                                 :table_id [:in table-ids]))
-          enforced-sandboxes (mt.api.u/enforced-sandboxes sandboxes group-ids)]
+    (let [enforced-sandboxes (mt.api.u/enforced-sandboxes-for *current-user-id*)]
        (when (seq enforced-sandboxes)
          (assert-one-gtap-per-table enforced-sandboxes)
          enforced-sandboxes))))</pre></td></tr><tr><td class="docs">
@@ -3091,24 +3080,24 @@ excluded from subsequent permission checks in order to run the sandboxed query.<
        (:table-id (lib.metadata.protocols/field (qp.store/metadata-provider) field-id))))
    (cons table-id)
    (remove nil?)
-   set))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private sandbox-&gt;perms-set :- [:set perms.u/PathSchema]
-  &quot;Calculate the set of permissions needed to run the query associated with a sandbox; this set of permissions is excluded
-  during the normal QP perms check.
-  Background: when applying sandboxing, we don't want the QP perms check middleware to throw an Exception if the Current
-  User doesn't have permissions to run the underlying sandboxed query, which will likely be greater than what they
-  actually have. (For example, a User might have sandboxed query perms for Table 15, which is why we're applying a
-  sandbox in the first place; the actual perms required to normally run the underlying sandbox query is more likely
-  something like *full* query perms for Table 15.) The QP perms check middleware subtracts this set from the set of
-  required permissions, allowing the user to run their sandboxed query.&quot;
+   set))</pre></td></tr><tr><td class="docs"><p>Calculate the permissions needed to run the query associated with a sandbox, which are implitly granted to the
+current user during the normal QP perms check.</p>
+
+<p>Background: when applying sandboxing, we don't want the QP perms check middleware to throw an Exception if the Current
+User doesn't have permissions to run the underlying sandboxed query, which will likely be greater than what they
+actually have. (For example, a User might have sandboxed query perms for Table 15, which is why we're applying a
+sandbox in the first place; the actual perms required to normally run the underlying sandbox query is more likely
+something like <em>full</em> query perms for Table 15.) The QP perms check middleware subtracts this set from the set of
+required permissions, allowing the user to run their sandboxed query.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private sandbox-&gt;required-perms
   [{card-id :card_id :as sandbox}]
   (if card-id
     (qp.store/cached card-id
-      (query-perms/perms-set (:dataset-query (lib.metadata.protocols/card (qp.store/metadata-provider) card-id))
-                             :throw-exceptions? true))
-    (set (map perms/table-query-path (sandbox-&gt;table-ids sandbox)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- sandboxes-&gt;perms-set [sandboxes]
-  (set (mapcat sandbox-&gt;perms-set sandboxes)))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
+                     (query-perms/required-perms (:dataset-query (lib.metadata.protocols/card (qp.store/metadata-provider) card-id))
+                                                 :throw-exceptions? true))
+    {:perms/data-access (zipmap (sandbox-&gt;table-ids sandbox) (repeat :unrestricted))}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- sandboxes-&gt;required-perms [sandboxes]
+  (apply m/deep-merge (map sandbox-&gt;required-perms sandboxes)))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
 |                                                   Middleware                                                   |
 +----------------------------------------------------------------------------------------------------------------+</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>------------------------------------------ apply-row-level-permissions -------------------------------------------</p>
@@ -3155,7 +3144,9 @@ from their GTAPs.</p>
       original-query
       (-&gt; sandboxed-query
           (assoc ::original-metadata (expected-cols original-query))
-          (update-in [::qp.perms/perms :gtaps] (fn [perms] (into (set perms) (sandboxes-&gt;perms-set (vals table-id-&gt;gtap)))))))))</pre></td></tr><tr><td class="docs">
+          (update-in [::query-perms/perms :gtaps]
+                     (fn [required-perms] (merge required-perms
+                                                 (sandboxes-&gt;required-perms (vals table-id-&gt;gtap)))))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private default-recursion-limit 20)
 (def ^:private ^:dynamic *recursion-limit* default-recursion-limit)</pre></td></tr><tr><td class="docs"><p>Pre-processing middleware. Replaces source tables a User was querying against with source queries that (presumably)
 restrict the rows returned, based on presence of sandboxes.</p>
@@ -3193,7 +3184,7 @@ final results metadata coming back matches what we'd get if the query was not ru
   :feature :sandboxes
   [{::keys [original-metadata] :as query} rff]
   (fn merge-sandboxing-metadata-rff* [metadata]
-    (let [metadata (assoc metadata :is_sandboxed (some? (get-in query [::qp.perms/perms :gtaps])))
+    (let [metadata (assoc metadata :is_sandboxed (some? (get-in query [::query-perms/perms :gtaps])))
           metadata (if original-metadata
                      (merge-metadata original-metadata metadata)
                      metadata)]
