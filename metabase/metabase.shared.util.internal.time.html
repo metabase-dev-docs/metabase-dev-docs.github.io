@@ -2900,9 +2900,8 @@ In CLJS, Moment is already configured with that setting.</p>
 <p>---------------------------------------------- information -------------------------------------------------------</p>
 </td><td class="codes"><pre class="brush: clojure">(defn first-day-of-week
   []
-  (-&gt; (moment/weekdays 0)
-      (.toLowerCase)
-      keyword))</pre></td></tr><tr><td class="docs"><p>The default map of options - empty in CLJS.</p>
+  (nth [:sunday :monday :tuesday :wednesday :thursday :friday :saturday]
+       (.firstDayOfWeek (moment/localeData))))</pre></td></tr><tr><td class="docs"><p>The default map of options - empty in CLJS.</p>
 </td><td class="codes"><pre class="brush: clojure">(def default-options
   {})</pre></td></tr><tr><td class="docs"><p>------------------------------------------------ to-range --------------------------------------------------------</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- apply-offset
@@ -2992,7 +2991,20 @@ This requires a different API call from timestamps without time zones in CLJS.</
 </td><td class="codes"><pre class="brush: clojure">(defn- coerce-local-date-time [input]
   (-&gt; input
       common/drop-trailing-time-zone
-      (moment/utc moment/ISO_8601)))</pre></td></tr><tr><td class="docs"><p>Formats a temporal-value (iso date/time string, int for hour/minute) given the temporal-bucketing unit.
+      (moment/utc moment/ISO_8601)))</pre></td></tr><tr><td class="docs"><p>Formats a date-time value given the temporal extraction unit.
+If unit is not supported, returns nil.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn ^:private format-extraction-unit
+  [t unit]
+  (case unit
+    :day-of-week     (.format t &quot;dddd&quot;)
+    :month-of-year   (.format t &quot;MMM&quot;)
+    :minute-of-hour  (.format t &quot;m&quot;)
+    :hour-of-day     (.format t &quot;h A&quot;)
+    :day-of-month    (.format t &quot;D&quot;)
+    :day-of-year     (.format t &quot;DDD&quot;)
+    :week-of-year    (.format t &quot;w&quot;)
+    :quarter-of-year (.format t &quot;[Q]Q&quot;)
+    nil))</pre></td></tr><tr><td class="docs"><p>Formats a temporal-value (iso date/time string, int for extraction units) given the temporal-bucketing unit.
  If unit is nil, formats the full date/time.
  Time input formatting is only defined with time units.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn format-unit
@@ -3007,15 +3019,8 @@ This requires a different API call from timestamps without time zones in CLJS.</
               time? (moment/utc (str &quot;2023-01-01T&quot; input) moment/ISO_8601)
               (or date? date-time?) (coerce-local-date-time input))]
       (if (and t (.isValid t))
-        (case unit
-          :day-of-week (.format t &quot;dddd&quot;)
-          :month-of-year (.format t &quot;MMM&quot;)
-          :minute-of-hour (.format t &quot;m&quot;)
-          :hour-of-day (.format t &quot;h A&quot;)
-          :day-of-month (.format t &quot;D&quot;)
-          :day-of-year (.format t &quot;DDD&quot;)
-          :week-of-year (.format t &quot;w&quot;)
-          :quarter-of-year (.format t &quot;[Q]Q&quot;)
+        (or
+          (format-extraction-unit t unit)
           (cond
             time? (.format t &quot;h:mm A&quot;)
             date? (.format t &quot;MMM D, YYYY&quot;)
@@ -3023,7 +3028,9 @@ This requires a different API call from timestamps without time zones in CLJS.</
         input))
     (if (= unit :hour-of-day)
       (str (cond (zero? input) &quot;12&quot; (&lt;= input 12) input :else (- input 12)) &quot; &quot; (if (&lt;= input 11) &quot;AM&quot; &quot;PM&quot;))
-      (str input))))</pre></td></tr><tr><td class="docs"><p>Formats a time difference between two temporal values.
+      (or
+        (format-extraction-unit (common/number-&gt;timestamp input {:unit unit}) unit)
+        (str input)))))</pre></td></tr><tr><td class="docs"><p>Formats a time difference between two temporal values.
  Drops redundant information.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn format-diff
   [temporal-value-1 temporal-value-2]
