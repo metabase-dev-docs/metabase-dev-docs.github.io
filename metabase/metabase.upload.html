@@ -3039,22 +3039,26 @@ Numbers are assumed to use separators corresponding to the locale defined in the
     (let [trimmed (str/trim value)]
       (-&gt;&gt; (remove non-inferable-types value-types)
            (filter #((type-&gt;check %) trimmed))
-           first))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- row-&gt;value-types
-  [type-&gt;check row]
-  (map (partial value-&gt;type type-&gt;check) row))</pre></td></tr><tr><td class="docs"><p>Return the first "ancestor" of <code>base-type</code> which is also an "ancestor" of <code>new-type</code>.
-We use a more relaxed definition of "ancestor" here than usual, which includes the tag itself.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- most-specific-common-ancestor
-  [base-type new-type]
-  (when (or base-type new-type)
-    (or (ordered-hierarchy/first-common-ancestor h base-type new-type)
-        (throw (IllegalArgumentException. (tru &quot;Could not find a common type for {0} and {1}&quot;
-                                               base-type
-                                               new-type))))))</pre></td></tr><tr><td class="docs"><p>Given two collections of type tags, find the most specific common ancestor for each pair.
-If one of the collections is longer, we return its existing tags for the remaining length.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- coalesce-types
-  [types-a types-b]
-  (u/map-all most-specific-common-ancestor types-a types-b))</pre></td></tr><tr><td class="docs">
+           first))))</pre></td></tr><tr><td class="docs"><p>Given an existing column type, and a new value, relax the type until it includes the value.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- relax-type
+  [type-&gt;check current-type value]
+  (cond (nil? value) current-type
+        (nil? current-type) (value-&gt;type type-&gt;check value)
+        :else (let [trimmed (str/trim value)]
+                (if (str/blank? trimmed)
+                  current-type
+                  (-&gt;&gt; (cons current-type (ancestors h current-type))
+                       (filter #((type-&gt;check %) trimmed))
+                       first)))))</pre></td></tr><tr><td class="docs"><p>Given a map of {value-type -> predicate}, return a reducing fn which updates our inferred schema using the next row.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- type-relaxer
+  [type-&gt;check]
+  (fn [value-types row]
+    ;; It's important to realize this lazy sequence, because otherwise we can build a huge stack and overflow.
+    (vec (u/map-all (partial relax-type type-&gt;check) value-types row))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- relax-types [settings current-types rows]
+  (let [type-&gt;check (settings-&gt;type-&gt;check settings)]
+    (-&gt;&gt; (reduce (type-relaxer type-&gt;check) current-types rows)
+         (map column-type))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- normalize-column-name
   [raw-name]
   (if (str/blank? raw-name)
@@ -3071,11 +3075,7 @@ If one of the collections is longer, we return its existing tags for the remaini
 </td><td class="codes"><pre class="brush: clojure">(mu/defn column-types-from-rows :- [:sequential (into [:enum] column-types)]
   &quot;Returns a sequence of types, given the unparsed rows in the CSV file&quot;
   [settings column-count rows]
-  (let [type-&gt;check (settings-&gt;type-&gt;check settings)]
-    (-&gt;&gt; rows
-         (map (partial row-&gt;value-types type-&gt;check))
-         (reduce coalesce-types (repeat column-count nil))
-         (map column-type))))</pre></td></tr><tr><td class="docs"><p>Consumes the header and rows from a CSV file.</p>
+  (relax-types settings (repeat column-count nil) rows))</pre></td></tr><tr><td class="docs"><p>Consumes the header and rows from a CSV file.</p>
 
 <p> Returns a map with two keys:
    - <code>:extant-columns</code>: an ordered map of columns found in the CSV file, excluding columns that have the same normalized name as the generated columns.
@@ -3085,16 +3085,11 @@ If one of the collections is longer, we return its existing tags for the remaini
  given CSV file. Supported types include <code>::int</code>, <code>::datetime</code>, etc. A column that is completely blank is assumed to
  be of type <code>::text</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- detect-schema
-  [header rows]
-  (let [normalized-header (-&gt;&gt; header
-                               (map normalize-column-name))
-        unique-header     (-&gt;&gt; normalized-header
-                               mbql.u/uniquify-names
-                               (map keyword))
-        column-count      (count normalized-header)
-        settings          (upload-parsing/get-settings)
-        col-name+type-pairs (-&gt;&gt; rows
-                                 (column-types-from-rows settings column-count)
+  [settings header rows]
+  (let [normalized-header   (map normalize-column-name header)
+        unique-header       (map keyword (mbql.u/uniquify-names normalized-header))
+        column-count        (count normalized-header)
+        col-name+type-pairs (-&gt;&gt; (column-types-from-rows settings column-count rows)
                                  (map vector unique-header))]
     {:extant-columns    (ordered-map/ordered-map col-name+type-pairs)
      :generated-columns (ordered-map/ordered-map auto-pk-column-keyword ::auto-incrementing-int-pk)}))</pre></td></tr><tr><td class="docs"><p>+------------------+
@@ -3120,16 +3115,7 @@ If one of the collections is longer, we return its existing tags for the remaini
         acceptable-length           (min (count slugified-name) max-length)
         truncated-name-without-time (subs slugified-name 0 acceptable-length)]
     (str truncated-name-without-time
-         (t/format time-format (strictly-monotonic-now)))))</pre></td></tr><tr><td class="docs"><p>Maximum number of values to use for detecting a column's type</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private max-sample-rows  1000)</pre></td></tr><tr><td class="docs"><p>Returns an improper subset of the rows no longer than [[max-sample-rows]]. Takes an evenly-distributed sample (not
-just the first n).</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- sample-rows
-  [rows]
-  (take max-sample-rows
-        (take-nth (max 1
-                       (long (/ (count rows)
-                                max-sample-rows)))
-                  rows)))</pre></td></tr><tr><td class="docs"><p>Returns a map of column-name -> column-definition from a map of column-name -> upload-type.</p>
+         (t/format time-format (strictly-monotonic-now)))))</pre></td></tr><tr><td class="docs"><p>Returns a map of column-name -> column-definition from a map of column-name -> upload-type.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- column-definitions
   [driver col-&gt;upload-type]
   (update-vals col-&gt;upload-type (partial driver/upload-type-&gt;database-type driver)))</pre></td></tr><tr><td class="docs"><p>The database being used for uploads (as per the <code>uploads-database-id</code> setting).</p>
@@ -3146,9 +3132,8 @@ just the first n).</p>
     (str schema &quot;.&quot; name)))</pre></td></tr><tr><td class="docs"><p>Returns a lazy seq of parsed rows, given a sequence of upload types for each column.
 Empty strings are parsed as nil.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- parse-rows
-  [col-upload-types rows]
-  (let [settings (upload-parsing/get-settings)
-        parsers  (map #(upload-parsing/upload-type-&gt;parser % settings) col-upload-types)]
+  [settings col-upload-types rows]
+  (let [parsers (map #(upload-parsing/upload-type-&gt;parser % settings) col-upload-types)]
     (for [row rows]
       (for [[value parser] (u/map-all vector row parsers)]
         (when-not (str/blank? value)
@@ -3180,12 +3165,13 @@ Empty strings are parsed as nil.</p>
   [driver db-id table-name ^File csv-file]
   (with-open [reader (bom/bom-reader csv-file)]
     (let [[header &amp; rows]         (without-auto-pk-columns (csv/read-csv reader))
-          {:keys [extant-columns generated-columns]} (detect-schema header (sample-rows rows))
+          settings                (upload-parsing/get-settings)
+          {:keys [extant-columns generated-columns]} (detect-schema settings header rows)
           cols-&gt;upload-type       (merge generated-columns extant-columns)
           col-definitions         (column-definitions driver cols-&gt;upload-type)
           csv-col-names           (keys extant-columns)
           col-upload-types        (vals extant-columns)
-          parsed-rows             (vec (parse-rows col-upload-types rows))]
+          parsed-rows             (vec (parse-rows settings col-upload-types rows))]
       (driver/create-table! driver
                             db-id
                             table-name
@@ -3360,7 +3346,9 @@ Returns the newly created model. May throw validation, permimissions, or DB erro
                (when (seq columns)
                  (str/join &quot;\n&quot; (cons header (map #(str &quot;- &quot; %) columns))))))
        (str/join &quot;\n\n&quot;)
-       (not-blank)))</pre></td></tr><tr><td class="docs"><p>Throws an exception if:
+       (not-blank)))</pre></td></tr><tr><td class="docs"><p>A mapping of which types a column can be implicitly relaxed to, based on the content of appended values.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private allowed-type-upgrades
+  {::int #{::float}})</pre></td></tr><tr><td class="docs"><p>Throws an exception if:
   - the CSV file contains duplicate column names
   - the schema of the CSV file does not match the schema of the table</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- check-schema
@@ -3376,6 +3364,23 @@ Returns the newly created model. May throw validation, permimissions, or DB erro
     (when (or extra missing)
       (let [error-message (extra-and-missing-error-markdown extra missing)]
         (throw (ex-info error-message {:status-code 422}))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- matching-or-upgradable? [current-type relaxed-type]
+  (or (= current-type relaxed-type)
+      (when-let [f (allowed-type-upgrades current-type)]
+        (f relaxed-type))))</pre></td></tr><tr><td class="docs"><p>Given some fields and old and new types, filter out fields with unchanged types, then pair with the new types.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- changed-field-&gt;new-type
+  [fields old-types new-types]
+  (let [new-if-changed #(when (not= %1 %2) %2)]
+    (-&gt;&gt; (map new-if-changed old-types new-types)
+         (map vector fields)
+         (filter second)
+         (into {}))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- alter-columns! [driver database table field-&gt;new-type]
+  (driver/alter-columns! driver (:id database) (table-identifier table)
+                         (m/map-kv (fn [field column-type]
+                                     [(keyword (:name field))
+                                      (driver/upload-type-&gt;database-type driver column-type)])
+                                   field-&gt;new-type)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- append-csv!*
   [database table file]
   (with-open [reader (bom/bom-reader file)]
@@ -3388,8 +3393,22 @@ Returns the newly created model. May throw validation, permimissions, or DB erro
                               (driver/create-auto-pk-with-append-csv? driver)
                               (not (contains? normed-name-&gt;field auto-pk-column-name)))
           _                  (check-schema (dissoc normed-name-&gt;field auto-pk-column-name) header)
-          col-upload-types   (map (comp base-type-&gt;upload-type :base_type normed-name-&gt;field) normed-header)
-          parsed-rows        (parse-rows col-upload-types rows)]
+          settings           (upload-parsing/get-settings)
+          old-column-types   (map (comp base-type-&gt;upload-type :base_type normed-name-&gt;field) normed-header)
+          ;; in the happy, and most common, case all the values will match the existing types
+          ;; for now we just plan for the worst and perform a fairly expensive operation to detect any type changes
+          ;; we can come back and optimize this to an optimistic-with-fallback approach later.
+          relaxed-types      (relax-types settings old-column-types rows)
+          new-column-types   (map #(if (matching-or-upgradable? %1 %2) %2 %1) old-column-types relaxed-types)
+          _                  (when (and (not= old-column-types new-column-types)
+                                        ;; if we cannot coerce all the columns, don't bother coercing any of them
+                                        ;; we will instead throw an error when we try to parse as the old type
+                                        (= relaxed-types new-column-types))
+                               (let [fields (map normed-name-&gt;field normed-header)]
+                                 (-&gt;&gt; (changed-field-&gt;new-type fields old-column-types relaxed-types)
+                                      (alter-columns! driver database table))))
+          ;; this will fail if any of our required relaxations were rejected.
+          parsed-rows        (parse-rows settings new-column-types rows)]
       (try
         (driver/insert-into! driver (:id database) (table-identifier table) normed-header parsed-rows)
         (catch Throwable e
@@ -3398,7 +3417,7 @@ Returns the newly created model. May throw validation, permimissions, or DB erro
         (driver/add-columns! driver
                              (:id database)
                              (table-identifier table)
-                             {auto-pk-column-keyword (conj (driver/upload-type-&gt;database-type driver ::auto-incrementing-int-pk))}
+                             {auto-pk-column-keyword (driver/upload-type-&gt;database-type driver ::auto-incrementing-int-pk)}
                              :primary-key [auto-pk-column-keyword]))
       (scan-and-sync-table! database table)
       (when create-auto-pk?
