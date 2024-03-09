@@ -3143,9 +3143,50 @@ generating the suggested name for a query.</p>
 (lib.common/defop contains [whole part])
 (lib.common/defop does-not-contain [whole part])
 (lib.common/defop time-interval [x amount unit])
-(lib.common/defop segment [segment-id])</pre></td></tr><tr><td class="docs">
+(lib.common/defop segment [segment-id])</pre></td></tr><tr><td class="docs"><p>Add a new filter clause to a <code>stage</code>, ignoring it if it is a duplicate clause (ignoring :lib/uuid).</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private add-filter-to-stage
+  [stage      :- ::lib.schema/stage
+   new-filter :- [:maybe ::lib.schema.expression/boolean]]
+  (if-not new-filter
+    stage
+    (let [existing-filter? (some (fn [existing-filter]
+                                   (lib.equality/= existing-filter new-filter))
+                                 (:filters stage))]
+      (if existing-filter?
+        stage
+        (update stage :filters #(conj (vec %) new-filter))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn add-filters-to-stage :- ::lib.schema/stage
+  &quot;Add additional filter clauses to a `stage`. Ignores any duplicate clauses (ignoring :lib/uuid).&quot;
+  [stage       :- ::lib.schema/stage
+   new-filters :- [:maybe [:sequential ::lib.schema.expression/boolean]]]
+  (reduce add-filter-to-stage stage new-filters))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn remove-duplicate-filters-in-stage :- ::lib.schema/stage
+  &quot;Remove any duplicate filters from a query `stage` (ignoring :lib/uuid).&quot;
+  [stage :- ::lib.schema/stage]
+  (add-filters-to-stage (dissoc stage :filters) (:filters stage)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn flatten-compound-filters-in-stage :- ::lib.schema/stage
+  &quot;Flatten any `:and` filters in a `stage`. Does multiple passes until all `:and` filters are flattened.&quot;
+  [stage :- ::lib.schema/stage]
+  (letfn [(flatten-filters [filter-clauses]
+            ;; if we did ANY flattening, recurse so we can see if we can do MORE. I'm using a volatile to track this
+            ;; so we can avoid equality comparisons which are more expensive and also potentially dangerous (don't
+            ;; want to accidentally end up with infinite recursion here)
+            (let [did-some-flattening? (volatile! false)
+                  filter-clauses'      (into []
+                                             (mapcat (fn [[tag _opts &amp; args :as filter-clause]]
+                                                       (if (clojure.core/= tag :and)
+                                                         (do
+                                                           (vreset! did-some-flattening? true)
+                                                           args)
+                                                         [filter-clause])))
+                                             filter-clauses)]
+              (if @did-some-flattening?
+                (recur filter-clauses')
+                filter-clauses')))]
+    (cond-&gt; stage
+      (seq (:filters stage)) (update :filters flatten-filters))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn filter :- :metabase.lib.schema/query
-  &quot;Sets `boolean-expression` as a filter on `query`.&quot;
+  &quot;Sets `boolean-expression` as a filter on `query`. Ignores duplicate filters (ignoring :lib/uuid).&quot;
   ([query :- :metabase.lib.schema/query
     boolean-expression]
    (metabase.lib.filter/filter query nil boolean-expression))
@@ -3157,7 +3198,7 @@ generating the suggested name for a query.</p>
      (recur query stage-number (lib.ref/ref boolean-expression))
      (let [stage-number (clojure.core/or stage-number -1)
            new-filter (lib.common/-&gt;op-arg boolean-expression)]
-       (lib.util/update-query-stage query stage-number update :filters (fnil conj []) new-filter)))))</pre></td></tr><tr><td class="docs">
+       (lib.util/update-query-stage query stage-number add-filter-to-stage new-filter)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn filters :- [:maybe [:ref ::lib.schema/filters]]
   &quot;Returns the current filters in stage with `stage-number` of `query`.
   If `stage-number` is omitted, the last stage is used. Logicaly, the

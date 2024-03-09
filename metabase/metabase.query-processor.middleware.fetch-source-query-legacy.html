@@ -2865,237 +2865,240 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.lib.schema" name="metabase.lib.schema"><h1 class="project-name">metabase.lib.schema</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Malli schema for the pMBQL query type, the version of MBQL produced and manipulated by the new Cljc
-Metabase lib. Currently this is a little different from the version of MBQL consumed by the QP, specified
-in [[metabase.mbql.schema]]. Hopefully these versions will converge in the future.</p>
-
-<p>Some primitives below are duplicated from [[metabase.util.malli.schema]] since that's not <code>.cljc</code>. Other stuff is
-copied from [[metabase.mbql.schema]] so this can exist completely independently; hopefully at some point in the
-future we can deprecate that namespace and eventually do away with it entirely.</p>
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.lib.schema
-  (:refer-clojure :exclude [ref])
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.query-processor.middleware.fetch-source-query-legacy" name="metabase.query-processor.middleware.fetch-source-query-legacy"><h1 class="project-name">metabase.query-processor.middleware.fetch-source-query-legacy</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>LEGACY IMPLEMENTATION of [[metabase.query-processor.middleware.fetch-source-query]], will be removed soon.</p>
+</td><td class="codes"><pre class="brush: clojure">(ns ^:deprecated metabase.query-processor.middleware.fetch-source-query-legacy
   (:require
-   [metabase.lib.schema.aggregation :as aggregation]
-   [metabase.lib.schema.common :as common]
-   [metabase.lib.schema.expression :as expression]
-   [metabase.lib.schema.expression.arithmetic]
-   [metabase.lib.schema.expression.conditional]
-   [metabase.lib.schema.expression.string]
-   [metabase.lib.schema.expression.temporal]
-   [metabase.lib.schema.filter]
-   [metabase.lib.schema.id :as id]
-   [metabase.lib.schema.join :as join]
-   [metabase.lib.schema.literal]
-   [metabase.lib.schema.order-by :as order-by]
-   [metabase.lib.schema.ref :as ref]
-   [metabase.lib.schema.template-tag :as template-tag]
-   [metabase.lib.schema.util :as lib.schema.util]
+   [clojure.set :as set]
+   [medley.core :as m]
+   [metabase.driver.ddl.interface :as ddl.i]
+   [metabase.driver.util :as driver.u]
+   [metabase.lib.convert :as lib.convert]
+   [metabase.lib.metadata :as lib.metadata]
+   [metabase.lib.schema.id :as lib.schema.id]
+   [metabase.lib.util :as lib.util]
+   [metabase.mbql.normalize :as mbql.normalize]
+   [metabase.mbql.schema :as mbql.s]
    [metabase.mbql.util :as mbql.u]
-   [metabase.mbql.util.match :as mbql.match]
-   [metabase.util.malli.registry :as mr]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(comment metabase.lib.schema.expression.arithmetic/keep-me
-         metabase.lib.schema.expression.conditional/keep-me
-         metabase.lib.schema.expression.string/keep-me
-         metabase.lib.schema.expression.temporal/keep-me
-         metabase.lib.schema.filter/keep-me
-         metabase.lib.schema.literal/keep-me)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::stage.native
+   [metabase.public-settings :as public-settings]
+   [metabase.query-processor.store :as qp.store]
+   [metabase.query-processor.util.persisted-cache :as qp.persisted]
+   [metabase.util :as u]
+   [metabase.util.i18n :refer [trs tru]]
+   [metabase.util.log :as log]
+   [metabase.util.malli :as mu]
+   [metabase.util.malli.schema :as ms]
+   [weavejester.dependency :as dep]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>These next two schemas are for validating the intermediate stages of the middleware. We don't need to validate the
+entire query</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private SourceQueryAndMetadata
   [:map
-   [:lib/type [:= :mbql.stage/native]]
-   ;; the actual native query, depends on the underlying database. Could be a raw SQL string or something like that.
-   ;; Only restriction is that it is non-nil.
-   [:native some?]
-   ;; any parameters that should be passed in along with the query to the underlying query engine, e.g. for JDBC these
-   ;; are the parameters we pass in for a `PreparedStatement` for `?` placeholders. These can be anything, including
-   ;; nil.
-   [:args {:optional true} [:sequential any?]]
-   ;; the Table/Collection/etc. that this query should be executed against; currently only used for MongoDB, where it
-   ;; is required.
-   [:collection {:optional true} ::common/non-blank-string]
-   ;; optional template tag declarations. Template tags are things like `{{x}}` in the query (the value of the
-   ;; `:native` key), but their definition lives under this key.
-   [:template-tags {:optional true} [:ref ::template-tag/template-tag-map]]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::breakout
-  [:ref ::ref/ref])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::breakouts
-  [:and
-   [:sequential {:min 1} ::breakout]
-   [:fn
-    {:error/message &quot;Breakouts must be distinct&quot;}
-    #'lib.schema.util/distinct-refs?]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::fields
-  [:and
-   [:sequential {:min 1} [:ref ::ref/ref]]
-   [:fn
-    {:error/message &quot;:fields must be distinct&quot;}
-    #'lib.schema.util/distinct-refs?]])</pre></td></tr><tr><td class="docs"><p>this is just for enabling round-tripping filters with named segment references</p>
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::filterable
-  [:or
-   [:ref ::expression/boolean]
-   [:tuple [:= :segment] :map :string]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::filters
-  [:sequential {:min 1} ::filterable])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- bad-ref-clause? [ref-type valid-ids x]
-  (and (vector? x)
-       (= ref-type (first x))
-       (not (contains? valid-ids (get x 2)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- expression-ref-errors-for-stage [stage]
-  (let [expression-names (into #{} (map (comp :lib/expression-name second)) (:expressions stage))]
-    (mbql.u/matching-locations (dissoc stage :joins :lib/stage-metadata)
-                               #(bad-ref-clause? :expression expression-names %))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- aggregation-ref-errors-for-stage [stage]
-  (let [uuids (into #{} (map (comp :lib/uuid second)) (:aggregation stage))]
-    (mbql.u/matching-locations (dissoc stage :joins :lib/stage-metadata)
-                               #(bad-ref-clause? :aggregation uuids %))))</pre></td></tr><tr><td class="docs"><p>Return the locations and the clauses with dangling expression or aggregation references.
-The return value is sequence of pairs (vectors) with the first element specifying the location
-as a vector usable in [[get-in]] and the second element being the clause with dangling reference.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ref-errors-for-stage
-  [stage]
-  (concat (expression-ref-errors-for-stage stage)
-          (aggregation-ref-errors-for-stage stage)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- expression-ref-error-for-stage [stage]
-  (when-let [err-loc (first (expression-ref-errors-for-stage stage))]
-    (if-let [expression-name (get-in err-loc [1 2])]
-      (str &quot;Invalid :expression reference: no expression named &quot; (pr-str expression-name))
-      (str &quot;Invalid :expression reference: &quot; (get err-loc 1)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- aggregation-ref-error-for-stage [stage]
-  (when-let [err-loc (first (aggregation-ref-errors-for-stage stage))]
-    (if-let [ag-uuid (get-in err-loc [1 2])]
-      (str &quot;Invalid :aggregation reference: no aggregation with uuid &quot; ag-uuid)
-      (str &quot;Invalid :aggregation reference: &quot; (get err-loc 1)))))</pre></td></tr><tr><td class="docs"><p>Validate references in the context of a single <code>stage</code>, independent of any previous stages. If there is an error with
-a reference, return a string describing the error.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([stage])} ref-error-for-stage
-  (some-fn expression-ref-error-for-stage
-           aggregation-ref-error-for-stage))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::stage.valid-refs
-  [:fn
-   {:error/message &quot;Valid references for a single query stage&quot;
-    :error/fn      (fn [{:keys [value]} _]
-                     (ref-error-for-stage value))}
-   (complement ref-error-for-stage)])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::stage.mbql
+   [:source-query    mbql.s/SourceQuery]
+   [:database        mbql.s/DatabaseID]
+   [:source-metadata [:maybe [:sequential mbql.s/SourceQueryMetadata]]]
+   [:source-query/model?   {:optional true} :boolean]
+   [:persisted-info/native {:optional true} :string]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private MapWithResolvedSourceQuery
   [:and
    [:map
-    [:lib/type     [:= :mbql.stage/mbql]]
-    [:joins        {:optional true} [:ref ::join/joins]]
-    [:expressions  {:optional true} [:ref ::expression/expressions]]
-    [:breakout     {:optional true} ::breakouts]
-    [:aggregation  {:optional true} [:ref ::aggregation/aggregations]]
-    [:fields       {:optional true} ::fields]
-    [:filters      {:optional true} ::filters]
-    [:order-by     {:optional true} [:ref ::order-by/order-bys]]
-    [:source-table {:optional true} [:ref ::id/table]]
-    [:source-card  {:optional true} [:ref ::id/card]]
-    ;; TODO -- `:page` ???
-    ]
+    [:database        mbql.s/DatabaseID]
+    [:source-metadata [:maybe [:sequential mbql.s/SourceQueryMetadata]]]
+    [:source-query    mbql.s/SourceQuery]
+    [:source-card-id  ms/PositiveInt]]
    [:fn
-    {:error/message &quot;:source-query is not allowed in pMBQL queries.&quot;}
-    #(not (contains? % :source-query))]
-   [:fn
-    {:error/message &quot;A query cannot have both a :source-table and a :source-card.&quot;}
-    (complement (every-pred :source-table :source-card))]
-   [:ref ::stage.valid-refs]])</pre></td></tr><tr><td class="docs"><p>Schema for an MBQL stage that includes either <code>:source-table</code> or <code>:source-query</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::stage.mbql.with-source-table
-  [:merge
-   [:ref ::stage.mbql]
-   [:map
-    [:source-table [:ref ::id/table]]]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::stage.mbql.with-source-card
-  [:merge
-   [:ref ::stage.mbql]
-   [:map
-    [:source-card [:ref ::id/card]]]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::stage.mbql.with-source
-  [:or
-   [:ref ::stage.mbql.with-source-table]
-   [:ref ::stage.mbql.with-source-card]])</pre></td></tr><tr><td class="docs"><p>Schema for an MBQL stage that DOES NOT include <code>:source-table</code> -- an MBQL stage that is not the initial stage.</p>
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::stage.mbql.without-source
-  [:and
-   [:ref ::stage.mbql]
-   [:fn
-    {:error/message &quot;Only the initial stage of a query can have a :source-table or :source-card.&quot;}
-    (complement (some-fn :source-table :source-card))]])</pre></td></tr><tr><td class="docs"><p>the schemas are constructed this way instead of using <code>:or</code> because they give better error messages</p>
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::stage.type
-  [:enum :mbql.stage/native :mbql.stage/mbql])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::stage
-  [:and
-   [:map
-    [:lib/type ::stage.type]]
-   [:multi {:dispatch :lib/type}
-    [:mbql.stage/native [:ref ::stage.native]]
-    [:mbql.stage/mbql   [:ref ::stage.mbql]]]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::stage.initial
-  [:and
-   [:map
-    [:lib/type ::stage.type]]
-   [:multi {:dispatch :lib/type}
-    [:mbql.stage/native [:ref ::stage.native]]
-    [:mbql.stage/mbql   [:ref ::stage.mbql.with-source]]]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::stage.additional
-  ::stage.mbql.without-source)</pre></td></tr><tr><td class="docs"><p>Apparently you're allowed to use a join alias for a join that appeared in any previous stage or the current stage, or
-<em>inside</em> any join in any previous stage or the current stage. Why? Who knows, but this is a real thing.
-See [[metabase.driver.sql.query-processor-test/join-source-queries-with-joins-test]] for example.</p>
+    {:error/message &quot;`:source-table` should be removed&quot;}
+    (complement :source-table)]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- query-has-unresolved-card-id-source-tables? [{inner-mbql-query :query}]
+  (when inner-mbql-query
+    (mbql.u/match-one inner-mbql-query
+      (&amp;match :guard (every-pred map? (comp string? :source-table))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- query-has-resolved-database-id? [{:keys [database]}]
+  ((every-pred integer? pos?) database))</pre></td></tr><tr><td class="docs"><p>Schema for a MBQL query where all <code>card__id</code> <code>:source-tables</code> have been removes and appropriate <code>:source-query</code>s have
+been added instead, and where the top-level <code>:database</code> ID, if it was the 'source query placeholder`, is replaced by
+the actual database ID of the source query.</p>
 
-<p>This doesn't really make sense IMO (you should use string field refs to refer to things from a previous
-stage...right?) but for now we'll have to allow it until we can figure out how to go fix all of the old broken queries.</p>
-
-<p>Also, it's apparently legal to use a join alias to refer to a column that comes from a join in a source Card, and
-there is no way for us to know what joins exist in the source Card without a metadata provider, so we're just going
-to have to go ahead and skip validation in that case. Icky! But it's better than being overly strict and rejecting
-queries that the QP could have fixed.</p>
-
-<p>Anyways, this function returns a function with the signature:</p>
-
-<p>  (visible-join-alias? <join-alias>) => boolean</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- visible-join-alias?-fn
-  [stage]
-  (if (:source-card stage)
-    (constantly true)
-    (letfn [(join-aliases-in-join [join]
-              (cons
-               (:alias join)
-               (mapcat join-aliases-in-stage (:stages join))))
-            (join-aliases-in-stage [stage]
-              (mapcat join-aliases-in-join (:joins stage)))]
-      (set (join-aliases-in-stage stage)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- join-ref-error-for-stages [stages]
-  (when (sequential? stages)
-    (loop [visible-join-alias? (constantly false), i 0, [stage &amp; more] stages]
-      (let [visible-join-alias? (some-fn visible-join-alias? (visible-join-alias?-fn stage))]
-        (or
-         (mbql.match/match-one (dissoc stage :joins :stage/metadata) ; TODO isn't this supposed to be `:lib/stage-metadata`?
-           [:field ({:join-alias (join-alias :guard (complement visible-join-alias?))} :guard :join-alias) _id-or-name]
-           (str &quot;Invalid :field reference in stage &quot; i &quot;: no join named &quot; (pr-str join-alias)))
-         (when (seq more)
-           (recur visible-join-alias? (inc i) more)))))))</pre></td></tr><tr><td class="docs"><p>Like [[ref-error-for-stage]], but validate references in the context of a sequence of several stages; for validations
-that can't be done on the basis of just a single stage. For example join alias validation needs to take into account
-previous stages.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([stages])} ref-error-for-stages
-  ;; this var is ultimately redundant for now since it just points to one function but I'm leaving it here so we can
-  ;; add more stuff to it the future as we validate more things.
-  join-ref-error-for-stages)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::stages.valid-refs
-  [:fn
-   {:error/message &quot;Valid references for all query stages&quot;
-    :error/fn      (fn [{:keys [value]} _]
-                     (ref-error-for-stages value))}
-   (complement ref-error-for-stages)])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::stages
+<p>This schema represents the way the query should look after this middleware finishes preprocessing it.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private FullyResolvedQuery
   [:and
-   [:cat
-    [:schema [:ref ::stage.initial]]
-    [:* [:schema [:ref ::stage.additional]]]]
-   [:ref ::stages.valid-refs]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::query
-  [:and
-   [:map
-    [:lib/type [:= :mbql/query]]
-    [:database [:or
-                ::id/database
-                ::id/saved-questions-virtual-database]]
-    ;;; TODO -- `:parameters`. Legacy MBQL schema has it
-    [:stages   [:ref ::stages]]]
-   lib.schema.util/UniqueUUIDs])</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+   mbql.s/Query
+   [:fn
+    {:error/message &quot;Query where all card__id :source-tables are fully resolved&quot;}
+    (complement query-has-unresolved-card-id-source-tables?)]
+   [:fn
+    {:error/message &quot;Query where source-query virtual `:database` has been replaced with actual Database ID&quot;}
+    query-has-resolved-database-id?]])</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
+|                                       Resolving card__id -> source query                                       |
++----------------------------------------------------------------------------------------------------------------+</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Get the query to be run from the card</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- source-query
+  [{dataset-query :dataset-query, card-id :id, :as card}]
+  (let [dataset-query (cond-&gt; dataset-query
+                        (:lib/type dataset-query) lib.convert/-&gt;legacy-MBQL)
+        {db-id                                           :database
+         mbql-query                                      :query
+         {template-tags :template-tags :as native-query} :native} dataset-query]
+    (or
+     mbql-query
+     ;; rename `:query` to `:native` because source queries have a slightly different shape
+     (when-some [native-query (set/rename-keys native-query {:query :native})]
+       (let [mongo? (= (driver.u/database-&gt;driver db-id) :mongo)]
+         (cond-&gt; native-query
+           ;; MongoDB native queries consist of a collection and a pipelne (query)
+           mongo? (update :native (fn [pipeline] {:collection (:collection native-query)
+                                                  :query      pipeline}))
+           (empty? template-tags) (dissoc :template-tags))))
+     (throw (ex-info (tru &quot;Missing source query in Card {0}&quot; card-id)
+                     {:card card, :dataset-query dataset-query})))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn card-id-&gt;source-query-and-metadata :- SourceQueryAndMetadata
+  &quot;Return the source query info for Card with `card-id`. Pass true as the optional second arg `log?` to enable
+  logging. (The circularity check calls this and will print more than desired)&quot;
+  ([card-id :- ::lib.schema.id/card]
+   (card-id-&gt;source-query-and-metadata card-id false))
+  ([card-id :- ::lib.schema.id/card log? :- :boolean]
+   (let [;; todo: we need to cache this. We are running this in preprocess, compile, and then again
+         card           (or (lib.metadata/card (qp.store/metadata-provider) card-id)
+                            (throw (ex-info (tru &quot;Card {0} does not exist.&quot; card-id)
+                                            {:card-id card-id})))
+         persisted-info (:lib/persisted-info card)
+         {{database-id :database} :dataset-query
+          result-metadata         :result-metadata
+          card-type               :type} card
+         persisted?     (qp.persisted/can-substitute? card persisted-info)
+         source-query   (source-query card)]
+     (when (and persisted? log?)
+       (log/info (trs &quot;Found substitute cached query for card {0} from {1}.{2}&quot;
+                      card-id
+                      (ddl.i/schema-name {:id database-id} (public-settings/site-uuid))
+                      (:table-name persisted-info))))
+     ;; log the query at this point, it's useful for some purposes
+     (log/debug (trs &quot;Fetched source query from Card {0}:&quot; card-id)
+                &quot;\n&quot;
+                (u/pprint-to-str 'yellow source-query))
+     (cond-&gt; {:source-query    (cond-&gt; source-query
+                                 ;; This will be applied, if still appropriate, by the peristence middleware
+                                 persisted?
+                                 (assoc :persisted-info/native
+                                        (qp.persisted/persisted-info-native-query
+                                         (u/the-id (lib.metadata/database (qp.store/metadata-provider)))
+                                         persisted-info)))
+              :database        database-id
+              :source-metadata (seq (map mbql.normalize/normalize-source-metadata result-metadata))}
+       (= card-type :model) (assoc :source-query/model? true)))))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
+|                                         Logic for traversing the query                                         |
++----------------------------------------------------------------------------------------------------------------+</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Is <code>x</code> a map with a "card__id" <code>:source-table</code>, i.e., something this middleware needs to resolve?</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([x])} map-with-card-id-source-table?
+  (every-pred
+   map?
+   (comp string? :source-table)
+   (comp (partial re-matches mbql.s/source-table-card-id-regex) :source-table)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private resolve-one :- MapWithResolvedSourceQuery
+  [{:keys [source-table], :as m} :- [:map [:source-table mbql.s/source-table-card-id-regex]]]
+  (let [card-id                   (-&gt; source-table lib.util/legacy-string-table-id-&gt;card-id)
+        source-query-and-metadata (-&gt; card-id (card-id-&gt;source-query-and-metadata true))]
+    (merge
+     (dissoc m :source-table)
+     ;; record the `card-id` we've resolved here. We'll include it in `:info` for permissions purposes later
+     {:source-card-id card-id}
+     source-query-and-metadata)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- resolve-all*
+  [m]
+  (mbql.u/replace m
+    map-with-card-id-source-table?
+    ;; if this is a map that has a Card ID `:source-table`, resolve that (replacing it with the appropriate
+    ;; `:source-query`, then recurse and resolve any nested-nested queries that need to be resolved too
+    (let [resolved (if (public-settings/enable-nested-queries)
+                     (resolve-one &amp;match)
+                     (throw (ex-info (trs &quot;Nested queries are disabled&quot;)
+                                     {:clause &amp;match})))]
+      ;; wrap the recursive call in a try-catch; if the recursive resolution fails, add context about the
+      ;; resolution that were we in the process of
+      (try
+        (resolve-all* resolved)
+        (catch Throwable e
+          (throw (ex-info (tru &quot;Error resolving source query&quot;)
+                          {:resolving &amp;match, :resolved resolved}
+                          e)))))))</pre></td></tr><tr><td class="docs"><p>Check that there are no circular dependencies among source cards. This is equivalent to
+ finding a topological sort of the dependency graph.
+ https://en.wikipedia.org/wiki/Topological_sorting</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- check-for-circular-references
+  ([m]
+   (check-for-circular-references (dep/graph) m)
+   m)
+  ([g m]
+   (transduce (comp (filter map-with-card-id-source-table?)
+                    (map (comp card-id-&gt;source-query-and-metadata
+                               lib.util/legacy-string-table-id-&gt;card-id
+                               :source-table)))
+              (fn
+                ([] g)
+                ([g source-query]
+                 (-&gt; g
+                     (dep/depend m source-query)
+                     ;; Recursive call will circuit break the moment there's a cycle, so no
+                     ;; danger of unbounded recursion.
+                     (check-for-circular-references source-query)))
+                ([g]
+                 ;; This will throw if there's a cycle
+                 (dep/topo-sort g)
+                 g))
+              (tree-seq coll? identity m))))</pre></td></tr><tr><td class="docs"><p>If <code>m</code> has the saved questions virtual <code>:database</code> ID, (recursively) look for actual resolved Database IDs in the
+next level down and copy it to our level.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- copy-source-query-database-ids
+  [{:keys [database], :as m}]
+  (if (and database (not= database lib.schema.id/saved-questions-virtual-database-id))
+    m
+    (let [{:keys [query source-query], :as m}
+          (cond-&gt; m
+            (:query m)        (update :query        copy-source-query-database-ids)
+            (:source-query m) (update :source-query copy-source-query-database-ids))
+          db-id
+          (some (fn [{:keys [database]}]
+                  (when (some-&gt; database (not= lib.schema.id/saved-questions-virtual-database-id))
+                    database))
+                [source-query query])]
+      (cond-&gt; m
+        db-id (assoc :database db-id)))))</pre></td></tr><tr><td class="docs"><p>Remove <code>:database</code> from all levels besides the top level.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- remove-unneeded-database-ids
+  [m]
+  (mbql.u/replace-in m [:query]
+    (&amp;match :guard (every-pred map? :database (comp integer? :database)))
+    (recur (dissoc &amp;match :database))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private extract-resolved-card-id :- [:map
+                                                [:card-id [:maybe ms/PositiveInt]]
+                                                [:query   :map]]
+  &quot;If the ID of the Card we've resolved (`:source-card-id`) was added by a previous step, add it
+  to `:query` `:info` (so it can be included in the QueryExecution log), then return a map with the resolved
+  `:card-id` and updated `:query`.&quot;
+  [query :- :map]
+  (let [card-id (get-in query [:query :source-card-id])]
+    {:query   (cond-&gt; query
+                card-id (update-in [:info :card-id] #(or % card-id)))
+     :card-id card-id}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private resolve-all :- [:map
+                                   [:card-id [:maybe ms/PositiveInt]]
+                                   [:query   :map]]
+  &quot;Recursively replace all Card ID source tables in `query` with resolved `:source-query` and `:source-metadata`. Since
+  the `:database` is only useful for top-level source queries, we'll remove it from all other levels.&quot;
+  [query :- :map]
+  ;; if a `:source-card-id` is already in the query, remove it, so we don't pull user-supplied input up into `:info`
+  ;; allowing someone to bypass permissions
+  (-&gt; (m/dissoc-in query [:query :source-card-id])
+      check-for-circular-references
+      resolve-all*
+      copy-source-query-database-ids
+      remove-unneeded-database-ids
+      extract-resolved-card-id))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn resolve-card-id-source-tables* :- [:map
+                                            [:card-id [:maybe ms/PositiveInt]]
+                                            [:query   FullyResolvedQuery]]
+  &quot;Resolve `card__n`-style `:source-tables` in `query`.&quot;
+  [{inner-query :query, :as outer-query} :- mbql.s/Query]
+  (if-not inner-query
+    ;; for non-MBQL queries there's nothing to do since they have nested queries
+    {:query outer-query, :card-id nil}
+    ;; Otherwise attempt to expand any source queries as needed. Pull the `:database` key up into the top-level if it
+    ;; exists
+    (resolve-all outer-query)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

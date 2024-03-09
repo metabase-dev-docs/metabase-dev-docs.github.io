@@ -2875,6 +2875,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [clojure.walk :as walk]
    [medley.core :as m]
    [metabase.driver :as driver]
+   [metabase.lib.convert :as lib.convert]
    [metabase.mbql.normalize :as mbql.normalize]
    [metabase.util :as u]
    [metabase.util.malli :as mu]))</pre></td></tr><tr><td class="docs">
@@ -2932,22 +2933,39 @@ all the maps to sorted maps so queries are serialized to JSON in an identical or
               (not (sorted? x)))
        (into (sorted-map) x)
        x))
+   x))</pre></td></tr><tr><td class="docs"><p>Two queries should be the same even if they have different :lib/uuids, because they might have both been converted
+from the same legacy query.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- remove-lib-uuids
+  [x]
+  (walk/postwalk
+   (fn [x]
+     (if (map? x)
+       (dissoc x :lib/uuid)
+       x))
    x))</pre></td></tr><tr><td class="docs"><p>Return <code>query</code> with only the keys relevant to hashing kept.
 (This is done so irrelevant info or options that don't affect query results doesn't result in the same query
 producing different hashes.)</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private select-keys-for-hashing
   [query :- :map]
-  (let [{:keys [constraints parameters], :as query} (select-keys query [:database :type :query :native :parameters
-                                                                        :constraints])]
+  (let [{:keys [constraints parameters], :as query} (select-keys query [:database :lib/type :stages :parameters :constraints])]
     (cond-&gt; query
       (empty? constraints) (dissoc :constraints)
       (empty? parameters)  (dissoc :parameters)
+      true                 remove-lib-uuids
       true                 walk-query-sort-maps)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:non-arg-vec-return-type-hint]}
-(mu/defn ^&quot;[B&quot; query-hash :- bytes?
+</td><td class="codes"><pre class="brush: clojure">(mu/defn query-hash :- bytes?
   &quot;Return a 256-bit SHA3 hash of `query` as a key for the cache. (This is returned as a byte array.)&quot;
-  [query :- :map]
-  (buddy-hash/sha3-256 (json/generate-string (select-keys-for-hashing query))))</pre></td></tr><tr><td class="docs"><p>--------------------------------------------- Query Source Card IDs ----------------------------------------------</p>
+  ^bytes [query :- :map]
+  ;; convert to pMBQL first if this is a legacy query.
+  (let [query (try
+                (cond-&gt; query
+                  (#{&quot;query&quot; &quot;native&quot;} (:type query)) (#(lib.convert/-&gt;pMBQL (mbql.normalize/normalize %)))
+                  (#{:query :native} (:type query))   lib.convert/-&gt;pMBQL)
+                (catch Throwable e
+                  (throw (ex-info &quot;Error hashing query. Is this a valid query?&quot;
+                                  {:query query}
+                                  e))))]
+    (buddy-hash/sha3-256 (json/generate-string (select-keys-for-hashing query)))))</pre></td></tr><tr><td class="docs"><p>--------------------------------------------- Query Source Card IDs ----------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Return the ID of the Card used as the "source" query of this query, if applicable; otherwise return <code>nil</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn query-&gt;source-card-id
   ^Integer [outer-query]

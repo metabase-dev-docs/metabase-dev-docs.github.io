@@ -2881,6 +2881,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.driver :as driver]
    [metabase.driver.sync :as driver.s]
    [metabase.driver.util :as driver.u]
+   [metabase.events :as events]
    [metabase.lib.core :as lib]
    [metabase.mbql.util :as mbql.u]
    [metabase.models :refer [Database]]
@@ -3159,7 +3160,9 @@ Empty strings are parsed as nil.</p>
         auto-pk-indices (auto-pk-column-indices header)]
     (cond-&gt;&gt; header-and-rows
       auto-pk-indices
-      (map (partial remove-indices auto-pk-indices)))))</pre></td></tr><tr><td class="docs"><p>Loads a table from a CSV file. If the table already exists, it will throw an error.
+      (map (partial remove-indices auto-pk-indices)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- file-size-mb [csv-file]
+  (/ (.length ^File csv-file) 1048576.0))</pre></td></tr><tr><td class="docs"><p>Loads a table from a CSV file. If the table already exists, it will throw an error.
  Returns the file size, number of rows, and number of columns.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- load-from-csv!
   [driver db-id table-name ^File csv-file]
@@ -3182,8 +3185,7 @@ Empty strings are parsed as nil.</p>
         {:num-rows          (count rows)
          :num-columns       (count extant-columns)
          :generated-columns (count generated-columns)
-         :size-mb           (/ (.length csv-file)
-                               1048576.0)}
+         :size-mb           (file-size-mb csv-file)}
         (catch Throwable e
           (driver/drop-table! driver db-id table-name)
           (throw (ex-info (ex-message e) {:status-code 400})))))))</pre></td></tr><tr><td class="docs"><p>+------------------+
@@ -3238,7 +3240,9 @@ entry points. Returns nil otherwise.</p>
     (throw error)))</pre></td></tr><tr><td class="docs"><p>Returns true if the user can upload to the given database and schema, and false otherwise.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn can-create-upload?
   [db schema-name]
-  (nil? (can-create-upload-error db schema-name)))</pre></td></tr><tr><td class="docs"><p>+-----------------------------------------
+  (nil? (can-create-upload-error db schema-name)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- start-timer [] (System/nanoTime))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- since-ms [timer] (/ (- (System/nanoTime) timer) 1e6))</pre></td></tr><tr><td class="docs"><p>+-----------------------------------------
 |  public interface for creating CSV table
 +-----------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Main entry point for CSV uploading.</p>
@@ -3277,7 +3281,7 @@ Returns the newly created model. May throw validation, permimissions, or DB erro
     (check-can-create-upload database schema-name)
     (collection/check-write-perms-for-collection collection-id)
     (try
-      (let [start-time        (System/currentTimeMillis)
+      (let [timer             (start-timer)
             driver            (driver.u/database-&gt;driver database)
             filename-prefix   (or (second (re-matches #&quot;(.*)\.csv$&quot; filename))
                                   filename)
@@ -3305,14 +3309,20 @@ Returns the newly created model. May throw validation, permimissions, or DB erro
                                 :name                   (humanization/name-&gt;human-readable-name filename-prefix)
                                 :visualization_settings {}}
                                @api/*current-user*)
-            upload-seconds    (/ (- (System/currentTimeMillis) start-time)
-                                 1000.0)]
+            upload-seconds    (/ (since-ms timer) 1e3)
+            stats             (assoc stats :upload-seconds upload-seconds)]
+        (events/publish-event! :event/upload-create
+                               {:user-id  (:id @api/*current-user*)
+                                :model-id (:id table)
+                                :model    :model/Table
+                                :details  {:db-id       db-id
+                                           :schema-name schema-name
+                                           :table-name  table-name
+                                           :model-id    (:id card)
+                                           :stats       stats}})
         (snowplow/track-event! ::snowplow/csv-upload-successful
                                api/*current-user-id*
-                               (merge
-                                {:model-id       (:id card)
-                                 :upload-seconds upload-seconds}
-                                stats))
+                               (assoc stats :model-id (:id card)))
         card)
       (catch Throwable e
         (let [fail-stats (with-open [reader (bom/bom-reader file)]
@@ -3384,7 +3394,8 @@ Returns the newly created model. May throw validation, permimissions, or DB erro
 </td><td class="codes"><pre class="brush: clojure">(defn- append-csv!*
   [database table file]
   (with-open [reader (bom/bom-reader file)]
-    (let [[header &amp; rows]    (without-auto-pk-columns (csv/read-csv reader))
+    (let [timer              (start-timer)
+          [header &amp; rows]    (without-auto-pk-columns (csv/read-csv reader))
           driver             (driver.u/database-&gt;driver database)
           normed-name-&gt;field (m/index-by (comp normalize-column-name :name)
                                          (t2/select :model/Field :table_id (:id table) :active true))
@@ -3408,7 +3419,8 @@ Returns the newly created model. May throw validation, permimissions, or DB erro
                                  (-&gt;&gt; (changed-field-&gt;new-type fields old-column-types relaxed-types)
                                       (alter-columns! driver database table))))
           ;; this will fail if any of our required relaxations were rejected.
-          parsed-rows        (parse-rows settings new-column-types rows)]
+          parsed-rows        (parse-rows settings new-column-types rows)
+          row-count          (count parsed-rows)]
       (try
         (driver/insert-into! driver (:id database) (table-identifier table) normed-header parsed-rows)
         (catch Throwable e
@@ -3423,7 +3435,19 @@ Returns the newly created model. May throw validation, permimissions, or DB erro
       (when create-auto-pk?
         (let [auto-pk-field (table-id-&gt;auto-pk-column (:id table))]
           (t2/update! :model/Field (:id auto-pk-field) {:display_name (:name auto-pk-field)})))
-      {:row-count (count parsed-rows)})))</pre></td></tr><tr><td class="docs"><p>Returns an ExceptionInfo object if the user cannot upload to the given database and schema. Returns nil otherwise.</p>
+      (events/publish-event! :event/upload-append
+                             {:user-id  (:id @api/*current-user*)
+                              :model-id (:id table)
+                              :model    :model/Table
+                              :details  {:db-id       (:id database)
+                                         :schema-name (:schema table)
+                                         :table-name  (:name table)
+                                         :stats       {:num-rows          row-count
+                                                       :num-columns       (count new-column-types)
+                                                       :generated-columns (if create-auto-pk? 1 0)
+                                                       :size-mb           (file-size-mb file)
+                                                       :upload-seconds    (since-ms timer)}}})
+      {:row-count row-count})))</pre></td></tr><tr><td class="docs"><p>Returns an ExceptionInfo object if the user cannot upload to the given database and schema. Returns nil otherwise.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- can-append-error
   [db table]
   (or (can-use-uploads-error db)

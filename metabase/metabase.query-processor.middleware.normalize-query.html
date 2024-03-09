@@ -2868,50 +2868,59 @@ net.brehaut.ClojureTools = (function (SH) {
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.query-processor.middleware.normalize-query" name="metabase.query-processor.middleware.normalize-query"><h1 class="project-name">metabase.query-processor.middleware.normalize-query</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Middleware that converts a query into a normalized, canonical form.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.query-processor.middleware.normalize-query
   (:require
-   [metabase.lib.convert :as lib.convert]
    [metabase.lib.core :as lib]
-   [metabase.mbql.normalize :as mbql.normalize]
+   [metabase.lib.schema.id :as lib.schema.id]
    [metabase.query-processor.error-type :as qp.error-type]
+   [metabase.query-processor.store :as qp.store]
    [metabase.util :as u]
    [metabase.util.i18n :as i18n]
    [metabase.util.log :as log]
    [metabase.util.malli :as mu]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private normalize-audit-app-query :- [:map
-                                                 [:type [:= :internal]]]
-  [query :- :map]
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private query-type :- [:enum #_pMBQL :mbql/query #_legacy :query :native #_audit :internal]
+  &quot;Query type from a not-yet-normalized query map.&quot;
+  [query]
+  (keyword (some #(get query %) [:lib/type &quot;lib/type&quot; :type &quot;type&quot;])))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmulti ^:private normalize*
+  {:arglists '([query])}
+  query-type)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- normalize-legacy-query [query]
+  (lib/query (qp.store/metadata-provider) query))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod normalize* :query  [query] (normalize-legacy-query query))
+(defmethod normalize* :native [query] (normalize-legacy-query query))</pre></td></tr><tr><td class="docs"><p>normalize a pMBQL query</p>
+</td><td class="codes"><pre class="brush: clojure">(defmethod normalize* :mbql/query
+  [query]
+  (let [query (lib/normalize query)]
+    ;; attach the metatdata provider if needed.
+    (cond-&gt;&gt; query
+      (not (:lib/metadata query)) (lib/query (qp.store/metadata-provider)))))</pre></td></tr><tr><td class="docs"><p>normalize an audit app query</p>
+</td><td class="codes"><pre class="brush: clojure">(defmethod normalize* :internal
+  [query]
   (-&gt; query
       (update-keys keyword)
       (update :type keyword)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn normalize-preprocessing-middleware :- :map
+</td><td class="codes"><pre class="brush: clojure">(defmethod normalize* :default
+  [query]
+  (throw (ex-info (i18n/tru &quot;Invalid query, missing query :type or :lib/type&quot;)
+                  {:query query, :type qp.error-type/invalid-query})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn normalize-preprocessing-middleware :- [:and
+                                                [:map
+                                                 [:database ::lib.schema.id/database]
+                                                 [:lib/type {:optional true} [:= :mbql/query]]
+                                                 [:type     {:optional true} [:= :internal]]]
+                                                [:fn
+                                                 {:error/message &quot;valid pMBQL query or :internal audit query&quot;}
+                                                 (some-fn :lib/type :type)]]
   &quot;Preprocessing middleware. Normalize a query, meaning do things like convert keys and MBQL clause tags to kebab-case
-  keywords. Convert MLv2 pMBQL queries to legacy (temporary, until the QP is updated to process MLv2 directly).&quot;
+  keywords. Convert query to pMBQL if needed.&quot;
   [query :- :map]
   (try
-    (let [query-type (keyword (some #(get query %) [:lib/type &quot;lib/type&quot; :type &quot;type&quot;]))
-          normalized (case query-type
-                       :mbql/query      ; pMBQL pipeline query
-                       (lib.convert/-&gt;legacy-MBQL (lib/normalize query))
-                       (:query :native)
-                       (mbql.normalize/normalize query)
-                       :internal
-                       (normalize-audit-app-query query)
-                       #_else
-                       (throw (ex-info (i18n/tru &quot;Invalid query, missing query :type or :lib/type&quot;)
-                                       {:query query, :type qp.error-type/invalid-query})))]
-      (log/tracef &quot;Normalized query:\n%s\n=&gt;\n%s&quot; (u/pprint-to-str query) (u/pprint-to-str normalized))
-      normalized)
+    (u/prog1 (normalize* query)
+      (log/tracef &quot;Normalized query:\n%s\n=&gt;\n%s&quot; (u/pprint-to-str query) (u/pprint-to-str &lt;&gt;)))
     (catch Throwable e
-      (throw (ex-info (format &quot;Error normalizing query: %s&quot; (.getMessage e))
+      (throw (ex-info (format &quot;Error normalizing query: %s&quot; (ex-message e))
                       {:type  qp.error-type/qp
                        :query query}
-                      e)))))</pre></td></tr><tr><td class="docs"><p>Middleware that converts a query into a normalized, canonical form, including things like converting all identifiers
-into standard <code>lisp-case</code> ones, removing/rewriting legacy clauses, removing empty ones, etc. This is done to
-simplifiy the logic in the QP steps following this.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn normalize-around-middleware
-  [qp]
-  (fn [query rff]
-    (qp (normalize-preprocessing-middleware query) rff)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+                      e)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
