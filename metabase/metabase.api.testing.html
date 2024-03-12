@@ -2873,8 +2873,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [compojure.core :refer [POST]]
    [metabase.api.common :as api]
    [metabase.config :as config]
-   [metabase.db.connection :as mdb.connection]
-   [metabase.db.setup :as mdb.setup]
+   [metabase.db :as mdb]
    [metabase.util.files :as u.files]
    [metabase.util.log :as log]
    [metabase.util.malli.schema :as ms])
@@ -2893,10 +2892,10 @@ net.brehaut.ClojureTools = (function (SH) {
     (str (.toAbsolutePath path))))</pre></td></tr><tr><td class="docs"><p>SAVE</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- save-snapshot! [snapshot-name]
-  (assert-h2 mdb.connection/*application-db*)
+  (assert-h2 (mdb/app-db))
   (let [path (snapshot-path-for-name snapshot-name)]
     (log/infof &quot;Saving snapshot to %s&quot; path)
-    (jdbc/query {:datasource mdb.connection/*application-db*} [&quot;SCRIPT TO ?&quot; path]))
+    (jdbc/query {:datasource (mdb/app-db)} [&quot;SCRIPT TO ?&quot; path]))
   :ok)</pre></td></tr><tr><td class="docs"><p>/snapshot/:name</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint POST 
   &quot;Snapshot the database for testing purposes.&quot;
@@ -2907,7 +2906,7 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Immediately destroy all open connections in the app DB connection pool.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- reset-app-db-connection-pool!
   []
-  (let [{:keys [data-source]} mdb.connection/*application-db*]
+  (let [data-source (mdb/data-source)]
      (when (instance? PoolBackedDataSource data-source)
        (log/info &quot;Destroying application database connection pool&quot;)
        (.hardReset ^PoolBackedDataSource data-source))))</pre></td></tr><tr><td class="docs"><p>Drop all objects in the application DB, then reload everything from the SQL dump at <code>snapshot-path</code>.</p>
@@ -2915,7 +2914,7 @@ net.brehaut.ClojureTools = (function (SH) {
   [^String snapshot-path]
   (log/infof &quot;Restoring snapshot from %s&quot; snapshot-path)
   (api/check-404 (.exists (java.io.File. snapshot-path)))
-  (with-open [conn (.getConnection mdb.connection/*application-db*)]
+  (with-open [conn (.getConnection (mdb/app-db))]
     (doseq [sql-args [[&quot;SET LOCK_TIMEOUT 180000&quot;]
                       [&quot;DROP ALL OBJECTS&quot;]
                       [&quot;RUNSCRIPT FROM ?&quot; snapshot-path]]]
@@ -2942,23 +2941,18 @@ net.brehaut.ClojureTools = (function (SH) {
   ;; a bunch of time initializing Liquibase and checking for unrun migrations for every test when we don't need to. --
   ;; Cam
   (when config/is-dev?
-    (mdb.setup/migrate! (mdb.connection/db-type) mdb.connection/*application-db* :up)))</pre></td></tr><tr><td class="docs"><p>Increment the [[mdb.connection/unique-identifier]] for the Metabase application DB. This effectively flushes all
-caches using it as a key (including things using [[mdb.connection/memoize-for-application-db]]) such as the Settings
-cache.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- increment-app-db-unique-indentifier!
-  []
-  (alter-var-root #'mdb.connection/*application-db* assoc :id (swap! mdb.connection/application-db-counter inc)))</pre></td></tr><tr><td class="docs">
+    (mdb/migrate! (mdb/db-type) (mdb/app-db) :up)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- restore-snapshot! [snapshot-name]
-  (assert-h2 mdb.connection/*application-db*)
+  (assert-h2 (mdb/app-db))
   (let [path                         (snapshot-path-for-name snapshot-name)
-        ^ReentrantReadWriteLock lock (:lock mdb.connection/*application-db*)]
+        ^ReentrantReadWriteLock lock (:lock (mdb/app-db))]
     ;; acquire the application DB WRITE LOCK which will prevent any other threads from getting any new connections until
     ;; we release it.
     (try
       (.. lock writeLock lock)
       (reset-app-db-connection-pool!)
       (restore-app-db-from-snapshot! path)
-      (increment-app-db-unique-indentifier!)
+      (mdb/increment-app-db-unique-indentifier!)
       (finally
         (.. lock writeLock unlock))))
   :ok)</pre></td></tr><tr><td class="docs"><p>/restore/:name</p>

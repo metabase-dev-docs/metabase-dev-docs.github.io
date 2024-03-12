@@ -2883,17 +2883,13 @@ those Fields potentially dozens of times in a single query execution.</p>
    [medley.core :as m]
    [metabase.lib.convert :as lib.convert]
    [metabase.lib.metadata :as lib.metadata]
-   [metabase.lib.metadata.composed-provider :as lib.metadata.composed-provider]
    [metabase.lib.metadata.jvm :as lib.metadata.jvm]
-   [metabase.lib.metadata.protocols :as lib.metadata.protocols]
-   [metabase.lib.schema.common :as lib.schema.common]
    [metabase.lib.schema.id :as lib.schema.id]
    [metabase.lib.schema.metadata :as lib.schema.metadata]
    [metabase.query-processor.error-type :as qp.error-type]
    [metabase.util :as u]
    [metabase.util.i18n :refer [tru]]
-   [metabase.util.malli :as mu]
-   [metabase.util.malli.schema :as ms]))</pre></td></tr><tr><td class="docs">
+   [metabase.util.malli :as mu]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private uninitialized-store
   (reify
@@ -3017,70 +3013,18 @@ a [[metabase.lib.metadata.jvm/application-database-metadata-provider]].</p>
 </td><td class="codes"><pre class="brush: clojure">(defmacro with-metadata-provider
   {:style/indent [:defn]}
   [database-id-or-metadata-provider &amp; body]
-  `(do-with-metadata-provider ~database-id-or-metadata-provider (^:once fn* [] ~@body)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- missing-bulk-metadata-error [metadata-type id]
-  (ex-info (tru &quot;Failed to fetch {0} {1}&quot; (pr-str metadata-type) (pr-str id))
-           {:status-code       400
-            :type              qp.error-type/invalid-query
-            :metadata-provider (metadata-provider)
-            :metadata-type     metadata-type
-            :id                id}))</pre></td></tr><tr><td class="docs">
+  `(do-with-metadata-provider ~database-id-or-metadata-provider (^:once fn* [] ~@body)))</pre></td></tr><tr><td class="docs"><p>TODO -- mark this deprecated in favor of the version in <code>lib.metadata</code></p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn bulk-metadata :- [:maybe [:sequential [:map
                                                 [:lib/type :keyword]
-                                                [:id ::lib.schema.common/positive-int]]]]
-  &quot;Fetch multiple objects in bulk. If our metadata provider is a bulk provider (e.g., the application database metadata
-  provider), does a single fetch with [[lib.metadata.protocols/bulk-metadata]] if not (i.e., if this is a mock
-  provider), fetches them with repeated calls to the appropriate single-object method,
-  e.g. [[lib.metadata.protocols/field]].
-  The order of the returned objects will match the order of `ids`, and the response is guaranteed to contain every
-  object referred to by `ids`. Throws an exception if any objects could not be fetched.
-  This can also be called for side-effects to warm the cache.&quot;
+                                                [:id pos-int?]]]]
+  &quot;DEPRECATED -- prefer [[metabase.lib.metadata/bulk-metadata-or-throw]] instead.&quot;
   [metadata-type :- [:enum :metadata/card :metadata/column :metadata/metric :metadata/segment :metadata/table]
    ids           :- [:maybe
                      [:or
-                      [:set ::lib.schema.common/positive-int]
-                      [:sequential ::lib.schema.common/positive-int]]]]
-  (when-let [ids-set (not-empty (set ids))]
-    (let [provider   (metadata-provider)
-          objects    (vec (if (satisfies? lib.metadata.protocols/BulkMetadataProvider provider)
-                            (filter some? (lib.metadata.protocols/bulk-metadata provider metadata-type ids-set))
-                            (lib.metadata.composed-provider/fetch-bulk-metadata-with-non-bulk-provider
-                             provider
-                             metadata-type
-                             ids-set)))
-          id-&gt;object (m/index-by :id objects)]
-      (mapv (fn [id]
-              (or (get id-&gt;object id)
-                  (throw (missing-bulk-metadata-error metadata-type id))))
-            ids))))</pre></td></tr><tr><td class="docs"><p>DEPRECATED STUFF</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:deprecated &quot;0.48.0&quot;} LegacyDatabaseMetadata
-  [:map
-   [:id       ::lib.schema.id/database]
-   [:engine   :keyword]
-   [:name     ms/NonBlankString]
-   [:details  :map]
-   [:settings [:maybe :map]]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:deprecated &quot;0.48.0&quot;} LegacyTableMetadata
-  [:map
-   [:schema [:maybe :string]]
-   [:name   ms/NonBlankString]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:deprecated &quot;0.48.0&quot;} LegacyFieldMetadata
-  [:map
-   [:name          ms/NonBlankString]
-   [:table_id      ::lib.schema.id/table]
-   [:display_name  ms/NonBlankString]
-   [:description   [:maybe :string]]
-   [:database_type ms/NonBlankString]
-   [:base_type     ms/FieldType]
-   [:semantic_type [:maybe ms/FieldSemanticOrRelationType]]
-   [:fingerprint   [:maybe :map]]
-   [:parent_id     [:maybe ::lib.schema.id/field]]
-   [:nfc_path      [:maybe [:sequential ms/NonBlankString]]]
-   ;; there's a tension as we sometimes store fields from the db, and sometimes store computed fields. ideally we
-   ;; would make everything just use base_type.
-   [:effective_type    {:optional true} [:maybe ms/FieldType]]
-   [:coercion_strategy {:optional true} [:maybe ms/CoercionStrategy]]])</pre></td></tr><tr><td class="docs"><p>For compatibility: convert MLv2-style metadata as returned by [[metabase.lib.metadata.protocols]]
+                      [:set pos-int?]
+                      [:sequential pos-int?]]]]
+  (lib.metadata/bulk-metadata-or-throw (metadata-provider) metadata-type ids))</pre></td></tr><tr><td class="docs"><p>DEPRECATED STUFF</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>For compatibility: convert MLv2-style metadata as returned by [[metabase.lib.metadata.protocols]]
 or [[metabase.lib.metadata]] functions
 (with <code>kebab-case</code> keys and <code>:lib/type</code>) to legacy QP/application database style metadata (with <code>snake_case</code> keys
 and Toucan 2 model <code>:type</code> metadata).</p>
@@ -3097,41 +3041,7 @@ and Toucan 2 model <code>:type</code> metadata).</p>
         (dissoc :lib/type)
         (update-keys u/-&gt;snake_case_en)
         (vary-meta assoc :type model)
-        (m/update-existing :field_ref lib.convert/-&gt;legacy-MBQL))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(mu/defn database :- LegacyDatabaseMetadata
-  &quot;Fetch the Database referenced by the current query from the QP Store. Throws an Exception if valid item is not
-  returned.
-  Deprecated in favor of [[metabase.lib.metadata/database]] + [[metadata-provider]].&quot;
-  {:deprecated &quot;0.48.0&quot;}
-  []
-  (-&gt;legacy-metadata (lib.metadata/database (metadata-provider))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(mu/defn ^:deprecated table :- LegacyTableMetadata
-  &quot;Fetch Table with `table-id` from the QP Store. Throws an Exception if valid item is not returned.
-  Deprecated in favor of [[metabase.lib.metadata/table]] + [[metadata-provider]].&quot;
-  {:deprecated &quot;0.48.0&quot;}
-  [table-id :- ::lib.schema.id/table]
-  (-&gt; (or (lib.metadata.protocols/table (metadata-provider) table-id)
-          (throw (ex-info (tru &quot;Failed to fetch Table {0}: Table does not exist, or belongs to a different Database.&quot;
-                               (pr-str table-id))
-                          {:status-code 404
-                           :type        qp.error-type/invalid-query
-                           :table-id    table-id})))
-      -&gt;legacy-metadata))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(mu/defn ^:deprecated field :- LegacyFieldMetadata
-  &quot;Fetch Field with `field-id` from the QP Store. Throws an Exception if valid item is not returned.
-  Deprecated in favor of [[metabase.lib.metadata/field]] + [[metadata-provider]].&quot;
-  {:deprecated &quot;0.48.0&quot;}
-  [field-id :- ::lib.schema.id/field]
-  (-&gt; (or (lib.metadata.protocols/field (metadata-provider) field-id)
-          (throw (ex-info (tru &quot;Failed to fetch Field {0}: Field does not exist, or belongs to a different Database.&quot;
-                               (pr-str field-id))
-                          {:status-code 404
-                           :type        qp.error-type/invalid-query
-                           :field-id    field-id})))
-      -&gt;legacy-metadata))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+        (m/update-existing :field_ref lib.convert/-&gt;legacy-MBQL))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

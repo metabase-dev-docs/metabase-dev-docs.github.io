@@ -2875,6 +2875,8 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.lib.query :as lib.query]
    [metabase.lib.schema :as lib.schema]
    [metabase.lib.schema.common :as common]
+   [metabase.lib.schema.id :as lib.schema.id]
+   [metabase.lib.schema.metadata :as lib.schema.metadata]
    [metabase.lib.schema.template-tag :as lib.schema.template-tag]
    [metabase.lib.util :as lib.util]
    [metabase.shared.util.i18n :as i18n]
@@ -2972,7 +2974,7 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(mu/defn required-native-extras :- set?
   &quot;Returns the extra keys that are required for this database's native queries, for example `:collection` name is
   needed for MongoDB queries.&quot;
-  [metadata-provider :- lib.metadata/MetadataProviderable]
+  [metadata-provider :- ::lib.schema.metadata/metadata-providerable]
   (let [db (lib.metadata/database metadata-provider)]
    (cond-&gt; #{}
     (get-in db [:features :native-requires-specified-collection])
@@ -2998,12 +3000,12 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(mu/defn native-query :- ::lib.schema/query
   &quot;Create a new native query.
   Native in this sense means a pMBQL query with a first stage that is a native query.&quot;
-  ([metadata-providerable :- lib.metadata/MetadataProviderable
+  ([metadata-providerable :- ::lib.schema.metadata/metadata-providerable
     inner-query :- ::common/non-blank-string]
    (native-query metadata-providerable inner-query nil nil))
-  ([metadata-providerable :- lib.metadata/MetadataProviderable
+  ([metadata-providerable :- ::lib.schema.metadata/metadata-providerable
     inner-query :- ::common/non-blank-string
-    results-metadata :- [:maybe lib.metadata/StageMetadata]
+    results-metadata :- [:maybe ::lib.schema.metadata/stage]
     native-extras :- [:maybe ::native-extras]]
    (let [tags (extract-template-tags inner-query)]
      (-&gt; (lib.query/query-with-stages metadata-providerable
@@ -3016,10 +3018,10 @@ net.brehaut.ClojureTools = (function (SH) {
   &quot;Changes the database for this query. The first stage must be a native type.
    Native extras must be provided if the new database requires it.&quot;
   ([query :- ::lib.schema/query
-    metadata-provider :- lib.metadata/MetadataProviderable]
+    metadata-provider :- ::lib.schema.metadata/metadata-providerable]
    (with-different-database query metadata-provider nil))
   ([query :- ::lib.schema/query
-    metadata-provider :- lib.metadata/MetadataProviderable
+    metadata-provider :- ::lib.schema.metadata/metadata-providerable
     native-extras :- [:maybe ::native-extras]]
    (assert-native-query! (lib.util/query-stage query 0))
    ;; Changing the database should also clean up template tags, see #31926
@@ -3056,10 +3058,21 @@ net.brehaut.ClojureTools = (function (SH) {
   &quot;Returns the native query string&quot;
   [query :- ::lib.schema/query]
   (:native (lib.util/query-stage query 0)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn template-tags :- ::lib.schema.template-tag/template-tag-map
+</td><td class="codes"><pre class="brush: clojure">(mu/defn template-tags :- [:maybe ::lib.schema.template-tag/template-tag-map]
   &quot;Returns the native query's template tags&quot;
   [query :- ::lib.schema/query]
   (:template-tags (lib.util/query-stage query 0)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn template-tag-card-ids :- [:maybe [:set {:min 1} ::lib.schema.id/card]]
+  &quot;Returns the card IDs from the template tags of the native query of `query`.&quot;
+  [query :- ::lib.schema/query]
+  (not-empty (into #{} (keep (fn [[_k m]] (:card-id m))) (template-tags query))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn template-tags-referenced-cards :- [:maybe [:sequential ::lib.schema.metadata/card]]
+  &quot;Returns Card instances referenced by the given native `query`.&quot;
+  [query :- ::lib.schema/query]
+  (mapv
+   (fn [card-id]
+     (lib.metadata/card query card-id))
+   (template-tag-card-ids query)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn has-write-permission :- :boolean
   &quot;Returns whether the database has native write permissions.
    This is only filled in by [[metabase.api.database/add-native-perms-info]]

@@ -2933,9 +2933,8 @@ AND field_2 = "abc"</p>
    [clojure.set :as set]
    [clojure.string :as str]
    [honey.sql :as sql]
-   [metabase.db.connection :as mdb.connection]
+   [metabase.db :as mdb]
    [metabase.db.query :as mdb.query]
-   [metabase.db.util :as mdb.u]
    [metabase.driver.common.parameters.dates :as params.dates]
    [metabase.mbql.util :as mbql.u]
    [metabase.models :refer [Field FieldValues Table]]
@@ -2948,6 +2947,7 @@ AND field_2 = "abc"</p>
    [metabase.query-processor :as qp]
    [metabase.query-processor.middleware.permissions :as qp.perms]
    [metabase.query-processor.preprocess :as qp.preprocess]
+   [metabase.query-processor.setup :as qp.setup]
    [metabase.types :as types]
    [metabase.util :as u]
    [metabase.util.i18n :refer [tru]]
@@ -2955,8 +2955,7 @@ AND field_2 = "abc"</p>
    [metabase.util.malli :as mu]
    [metabase.util.malli.schema :as ms]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs"><p>so the hydration method for name_field is loaded</p>
-</td><td class="codes"><pre class="brush: clojure">(comment params/keep-me)</pre></td></tr><tr><td class="docs"><p>for [[memoize/ttl]] keys</p>
-</td><td class="codes"><pre class="brush: clojure">(comment mdb.connection/keep-me)</pre></td></tr><tr><td class="docs"><p>Schema for a constraint on a field.</p>
+</td><td class="codes"><pre class="brush: clojure">(comment params/keep-me)</pre></td></tr><tr><td class="docs"><p>Schema for a constraint on a field.</p>
 </td><td class="codes"><pre class="brush: clojure">(def Constraint
   [:map
    [:field-id ms/PositiveInt]
@@ -2976,7 +2975,7 @@ the DB too much since this is unlike to change often, if ever.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([field-id])} temporal-field?
   (memoize/ttl
    ^{::memoize/args-fn (fn [[field-id]]
-                         [(mdb.connection/unique-identifier) field-id])}
+                         [(mdb/unique-identifier) field-id])}
    (fn [field-id]
      (types/temporal-field? (t2/select-one [Field :base_type :semantic_type] :id field-id)))
    :ttl/threshold (u/minutes-&gt;ms 10)))</pre></td></tr><tr><td class="docs"><p>Generate a single MBQL <code>:filter</code> clause for a Field and <code>value</code> (or multiple values, if <code>value</code> is a collection).</p>
@@ -3075,7 +3074,7 @@ the implementation of <code>find-joins</code> below.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([database-id enable-reverse-joins?])} database-fk-relationships
   (memoize/ttl
    ^{::memoize/args-fn (fn [[database-id enable-reverse-joins?]]
-                         [(mdb.connection/unique-identifier) database-id enable-reverse-joins?])}
+                         [(mdb/unique-identifier) database-id enable-reverse-joins?])}
    database-fk-relationships*
    :ttl/threshold find-joins-cache-duration-ms))</pre></td></tr><tr><td class="docs"><p>A breadth first traversal of graph, not probing any paths that are over <code>max-depth</code> in length.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- traverse-graph
@@ -3133,7 +3132,7 @@ primary (source) Table is the Table with <code>source-table-id</code>. Informati
                              [database-id source-table-id other-table-id enable-reverse-joins?])} find-joins
   (let [f (memoize/ttl
            ^{::memoize/args-fn (fn [[database-id source-table-id other-table-id enable-reverse-joins?]]
-                                 [(mdb.connection/unique-identifier)
+                                 [(mdb/unique-identifier)
                                   database-id
                                   source-table-id
                                   other-table-id
@@ -3151,7 +3150,7 @@ primary (source) Table is the Table with <code>source-table-id</code>. Informati
 </td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([source-table other-table-ids enable-reverse-joins?])} find-all-joins*
   (memoize/ttl
    ^{::memoize/args-fn (fn [[source-table-id other-table-ids enable-reverse-joins?]]
-                         [(mdb.connection/unique-identifier) source-table-id other-table-ids enable-reverse-joins?])}
+                         [(mdb/unique-identifier) source-table-id other-table-ids enable-reverse-joins?])}
    (fn [source-table-id other-table-ids enable-reverse-joins?]
      (let [db-id     (database/table-id-&gt;database-id source-table-id)
            all-joins (mapcat #(find-joins db-id source-table-id % enable-reverse-joins?)
@@ -3322,8 +3321,8 @@ fail on Postgres.</p>
                                     [:metabase_field :dest] [:= :dest.table_id :table.id]]
                         :where     [:and
                                     [:= :source.id field-id]
-                                    (mdb.u/isa :source.semantic_type :type/PK)
-                                    (mdb.u/isa :dest.semantic_type :type/Name)]
+                                    (mdb.query/isa :source.semantic_type :type/PK)
+                                    (mdb.query/isa :dest.semantic_type :type/Name)]
                         :limit     1}]}
              :ids]]
    :limit  1})</pre></td></tr><tr><td class="docs"><p>TODO -- add some caching here?</p>
@@ -3339,9 +3338,11 @@ fail on Postgres.</p>
     (field-values/field-should-have-field-values? field-id)))</pre></td></tr><tr><td class="docs"><p>Check query permissions against the chain-filter-mbql-query (private #196)</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- check-field-value-query-permissions
   [field-id constraints options]
-  (-&gt;&gt; (chain-filter-mbql-query field-id constraints options)
-       qp.preprocess/preprocess
-       qp.perms/check-query-permissions*))</pre></td></tr><tr><td class="docs">
+  (let [query (chain-filter-mbql-query field-id constraints options)]
+    (qp.setup/with-qp-setup [query query]
+      (-&gt;&gt; query
+           qp.preprocess/preprocess
+           qp.perms/check-query-permissions*))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- cached-field-values [field-id constraints {:keys [limit]}]
   ;; TODO: why don't we remap the human readable values here?
   (let [{:keys [values has_more_values]}

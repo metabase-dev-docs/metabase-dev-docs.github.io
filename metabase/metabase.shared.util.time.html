@@ -2896,26 +2896,32 @@ Most of the implementations are in the split CLJ/CLJS files [[metabase.shared.ut
   add
   format-for-base-type])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- prep-options [options]
-  (merge internal/default-options (u/normalize-map options)))</pre></td></tr><tr><td class="docs"><p>Parses a timestamp value into a date object. This can be a straightforward Unix timestamp or ISO format string.
+  (merge internal/default-options (u/normalize-map options)))</pre></td></tr><tr><td class="docs"><p>Check whether value is coercible to timestamp. Condition resembles [[coerce-to-timestamp]].</p>
+</td><td class="codes"><pre class="brush: clojure">(defn ^:export timestamp-coercible?
+  [value]
+  (or (internal/datetime? value)
+      (string? value)
+      (number? value)))</pre></td></tr><tr><td class="docs"><p>Parses a timestamp value into a date object. This can be a straightforward Unix timestamp or ISO format string.
 But the <code>:unit</code> field can be used to alter the parsing to, for example, treat the input number as a day-of-week or
 day-of-month number.
-Returns Moments in JS and OffsetDateTimes in Java.</p>
+Returns Moments in JS and OffsetDateTimes in Java for coercible values, otherwise nil.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn ^:export coerce-to-timestamp
   ([value] (coerce-to-timestamp value {}))
   ([value options]
-   (let [options (prep-options options)
-         base (cond
-                ;; Just return an already-parsed value. (Moment in CLJS, DateTime classes in CLJ.)
-                (internal/datetime? value)                        (internal/normalize value)
-                ;; If there's a timezone offset, or Z for Zulu/UTC time, parse it directly.
-                (and (string? value)
-                     (re-matches #&quot;.*(Z|[+-]\d\d:?\d\d)$&quot; value)) (internal/parse-with-zone value)
-                ;; Then we fall back to two multimethods for coercing strings and number to timestamps per the :unit.
-                (string? value)                                   (common/string-&gt;timestamp value options)
-                :else                                             (common/number-&gt;timestamp value options))]
-     (if (:local options)
-       (internal/localize base)
-       base))))</pre></td></tr><tr><td class="docs"><p>Parses a standalone time, or the time portion of a timestamp.
+   (when (timestamp-coercible? value)
+     (let [options (prep-options options)
+           base (cond
+                  ;; Just return an already-parsed value. (Moment in CLJS, DateTime classes in CLJ.)
+                  (internal/datetime? value)                        (internal/normalize value)
+                  ;; If there's a timezone offset, or Z for Zulu/UTC time, parse it directly.
+                  (and (string? value)
+                       (re-matches #&quot;.*(Z|[+-]\d\d:?\d\d)$&quot; value)) (internal/parse-with-zone value)
+                  ;; Then we fall back to two multimethods for coercing strings and number to timestamps per the :unit.
+                  (string? value)                                   (common/string-&gt;timestamp value options)
+                  (number? value)                                   (common/number-&gt;timestamp value options))]
+       (if (:local options)
+         (internal/localize base)
+         base)))))</pre></td></tr><tr><td class="docs"><p>Parses a standalone time, or the time portion of a timestamp.
 Accepts a platform time value (eg. Moment, OffsetTime, LocalTime) or a string.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn ^:export coerce-to-time
   [value]

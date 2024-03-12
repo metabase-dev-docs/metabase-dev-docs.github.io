@@ -2869,25 +2869,20 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(ns ^:deprecated metabase.query-processor.middleware.fetch-source-query-legacy
   (:require
    [clojure.set :as set]
-   [medley.core :as m]
    [metabase.driver.ddl.interface :as ddl.i]
    [metabase.driver.util :as driver.u]
    [metabase.lib.convert :as lib.convert]
    [metabase.lib.metadata :as lib.metadata]
    [metabase.lib.schema.id :as lib.schema.id]
-   [metabase.lib.util :as lib.util]
    [metabase.mbql.normalize :as mbql.normalize]
    [metabase.mbql.schema :as mbql.s]
-   [metabase.mbql.util :as mbql.u]
    [metabase.public-settings :as public-settings]
    [metabase.query-processor.store :as qp.store]
    [metabase.query-processor.util.persisted-cache :as qp.persisted]
    [metabase.util :as u]
    [metabase.util.i18n :refer [trs tru]]
    [metabase.util.log :as log]
-   [metabase.util.malli :as mu]
-   [metabase.util.malli.schema :as ms]
-   [weavejester.dependency :as dep]))</pre></td></tr><tr><td class="docs">
+   [metabase.util.malli :as mu]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>These next two schemas are for validating the intermediate stages of the middleware. We don't need to validate the
 entire query</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private SourceQueryAndMetadata
@@ -2896,39 +2891,7 @@ entire query</p>
    [:database        mbql.s/DatabaseID]
    [:source-metadata [:maybe [:sequential mbql.s/SourceQueryMetadata]]]
    [:source-query/model?   {:optional true} :boolean]
-   [:persisted-info/native {:optional true} :string]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private MapWithResolvedSourceQuery
-  [:and
-   [:map
-    [:database        mbql.s/DatabaseID]
-    [:source-metadata [:maybe [:sequential mbql.s/SourceQueryMetadata]]]
-    [:source-query    mbql.s/SourceQuery]
-    [:source-card-id  ms/PositiveInt]]
-   [:fn
-    {:error/message &quot;`:source-table` should be removed&quot;}
-    (complement :source-table)]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- query-has-unresolved-card-id-source-tables? [{inner-mbql-query :query}]
-  (when inner-mbql-query
-    (mbql.u/match-one inner-mbql-query
-      (&amp;match :guard (every-pred map? (comp string? :source-table))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- query-has-resolved-database-id? [{:keys [database]}]
-  ((every-pred integer? pos?) database))</pre></td></tr><tr><td class="docs"><p>Schema for a MBQL query where all <code>card__id</code> <code>:source-tables</code> have been removes and appropriate <code>:source-query</code>s have
-been added instead, and where the top-level <code>:database</code> ID, if it was the 'source query placeholder`, is replaced by
-the actual database ID of the source query.</p>
-
-<p>This schema represents the way the query should look after this middleware finishes preprocessing it.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private FullyResolvedQuery
-  [:and
-   mbql.s/Query
-   [:fn
-    {:error/message &quot;Query where all card__id :source-tables are fully resolved&quot;}
-    (complement query-has-unresolved-card-id-source-tables?)]
-   [:fn
-    {:error/message &quot;Query where source-query virtual `:database` has been replaced with actual Database ID&quot;}
-    query-has-resolved-database-id?]])</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
-|                                       Resolving card__id -> source query                                       |
-+----------------------------------------------------------------------------------------------------------------+</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Get the query to be run from the card</p>
+   [:persisted-info/native {:optional true} :string]])</pre></td></tr><tr><td class="docs"><p>Get the query to be run from the card</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- source-query
   [{dataset-query :dataset-query, card-id :id, :as card}]
   (let [dataset-query (cond-&gt; dataset-query
@@ -2982,123 +2945,7 @@ the actual database ID of the source query.</p>
                                          persisted-info)))
               :database        database-id
               :source-metadata (seq (map mbql.normalize/normalize-source-metadata result-metadata))}
-       (= card-type :model) (assoc :source-query/model? true)))))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
-|                                         Logic for traversing the query                                         |
-+----------------------------------------------------------------------------------------------------------------+</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Is <code>x</code> a map with a "card__id" <code>:source-table</code>, i.e., something this middleware needs to resolve?</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([x])} map-with-card-id-source-table?
-  (every-pred
-   map?
-   (comp string? :source-table)
-   (comp (partial re-matches mbql.s/source-table-card-id-regex) :source-table)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private resolve-one :- MapWithResolvedSourceQuery
-  [{:keys [source-table], :as m} :- [:map [:source-table mbql.s/source-table-card-id-regex]]]
-  (let [card-id                   (-&gt; source-table lib.util/legacy-string-table-id-&gt;card-id)
-        source-query-and-metadata (-&gt; card-id (card-id-&gt;source-query-and-metadata true))]
-    (merge
-     (dissoc m :source-table)
-     ;; record the `card-id` we've resolved here. We'll include it in `:info` for permissions purposes later
-     {:source-card-id card-id}
-     source-query-and-metadata)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- resolve-all*
-  [m]
-  (mbql.u/replace m
-    map-with-card-id-source-table?
-    ;; if this is a map that has a Card ID `:source-table`, resolve that (replacing it with the appropriate
-    ;; `:source-query`, then recurse and resolve any nested-nested queries that need to be resolved too
-    (let [resolved (if (public-settings/enable-nested-queries)
-                     (resolve-one &amp;match)
-                     (throw (ex-info (trs &quot;Nested queries are disabled&quot;)
-                                     {:clause &amp;match})))]
-      ;; wrap the recursive call in a try-catch; if the recursive resolution fails, add context about the
-      ;; resolution that were we in the process of
-      (try
-        (resolve-all* resolved)
-        (catch Throwable e
-          (throw (ex-info (tru &quot;Error resolving source query&quot;)
-                          {:resolving &amp;match, :resolved resolved}
-                          e)))))))</pre></td></tr><tr><td class="docs"><p>Check that there are no circular dependencies among source cards. This is equivalent to
- finding a topological sort of the dependency graph.
- https://en.wikipedia.org/wiki/Topological_sorting</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- check-for-circular-references
-  ([m]
-   (check-for-circular-references (dep/graph) m)
-   m)
-  ([g m]
-   (transduce (comp (filter map-with-card-id-source-table?)
-                    (map (comp card-id-&gt;source-query-and-metadata
-                               lib.util/legacy-string-table-id-&gt;card-id
-                               :source-table)))
-              (fn
-                ([] g)
-                ([g source-query]
-                 (-&gt; g
-                     (dep/depend m source-query)
-                     ;; Recursive call will circuit break the moment there's a cycle, so no
-                     ;; danger of unbounded recursion.
-                     (check-for-circular-references source-query)))
-                ([g]
-                 ;; This will throw if there's a cycle
-                 (dep/topo-sort g)
-                 g))
-              (tree-seq coll? identity m))))</pre></td></tr><tr><td class="docs"><p>If <code>m</code> has the saved questions virtual <code>:database</code> ID, (recursively) look for actual resolved Database IDs in the
-next level down and copy it to our level.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- copy-source-query-database-ids
-  [{:keys [database], :as m}]
-  (if (and database (not= database lib.schema.id/saved-questions-virtual-database-id))
-    m
-    (let [{:keys [query source-query], :as m}
-          (cond-&gt; m
-            (:query m)        (update :query        copy-source-query-database-ids)
-            (:source-query m) (update :source-query copy-source-query-database-ids))
-          db-id
-          (some (fn [{:keys [database]}]
-                  (when (some-&gt; database (not= lib.schema.id/saved-questions-virtual-database-id))
-                    database))
-                [source-query query])]
-      (cond-&gt; m
-        db-id (assoc :database db-id)))))</pre></td></tr><tr><td class="docs"><p>Remove <code>:database</code> from all levels besides the top level.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- remove-unneeded-database-ids
-  [m]
-  (mbql.u/replace-in m [:query]
-    (&amp;match :guard (every-pred map? :database (comp integer? :database)))
-    (recur (dissoc &amp;match :database))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private extract-resolved-card-id :- [:map
-                                                [:card-id [:maybe ms/PositiveInt]]
-                                                [:query   :map]]
-  &quot;If the ID of the Card we've resolved (`:source-card-id`) was added by a previous step, add it
-  to `:query` `:info` (so it can be included in the QueryExecution log), then return a map with the resolved
-  `:card-id` and updated `:query`.&quot;
-  [query :- :map]
-  (let [card-id (get-in query [:query :source-card-id])]
-    {:query   (cond-&gt; query
-                card-id (update-in [:info :card-id] #(or % card-id)))
-     :card-id card-id}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private resolve-all :- [:map
-                                   [:card-id [:maybe ms/PositiveInt]]
-                                   [:query   :map]]
-  &quot;Recursively replace all Card ID source tables in `query` with resolved `:source-query` and `:source-metadata`. Since
-  the `:database` is only useful for top-level source queries, we'll remove it from all other levels.&quot;
-  [query :- :map]
-  ;; if a `:source-card-id` is already in the query, remove it, so we don't pull user-supplied input up into `:info`
-  ;; allowing someone to bypass permissions
-  (-&gt; (m/dissoc-in query [:query :source-card-id])
-      check-for-circular-references
-      resolve-all*
-      copy-source-query-database-ids
-      remove-unneeded-database-ids
-      extract-resolved-card-id))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn resolve-card-id-source-tables* :- [:map
-                                            [:card-id [:maybe ms/PositiveInt]]
-                                            [:query   FullyResolvedQuery]]
-  &quot;Resolve `card__n`-style `:source-tables` in `query`.&quot;
-  [{inner-query :query, :as outer-query} :- mbql.s/Query]
-  (if-not inner-query
-    ;; for non-MBQL queries there's nothing to do since they have nested queries
-    {:query outer-query, :card-id nil}
-    ;; Otherwise attempt to expand any source queries as needed. Pull the `:database` key up into the top-level if it
-    ;; exists
-    (resolve-all outer-query)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+       (= card-type :model) (assoc :source-query/model? true)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

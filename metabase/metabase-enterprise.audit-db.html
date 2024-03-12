@@ -2873,8 +2873,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [clojure.string :as str]
    [metabase-enterprise.internal-user :as ee.internal-user]
    [metabase-enterprise.serialization.cmd :as serialization.cmd]
-   [metabase.db.connection :as mdb.connection]
-   [metabase.db.env :as mdb.env]
+   [metabase.db :as mdb]
    [metabase.models.database :refer [Database]]
    [metabase.models.permissions :as perms]
    [metabase.models.setting :refer [defsetting]]
@@ -2939,7 +2938,7 @@ way to "ls" or list a directory inside of a jar's resources.</p>
 Should only be used for audit/pre-loaded objects.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn entity-id-&gt;object
   [model entity-id]
-  ((mdb.connection/memoize-for-application-db
+  ((mdb/memoize-for-application-db
     (fn [entity-id]
       (t2/select-one model :entity_id entity-id))) entity-id))</pre></td></tr><tr><td class="docs"><p>Default custom reports collection.</p>
 </td><td class="codes"><pre class="brush: clojure">(defenterprise default-custom-reports-collection
@@ -2971,11 +2970,11 @@ throws that off since these IDs are sequential.</li>
 </td><td class="codes"><pre class="brush: clojure">(defn- adjust-audit-db-to-source!
   [{audit-db-id :id}]
   ;; We need to move back to a schema that matches the serialized data
-  (when (contains? #{:mysql :h2} mdb.env/db-type)
+  (when (contains? #{:mysql :h2} (mdb/db-type))
     (t2/update! :model/Database audit-db-id {:engine &quot;postgres&quot;})
-    (when (= :mysql mdb.env/db-type)
+    (when (= :mysql (mdb/db-type))
       (t2/update! :model/Table {:db_id audit-db-id} {:schema &quot;public&quot;}))
-    (when (= :h2 mdb.env/db-type)
+    (when (= :h2 (mdb/db-type))
       (t2/update! :model/Table {:db_id audit-db-id} {:schema [:lower :schema] :name [:lower :name]})
       (t2/update! :model/Field
                   {:table_id
@@ -2987,12 +2986,12 @@ throws that off since these IDs are sequential.</li>
     (log/infof &quot;Adjusted Audit DB for loading Analytics Content&quot;)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- adjust-audit-db-to-host!
   [{audit-db-id :id :keys [engine]}]
-  (when (not= engine mdb.env/db-type)
+  (when (not= engine (mdb/db-type))
     ;; We need to move the loaded data back to the host db
-    (t2/update! :model/Database audit-db-id {:engine (name mdb.env/db-type)})
-    (when (= :mysql mdb.env/db-type)
+    (t2/update! :model/Database audit-db-id {:engine (name (mdb/db-type))})
+    (when (= :mysql (mdb/db-type))
       (t2/update! :model/Table {:db_id audit-db-id} {:schema nil}))
-    (when (= :h2 mdb.env/db-type)
+    (when (= :h2 (mdb/db-type))
       (t2/update! :model/Table {:db_id audit-db-id} {:schema [:upper :schema] :name [:upper :name]})
       (t2/update! :model/Field
                   {:table_id
@@ -3001,7 +3000,7 @@ throws that off since these IDs are sequential.</li>
                      :from [(t2/table-name :model/Table)]
                      :where [:= :db_id audit-db-id]}]}
                   {:name [:upper :name]}))
-    (log/infof &quot;Adjusted Audit DB to match host engine: %s&quot; (name mdb.env/db-type))))</pre></td></tr><tr><td class="docs"><p>A resource dir containing analytics content created by Metabase to load into the app instance on startup.</p>
+    (log/infof &quot;Adjusted Audit DB to match host engine: %s&quot; (name (mdb/db-type)))))</pre></td></tr><tr><td class="docs"><p>A resource dir containing analytics content created by Metabase to load into the app instance on startup.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private analytics-dir-resource
   (io/resource &quot;instance_analytics&quot;))</pre></td></tr><tr><td class="docs"><p>The directory analytics content is unzipped or moved to, and subsequently loaded into the app from on startup.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- instance-analytics-plugin-dir
@@ -3093,10 +3092,10 @@ entirely to avoid calculating checksums in environments (e2e tests) where we don
       (nil? audit-db)
       (u/prog1 ::installed
        (log/info &quot;Installing Audit DB...&quot;)
-       (install-database! mdb.env/db-type perms/audit-db-id))
-      (not= mdb.env/db-type (:engine audit-db))
+       (install-database! (mdb/db-type) perms/audit-db-id))
+      (not= (mdb/db-type) (:engine audit-db))
       (u/prog1 ::updated
-       (log/infof &quot;App DB change detected. Changing Audit DB source to match: %s.&quot; (name mdb.env/db-type))
+       (log/infof &quot;App DB change detected. Changing Audit DB source to match: %s.&quot; (name (mdb/db-type)))
        (adjust-audit-db-to-host! audit-db))
       :else
       ::no-op)))</pre></td></tr><tr><td class="docs"><p>EE implementation of <code>ensure-db-installed!</code>. Installs audit db if it does not already exist, and loads audit

@@ -2881,6 +2881,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.lib.temporal-bucket :as lib.temporal-bucket]
    [metabase.lib.util :as lib.util]
    [metabase.mbql.util :as mbql.u]
+   [metabase.shared.formatting.date :as fmt.date]
    [metabase.shared.util.i18n :as i18n]
    [metabase.shared.util.time :as shared.ut]
    [metabase.util :as u]
@@ -2891,6 +2892,39 @@ net.brehaut.ClojureTools = (function (SH) {
    [:operator [:or :keyword :string]]
    [:options ::lib.schema.common/options]
    [:args [:sequential :any]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private expandable-time-units #{:hour})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private expandable-date-units #{:week :month :quarter :year})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private expandable-temporal-units
+  (into expandable-time-units expandable-date-units))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- expandable-temporal-expression?
+  [[operator _options &amp; [maybe-clause-arg other-arg :as args]]]
+  (boolean (and (= := operator)
+                (= 2 (count args))
+                (lib.util/clause? maybe-clause-arg)
+                (contains? expandable-temporal-units
+                           (:temporal-unit (lib.options/options maybe-clause-arg)))
+                (shared.ut/timestamp-coercible? other-arg))))</pre></td></tr><tr><td class="docs"><p>Modify expression in a way, that its resulting [[expression-parts]] are digestable by filter picker.</p>
+
+<p> Current filter picker implementation is unable to handle expression parts of expressions of a form
+ <code>[:= {...} [:field {:temporal-unit :week} 11] "2024-05-12"]</code> -- expresions that check for equality of a column
+ with <code>:temporal-unit</code> set to value other than <code>:day</code> or <code>:minute</code> to some date time value.</p>
+
+<p> To mitigate that expressions are converted to <code>:between</code> form which is handled correctly by filter picker. For more
+ info on the issue see the comment [https://github.com/metabase/metabase/issues/12496#issuecomment-1629317661].
+ This functionality is backend approach to "smaller solution".</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- expand-temporal-expression
+  [[_operator options column-arg dt-arg :as _expression-clause]]
+  (let [temporal-unit (:temporal-unit (lib.options/options column-arg))
+        interval (shared.ut/to-range (shared.ut/coerce-to-timestamp dt-arg) {:unit temporal-unit :n 1})
+        formatter (if (contains? expandable-time-units temporal-unit)
+                    fmt.date/datetime-&gt;iso-string
+                    fmt.date/date-&gt;iso-string)]
+    (into [:between options column-arg] (map formatter) interval)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- maybe-expand-temporal-expression
+  [expression-clause]
+  (if (expandable-temporal-expression? expression-clause)
+    (expand-temporal-expression expression-clause)
+    expression-clause))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn expression-parts :- ExpressionParts
   &quot;Return the parts of the filter clause `expression-clause` in query `query` at stage `stage-number`.&quot;
   ([query expression-clause]
@@ -2898,7 +2932,7 @@ net.brehaut.ClojureTools = (function (SH) {
   ([query :- ::lib.schema/query
     stage-number :- :int
     expression-clause :- ::lib.schema.expression/expression]
-   (let [[op options &amp; args] expression-clause
+   (let [[op options &amp; args] (maybe-expand-temporal-expression expression-clause)
          -&gt;maybe-col #(when (lib.util/ref-clause? %)
                         (lib.filter/add-column-operators
                           (lib.field/extend-column-metadata-from-ref

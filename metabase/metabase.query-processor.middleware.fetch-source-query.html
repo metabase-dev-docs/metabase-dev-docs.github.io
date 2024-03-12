@@ -2891,6 +2891,9 @@ net.brehaut.ClojureTools = (function (SH) {
 
 <p>TODO -- it's not great that this code lives here. This should be part of the MongoDB driver. We should NOT be
 hardcoding driver-specific behavior in generic QP middleware.</p>
+
+<p>TODO -- consider whether [[normalize-card-query]] should be moved into [[metabase.lib.card]], seems like it would
+make sense but it would involve teasing out some QP-specific stuff to make it work.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- fix-mongodb-first-stage
   [[first-stage &amp; more]]
   (let [first-stage (cond-&gt; first-stage
@@ -2902,9 +2905,11 @@ hardcoding driver-specific behavior in generic QP middleware.</p>
                                           {:collection  (:collection first-stage)
                                            :projections (:projections first-stage)
                                            :query       x}))))]
-    (cons first-stage more)))</pre></td></tr><tr><td class="docs"><p>Convert Card's query (<code>:datasaet-query</code>) to pMBQL as needed; splice in stage metadata and some extra keys.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- normalize-card-query
-  [metadata-providerable {card-id :id, :as card}]
+    (cons first-stage more)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn normalize-card-query :- ::lib.schema.metadata/card
+  &quot;Convert Card's query (`:datasaet-query`) to pMBQL as needed; splice in stage metadata and some extra keys.&quot;
+  [metadata-providerable   :- ::lib.schema.metadata/metadata-providerable
+   {card-id :id, :as card} :- ::lib.schema.metadata/card]
   (let [persisted-info (:lib/persisted-info card)
         persisted?     (qp.persisted/can-substitute? card persisted-info)]
     (when persisted?
@@ -2954,7 +2959,7 @@ hardcoding driver-specific behavior in generic QP middleware.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private resolve-source-cards-in-stage :- [:maybe ::lib.schema/stages]
   [query     :- ::lib.schema/query
    stage     :- ::lib.schema/stage
-   dep-graph :- (ms/InstanceOfClass clojure.lang.Atom)]
+   dep-graph :- (ms/InstanceOfClass clojure.lang.Volatile)]
   (when (and (= (:lib/type stage) :mbql.stage/mbql)
              (:source-card stage))
     ;; make sure nested queries are enabled before resolving them.
@@ -2965,10 +2970,10 @@ hardcoding driver-specific behavior in generic QP middleware.</p>
     ;; dependency of the previously-resolved source card on the one we're about to resolve. We can check for circular
     ;; dependencies this way.
     (when (:qp/stage-is-from-source-card stage)
-      (u/prog1 (swap! dep-graph
-                      dep/depend
-                      (tru &quot;Card {0}&quot; (:qp/stage-is-from-source-card stage))
-                      (tru &quot;Card {0}&quot; (:source-card stage)))
+      (u/prog1 (vswap! dep-graph
+                       dep/depend
+                       (tru &quot;Card {0}&quot; (:qp/stage-is-from-source-card stage))
+                       (tru &quot;Card {0}&quot; (:source-card stage)))
         ;; This will throw if there's a cycle
         (dep/topo-sort &lt;&gt;)))
     (let [card         (card query (:source-card stage))
@@ -3008,7 +3013,7 @@ hardcoding driver-specific behavior in generic QP middleware.</p>
   &quot;If a stage has a `:source-card`, fetch the Card and prepend its underlying stages to the pipeline.&quot;
   [query :- ::lib.schema/query]
   (let [query (dissoc query :source-card-id :qp/source-card-id)] ; `:source-card-id` was the old key
-    (resolve-source-cards* query 0 (atom (dep/graph)))))</pre></td></tr><tr><td class="docs"><p>Post-processing middleware that adds <code>:model</code> and <code>:dataset</code> (for historic reasons) <code>true</code> or <code>false</code> to queries with
+    (resolve-source-cards* query 0 (volatile! (dep/graph)))))</pre></td></tr><tr><td class="docs"><p>Post-processing middleware that adds <code>:model</code> and <code>:dataset</code> (for historic reasons) <code>true</code> or <code>false</code> to queries with
 a source card.</p>
 
 <p>TODO -- we should remove remove the <code>:dataset</code> key and make sure nothing breaks, and make sure everything is looking
