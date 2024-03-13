@@ -2983,7 +2983,7 @@ set it with a different intended JDBC type as needed.</p>
     [(driver/dispatch-on-initialized-driver driver) (class object)])
   :hierarchy #'driver/hierarchy)</pre></td></tr><tr><td class="docs"><p>TODO -- maybe like [[do-with-connection-with-options]] we should replace [[prepared-statment]] and [[statement]]
 with <code>do-with-prepared-statement</code> and <code>do-with-statement</code> methods -- that way you can't accidentally forget to wrap
-things in a <code>try-catch</code> and call <code>.close</code></p>
+things in a <code>try-catch</code> and call <code>.close</code> (metabase#40010)</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Create a PreparedStatement with <code>sql</code> query, and set any <code>params</code>. You shouldn't need to override the default
 implementation for this method; if you do, take care to set options to maximize result set read performance (e.g.
 <code>ResultSet/TYPE_FORWARD_ONLY</code>); refer to the default implementation.</p>
@@ -3068,7 +3068,7 @@ should be considered deprecated in favor of implementing <code>connection-with-t
   [_ _ _])</pre></td></tr><tr><td class="docs"><p>Set the connection transaction isolation level to the least-locking level supported by the DB. See
 https://docs.oracle.com/cd/E19830-01/819-4721/beamv/index.html for an explanation of these levels.</p>
 
-<p>TODO - since we're not running the queries in a transaction, does this make any difference at all?</p>
+<p>TODO - since we're not running the queries in a transaction, does this make any difference at all? (metabase#40012)</p>
 </td><td class="codes"><pre class="brush: clojure">(defn set-best-transaction-level!
   {:added &quot;0.35.0&quot;}
   [driver ^Connection conn]
@@ -3186,11 +3186,10 @@ Connection.</p>
     ;; If this is (supposedly) a read-only connection, we would prefer enable auto-commit
     ;; so this IS NOT ran inside of a transaction, but without transaction the read-only
     ;; flag has no effect for most of the drivers.
-    ;; TODO Enable auto-commit after having communicated this change in behvaior to our users.
     ;;
     ;; TODO -- for `write?` connections, we should probably disable autoCommit and then manually call `.commit` at after
     ;; `f`... we need to check and make sure that won't mess anything up, since some existing code is already doing it
-    ;; manually.
+    ;; manually. (metabase#40014)
     (when-not write?
       (try
         (log/trace (pr-str '(.setAutoCommit conn true)))
@@ -3482,7 +3481,31 @@ by using <code>read-column-thunk</code> to fetch values).</p>
                                                     e))))]
         (let [rsmeta           (.getMetaData rs)
               results-metadata {:cols (column-metadata driver rsmeta)}]
-          (respond results-metadata (reducible-rows driver rs rsmeta qp.pipeline/*canceled-chan*))))))))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
+          (respond results-metadata (reducible-rows driver rs rsmeta qp.pipeline/*canceled-chan*))))))))</pre></td></tr><tr><td class="docs"><p>Returns a reducible collection of rows as maps from <code>db</code> and a given SQL query. This is similar to [[jdbc/reducible-query]] but reuses the
+driver-specific configuration for the Connection and Statement/PreparedStatement. This is slightly different from [[execute-reducible-query]]
+in that it is not intended to be used as part of middleware. Keywordizes column names. </p>
+</td><td class="codes"><pre class="brush: clojure">(defn reducible-query
+  [db [sql &amp; params]]
+  (let [driver (:engine db)]
+    (reify clojure.lang.IReduceInit
+      (reduce [_ rf init]
+        (do-with-connection-with-options
+         driver
+         db
+         nil
+         (fn [^Connection conn]
+           (with-open [stmt          (statement-or-prepared-statement driver conn sql params nil)
+                       ^ResultSet rs (try
+                                       (let [max-rows 0] ; 0 means no limit
+                                         (execute-statement-or-prepared-statement! driver stmt max-rows params sql))
+                                       (catch Throwable e
+                                         (throw (ex-info (tru &quot;Error executing query: {0}&quot; (ex-message e))
+                                                         {:driver driver
+                                                          :sql    (str/split-lines (driver/prettify-native-form driver sql))
+                                                          :params params}
+                                                         e))))]
+             ;; TODO - we should probably be using [[reducible-rows]] instead to convert to the correct types
+             (reduce rf init (jdbc/reducible-result-set rs {})))))))))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
 |                                                 Actions Stuff                                                  |
 +----------------------------------------------------------------------------------------------------------------+</p>
 </td><td class="codes"></td></tr><tr><td class="docs">

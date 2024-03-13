@@ -2870,6 +2870,8 @@ net.brehaut.ClojureTools = (function (SH) {
   (:require
    [honey.sql :as sql]
    [metabase.db.connection :as mdb.connection]
+   [metabase.driver :as driver]
+   [metabase.driver.util :as driver.u]
    [metabase.models.table :as table]
    [metabase.sync.fetch-metadata :as fetch-metadata]
    [metabase.sync.interface :as i]
@@ -2880,13 +2882,12 @@ net.brehaut.ClojureTools = (function (SH) {
    [toucan2.core :as t2]
    [toucan2.realize :as t2.realize]))</pre></td></tr><tr><td class="docs"><p>Returns [sql &amp; params] for [[mark-fk!]] according to the application DB's dialect.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn ^:private mark-fk-sql
-  [{:keys [db-id
-           fk-table-name
-           fk-table-schema
-           fk-column-name
-           pk-table-name
-           pk-table-schema
-           pk-column-name]}]
+  [db-id {:keys [fk-table-name
+                 fk-table-schema
+                 fk-column-name
+                 pk-table-name
+                 pk-table-schema
+                 pk-column-name]}]
   (let [field-id-query (fn [db-id table-schema table-name column-name]
                          {:select [[[:min :f.id] :id]]
                           ;; Cal 2024-03-04: We use `min` to limit this subquery to one result (limit 1 isn't allowed
@@ -2938,49 +2939,66 @@ net.brehaut.ClojureTools = (function (SH) {
     (sql/format q :dialect (mdb.connection/quoting-style (mdb.connection/db-type)))))</pre></td></tr><tr><td class="docs"><p>Updates the <code>fk_target_field_id</code> of a Field. Returns 1 if the Field was successfully updated, 0 otherwise.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private mark-fk!
   [database :- i/DatabaseInstance
-   table    :- i/TableInstance
-   fk       :- i/FKMetadataEntry]
-  (u/prog1 (t2/query-one (mark-fk-sql {:db-id           (:id database)
-                                       :fk-table-name   (:name table)
-                                       :fk-table-schema (:schema table)
-                                       :fk-column-name  (:fk-column-name fk)
-                                       :pk-table-name   (:name (:dest-table fk))
-                                       :pk-table-schema (:schema (:dest-table fk))
-                                       :pk-column-name  (:dest-column-name fk)}))
-    (when (= &lt;&gt; 1)
-      (log/info (u/format-color 'cyan &quot;Marking foreign key from %s %s -&gt; %s %s&quot;
-                                (sync-util/table-name-for-logging table)
-                                (sync-util/field-name-for-logging :name (:fk-column-name fk))
-                                (sync-util/table-name-for-logging (:dest-table fk))
-                                (sync-util/field-name-for-logging :name (:dest-column-name fk)))))))</pre></td></tr><tr><td class="docs"><p>Sync the foreign keys for a specific <code>table</code>.</p>
+   metadata :- i/FKMetadataEntry]
+  (u/prog1 (t2/query-one (mark-fk-sql (:id database) metadata))
+  (when (= &lt;&gt; 1)
+    (log/info (u/format-color 'cyan &quot;Marking foreign key from %s %s -&gt; %s %s&quot;
+                              (sync-util/table-name-for-logging :name (:fk-table-name metadata)
+                                                                :schema (:fk-table-schema metadata))
+                              (sync-util/field-name-for-logging :name (:fk-column-name metadata))
+                              (sync-util/table-name-for-logging :name (:fk-table-name metadata)
+                                                                :schema (:fk-table-schema metadata))
+                              (sync-util/field-name-for-logging :name (:pk-column-name metadata)))))))</pre></td></tr><tr><td class="docs"><p>Sync the foreign keys for a <code>database</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn sync-fks-for-db!
+  [database :- i/DatabaseInstance]
+  (sync-util/with-error-handling (format &quot;Error syncing FKs for %s&quot; (sync-util/name-for-logging database))
+    (let [schema-names (sync-util/db-&gt;sync-schemas database)
+          fk-metadata  (fetch-metadata/fk-metadata database :schema-names schema-names)]
+      (transduce (map (fn [x]
+                        (let [[updated failed] (try [(mark-fk! database x) 0]
+                                                    (catch Exception e
+                                                      (log/error e)
+                                                      [0 1]))]
+                          {:total-fks    1
+                           :updated-fks  updated
+                           :total-failed failed})))
+                 (partial merge-with +)
+                 {:total-fks    0
+                  :updated-fks  0
+                  :total-failed 0}
+                 fk-metadata))))</pre></td></tr><tr><td class="docs"><p>Sync the foreign keys for a specific <code>table</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn sync-fks-for-table!
   ([table :- i/TableInstance]
    (sync-fks-for-table! (table/database table) table))
   ([database :- i/DatabaseInstance
     table    :- i/TableInstance]
    (sync-util/with-error-handling (format &quot;Error syncing FKs for %s&quot; (sync-util/name-for-logging table))
-     (let [fks-to-update (fetch-metadata/fk-metadata database table)]
-       {:total-fks   (count fks-to-update)
-        :updated-fks (sync-util/sum-numbers (fn [fk]
-                                              (mark-fk! database table fk))
-                                            fks-to-update)}))))</pre></td></tr><tr><td class="docs"><p>Sync the foreign keys in a <code>database</code>. This sets appropriate values for relevant Fields in the Metabase application
+     (let [fk-metadata (fetch-metadata/table-fk-metadata database table)]
+       {:total-fks   (count fk-metadata)
+        :updated-fks (sync-util/sum-numbers #(mark-fk! database %) fk-metadata)}))))</pre></td></tr><tr><td class="docs"><p>Sync the foreign keys in a <code>database</code>. This sets appropriate values for relevant Fields in the Metabase application
 DB based on values from the <code>FKMetadata</code> returned by [[metabase.driver/describe-table-fks]].</p>
+
+<p>If the driver supports the <code>:describe-fks</code> feature, [[metabase.driver/describe-fks]] is used to fetch the FK metadata.</p>
+
+<p>This function also sets all the tables that should be synced to have <code>initial-sync-status=complete</code> once the sync is done.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn sync-fks!
   [database :- i/DatabaseInstance]
-  (reduce (fn [update-info table]
-            (let [table         (t2.realize/realize table)
-                  table-fk-info (sync-fks-for-table! database table)]
-              ;; Mark the table as done with its initial sync once this step is done even if it failed, because only
-              ;; sync-aborting errors should be surfaced to the UI (see
-              ;; `:metabase.sync.util/exception-classes-not-to-retry`).
-              (sync-util/set-initial-table-sync-complete! table)
-              (if (instance? Exception table-fk-info)
-                (update update-info :total-failed inc)
-                (merge-with + update-info table-fk-info))))
-          {:total-fks    0
-           :updated-fks  0
-           :total-failed 0}
-          (sync-util/db-&gt;reducible-sync-tables database)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+  (u/prog1 (if (driver/database-supports? (driver.u/database-&gt;driver database) :describe-fks database)
+             (sync-fks-for-db! database)
+             (reduce (fn [update-info table]
+                       (let [table         (t2.realize/realize table)
+                             table-fk-info (sync-fks-for-table! database table)]
+                         (if (instance? Exception table-fk-info)
+                           (update update-info :total-failed inc)
+                           (merge-with + update-info table-fk-info))))
+                     {:total-fks    0
+                      :updated-fks  0
+                      :total-failed 0}
+                     (sync-util/db-&gt;reducible-sync-tables database)))
+    ;; Mark the table as done with its initial sync once this step is done even if it failed, because only
+    ;; sync-aborting errors should be surfaced to the UI (see
+    ;; `:metabase.sync.util/exception-classes-not-to-retry`).
+    (sync-util/set-initial-table-sync-complete-for-db! database)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
