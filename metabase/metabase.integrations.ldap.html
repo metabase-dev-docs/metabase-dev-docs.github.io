@@ -2877,6 +2877,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.plugins.classloader :as classloader]
    [metabase.util :as u]
    [metabase.util.i18n :refer [deferred-tru tru]]
+   [metabase.util.log :as log]
    [metabase.util.malli :as mu]
    [metabase.util.malli.schema :as ms])
   (:import
@@ -2999,8 +3000,15 @@ Otherwise, this would only happen the first time <code>find-user</code> or <code
                           :password  (ldap-password)
                           :security  (ldap-security)}))</pre></td></tr><tr><td class="docs"><p>Connects to LDAP with the currently set settings and returns the connection.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- get-connection
-  ^LDAPConnectionPool []
-  (ldap/connect (settings-&gt;ldap-options)))</pre></td></tr><tr><td class="docs"><p>Impl for [[with-ldap-connection]] macro.</p>
+  ^LDAPConnectionPool
+  []
+  (let [options (settings-&gt;ldap-options)]
+    (log/debugf &quot;Opening LDAP connection with options %s&quot; (u/pprint-to-str options))
+    (try
+      (ldap/connect options)
+      (catch LDAPException e
+        (log/errorf &quot;Failed to obtain LDAP connection: %s&quot; (.getMessage e))
+        (throw e)))))</pre></td></tr><tr><td class="docs"><p>Impl for [[with-ldap-connection]] macro.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn do-with-ldap-connection
   [f]
   (with-open [conn (get-connection)]
@@ -3038,10 +3046,13 @@ Otherwise, this would only happen the first time <code>find-user</code> or <code
              group-base-error)
            (catch Exception _e
              group-base-error)))
+       (log/debug &quot;LDAP connection test successful&quot;)
        {:status :SUCCESS}))
     (catch LDAPException e
+       (log/debugf &quot;LDAP connection test failed: &quot; (.getMessage e))
       {:status :ERROR, :message (.getMessage e), :code (.getResultCode e)})
     (catch Exception e
+      (log/debugf &quot;LDAP connection test failed: &quot; (.getMessage e))
       {:status :ERROR, :message (.getMessage e)})))</pre></td></tr><tr><td class="docs"><p>Tests the connection to an LDAP server using the currently set settings.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn test-current-ldap-details
   []

@@ -2921,10 +2921,16 @@ net.brehaut.ClojureTools = (function (SH) {
        ;; now recursively expand any remaining maps that contain `:parameters`
        (expand-all outer-query expanded)))))</pre></td></tr><tr><td class="docs"><p>Move any top-level parameters to the same level (i.e., 'inner query') as the query they affect.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private move-top-level-params-to-inner-query
-  [{:keys [parameters], query-type :type, :as outer-query} :- [:map [:type [:enum :query :native]]]]
+  [{:keys [info parameters], query-type :type, :as outer-query} :- [:map [:type [:enum :query :native]]]]
   (cond-&gt; (set/rename-keys outer-query {:parameters :user-parameters})
-    (seq parameters)
-    (assoc-in [query-type :parameters] parameters)))</pre></td></tr><tr><td class="docs"><p>Expand parameters in the <code>outer-query</code>, and if the query is using a native source query, expand params in that as
+    ;; TODO: Native models should be within scope of dashboard filters, by applying the filter on an outer stage.
+    ;; That doesn't work, so the logic below requires MBQL queries only to fix the regression.
+    ;; Native models don't actual get filtered even when linked to dashboard filters, but that's not a regression.
+    ;; This can be fixed properly once this middleware is powered by MLv2. See #40011.
+    (and (seq parameters)
+         (:metadata/model-metadata info)
+         (= query-type :query))          (update query-type (fn [inner-query] {:source-query inner-query}))
+    (seq parameters)                     (assoc-in [query-type :parameters] parameters)))</pre></td></tr><tr><td class="docs"><p>Expand parameters in the <code>outer-query</code>, and if the query is using a native source query, expand params in that as
 well.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- expand-parameters
   [outer-query]
