@@ -2917,33 +2917,33 @@ net.brehaut.ClojureTools = (function (SH) {
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>----------------------------------------------- Filtered Fetch Fns -----------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private order-by-name {:order-by [[:%lower.name :asc]]})</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmulti ^:private cards-for-filter-option*
   {:arglists '([filter-option &amp; args])}
   (fn [filter-option &amp; _]
     (keyword filter-option)))</pre></td></tr><tr><td class="docs"><p>return all Cards. This is the default filter option.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmethod cards-for-filter-option* :all
   [_]
-  (t2/select Card, :archived false, {:order-by [[:%lower.name :asc]]}))</pre></td></tr><tr><td class="docs"><p>return Cards created by the current user</p>
+  (t2/select Card, :archived false, order-by-name))</pre></td></tr><tr><td class="docs"><p>return Cards created by the current user</p>
 </td><td class="codes"><pre class="brush: clojure">(defmethod cards-for-filter-option* :mine
   [_]
-  (t2/select Card, :creator_id api/*current-user-id*, :archived false, {:order-by [[:%lower.name :asc]]}))</pre></td></tr><tr><td class="docs"><p>return all Cards bookmarked by the current user.</p>
+  (t2/select Card, :creator_id api/*current-user-id*, :archived false, order-by-name))</pre></td></tr><tr><td class="docs"><p>return all Cards bookmarked by the current user.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmethod cards-for-filter-option* :bookmarked
   [_]
-  (let [cards (for [{{:keys [archived], :as card} :card} (t2/hydrate (t2/select [CardBookmark :card_id]
-                                                                      :user_id api/*current-user-id*)
-                                                                  :card)
-                    :when                                 (not archived)]
-                card)]
-    (sort-by :name cards)))</pre></td></tr><tr><td class="docs"><p>Return all Cards belonging to Database with <code>database-id</code>.</p>
+  (let [bookmarks (t2/select [CardBookmark :card_id] :user_id api/*current-user-id*)]
+    (-&gt;&gt; (t2/hydrate bookmarks :card)
+         (map :card)
+         (remove :archived)
+         (sort-by :name))))</pre></td></tr><tr><td class="docs"><p>Return all Cards belonging to Database with <code>database-id</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmethod cards-for-filter-option* :database
   [_ database-id]
-  (t2/select Card, :database_id database-id, :archived false, {:order-by [[:%lower.name :asc]]}))</pre></td></tr><tr><td class="docs"><p>Return all Cards belonging to <code>Table</code> with <code>table-id</code>.</p>
+  (t2/select Card, :database_id database-id, :archived false, order-by-name))</pre></td></tr><tr><td class="docs"><p>Return all Cards belonging to <code>Table</code> with <code>table-id</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmethod cards-for-filter-option* :table
   [_ table-id]
-  (t2/select Card, :table_id table-id, :archived false, {:order-by [[:%lower.name :asc]]}))</pre></td></tr><tr><td class="docs"><p>Cards that have been archived.</p>
+  (t2/select Card, :table_id table-id, :archived false, order-by-name))</pre></td></tr><tr><td class="docs"><p>Cards that have been archived.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmethod cards-for-filter-option* :archived
   [_]
-  (t2/select Card, :archived true, {:order-by [[:%lower.name :asc]]}))</pre></td></tr><tr><td class="docs"><p>Cards that are using a given model.</p>
+  (t2/select Card, :archived true, order-by-name))</pre></td></tr><tr><td class="docs"><p>Cards that are using a given model.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmethod cards-for-filter-option* :using_model
   [_filter-option model-id]
   (-&gt;&gt; (t2/select Card {:select [:c.*]
@@ -2953,12 +2953,14 @@ net.brehaut.ClojureTools = (function (SH) {
                                                   [:or
                                                    [:like :c.dataset_query (format &quot;%%card__%s%%&quot; model-id)]
                                                    [:like :c.dataset_query (format &quot;%%#%s%%&quot; model-id)]]]]
-                        :where [:and [:= :m.id model-id] [:not :c.archived]]})
+                        :where [:and [:= :m.id model-id] [:not :c.archived]]
+                        :order-by [[[:lower :c.name] :asc]]})
        ;; now check if model-id really occurs as a card ID
        (filter (fn [card] (some #{model-id} (-&gt; card :dataset_query query/collect-card-ids))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- cards-for-segment-or-metric
   [model-type model-id]
-  (-&gt;&gt; (t2/select :model/Card {:where [:like :dataset_query (str &quot;%&quot; (name model-type) &quot;%&quot; model-id &quot;%&quot;)]})
+  (-&gt;&gt; (t2/select :model/Card (merge order-by-name
+                                     {:where [:like :dataset_query (str &quot;%&quot; (name model-type) &quot;%&quot; model-id &quot;%&quot;)]}))
        ;; now check if the segment/metric with model-id really occurs in a filter/aggregation expression
        (filter (fn [card]
                  (when-let [query (some-&gt; card :dataset_query lib.convert/-&gt;pMBQL)]
@@ -2971,6 +2973,20 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defmethod cards-for-filter-option* :using_segment
   [_filter-option model-id]
   (cards-for-segment-or-metric :segment model-id))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod cards-for-filter-option* :stale
+  [_]
+  (let [card-id-&gt;query-fields (group-by :card_id
+                                        (t2/select :model/QueryField
+                                                   {:select [:qf.* [:f.name :column_name] [:t.name :table_name]]
+                                                    :from   [[(t2/table-name :model/QueryField) :qf]]
+                                                    :join   [[(t2/table-name :model/Field) :f] [:= :f.id :qf.field_id]
+                                                             [(t2/table-name :model/Table) :t] [:= :t.id :f.table_id]]
+                                                    :where  [:= :f.active false]}))
+        card-ids              (keys card-id-&gt;query-fields)
+        add-query-fields      (fn [{:keys [id] :as card}]
+                                (assoc card :query_fields (card-id-&gt;query-fields id)))]
+    (when (seq card-ids)
+      (map add-query-fields (t2/select Card :id [:in card-ids] order-by-name)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- cards-for-filter-option [filter-option model-id-or-nil]
   (-&gt; (apply cards-for-filter-option* filter-option (when model-id-or-nil [model-id-or-nil]))
       (t2/hydrate :creator :collection)))</pre></td></tr><tr><td class="docs"><p>a valid card filter option.</p>
@@ -2987,8 +3003,8 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
   &quot;Get all the Cards. Option filter param `f` can be used to change the set of Cards that are returned; default is
   `all`, but other options include `mine`, `bookmarked`, `database`, `table`, `using_model`, `using_metric`,
-  `using_segment`, and `archived`. See corresponding implementation functions above for the specific behavior of each
-  filterp option. :card_index:&quot;
+  `using_segment`, `archived`, and `stale`. See corresponding implementation functions above for the specific behavior
+  of each filter option. :card_index:&quot;
   [f model_id]
   {f        [:maybe (into [:enum] card-filter-options)]
    model_id [:maybe ms/PositiveInt]}

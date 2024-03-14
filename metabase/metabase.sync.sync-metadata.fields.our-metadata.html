@@ -2865,830 +2865,94 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.models.card" name="metabase.models.card"><h1 class="project-name">metabase.models.card</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Underlying DB model for what is now most commonly referred to as a 'Question' in most user-facing situations. Card
-is a historical name, but is the same thing; both terms are used interchangeably in the backend codebase.</p>
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.models.card
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.sync.sync-metadata.fields.our-metadata" name="metabase.sync.sync-metadata.fields.our-metadata"><h1 class="project-name">metabase.sync.sync-metadata.fields.our-metadata</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Logic for constructing a map of metadata from the Metabase application database that matches the form of DB metadata
+about Fields in a Table, and for fetching the DB metadata itself. This metadata is used by the logic in other
+<code>metabase.sync.sync-metadata.fields.*</code> namespaces to determine what sync operations need to be performed by
+comparing the differences in the two sets of Metadata.</p>
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.sync.sync-metadata.fields.our-metadata
   (:require
-   [clojure.core.async :as a]
-   [clojure.data :as data]
    [clojure.set :as set]
-   [clojure.string :as str]
-   [clojure.walk :as walk]
-   [malli.core :as mc]
    [medley.core :as m]
-   [metabase.api.common :as api]
-   [metabase.config :as config]
-   [metabase.db.query :as mdb.query]
-   [metabase.email.messages :as messages]
-   [metabase.events :as events]
-   [metabase.mbql.normalize :as mbql.normalize]
-   [metabase.mbql.schema :as mbql.s]
-   [metabase.models.audit-log :as audit-log]
-   [metabase.models.collection :as collection]
-   [metabase.models.field-values :as field-values]
-   [metabase.models.interface :as mi]
-   [metabase.models.moderation-review :as moderation-review]
-   [metabase.models.parameter-card
-    :as parameter-card
-    :refer [ParameterCard]]
-   [metabase.models.params :as params]
-   [metabase.models.permissions :as perms]
-   [metabase.models.pulse :as pulse]
-   [metabase.models.query :as query]
-   [metabase.models.revision :as revision]
-   [metabase.models.serialization :as serdes]
-   [metabase.moderation :as moderation]
-   [metabase.native-query-analyzer :as query-analyzer]
-   [metabase.public-settings :as public-settings]
-   [metabase.public-settings.premium-features
-    :as premium-features
-    :refer [defenterprise]]
-   [metabase.query-processor.async :as qp.async]
-   [metabase.query-processor.util :as qp.util]
-   [metabase.server.middleware.session :as mw.session]
-   [metabase.shared.util.i18n :refer [trs]]
-   [metabase.sync.analyze.query-results :as qr]
+   [metabase.driver :as driver]
+   [metabase.models.table :as table]
+   [metabase.sync.fetch-metadata :as fetch-metadata]
+   [metabase.sync.interface :as i]
+   [metabase.sync.sync-metadata.fields.common :as common]
    [metabase.util :as u]
-   [metabase.util.embed :refer [maybe-populate-initially-published-at]]
-   [metabase.util.i18n :refer [tru]]
-   [metabase.util.log :as log]
    [metabase.util.malli :as mu]
-   [metabase.util.malli.registry :as mr]
-   [metabase.util.malli.schema :as ms]
-   [methodical.core :as methodical]
-   [toucan2.core :as t2]
-   [toucan2.tools.hydrate :as t2.hydrate])
-  (:import
-   (clojure.core.async.impl.channels ManyToManyChannel)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Used to be the toucan1 model name defined using [[toucan.models/defmodel]], not it's a reference to the toucan2 model name.
-We'll keep this till we replace all the Card symbol in our codebase.</p>
-</td><td class="codes"><pre class="brush: clojure">(def Card
-  :model/Card)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/table-name :model/Card [_model] :report_card)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2.hydrate/model-for-automagic-hydration [#_model :default #_k :card]
-  [_original-model _k]
-  :model/Card)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(t2/deftransforms :model/Card
-  {:dataset_query          mi/transform-metabase-query
-   :display                mi/transform-keyword
-   :embedding_params       mi/transform-json
-   :query_type             mi/transform-keyword
-   :result_metadata        mi/transform-result-metadata
-   :visualization_settings mi/transform-visualization-settings
-   :parameters             mi/transform-parameters-list
-   :parameter_mappings     mi/transform-parameters-list
-   :type                   mi/transform-keyword})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(doto :model/Card
-  (derive :metabase/model)
-  ;; You can read/write a Card if you can read/write its parent Collection
-  (derive ::perms/use-parent-collection-perms)
-  (derive :hook/timestamped?)
-  (derive :hook/entity-id))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod mi/can-write? Card
-  ([instance]
-   ;; Cards in audit collection should not be writable.
-   (if (and
-        ;; We want to make sure there's an existing audit collection before doing the equality check below.
-        ;; If there is no audit collection, this will be nil:
-        (some? (:id (perms/default-audit-collection)))
-        ;; Is a direct descendant of audit collection
-        (= (:collection_id instance) (:id (perms/default-audit-collection))))
-     false
-     (mi/current-user-has-full-permissions? (perms/perms-objects-set-for-parent-collection instance :write))))
-  ([_ pk]
-   (mi/can-write? (t2/select-one :model/Card :id pk))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod mi/can-read? Card
-  ([instance]
-   (perms/can-read-audit-helper :model/Card instance))
-  ([_ pk]
-   (mi/can-read? (t2/select-one :model/Card :id pk))))</pre></td></tr><tr><td class="docs"><p>All acceptable card types.</p>
-
-<p>Previously (&lt; 49), we only had 2 card types: question and model, which were differentiated using the boolean
-<code>dataset</code> column. Soon we'll have more card types (e.g: metric) and we will longer be able to use a boolean column
-to differentiate between all types. So we've added a new <code>type</code> column for this purpose.</p>
-
-<p>Migrating all the code to use <code>report_card.type</code> will be quite an effort, we decided that we'll migrate it
-gradually.</p>
-</td><td class="codes"><pre class="brush: clojure">(def card-types
-  #{:model :question :metric})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::type
-  (into [:enum] card-types))</pre></td></tr><tr><td class="docs"><p>Returns true if <code>card</code> is a model.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn model?
-  [card]
-  (= (keyword (:type card)) :model))</pre></td></tr><tr><td class="docs"><p>-------------------------------------------------- Hydration --------------------------------------------------</p>
+   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
+|                                         FETCHING OUR CURRENT METADATA                                          |
++----------------------------------------------------------------------------------------------------------------+</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mi/define-simple-hydration-method dashboard-count
-  :dashboard_count
-  &quot;Return the number of Dashboards this Card is in.&quot;
-  [{:keys [id]}]
-  (t2/count :model/DashboardCard, :card_id id))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mi/define-simple-hydration-method parameter-usage-count
-  :parameter_usage_count
-  &quot;Return the number of dashboard/card filters and other widgets that use this card to populate their available
-  values (via ParameterCards)&quot;
-  [{:keys [id]}]
-  (t2/count ParameterCard, :card_id id))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mi/define-simple-hydration-method average-query-time
-  :average_query_time
-  &quot;Average query time of card, taken by query executions which didn't hit cache. If it's nil we don't have any query
-  executions on file.&quot;
-  [{:keys [id]}]
-  (-&gt; (mdb.query/query {:select [:%avg.running_time]
-                        :from [:query_execution]
-                        :where [:and
-                                [:not= :running_time nil]
-                                [:not= :cache_hit true]
-                                [:= :card_id id]]})
-      first vals first))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mi/define-simple-hydration-method last-query-start
-  :last_query_start
-  &quot;Timestamp for start of last query of this card.&quot;
-  [{:keys [id]}]
-  (-&gt; (mdb.query/query {:select [:%max.started_at]
-                        :from [:query_execution]
-                        :where [:and
-                                [:not= :running_time nil]
-                                [:not= :cache_hit true]
-                                [:= :card_id id]]})
-      first vals first))</pre></td></tr><tr><td class="docs"><p>There's more hydration in the shared metabase.moderation namespace, but it needs to be required:</p>
-</td><td class="codes"><pre class="brush: clojure">(comment moderation/keep-me)</pre></td></tr><tr><td class="docs"><p>--------------------------------------------------- Revisions ----------------------------------------------------</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private fields-&gt;parent-id-&gt;fields :- [:map-of common/ParentID [:set common/TableMetadataFieldWithID]]
+  [fields :- [:maybe [:sequential i/FieldInstance]]]
+  (-&gt;&gt; (for [field fields]
+         {:parent-id                 (:parent_id field)
+          :id                        (:id field)
+          :name                      (:name field)
+          :database-type             (:database_type field)
+          :effective-type            (:effective_type field)
+          :coercion-strategy         (:coercion_strategy field)
+          :base-type                 (:base_type field)
+          :semantic-type             (:semantic_type field)
+          :pk?                       (isa? (:semantic_type field) :type/PK)
+          :field-comment             (:description field)
+          :json-unfolding            (:json_unfolding field)
+          :database-is-auto-increment (:database_is_auto_increment field)
+          :position                  (:position field)
+          :database-position         (:database_position field)
+          :database-partitioned      (:database_partitioned field)
+          :database-required         (:database_required field)})
+       ;; make a map of parent-id -&gt; set of child Fields
+       (group-by :parent-id)
+       ;; remove the parent ID because the Metadata from `describe-table` won't have it. Save the results as a set
+       (m/map-vals (fn [fields]
+                     (set (for [field fields]
+                            (dissoc field :parent-id)))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private add-nested-fields :- common/TableMetadataFieldWithID
+  &quot;Recursively add entries for any nested-fields to `field`.&quot;
+  [metabase-field    :- common/TableMetadataFieldWithID
+   parent-id-&gt;fields :- [:map-of common/ParentID [:set common/TableMetadataFieldWithID]]]
+  (let [nested-fields (get parent-id-&gt;fields (u/the-id metabase-field))]
+    (if-not (seq nested-fields)
+      metabase-field
+      (assoc metabase-field :nested-fields (set (for [nested-field nested-fields]
+                                                  (add-nested-fields nested-field parent-id-&gt;fields)))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn fields-&gt;our-metadata :- [:set common/TableMetadataFieldWithID]
+  &quot;Given a sequence of Metabase Fields, format them and return them in a hierachy so the format matches the one
+  `db-metadata` comes back in.&quot;
+  ([fields :- [:maybe [:sequential i/FieldInstance]]]
+   (fields-&gt;our-metadata fields nil))
+  ([fields :- [:maybe [:sequential i/FieldInstance]], top-level-parent-id :- common/ParentID]
+   (let [parent-id-&gt;fields (fields-&gt;parent-id-&gt;fields fields)]
+     ;; get all the top-level fields, then call `add-nested-fields` to recursively add the fields
+     (set (for [metabase-field (get parent-id-&gt;fields top-level-parent-id)]
+            (add-nested-fields metabase-field parent-id-&gt;fields))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private table-&gt;fields :- [:maybe [:sequential i/FieldInstance]]
+  &quot;Fetch active Fields from the Metabase application database for a given `table`.&quot;
+  [table :- i/TableInstance]
+  (t2/select [:model/Field :name :database_type :base_type :effective_type :coercion_strategy :semantic_type
+              :parent_id :id :description :database_position :nfc_path :database_is_auto_increment :database_required
+              :database_partitioned :json_unfolding :position]
+             :table_id  (u/the-id table)
+             :active    true
+             {:order-by table/field-order-rule}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn our-metadata :- [:set common/TableMetadataFieldWithID]
+  &quot;Return information we have about Fields for a `table` in the application database in (almost) exactly the same
+   `TableMetadataField` format returned by `describe-table`.&quot;
+  [table :- i/TableInstance]
+  (-&gt; table table-&gt;fields fields-&gt;our-metadata))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
+|                                      FETCHING METADATA FROM CONNECTED DB                                       |
++----------------------------------------------------------------------------------------------------------------+</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private excluded-columns-for-card-revision
-  [:id :created_at :updated_at :entity_id :creator_id :public_uuid :made_public_by_id :metabase_version :initially_published_at])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod revision/revert-to-revision! :model/Card
-  [model id user-id serialized-card]
-  ;; make sure we handle &lt; 50 cards that had `:dataset` instead of `:type`
-  (let [serialized-card (cond-&gt; serialized-card
-                          (contains? serialized-card :dataset) (-&gt; (dissoc :dataset)
-                                                                   (assoc :type (if (:dataset serialized-card) :model :question))))]
-    ((get-method revision/revert-to-revision! :default) model id user-id serialized-card)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod revision/serialize-instance :model/Card
-  ([instance]
-   (revision/serialize-instance Card nil instance))
-  ([_model _id instance]
-   (cond-&gt; (apply dissoc instance excluded-columns-for-card-revision)
-     ;; datasets should preserve edits to metadata
-     ;; the type check only needed in tests because most test object does not include `type` key
-     (and (some? (:type instance)) (not (model? instance)))
-     (dissoc :result_metadata))))</pre></td></tr><tr><td class="docs"><p>--------------------------------------------------- Lifecycle ----------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Lift <code>database_id</code>, <code>table_id</code>, and <code>query_type</code> from query definition when inserting/updating a Card.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn populate-query-fields
-  [{{query-type :type, :as outer-query} :dataset_query, :as card}]
-  (merge
-   card
-   ;; mega HACK FIXME -- don't update this stuff when doing deserialization because it might differ from what's in the
-   ;; YAML file and break tests like [[metabase-enterprise.serialization.v2.e2e.yaml-test/e2e-storage-ingestion-test]].
-   ;; The root cause of this issue is that we're generating Cards that have a different Database ID or Table ID from
-   ;; what's actually in their query -- we need to fix [[metabase.test.generate]], but I'm not sure how to do that
-   (when-not mi/*deserializing?*
-     (when-let [{:keys [database-id table-id]} (and query-type
-                                                    (query/query-&gt;database-and-table-ids outer-query))]
-       (merge
-        {:query_type (keyword query-type)}
-        (when database-id
-          {:database_id database-id})
-        (when table-id
-          {:table_id table-id}))))))</pre></td></tr><tr><td class="docs"><p>When inserting/updating a Card, populate the result metadata column if not already populated by inferring the
-metadata from the query.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- populate-result-metadata
-  [{query :dataset_query, metadata :result_metadata, existing-card-id :id, :as card}]
-  (cond
-    ;; not updating the query =&gt; no-op
-    (not query)
-    (do
-      (log/debug &quot;Not inferring result metadata for Card: query was not updated&quot;)
-      card)
-    ;; passing in metadata =&gt; no-op
-    metadata
-    (do
-      (log/debug &quot;Not inferring result metadata for Card: metadata was passed in to insert!/update!&quot;)
-      card)
-    ;; this is an update, and dataset_query hasn't changed =&gt; no-op
-    (and existing-card-id
-         (= query (t2/select-one-fn :dataset_query Card :id existing-card-id)))
-    (do
-      (log/debugf &quot;Not inferring result metadata for Card %s: query has not changed&quot; existing-card-id)
-      card)
-    ;; query has changed (or new Card) and this is a native query =&gt; set metadata to nil
-    ;;
-    ;; we can't infer the metadata for a native query without running it, so it's better to have no metadata than
-    ;; possibly incorrect metadata.
-    (= (:type query) :native)
-    (do
-      (log/debug &quot;Can't infer result metadata for Card: query is a native query. Setting result metadata to nil&quot;)
-      (assoc card :result_metadata nil))
-    ;; otherwise, attempt to infer the metadata. If the query can't be run for one reason or another, set metadata to
-    ;; nil.
-    :else
-    (do
-      (log/debug &quot;Attempting to infer result metadata for Card&quot;)
-      (let [inferred-metadata (not-empty (mw.session/with-current-user nil
-                                           (u/ignore-exceptions
-                                             ((requiring-resolve 'metabase.query-processor.preprocess/query-&gt;expected-cols) query))))]
-        (assoc card :result_metadata inferred-metadata)))))</pre></td></tr><tr><td class="docs"><p>Check that a <code>card</code>, if it is using another Card as its source, does not have circular references between source
-Cards. (e.g. Card A cannot use itself as a source, or if A uses Card B as a source, Card B cannot use Card A, and so
-forth.)</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- check-for-circular-source-query-references
-  [{query :dataset_query, id :id}]      ; don't use `u/the-id` here so that we can use this with `pre-insert` too
-  (loop [query query, ids-already-seen #{id}]
-    (let [source-card-id (qp.util/query-&gt;source-card-id query)]
-      (cond
-        (not source-card-id)
-        :ok
-        (ids-already-seen source-card-id)
-        (throw
-         (ex-info (tru &quot;Cannot save Question: source query has circular references.&quot;)
-                  {:status-code 400}))
-        :else
-        (recur (or (t2/select-one-fn :dataset_query Card :id source-card-id)
-                   (throw (ex-info (tru &quot;Card {0} does not exist.&quot; source-card-id)
-                                   {:status-code 404})))
-               (conj ids-already-seen source-card-id))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- maybe-normalize-query [card]
-  (cond-&gt; card
-    (seq (:dataset_query card)) (update :dataset_query mbql.normalize/normalize)))</pre></td></tr><tr><td class="docs"><p>Transforms native query's <code>template-tags</code> into <code>parameters</code>.
-An older style was to not include <code>:template-tags</code> onto cards as parameters. I think this is a mistake and they should always be there. Apparently lots of e2e tests are sloppy about this so this is included as a convenience.</p>
-
-<p>TODO: move this to [[metabase.query-processor.card]] or MLv2 so the logic can be shared between the backend and frontend
-NOTE: this should mirror <code>getTemplateTagParameters</code> in frontend/src/metabase-lib/parameters/utils/template-tags.ts
-If this function moves you should update the comment that links to this one (#40013)</p>
-</td><td class="codes"><pre class="brush: clojure">(defn template-tag-parameters
-  [card]
-  (for [[_ {tag-type :type, widget-type :widget-type, :as tag}] (get-in card [:dataset_query :native :template-tags])
-        :when                         (and tag-type
-                                           (or (contains? mbql.s/raw-value-template-tag-types tag-type)
-                                               (and (= tag-type :dimension) widget-type (not= widget-type :none))))]
-    {:id       (:id tag)
-     :type     (or widget-type (cond (= tag-type :date)   :date/single
-                                     (= tag-type :string) :string/=
-                                     (= tag-type :number) :number/=
-                                     :else                :category))
-     :target   (if (= tag-type :dimension)
-                 [:dimension [:template-tag (:name tag)]]
-                 [:variable  [:template-tag (:name tag)]])
-     :name     (:display-name tag)
-     :slug     (:name tag)
-     :default  (:default tag)
-     :required (boolean (:required tag))}))</pre></td></tr><tr><td class="docs"><p>Check that all native query Field filter parameters reference Fields belonging to the Database the query points
-against. This is done when saving a Card. The goal here is to prevent people from saving Cards with invalid queries
--- it's better to error now then to error down the road in Query Processor land.</p>
-
-<p>The usual way a user gets into the situation of having a mismatch between the Database and Field Filters is by
-creating a native query in the Query Builder UI, adding parameters, and <em>then</em> changing the Database that the query
-targets. See https://github.com/metabase/metabase/issues/14145 for more details.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- check-field-filter-fields-are-from-correct-database
-  [{{query-db-id :database, :as query} :dataset_query, :as card}]
-  ;; for updates if `query` isn't being updated we don't need to validate anything.
-  (when query
-    (when-let [field-ids (not-empty (params/card-&gt;template-tag-field-ids card))]
-      (doseq [{:keys [field-id field-name table-name field-db-id]} (mdb.query/query
-                                                                    {:select    [[:field.id :field-id]
-                                                                                 [:field.name :field-name]
-                                                                                 [:table.name :table-name]
-                                                                                 [:table.db_id :field-db-id]]
-                                                                     :from      [[:metabase_field :field]]
-                                                                     :left-join [[:metabase_table :table]
-                                                                                 [:= :field.table_id :table.id]]
-                                                                     :where     [:in :field.id (set field-ids)]})]
-        (when-not (= field-db-id query-db-id)
-          (throw (ex-info (letfn [(describe-database [db-id]
-                                    (format &quot;%d %s&quot; db-id (pr-str (t2/select-one-fn :name 'Database :id db-id))))]
-                            (tru &quot;Invalid Field Filter: Field {0} belongs to Database {1}, but the query is against Database {2}&quot;
-                                 (format &quot;%d %s.%s&quot; field-id (pr-str table-name) (pr-str field-name))
-                                 (describe-database field-db-id)
-                                 (describe-database query-db-id)))
-                          {:status-code           400
-                           :query-database        query-db-id
-                           :field-filter-database field-db-id})))))))</pre></td></tr><tr><td class="docs"><p>Check that the card is a valid model if being saved as one. Throw an exception if not.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- assert-valid-type
-  [{query :dataset_query, card-type :type, :as _card}]
-  (when (= (keyword card-type) :model)
-    (let [template-tag-types (-&gt;&gt; (get-in query [:native :template-tags])
-                                  vals
-                                  (map (comp keyword :type)))]
-      (when (some (complement #{:card :snippet}) template-tag-types)
-        (throw (ex-info (tru &quot;A model made from a native SQL question cannot have a variable or field filter.&quot;)
-                        {:status-code 400})))))
-  nil)</pre></td></tr><tr><td class="docs"><p>TODO -- consider whether we should validate the Card query when you save/update it?? (#40013)</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- pre-insert [card]
-  (let [defaults {:parameters         []
-                  :parameter_mappings []}
-        card     (merge defaults card)]
-    (u/prog1 card
-      ;; make sure this Card doesn't have circular source query references
-      (check-for-circular-source-query-references card)
-      (check-field-filter-fields-are-from-correct-database card)
-      ;; TODO: add a check to see if all id in :parameter_mappings are in :parameters (#40013)
-      (assert-valid-type card)
-      (params/assert-valid-parameters card)
-      (params/assert-valid-parameter-mappings card)
-      (collection/check-collection-namespace Card (:collection_id card)))))</pre></td></tr><tr><td class="docs"><p>Checks additional sandboxing constraints for Metabase Enterprise Edition. The OSS implementation is a no-op.</p>
-</td><td class="codes"><pre class="brush: clojure">(defenterprise pre-update-check-sandbox-constraints
-  metabase-enterprise.sandbox.models.group-table-access-policy
-  [_])</pre></td></tr><tr><td class="docs"><p>Update the config of parameter on any Dashboard/Card use this <code>card</code> as values source .</p>
-
-<p>Remove parameter.values<em>source</em>type and set parameter.values<em>source</em>type to nil ( the default type ) when:
-- card is archived
-- card.result_metadata changes and the parameter values source field can't be found anymore</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- update-parameters-using-card-as-values-source
-  [{id :id, :as changes}]
-  (let [parameter-cards   (t2/select ParameterCard :card_id id)]
-    (doseq [[[po-type po-id] param-cards]
-            (group-by (juxt :parameterized_object_type :parameterized_object_id) parameter-cards)]
-      (let [model                  (case po-type :card 'Card :dashboard 'Dashboard)
-            {:keys [parameters]}   (t2/select-one [model :parameters] :id po-id)
-            affected-param-ids-set (cond
-                                     ;; update all parameters that use this card as source
-                                     (:archived changes)
-                                     (set (map :parameter_id param-cards))
-                                     ;; update only parameters that have value_field no longer in this card
-                                     (:result_metadata changes)
-                                     (let [param-id-&gt;parameter (m/index-by :id parameters)]
-                                       (-&gt;&gt; param-cards
-                                            (filter (fn [param-card]
-                                                      ;; if cant find the value-field in result_metadata, then we should
-                                                      ;; remove it
-                                                      (nil? (qp.util/field-&gt;field-info
-                                                              (get-in (param-id-&gt;parameter (:parameter_id param-card)) [:values_source_config :value_field])
-                                                              (:result_metadata changes)))))
-                                            (map :parameter_id)
-                                            set))
-                                     :else #{})
-            new-parameters (map (fn [parameter]
-                                  (if (affected-param-ids-set (:id parameter))
-                                    (-&gt; parameter
-                                        (assoc :values_source_type nil)
-                                        (dissoc :values_source_config))
-                                    parameter))
-                                parameters)]
-        (when-not (= parameters new-parameters)
-          (t2/update! model po-id {:parameters new-parameters}))))))</pre></td></tr><tr><td class="docs"><p>A model with implicit action supported iff they are a raw table,
-meaning there are no clauses such as filter, limit, breakout...</p>
-
-<p>It should be the opposite of [[metabase.lib.stage/has-clauses]] but for all stages.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn model-supports-implicit-actions?
-  [{dataset-query :dataset_query :as _card}]
-  (and (= :query (:type dataset-query))
-       (every? #(nil? (get-in dataset-query [:query %]))
-               [:expressions :filter :limit :breakout :aggregation :joins :order-by :fields])))</pre></td></tr><tr><td class="docs"><p>Delete all implicit actions of a model if exists.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- disable-implicit-action-for-model!
-  [model-id]
-  (when-let [action-ids (t2/select-pks-set :model/Action {:select [:action.id]
-                                                          :from   [:action]
-                                                          :join   [:implicit_action
-                                                                   [:= :action.id :implicit_action.action_id]]
-                                                          :where  [:= :action.model_id model-id]})]
-    (t2/delete! :model/Action :id [:in action-ids])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- pre-update [{archived? :archived, id :id, :as changes}]
-  ;; TODO - don't we need to be doing the same permissions check we do in `pre-insert` if the query gets changed? Or
-  ;; does that happen in the `PUT` endpoint? (#40013)
-  (u/prog1 changes
-    (let [;; Fetch old card data if necessary, and share the data between multiple checks.
-          old-card-info (when (or (contains? changes :type)
-                                  (:dataset_query changes)
-                                  (get-in changes [:dataset_query :native]))
-                          (t2/select-one [:model/Card :dataset_query :type] :id (u/the-id id)))]
-      ;; if the Card is archived, then remove it from any Dashboards
-      (when archived?
-        (t2/delete! :model/DashboardCard :card_id id))
-      ;; if the template tag params for this Card have changed in any way we need to update the FieldValues for
-      ;; On-Demand DB Fields
-      (when (get-in changes [:dataset_query :native])
-        (let [old-param-field-ids (params/card-&gt;template-tag-field-ids old-card-info)
-              new-param-field-ids (params/card-&gt;template-tag-field-ids changes)]
-          (when (and (seq new-param-field-ids)
-                     (not= old-param-field-ids new-param-field-ids))
-            (let [newly-added-param-field-ids (set/difference new-param-field-ids old-param-field-ids)]
-              (log/info &quot;Referenced Fields in Card params have changed. Was:&quot; old-param-field-ids
-                        &quot;Is Now:&quot; new-param-field-ids
-                        &quot;Newly Added:&quot; newly-added-param-field-ids)
-              ;; Now update the FieldValues for the Fields referenced by this Card.
-              (field-values/update-field-values-for-on-demand-dbs! newly-added-param-field-ids)))))
-      ;; make sure this Card doesn't have circular source query references if we're updating the query
-      (when (:dataset_query changes)
-        (check-for-circular-source-query-references changes))
-      ;; updating a model dataset query to not support implicit actions will disable implicit actions if they exist
-      (when (and (:dataset_query changes)
-                 (= (:type old-card-info) :model)
-                 (not (model-supports-implicit-actions? changes)))
-        (disable-implicit-action-for-model! id))
-      ;; Changing from a Question to a Model: archive associated actions
-      (when (and (= (:type changes) :question)
-                 (= (:type old-card-info) :model))
-        (t2/update! :model/Action {:model_id id :type [:not= :implicit]} {:archived true})
-        (t2/delete! :model/Action :model_id id, :type :implicit))
-      ;; Make sure any native query template tags match the DB in the query.
-      (check-field-filter-fields-are-from-correct-database changes)
-      ;; Make sure the Collection is in the default Collection namespace (e.g. as opposed to the Snippets Collection
-      ;; namespace)
-      (collection/check-collection-namespace Card (:collection_id changes))
-      (params/assert-valid-parameters changes)
-      (params/assert-valid-parameter-mappings changes)
-      (update-parameters-using-card-as-values-source changes)
-      (parameter-card/upsert-or-delete-from-parameters! &quot;card&quot; id (:parameters changes))
-      ;; additional checks (Enterprise Edition only)
-      (pre-update-check-sandbox-constraints changes)
-      (assert-valid-type (merge old-card-info changes)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(t2/define-after-select :model/Card
-  [card]
-  (public-settings/remove-public-uuid-if-public-sharing-is-disabled card))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(t2/define-before-insert :model/Card
-  [card]
-  (-&gt; card
-      (assoc :metabase_version config/mb-version-string)
-      maybe-normalize-query
-      populate-result-metadata
-      pre-insert
-      populate-query-fields))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(t2/define-after-insert :model/Card
-  [card]
-  (u/prog1 card
-    (when-let [field-ids (seq (params/card-&gt;template-tag-field-ids card))]
-      (log/info &quot;Card references Fields in params:&quot; field-ids)
-      (field-values/update-field-values-for-on-demand-dbs! field-ids))
-    (parameter-card/upsert-or-delete-from-parameters! &quot;card&quot; (:id card) (:parameters card))
-    (query-analyzer/update-query-fields-for-card! card)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(t2/define-before-update :model/Card
-  [{:keys [verified-result-metadata?] :as card}]
-  ;; remove all the unchanged keys from the map, except for `:id`, so the functions below can do the right thing since
-  ;; they were written pre-Toucan 2 and don't know about [[t2/changes]]...
-  ;;
-  ;; We have to convert this to a plain map rather than a Toucan 2 instance at this point to work around upstream bug
-  ;; https://github.com/camsaul/toucan2/issues/145 .
-  ;; TODO: ^ that's been fixed, this could be refactored
-  (-&gt; (into {:id (:id card)} (t2/changes (dissoc card :verified-result-metadata?)))
-      maybe-normalize-query
-      ;; If we have fresh result_metadata, we don't have to populate it anew. When result_metadata doesn't
-      ;; change for a native query, populate-result-metadata removes it (set to nil) unless prevented by the
-      ;; verified-result-metadata? flag (see #37009).
-      (cond-&gt; #_changes
-        (or (empty? (:result_metadata card))
-            (not verified-result-metadata?))
-        populate-result-metadata)
-      pre-update
-      populate-query-fields
-      maybe-populate-initially-published-at
-      ;; TODO: this should go in after-update once camsaul/toucan2#129 is fixed
-      ;; It's at the end for now so that all the before-update validations have a chance to run
-      ;; TODO the Second: No reason this couldn't be async, especially once it's in the after-update
-      (u/prog1 (query-analyzer/update-query-fields-for-card! &lt;&gt;))
-      (dissoc :id)))</pre></td></tr><tr><td class="docs"><p>Cards don't normally get deleted (they get archived instead) so this mostly affects tests</p>
-</td><td class="codes"><pre class="brush: clojure">(t2/define-before-delete :model/Card
-  [{:keys [id] :as _card}]
-  ;; delete any ParameterCard that the parameters on this card linked to
-  (parameter-card/delete-all-for-parameterized-object! &quot;card&quot; id)
-  ;; delete any ParameterCard linked to this card
-  (t2/delete! ParameterCard :card_id id)
-  (t2/delete! 'ModerationReview :moderated_item_type &quot;card&quot;, :moderated_item_id id)
-  (t2/delete! 'Revision :model &quot;Card&quot;, :model_id id))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/hash-fields :model/Card
-  [_card]
-  [:name (serdes/hydrated-hash :collection) :created_at])</pre></td></tr><tr><td class="docs"><p>----------------------------------------------- Creating Cards ----------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn result-metadata-async :- (ms/InstanceOfClass ManyToManyChannel)
-  &quot;Return a channel of metadata for the passed in `query`. Takes the `original-query` so it can determine if existing
-  `metadata` might still be valid. Takes `dataset?` since existing metadata might need to be \&quot;blended\&quot; into the
-  fresh metadata to preserve metadata edits from the dataset.
-  Note this condition is possible for new cards and edits to cards. New cards can be created from existing cards by
-  copying, and they could be datasets, have edited metadata that needs to be blended into a fresh run.
-  This is also complicated because everything is optional, so we cannot assume the client will provide metadata and
-  might need to save a metadata edit, or might need to use db-saved metadata on a modified dataset.&quot;
-  [{:keys [original-query query metadata original-metadata dataset?]}]
-  (let [valid-metadata? (and metadata (mc/validate qr/ResultsMetadata metadata))]
-    (cond
-      (or
-       ;; query didn't change, preserve existing metadata
-       (and (= (mbql.normalize/normalize original-query)
-               (mbql.normalize/normalize query))
-            valid-metadata?)
-       ;; only sent valid metadata in the edit. Metadata might be the same, might be different. We save in either case
-       (and (nil? query)
-            valid-metadata?)
-       ;; copying card and reusing existing metadata
-       (and (nil? original-query)
-            query
-            valid-metadata?))
-      (do
-        (log/debug (trs &quot;Reusing provided metadata&quot;))
-        (a/to-chan! [metadata]))
-      ;; frontend always sends query. But sometimes programatic don't (cypress, API usage). Returning an empty channel
-      ;; means the metadata won't be updated at all.
-      (nil? query)
-      (do
-        (log/debug (trs &quot;No query provided so not querying for metadata&quot;))
-        (doto (a/chan) a/close!))
-      ;; datasets need to incorporate the metadata either passed in or already in the db. Query has changed so we
-      ;; re-run and blend the saved into the new metadata
-      (and dataset? (or valid-metadata? (seq original-metadata)))
-      (do
-        (log/debug (trs &quot;Querying for metadata and blending model metadata&quot;))
-        (a/go (let [metadata' (if valid-metadata?
-                                (map mbql.normalize/normalize-source-metadata metadata)
-                                original-metadata)
-                    fresh     (a/&lt;! (qp.async/result-metadata-for-query-async query))]
-                (qp.util/combine-metadata fresh metadata'))))
-      :else
-      ;; compute fresh
-      (do
-        (log/debug (trs &quot;Querying for metadata&quot;))
-        (qp.async/result-metadata-for-query-async query)))))</pre></td></tr><tr><td class="docs"><p>Duration in milliseconds to wait for the metadata before saving the card without the metadata. That metadata will be
-saved later when it is ready.</p>
-</td><td class="codes"><pre class="brush: clojure">(def metadata-sync-wait-ms
-  1500)</pre></td></tr><tr><td class="docs"><p>Duration in milliseconds to wait for the metadata before abandoning the asynchronous metadata saving. Default is 15
-minutes.</p>
-</td><td class="codes"><pre class="brush: clojure">(def metadata-async-timeout-ms
-  (u/minutes-&gt;ms 15))</pre></td></tr><tr><td class="docs"><p>Save metadata when (and if) it is ready. Takes a chan that will eventually return metadata. Waits up
-to [[metadata-async-timeout-ms]] for the metadata, and then saves it if the query of the card has not changed.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn schedule-metadata-saving
-  [result-metadata-chan card]
-  (a/go
-    (let [timeoutc        (a/timeout metadata-async-timeout-ms)
-          [metadata port] (a/alts! [result-metadata-chan timeoutc])
-          id              (:id card)]
-      (cond (= port timeoutc)
-            (do (a/close! result-metadata-chan)
-                (log/info (trs &quot;Metadata not ready in {0} minutes, abandoning&quot;
-                               (long (/ metadata-async-timeout-ms 1000 60)))))
-            (not (seq metadata))
-            (log/info (trs &quot;Not updating metadata asynchronously for card {0} because no metadata&quot;
-                           id))
-            :else
-            (future
-              (let [current-query (t2/select-one-fn :dataset_query Card :id id)]
-                (if (= (:dataset_query card) current-query)
-                  (do (t2/update! Card id {:result_metadata metadata})
-                      (log/info (trs &quot;Metadata updated asynchronously for card {0}&quot; id)))
-                  (log/info (trs &quot;Not updating metadata asynchronously for card {0} because query has changed&quot;
-                                 id)))))))))</pre></td></tr><tr><td class="docs"><p>Create a new Card. Metadata will be fetched off thread. If the metadata takes longer than [[metadata-sync-wait-ms]]
-the card will be saved without metadata and it will be saved to the card in the future when it is ready.</p>
-
-<p>Dispatches the <code>:card-create</code> event unless <code>delay-event?</code> is true. Useful for when many cards are created in a
-transaction and work in the <code>:card-create</code> event cannot proceed because the cards would not be visible outside of
-the transaction yet. If you pass true here it is important to call the event after the cards are successfully
-created.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn create-card!
-  ([card creator] (create-card! card creator false))
-  ([{:keys [dataset_query result_metadata parameters parameter_mappings type] :as card-data} creator delay-event?]
-   (let [data-keys            [:dataset_query :description :display :name :visualization_settings
-                               :parameters :parameter_mappings :collection_id :collection_position :cache_ttl :type]
-         ;; `zipmap` instead of `select-keys` because we want to get `nil` values for keys that aren't present. Required
-         ;; by `api/maybe-reconcile-collection-position!`
-         card-data            (-&gt; (zipmap data-keys (map card-data data-keys))
-                                  (assoc
-                                   :creator_id (:id creator)
-                                   :parameters (or parameters [])
-                                   :parameter_mappings (or parameter_mappings []))
-                                  (cond-&gt; (nil? type)
-                                    (assoc :type :question)))
-         result-metadata-chan (result-metadata-async {:query    dataset_query
-                                                      :metadata result_metadata
-                                                      :dataset? (model? card-data)})
-         metadata-timeout     (a/timeout metadata-sync-wait-ms)
-         [metadata port]      (a/alts!! [result-metadata-chan metadata-timeout])
-         timed-out?           (= port metadata-timeout)
-         card                 (t2/with-transaction [_conn]
-                                ;; Adding a new card at `collection_position` could cause other cards in this
-                                ;; collection to change position, check that and fix it if needed
-                                (api/maybe-reconcile-collection-position! card-data)
-                                (t2/insert-returning-instance! Card (cond-&gt; card-data
-                                                                      (and metadata (not timed-out?))
-                                                                      (assoc :result_metadata metadata))))]
-     (when-not delay-event?
-       (events/publish-event! :event/card-create {:object card :user-id (:id creator)}))
-     (when timed-out?
-       (log/info (trs &quot;Metadata not available soon enough. Saving new card and asynchronously updating metadata&quot;)))
-     ;; include same information returned by GET /api/card/:id since frontend replaces the Card it currently has with
-     ;; returned one -- See #4283
-     (u/prog1 card
-       (when timed-out?
-         (schedule-metadata-saving result-metadata-chan &lt;&gt;))))))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------- Updating Cards -------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- card-archived? [old-card new-card]
-  (and (not (:archived old-card))
-       (:archived new-card)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- line-area-bar? [display]
-  (contains? #{:line :area :bar} display))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- progress? [display]
-  (= :progress display))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- allows-rows-alert? [display]
-  (not (contains? #{:line :bar :area :progress} display)))</pre></td></tr><tr><td class="docs"><p>Alerts no longer make sense when the kind of question being alerted on significantly changes. Setting up an alert
-when a time series query reaches 10 is no longer valid if the question switches from a line graph to a table. This
-function goes through various scenarios that render an alert no longer valid</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- display-change-broke-alert?
-  [{old-display :display} {new-display :display}]
-  (when-not (= old-display new-display)
-    (or
-     ;; Did the alert switch from a table type to a line/bar/area/progress graph type?
-     (and (allows-rows-alert? old-display)
-          (or (line-area-bar? new-display)
-              (progress? new-display)))
-     ;; Switching from a line/bar/area to another type that is not those three invalidates the alert
-     (and (line-area-bar? old-display)
-          (not (line-area-bar? new-display)))
-     ;; Switching from a progress graph to anything else invalidates the alert
-     (and (progress? old-display)
-          (not (progress? new-display))))))</pre></td></tr><tr><td class="docs"><p>If we had a goal before, and now it's gone, the alert is no longer valid</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- goal-missing?
-  [old-card new-card]
-  (and
-   (get-in old-card [:visualization_settings :graph.goal_value])
-   (not (get-in new-card [:visualization_settings :graph.goal_value]))))</pre></td></tr><tr><td class="docs"><p>If there are multiple breakouts and a goal, we don't know which breakout to compare to the goal, so it invalidates
-the alert</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- multiple-breakouts?
-  [{:keys [display] :as new-card}]
-  (and (get-in new-card [:visualization_settings :graph.goal_value])
-       (or (line-area-bar? display)
-           (progress? display))
-       (&lt; 1 (count (get-in new-card [:dataset_query :query :breakout])))))</pre></td></tr><tr><td class="docs"><p>Removes all of the alerts and notifies all of the email recipients of the alerts change via <code>NOTIFY-FN!</code></p>
-</td><td class="codes"><pre class="brush: clojure">(defn- delete-alert-and-notify!
-  [&amp; {:keys [notify-fn! alerts actor]}]
-  (t2/delete! :model/Pulse :id [:in (map :id alerts)])
-  (doseq [{:keys [channels] :as alert} alerts
-          :let [email-channel (m/find-first #(= :email (:channel_type %)) channels)]]
-    (doseq [recipient (:recipients email-channel)]
-      (notify-fn! alert recipient actor))))</pre></td></tr><tr><td class="docs"><p>Removes all alerts and will email each recipient letting them know</p>
-</td><td class="codes"><pre class="brush: clojure">(defn delete-alert-and-notify-archived!
-  [&amp; {:keys [alerts actor]}]
-  (delete-alert-and-notify! {:notify-fn! messages/send-alert-stopped-because-archived-email!
-                             :alerts     alerts
-                             :actor      actor}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- delete-alert-and-notify-changed! [&amp; {:keys [alerts actor]}]
-  (delete-alert-and-notify! {:notify-fn! messages/send-alert-stopped-because-changed-email!
-                             :alerts     alerts
-                             :actor      actor}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- delete-alerts-if-needed! [&amp; {:keys [old-card new-card actor]}]
-  ;; If there are alerts, we need to check to ensure the card change doesn't invalidate the alert
-  (when-let [alerts (binding [pulse/*allow-hydrate-archived-cards* true]
-                      (seq (pulse/retrieve-alerts-for-cards {:card-ids [(:id new-card)]})))]
-    (cond
-      (card-archived? old-card new-card)
-      (delete-alert-and-notify-archived! :alerts alerts, :actor actor)
-      (or (display-change-broke-alert? old-card new-card)
-          (goal-missing? old-card new-card)
-          (multiple-breakouts? new-card))
-      (delete-alert-and-notify-changed! :alerts alerts, :actor actor)
-      ;; The change doesn't invalidate the alert, do nothing
-      :else
-      nil)))</pre></td></tr><tr><td class="docs"><p>Return true if card is verified, false otherwise. Assumes that moderation reviews are ordered so that the most recent
-is the first. This is the case from the hydration function for moderation_reviews.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- card-is-verified?
-  [card]
-  (-&gt; card :moderation_reviews first :status #{&quot;verified&quot;} boolean))</pre></td></tr><tr><td class="docs"><p>Return whether there were any changes in the objects at the keys for <code>consider</code>.</p>
-
-<p>returns false because changes to collection_id are ignored:
-(changed? #{:description}
-          {:collection_id 1 :description "foo"}
-          {:collection_id 2 :description "foo"})</p>
-
-<p>returns true:
-(changed? #{:description}
-          {:collection_id 1 :description "foo"}
-          {:collection_id 2 :description "diff"})</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- changed?
-  [consider card-before updates]
-  ;; have to ignore keyword vs strings over api. `{:type :query}` vs `{:type &quot;query&quot;}`
-  (let [prepare              (fn prepare [card] (walk/prewalk (fn [x] (if (keyword? x)
-                                                                        (name x)
-                                                                        x))
-                                                              card))
-        before               (prepare (select-keys card-before consider))
-        after                (prepare (select-keys updates consider))
-        [_ changes-in-after] (data/diff before after)]
-    (boolean (seq changes-in-after))))</pre></td></tr><tr><td class="docs"><p>When comparing a card to possibly unverify, only consider these keys as changing something 'important' about the
-query.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private card-compare-keys
-  #{:table_id
-    :database_id
-    :query_type ;; these first three may not even be changeable
-    :dataset_query})</pre></td></tr><tr><td class="docs"><p>Update a Card. Metadata is fetched asynchronously. If it is ready before [[metadata-sync-wait-ms]] elapses it will be
-included, otherwise the metadata will be saved to the database asynchronously.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn update-card!
-  [{:keys [card-before-update card-updates actor]}]
-  ;; don't block our precious core.async thread, run the actual DB updates on a separate thread
-  (t2/with-transaction [_conn]
-    (api/maybe-reconcile-collection-position! card-before-update card-updates)
-    (when (and (card-is-verified? card-before-update)
-               (changed? card-compare-keys card-before-update card-updates))
-      ;; this is an enterprise feature but we don't care if enterprise is enabled here. If there is a review we need
-      ;; to remove it regardless if enterprise edition is present at the moment.
-      (moderation-review/create-review! {:moderated_item_id   (:id card-before-update)
-                                         :moderated_item_type &quot;card&quot;
-                                         :moderator_id        (:id actor)
-                                         :status              nil
-                                         :text                (tru &quot;Unverified due to edit&quot;)}))
-    ;; ok, now save the Card
-    (t2/update! Card (:id card-before-update)
-                ;; `collection_id` and `description` can be `nil` (in order to unset them).
-                ;; Other values should only be modified if they're passed in as non-nil
-                (u/select-keys-when card-updates
-                                    :present #{:collection_id :collection_position :description :cache_ttl}
-                                    :non-nil #{:dataset_query :display :name :visualization_settings :archived
-                                               :enable_embedding :type :parameters :parameter_mappings :embedding_params
-                                               :result_metadata :collection_preview :verified-result-metadata?})))
-  ;; Fetch the updated Card from the DB
-  (let [card (t2/select-one Card :id (:id card-before-update))]
-    (delete-alerts-if-needed! :old-card card-before-update, :new-card card, :actor actor)
-    ;; skip publishing the event if it's just a change in its collection position
-    (when-not (= #{:collection_position}
-                 (set (keys card-updates)))
-      (events/publish-event! :event/card-update {:object card :user-id api/*current-user-id*}))
-    card))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------- Serialization --------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/extract-query &quot;Card&quot; [_ opts]
-  (serdes/extract-query-collections Card opts))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- export-result-metadata [card metadata]
-  (when (and metadata (model? card))
-    (for [m metadata]
-      (-&gt; (dissoc m :fingerprint)
-          (m/update-existing :table_id  serdes/*export-table-fk*)
-          (m/update-existing :id        serdes/*export-field-fk*)
-          (m/update-existing :field_ref serdes/export-mbql)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- import-result-metadata [metadata]
-  (when metadata
-    (for [m metadata]
-      (-&gt; m
-          (m/update-existing :table_id  serdes/*import-table-fk*)
-          (m/update-existing :id        serdes/*import-field-fk*)
-          (m/update-existing :field_ref serdes/import-mbql)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- result-metadata-deps [metadata]
-  (when (seq metadata)
-    (reduce set/union #{} (for [m (seq metadata)]
-                            (reduce set/union (serdes/mbql-deps (:field_ref m))
-                                    [(when (:table_id m) #{(serdes/table-&gt;path (:table_id m))})
-                                     (when (:id m)       #{(serdes/field-&gt;path (:id m))})])))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/extract-one &quot;Card&quot;
-  [_model-name _opts card]
-  ;; Cards have :table_id, :database_id, :collection_id, :creator_id that need conversion.
-  ;; :table_id and :database_id are extracted as just :table_id [database_name schema table_name].
-  ;; :collection_id is extracted as its entity_id or identity-hash.
-  ;; :creator_id as the user's email.
-  (try
-    (-&gt; (serdes/extract-one-basics &quot;Card&quot; card)
-        (update :database_id            serdes/*export-fk-keyed* 'Database :name)
-        (update :table_id               serdes/*export-table-fk*)
-        (update :collection_id          serdes/*export-fk* 'Collection)
-        (update :creator_id             serdes/*export-user*)
-        (update :made_public_by_id      serdes/*export-user*)
-        (update :dataset_query          serdes/export-mbql)
-        (update :parameters             serdes/export-parameters)
-        (update :parameter_mappings     serdes/export-parameter-mappings)
-        (update :visualization_settings serdes/export-visualization-settings)
-        (update :result_metadata        (partial export-result-metadata card)))
-    (catch Exception e
-      (throw (ex-info (format &quot;Failed to export Card: %s&quot; (ex-message e)) {:card card} e)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/load-xform &quot;Card&quot;
-  [card]
-  (-&gt; card
-      serdes/load-xform-basics
-      (update :database_id            serdes/*import-fk-keyed* 'Database :name)
-      (update :table_id               serdes/*import-table-fk*)
-      (update :creator_id             serdes/*import-user*)
-      (update :made_public_by_id      serdes/*import-user*)
-      (update :collection_id          serdes/*import-fk* 'Collection)
-      (update :dataset_query          serdes/import-mbql)
-      (update :parameters             serdes/import-parameters)
-      (update :parameter_mappings     serdes/import-parameter-mappings)
-      (update :visualization_settings serdes/import-visualization-settings)
-      (update :result_metadata        import-result-metadata)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/dependencies &quot;Card&quot;
-  [{:keys [collection_id database_id dataset_query parameters parameter_mappings
-           result_metadata table_id visualization_settings]}]
-  (-&gt;&gt; (map serdes/mbql-deps parameter_mappings)
-       (reduce set/union #{})
-       (set/union (serdes/parameters-deps parameters))
-       (set/union #{[{:model &quot;Database&quot; :id database_id}]})
-       ; table_id and collection_id are nullable.
-       (set/union (when table_id #{(serdes/table-&gt;path table_id)}))
-       (set/union (when collection_id #{[{:model &quot;Collection&quot; :id collection_id}]}))
-       (set/union (result-metadata-deps result_metadata))
-       (set/union (serdes/mbql-deps dataset_query))
-       (set/union (serdes/visualization-settings-deps visualization_settings))
-       vec))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/descendants &quot;Card&quot; [_model-name id]
-  (let [card               (t2/select-one Card :id id)
-        source-table       (some-&gt;  card :dataset_query :query :source-table)
-        template-tags      (some-&gt;&gt; card :dataset_query :native :template-tags vals (keep :card-id))
-        parameters-card-id (some-&gt;&gt; card :parameters (keep (comp :card_id :values_source_config)))
-        snippets           (some-&gt;&gt; card :dataset_query :native :template-tags vals (keep :snippet-id))]
-    (set/union
-      (when (and (string? source-table)
-                 (str/starts-with? source-table &quot;card__&quot;))
-        #{[&quot;Card&quot; (Integer/parseInt (.substring ^String source-table 6))]})
-      (when (seq template-tags)
-        (set (for [card-id template-tags]
-               [&quot;Card&quot; card-id])))
-      (when (seq parameters-card-id)
-        (set (for [card-id parameters-card-id]
-               [&quot;Card&quot; card-id])))
-      (when (seq snippets)
-        (set (for [snippet-id snippets]
-               [&quot;NativeQuerySnippet&quot; snippet-id]))))))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------ Audit Log --------------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod audit-log/model-details :model/Card
-  [{card-type :type, :as card} _event-type]
-  (merge (select-keys card [:name :description :database_id :table_id])
-          ;; Use `model` instead of `dataset` to mirror product terminology
-         {:model? (= (keyword card-type) :model)}))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+</td><td class="codes"><pre class="brush: clojure">(mu/defn db-metadata :- [:set i/TableMetadataField]
+  &quot;Fetch metadata about Fields belonging to a given `table` directly from an external database by calling its driver's
+  implementation of `describe-table` or `describe-fields` if supported.&quot;
+  [database :- i/DatabaseInstance
+   table    :- i/TableInstance]
+    (cond-&gt; (fetch-metadata/table-fields-metadata database table)
+      (driver/database-supports? (:engine database) :nested-field-columns database)
+      (set/union (fetch-metadata/nfc-metadata database table))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

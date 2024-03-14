@@ -2870,7 +2870,6 @@ tables, schemas, and fields, and their types. For example, with SQL databases, t
 DatabaseMetaData to get this information.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.sync.fetch-metadata
   (:require
-   [metabase.config :as config]
    [metabase.driver :as driver]
    [metabase.driver.sql-jdbc.sync :as sql-jdbc.sync]
    [metabase.driver.util :as driver.u]
@@ -2880,18 +2879,25 @@ DatabaseMetaData to get this information.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn db-metadata :- i/DatabaseMetadata
   &quot;Get basic Metadata about a `database` and its Tables. Doesn't include information about the Fields.&quot;
   [database :- i/DatabaseInstance]
-  (driver/describe-database (driver.u/database-&gt;driver database) database))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn table-metadata :- i/TableMetadata
+  (driver/describe-database (driver.u/database-&gt;driver database) database))</pre></td></tr><tr><td class="docs"><p>Effectively a wrapper for [[metabase.driver/describe-fields]] that also validates the output against the schema.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn fields-metadata
+  [database :- i/DatabaseInstance &amp; {:as args}]
+  (cond-&gt;&gt; (driver/describe-fields (driver.u/database-&gt;driver database) database args)
+    ;; This is a workaround for the fact that [[mu/defn]] can't check reducible collections yet
+    (mu.fn/instrument-ns? *ns*)
+    (eduction (map #(mu.fn/validate-output {} i/FieldMetadataEntry %)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn table-fields-metadata :- [:set i/TableMetadataField]
   &quot;Get more detailed information about a `table` belonging to `database`. Includes information about the Fields.&quot;
   [database :- i/DatabaseInstance
    table    :- i/TableInstance]
-  (driver/describe-table (driver.u/database-&gt;driver database) database table))</pre></td></tr><tr><td class="docs"><p>Effectively a wrapper for [[metabase.driver/describe-fks]] that also validates the output against the schema.</p>
+  (if (driver/database-supports? (driver.u/database-&gt;driver database) :describe-fields database)
+    (set (fields-metadata database :table-names [(:name table)] :schema-names [(:schema table)]))
+    (:fields (driver/describe-table (driver.u/database-&gt;driver database) database table))))</pre></td></tr><tr><td class="docs"><p>Effectively a wrapper for [[metabase.driver/describe-fks]] that also validates the output against the schema.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn fk-metadata
   [database :- i/DatabaseInstance &amp; {:as args}]
   (cond-&gt;&gt; (driver/describe-fks (driver.u/database-&gt;driver database) database args)
-    ;; Validate the output against the schema, except in prod.
     ;; This is a workaround for the fact that [[mu/defn]] can't check reducible collections yet
-    (not config/is-prod?)
+    (mu.fn/instrument-ns? *ns*)
     (eduction (map #(mu.fn/validate-output {} i/FKMetadataEntry %)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn table-fk-metadata :- [:maybe [:sequential i/FKMetadataEntry]]
   &quot;Get information about the foreign keys belonging to `table`.&quot;

@@ -2865,7 +2865,7 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.driver.sql-jdbc.sync.describe-table" name="metabase.driver.sql-jdbc.sync.describe-table"><h1 class="project-name">metabase.driver.sql-jdbc.sync.describe-table</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>SQL JDBC impl for <code>describe-table</code>, <code>describe-fks</code>, <code>describe-table-fks</code>, and <code>describe-nested-field-columns</code>.
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.driver.sql-jdbc.sync.describe-table" name="metabase.driver.sql-jdbc.sync.describe-table"><h1 class="project-name">metabase.driver.sql-jdbc.sync.describe-table</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>SQL JDBC impl for <code>describe-fields</code>, <code>describe-table</code>, <code>describe-fks</code>, <code>describe-table-fks</code>, and <code>describe-nested-field-columns</code>.
 <code>describe-table-fks</code> is deprecated and will be replaced by <code>describe-fks</code> in the future.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.driver.sql-jdbc.sync.describe-table
   (:require
@@ -2933,7 +2933,7 @@ net.brehaut.ClojureTools = (function (SH) {
         honeysql (sql.qp/apply-top-level-clause driver :limit honeysql {:limit 0})]
     (sql.qp/format-honeysql driver honeysql)))</pre></td></tr><tr><td class="docs"><p>In some rare cases <code>:column_name</code> is blank (eg. SQLite's views with group by) fallback to sniffing the type from a
 SELECT * query.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn fallback-fields-metadata-from-select-query
+</td><td class="codes"><pre class="brush: clojure">(defn- fallback-fields-metadata-from-select-query
   [driver ^Connection conn db-name-or-nil schema table]
   ;; some DBs (:sqlite) don't actually return the correct metadata for LIMIT 0 queries
   (let [[sql &amp; params] (sql-jdbc.sync.interface/fallback-metadata-query driver db-name-or-nil schema table)]
@@ -3015,24 +3015,35 @@ SELECT * query.</p>
         (reduce
          ((comp cat (m/distinct-by :name)) rf)
          init
-         [jdbc-metadata fallback-metadata])))))</pre></td></tr><tr><td class="docs"><p>Returns a transducer for computing metadata about the fields in <code>table</code>.</p>
+         [jdbc-metadata fallback-metadata])))))</pre></td></tr><tr><td class="docs"><p>Returns a transducer for computing metadata about the fields in <code>db</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn describe-fields-xf
+  [driver db]
+  (map (fn [col]
+         (let [base-type      (database-type-&gt;base-type-or-warn driver (:database-type col))
+               semantic-type  (calculated-semantic-type driver (:name col) (:database-type col))
+               json?          (isa? base-type :type/JSON)]
+           (merge
+            (u/select-non-nil-keys col [:table-schema
+                                        :table-name
+                                        :pk?
+                                        :name
+                                        :database-type
+                                        :database-position
+                                        :field-comment
+                                        :database-required
+                                        :database-is-auto-increment])
+            {:base-type         base-type
+             ;; json-unfolding is true by default for JSON fields, but this can be overridden at the DB level
+             :json-unfolding    json?}
+            (when semantic-type
+              {:semantic-type semantic-type})
+            (when (and json? (driver/database-supports? driver :nested-field-columns db))
+              {:visibility-type :details-only}))))))</pre></td></tr><tr><td class="docs"><p>Returns a transducer for computing metadata about the fields in a table, given the database <code>db</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn describe-table-fields-xf
-  [driver table]
-  (map-indexed (fn [i {:keys [database-type], column-name :name, :as col}]
-                 (let [base-type      (database-type-&gt;base-type-or-warn driver database-type)
-                       semantic-type  (calculated-semantic-type driver column-name database-type)
-                       db             (table/database table)
-                       json?          (isa? base-type :type/JSON)]
-                   (merge
-                    (u/select-non-nil-keys col [:name :database-type :field-comment :database-required :database-is-auto-increment])
-                    {:base-type         base-type
-                     :database-position i
-                     ;; json-unfolding is true by default for JSON fields, but this can be overridden at the DB level
-                     :json-unfolding    json?}
-                    (when semantic-type
-                      {:semantic-type semantic-type})
-                    (when (and json? (driver/database-supports? driver :nested-field-columns db))
-                      {:visibility-type :details-only}))))))</pre></td></tr><tr><td class="docs"><p>Returns a set of column metadata for <code>table</code> using JDBC Connection <code>conn</code>.</p>
+  [driver db]
+  (comp
+   (describe-fields-xf driver db)
+   (map-indexed (fn [i col] (assoc col :database-position i)))))</pre></td></tr><tr><td class="docs"><p>Returns a set of column metadata for <code>table</code> using JDBC Connection <code>conn</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti describe-table-fields
   {:added    &quot;0.45.0&quot;
    :arglists '([driver ^Connection conn table ^String db-name-or-nil])}
@@ -3042,12 +3053,14 @@ SELECT * query.</p>
   [driver conn table db-name-or-nil]
   (into
    #{}
-   (describe-table-fields-xf driver table)
+   (describe-table-fields-xf driver (table/database table))
    (fields-metadata driver conn table db-name-or-nil)))</pre></td></tr><tr><td class="docs"><p>Returns a vector of primary keys for <code>table</code> using a JDBC DatabaseMetaData from JDBC Connection <code>conn</code>.
 The PKs should be ordered by column names if there are multiple PKs.
 Ref: https://docs.oracle.com/javase/8/docs/api/java/sql/DatabaseMetaData.html#getPrimaryKeys-java.lang.String-java.lang.String-java.lang.String-</p>
 
 <p>Note: If db-name, schema, and table-name are not passed, this may return <em>all</em> pks that the metadata's connection can access.</p>
+
+<p>This does not need to be implemented for drivers that support the [[driver/describe-fields]] multimethod.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti get-table-pks
   {:changelog-test/ignore true
    :added    &quot;0.45.0&quot;
@@ -3078,15 +3091,27 @@ Ref: https://docs.oracle.com/javase/8/docs/api/java/sql/DatabaseMetaData.html#ge
         ;; find PKs and mark them
         (add-table-pks driver conn db-name-or-nil))))</pre></td></tr><tr><td class="docs"><p>Default implementation of <code>driver/describe-table</code> for SQL JDBC drivers. Uses JDBC DatabaseMetaData.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn describe-table
-  [driver db-or-id-or-spec-or-conn table]
-  (if (instance? Connection db-or-id-or-spec-or-conn)
-    (describe-table* driver db-or-id-or-spec-or-conn table)
-    (sql-jdbc.execute/do-with-connection-with-options
-     driver
-     db-or-id-or-spec-or-conn
-     nil
-     (fn [^Connection conn]
-       (describe-table* driver conn table)))))</pre></td></tr><tr><td class="docs">
+  [driver db table]
+  (sql-jdbc.execute/do-with-connection-with-options
+   driver
+   db
+   nil
+   (fn [^Connection conn]
+     (describe-table* driver conn table))))</pre></td></tr><tr><td class="docs"><p>Returns a SQL query ([sql &amp; params]) for use in the default JDBC implementation of [[metabase.driver/describe-fields]],
+ i.e. [[describe-fields]].</p>
+</td><td class="codes"><pre class="brush: clojure">(defmulti describe-fields-sql
+  {:added    &quot;0.49.1&quot;
+   :arglists '([driver &amp; {:keys [schema-names table-names]}])}
+  driver/dispatch-on-initialized-driver
+  :hierarchy #'driver/hierarchy)</pre></td></tr><tr><td class="docs"><p>Default implementation of [[metabase.driver/describe-fields]] for JDBC drivers. Uses JDBC DatabaseMetaData.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn describe-fields
+  [driver db &amp; {:keys [schema-names table-names] :as args}]
+  (if (or (and schema-names (empty? schema-names))
+          (and table-names (empty? table-names)))
+    []
+    (eduction
+     (describe-fields-xf driver db)
+     (sql-jdbc.execute/reducible-query db (describe-fields-sql driver args)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- describe-table-fks*
   [_driver ^Connection conn {^String schema :schema, ^String table-name :name} &amp; [^String db-name-or-nil]]
   (into
@@ -3113,8 +3138,11 @@ Ref: https://docs.oracle.com/javase/8/docs/api/java/sql/DatabaseMetaData.html#ge
  driver/dispatch-on-initialized-driver
  :hierarchy #'driver/hierarchy)</pre></td></tr><tr><td class="docs"><p>Default implementation of [[metabase.driver/describe-fks]] for JDBC drivers. Uses JDBC DatabaseMetaData.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn describe-fks
-  [driver db &amp; args]
-  (sql-jdbc.execute/reducible-query db (describe-fks-sql driver args)))</pre></td></tr><tr><td class="docs"><p>Default implementation of [[metabase.driver/describe-table-indexes]] for SQL JDBC drivers. Uses JDBC DatabaseMetaData.</p>
+  [driver db &amp; {:keys [schema-names table-names] :as args}]
+    (if (or (and schema-names (empty? schema-names))
+            (and table-names (empty? table-names)))
+      []
+      (sql-jdbc.execute/reducible-query db (describe-fks-sql driver args))))</pre></td></tr><tr><td class="docs"><p>Default implementation of [[metabase.driver/describe-table-indexes]] for SQL JDBC drivers. Uses JDBC DatabaseMetaData.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn describe-table-indexes
   [driver db table]
   (sql-jdbc.execute/do-with-connection-with-options
