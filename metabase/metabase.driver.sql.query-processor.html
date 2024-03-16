@@ -2898,7 +2898,17 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(def source-query-alias
   &quot;source&quot;)</pre></td></tr><tr><td class="docs"><p>The INNER query currently being processed, for situations where we need to refer back to it.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *inner-query*
-  nil)</pre></td></tr><tr><td class="docs"><p>Do best effort edit to the <code>sql</code>, to make it nestable in subselect.</p>
+  nil)</pre></td></tr><tr><td class="docs"><p>See [[make-nestable-sql]] but does not wrap in result in parens.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn make-nestable-sql*
+  [sql]
+  (-&gt; sql
+      (str/replace #&quot;;([\s;]*(--.*\n?)*)*$&quot; &quot;&quot;)
+      str/trimr
+      (as-&gt; trimmed
+        ;; Query could potentially end with a comment.
+        (if (re-find #&quot;--.*$&quot; trimmed)
+          (str trimmed &quot;\n&quot;)
+          trimmed))))</pre></td></tr><tr><td class="docs"><p>Do best effort edit to the <code>sql</code>, to make it nestable in subselect.</p>
 
 <p>That requires:</p>
 
@@ -2916,20 +2926,11 @@ https://github.com/metabase/metabase/pull/30677</p>
 
 <p>For the limitations see the [[metabase.driver.sql.query-processor-test/make-nestable-sql-test]]</p>
 </td><td class="codes"><pre class="brush: clojure">(defn make-nestable-sql
-  [sql]
-  (str &quot;(&quot;
-       (-&gt; sql
-           (str/replace #&quot;;([\s;]*(--.*\n?)*)*$&quot; &quot;&quot;)
-           str/trimr
-           (as-&gt; trimmed
-                 ;; Query could potentially end with a comment.
-                 (if (re-find #&quot;--.*$&quot; trimmed)
-                   (str trimmed &quot;\n&quot;)
-                   trimmed)))
-       &quot;)&quot;))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- format-sql-source-query [_fn [sql params]]
-  (into [(make-nestable-sql sql)] params))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(sql/register-fn! ::sql-source-query #'format-sql-source-query)</pre></td></tr><tr><td class="docs"><p>Wrap clause in <code>::sql-source-query</code>. Does additional validation.</p>
+    [sql]
+  (str &quot;(&quot; (make-nestable-sql* sql) &quot;)&quot;))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- format-sql-source-query [_clause [sql params]]
+  (into [(make-nestable-sql* sql)] params))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(sql/register-clause! ::sql-source-query #'format-sql-source-query :select)</pre></td></tr><tr><td class="docs"><p>Wrap clause in <code>::sql-source-query</code>. Does additional validation.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn sql-source-query
   [sql params]
   (when-not (string? sql)
@@ -2942,7 +2943,7 @@ https://github.com/metabase/metabase/pull/30677</p>
                          (.getCanonicalName (class params)))
                     {:type  qp.error-type/invalid-query
                      :query params})))
-  [::sql-source-query sql params])</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
+  {::sql-source-query [sql params]})</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
 |                                            Interface (Multimethods)                                            |
 +----------------------------------------------------------------------------------------------------------------+</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>DEPRECATED: Prior to between 0.46.0 and 0.49.0, drivers could use either Honey SQL 1 or Honey SQL 2. In 0.49.0+, all
@@ -4037,22 +4038,42 @@ Clauses are applied according to the order in <code>top-level-clause-application
        (apply-top-level-clause driver k honeysql-form inner-query)))
     honeysql-form
     (query-&gt;keys-in-application-order inner-query))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(declare apply-clauses)</pre></td></tr><tr><td class="docs"><p>Handle a <code>:source-query</code> clause by adding a recursive <code>SELECT</code> or native query. At the time of this writing, all
-source queries are aliased as <code>source</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(declare apply-clauses)</pre></td></tr><tr><td class="docs"><p>Handle a <code>:source-query</code> clause by adding a recursive <code>SELECT</code> or native query.
+ If the source query has ambiguous column names, use a <code>WITH</code> statement to rename the source columns.
+ At the time of this writing, all source queries are aliased as <code>source</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- apply-source-query
-  [driver honeysql-form {{:keys [native params],
-                          persisted :persisted-info/native
-                          :as source-query} :source-query}]
-  (assoc honeysql-form
-         :from [[(cond
-                   persisted
-                   (sql-source-query persisted nil)
-                   native
-                   (sql-source-query native params)
-                   :else
-                   (apply-clauses driver {} source-query))
-                 (let [table-alias (-&gt;honeysql driver (h2x/identifier :table-alias source-query-alias))]
-                   [table-alias])]]))</pre></td></tr><tr><td class="docs"><p>Like [[apply-top-level-clauses]], but handles <code>source-query</code> as well, which needs to be handled in a special way
+  [driver honeysql-form {{:keys [native params] persisted :persisted-info/native :as source-query} :source-query
+                         source-metadata :source-metadata}]
+  (let [table-alias (-&gt;honeysql driver (h2x/identifier :table-alias source-query-alias))
+        source-clause (cond
+                        persisted
+                        (sql-source-query persisted nil)
+                        native
+                        (sql-source-query native params)
+                        :else
+                        (apply-clauses driver {} source-query))
+        ;; TODO: Use MLv2 here to get source and desired-aliases
+        alias-info (mapv (fn [{[_ desired-ref-name] :field_ref source-name :name}]
+                           [source-name desired-ref-name])
+                         source-metadata)
+        source-aliases (mapv first alias-info)
+        desired-aliases (mapv second alias-info)
+        duplicate-source-aliases? (and (&gt; (count source-aliases) 1)
+                                       (not (apply distinct? source-aliases)))
+        needs-columns? (and (seq desired-aliases)
+                            (&gt; (count desired-aliases) 1)
+                            duplicate-source-aliases?
+                            (apply distinct? desired-aliases)
+                            (every? string? desired-aliases))]
+    (merge
+      honeysql-form
+      (if needs-columns?
+        ;; HoneySQL cannot expand [::h2x/identifier :table &quot;source&quot;] in the with alias.
+        ;; This is ok since we control the alias.
+        {:with [[[source-query-alias {:columns (mapv #(h2x/identifier :field %) desired-aliases)}]
+                 source-clause]]
+         :from [[table-alias]]}
+        {:from [[source-clause [table-alias]]]}))))</pre></td></tr><tr><td class="docs"><p>Like [[apply-top-level-clauses]], but handles <code>source-query</code> as well, which needs to be handled in a special way
 because it is aliased.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- apply-clauses
   [driver honeysql-form {:keys [source-query], :as inner-query}]

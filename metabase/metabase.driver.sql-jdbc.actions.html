@@ -2879,15 +2879,18 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.driver.sql.query-processor :as sql.qp]
    [metabase.driver.util :as driver.u]
    [metabase.lib.metadata.protocols :as lib.metadata.protocols]
+   [metabase.lib.schema.actions :as lib.schema.actions]
    [metabase.lib.schema.common :as lib.schema.common]
    [metabase.lib.schema.id :as lib.schema.id]
+   [metabase.mbql.schema :as mbql.s]
    [metabase.query-processor.preprocess :as qp.preprocess]
    [metabase.query-processor.store :as qp.store]
    [metabase.util :as u]
    [metabase.util.honey-sql-2 :as h2x]
    [metabase.util.i18n :refer [trs tru]]
    [metabase.util.log :as log]
-   [metabase.util.malli :as mu])
+   [metabase.util.malli :as mu]
+   [metabase.util.malli.registry :as mr])
   (:import
    (java.sql Connection SQLException)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
@@ -2953,11 +2956,15 @@ to write more implementations for this.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti base-type-&gt;sql-type-map
   {:changelog-test/ignore true, :arglists '([driver]), :added &quot;0.44.0&quot;}
   driver/dispatch-on-initialized-driver
-  :hierarchy #'driver/hierarchy)</pre></td></tr><tr><td class="docs"><p>Certain value types need to have their honeysql form updated to work properly during update/creation. This function
-uses honeysql casting to wrap values in the map that need to be cast with their column's type, and passes through
-types that do not need casting like integer or string.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- cast-values
-  [driver column-&gt;value database-id table-id]
+  :hierarchy #'driver/hierarchy)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private cast-values :- ::lib.schema.actions/row
+  &quot;Certain value types need to have their honeysql form updated to work properly during update/creation. This function
+  uses honeysql casting to wrap values in the map that need to be cast with their column's type, and passes through
+  types that do not need casting like integer or string.&quot;
+  [driver        :- :keyword
+   column-&gt;value :- ::lib.schema.actions/row
+   database-id   :- ::lib.schema.id/database
+   table-id      :- ::lib.schema.id/table]
   (let [type-&gt;sql-type (base-type-&gt;sql-type-map driver)
         column-&gt;field  (actions/cached-value
                         [::cast-values table-id]
@@ -3063,8 +3070,7 @@ query of the type corresponding to <code>action</code>.</p>
         {:rows-deleted [1]}))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod actions/perform-action!* [:sql-jdbc :row/update]
   [driver action database {database-id :database :keys [update-row] :as query}]
-  (let [update-row   (update-keys update-row keyword)
-        raw-hsql     (mbql-query-&gt;raw-hsql driver query)
+  (let [raw-hsql     (mbql-query-&gt;raw-hsql driver query)
         target-table (first (:from raw-hsql))
         update-hsql  (-&gt; raw-hsql
                          (select-keys [:where])
@@ -3089,10 +3095,12 @@ query of the type corresponding to <code>action</code>.</p>
   {:changelog-test/ignore true, :arglists '([driver create-hsql conn result]), :added &quot;0.46.0&quot;}
   (fn [driver _ _ _]
     (driver/dispatch-on-initialized-driver driver))
-  :hierarchy #'driver/hierarchy)</pre></td></tr><tr><td class="docs"><p>H2 and MySQL are dumb and <code>RETURN_GENERATED_KEYS</code> only returns the ID of
+  :hierarchy #'driver/hierarchy)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::created-row
+  [:map-of :string :any])</pre></td></tr><tr><td class="docs"><p>H2 and MySQL are dumb and <code>RETURN_GENERATED_KEYS</code> only returns the ID of
 the newly created row. This function will <code>SELECT</code> the newly created row
 assuming that <code>result</code> is a map from column names to the generated values.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmethod select-created-row :default
+</td><td class="codes"><pre class="brush: clojure">(mu/defmethod select-created-row :default :- [:maybe ::created-row]
   [driver create-hsql conn result]
   (let [select-hsql     (-&gt; create-hsql
                             (dissoc :insert-into :values)
@@ -3105,11 +3113,13 @@ assuming that <code>result</code> is a map from column names to the generated va
         select-sql-args (sql.qp/format-honeysql driver select-hsql)]
     (log/tracef &quot;:row/create SELECT HoneySQL:\n\n%s&quot; (u/pprint-to-str select-hsql))
     (log/tracef &quot;:row/create SELECT SQL + args:\n\n%s&quot; (u/pprint-to-str select-sql-args))
-    (first (jdbc/query {:connection conn} select-sql-args {:identifiers identity, :transaction? false}))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod actions/perform-action!* [:sql-jdbc :row/create]
-  [driver action database {database-id :database :keys [create-row] :as query}]
-  (let [create-row  (update-keys create-row keyword)
-        raw-hsql    (mbql-query-&gt;raw-hsql driver query)
+    (first (jdbc/query {:connection conn} select-sql-args {:identifiers identity, :transaction? false, :keywordize? false}))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defmethod actions/perform-action!* [:sql-jdbc :row/create] :- [:map [:created-row [:maybe ::created-row]]]
+  [driver
+   action
+   database
+   {database-id :database :keys [create-row] :as query} :- ::mbql.s/Query]
+  (let [raw-hsql    (mbql-query-&gt;raw-hsql driver query)
         create-hsql (-&gt; raw-hsql
                         (assoc :insert-into (first (:from raw-hsql)))
                         (assoc :values [(cast-values driver create-row database-id (get-in query [:query :source-table]))])
@@ -3120,7 +3130,10 @@ assuming that <code>result</code> is a map from column names to the generated va
     (log/tracef &quot;:row/create SQL + args:\n\n%s&quot; (u/pprint-to-str sql-args))
     (with-jdbc-transaction [conn database-id]
       (let [result (with-auto-parse-sql-exception driver database action
-                     (jdbc/execute! {:connection conn} sql-args {:return-keys true, :identifiers identity, :transaction? false}))
+                     (jdbc/execute! {:connection conn} sql-args {:return-keys  true
+                                                                 :identifiers  identity
+                                                                 :transaction? false
+                                                                 :keywordize?  false}))
             _      (log/tracef &quot;:row/create INSERT returned\n\n%s&quot; (u/pprint-to-str result))
             row    (select-created-row driver create-hsql conn result)]
         (log/tracef &quot;:row/create returned row %s&quot; (pr-str row))
@@ -3173,8 +3186,14 @@ nested transaction which allows the top-level transaction to proceed even tho pa
              successes]))))
      rows)))</pre></td></tr><tr><td class="docs"><p><code>:bulk/create</code></p>
 </td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod actions/perform-action!* [:sql-jdbc :bulk/create]
-  [driver _action database {:keys [table-id rows]}]
+</td><td class="codes"><pre class="brush: clojure">(mu/defmethod actions/perform-action!* [:sql-jdbc :bulk/create]
+  [driver                  :- :keyword
+   _action
+   database                :- [:map
+                               [:id ::lib.schema.id/database]]
+   {:keys [table-id rows]} :- [:map
+                               [:table-id ::lib.schema.id/table]
+                               [:rows     [:sequential ::lib.schema.actions/row]]]]
   (log/tracef &quot;Inserting %d rows&quot; (count rows))
   (perform-bulk-action-with-repeated-single-row-actions!
    {:driver   driver
@@ -3286,7 +3305,7 @@ would fail anyway because the first call would delete it while the second would 
                                        {:success true})))})))</pre></td></tr><tr><td class="docs"><p><code>bulk/update</code></p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Return a 400 if <code>row</code> doesn't have all the required PK columns.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private check-row-has-all-pk-columns
-  [row      :- [:map-of :string :any]
+  [row      :- ::lib.schema.actions/row
    pk-names :- [:set :string]]
   (doseq [pk-key pk-names
           :when  (not (contains? row pk-key))]
@@ -3295,7 +3314,7 @@ would fail anyway because the first call would delete it while the second would 
                          (pr-str (set (keys row))))
                     {:row row, :pk-names pk-names, :status-code 400}))))</pre></td></tr><tr><td class="docs"><p>Return a 400 if <code>row</code> doesn't have any non-PK columns to update.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private check-row-has-some-non-pk-columns
-  [row      :- [:map-of :string :any]
+  [row      :- ::lib.schema.actions/row
    pk-names :- [:set :string]]
   (let [non-pk-names (set/difference (set (keys row)) pk-names)]
     (when (empty? non-pk-names)

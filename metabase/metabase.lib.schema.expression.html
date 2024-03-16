@@ -2894,23 +2894,21 @@ always have type info!</p>
         (type x)
         dispatch-value)))
   :hierarchy lib.hierarchy/hierarchy)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- mbql-clause? [expr]
-  (and (vector? expr)
-       (keyword? (first expr))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::base-type
-  [:or
-   [:= ::type.unknown]
-   ::common/base-type])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn type-of :- [:or
-                     ::base-type
-                     [:set {:min 2} ::base-type]]
+  [:multi {:dispatch (partial = ::type.unknown)}
+   [true  [:= ::type.unknown]]
+   [false [:ref ::common/base-type]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn type-of :- [:multi
+                     {:dispatch set?}
+                     [true  [:set {:min 2} [:ref ::base-type]]]
+                     [false [:ref ::base-type]]]
   &quot;Determine the type of an MBQL expression. Returns either a type keyword, or if the type is ambiguous, a set of
   possible types.&quot;
   [expr]
   (or
    ;; for MBQL clauses with `:effective-type` or `:base-type` in their options: ignore their dumb [[type-of-method]] methods
    ;; and return that type directly. Ignore everything else! Life hack!
-   (and (mbql-clause? expr)
+   (and (common/mbql-clause-tag expr)
         (map? (second expr))
         (or (:effective-type (second expr))
             (:base-type (second expr))))
@@ -2947,13 +2945,11 @@ for [[metabase.lib.metadata.calculation/type-of-method]].</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- expression-schema
   [base-type description]
   [:and
-   [:or
-    [:fn
-     {:error/message &quot;valid MBQL clause&quot;
-      :error/fn      (fn [{:keys [value]} _]
-                       (str &quot;invalid MBQL clause: &quot; (pr-str value)))}
-     (complement mbql-clause?)]
-    [:ref :metabase.lib.schema.mbql-clause/clause]]
+   ;; vector = MBQL clause, anything else = not an MBQL clause
+   [:multi
+    {:dispatch vector?}
+    [true  [:ref :metabase.lib.schema.mbql-clause/clause]]
+    [false [:ref :metabase.lib.schema.literal/literal]]]
    [:fn
     {:error/message description}
     #(type-of? % base-type)]])</pre></td></tr><tr><td class="docs">
@@ -3001,11 +2997,11 @@ there is an orderable type t such that both <code>t1</code> and <code>t2</code> 
   ;; This typing of each input should be replaced with an alternative scheme that checks that it's plausible to compare
   ;; all the args to an `:=` clause. Eg. comparing `:type/*` and `:type/String` is cool. Comparing `:type/IPAddress` to
   ;; `:type/Boolean` should fail; we can prove it's the wrong thing to do.
-   #{:type/Boolean :type/Text :type/Number :type/Temporal :type/IPAddress :type/MongoBSONID :type/Array :type/*})</pre></td></tr><tr><td class="docs">
+  #{:type/Boolean :type/Text :type/Number :type/Temporal :type/IPAddress :type/MongoBSONID :type/Array :type/*})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(derive :type/Text        ::emptyable)
+(derive :type/MongoBSONID ::emptyable)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::emptyable
-  [:or
-   [:ref ::string]
-   (expression-schema :type/MongoBSONID &quot;expression returning a BSONID&quot;)])</pre></td></tr><tr><td class="docs">
+  (expression-schema ::emptyable &quot;expression returning something emptyable (e.g. a string or BSON ID)&quot;))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::equality-comparable
   [:maybe
    (expression-schema equality-comparable-types

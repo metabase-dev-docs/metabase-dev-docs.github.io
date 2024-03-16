@@ -2899,9 +2899,11 @@ individual transformations, such as <code>reconcile-breakout-and-order-by-bucket
    [clojure.set :as set]
    [clojure.walk :as walk]
    [medley.core :as m]
+   [metabase.mbql.schema :as mbql.s]
    [metabase.mbql.util :as mbql.u]
    [metabase.mbql.util.match :as mbql.match]
    [metabase.shared.util.i18n :as i18n]
+   [metabase.util :as u]
    [metabase.util.log :as log]
    [metabase.util.malli :as mu]))</pre></td></tr><tr><td class="docs"><p>True if <code>x</code> is an MBQL clause (a sequence with a token as its first arg). (This is different from the implementation
 in <code>mbql.u</code> because it also supports un-normalized clauses. You shouldn't need to use this outside of this
@@ -3168,7 +3170,10 @@ it.</p>
   [native-query]
   (let [native-query (m/map-keys maybe-normalize-token native-query)]
     (cond-&gt; native-query
-      (seq (:template-tags native-query)) (update :template-tags normalize-template-tags))))</pre></td></tr><tr><td class="docs"><p>Map of special functions that should be used to perform token normalization for a given path. For example, the
+      (seq (:template-tags native-query)) (update :template-tags normalize-template-tags))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- normalize-actions-row [row]
+  (cond-&gt; row
+    (map? row) (update-keys u/qualified-name)))</pre></td></tr><tr><td class="docs"><p>Map of special functions that should be used to perform token normalization for a given path. For example, the
 <code>:expressions</code> key in an MBQL query should preserve the case of the expression names; this custom behavior is
 defined below.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private path-&gt;special-token-normalization-fn
@@ -3191,7 +3196,9 @@ defined below.</p>
    ;; TODO -- when does query ever have a top-level `:context` key??
    :context         #(some-&gt; % maybe-normalize-token)
    :source-metadata {::sequence normalize-source-metadata}
-   :viz-settings    maybe-normalize-token})</pre></td></tr><tr><td class="docs"><p>Recursively normalize tokens in <code>x</code>.</p>
+   :viz-settings    maybe-normalize-token
+   :create-row      normalize-actions-row
+   :update-row      normalize-actions-row})</pre></td></tr><tr><td class="docs"><p>Recursively normalize tokens in <code>x</code>.</p>
 
 <p>Every time this function recurses (thru a map value) it adds a new (normalized) key to key path, e.g. <code>path</code> will be
 <code>[:query :order-by]</code> when we're in the MBQL order-by clause. If we need to handle these top-level clauses in special
@@ -3260,6 +3267,7 @@ already. Done for MBQL 95 backwards-compatibility. e.g.:</p>
   (canonicalize-mbql-clause (wrap-implicit-field-id clause)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod canonicalize-mbql-clause :field
   [[_ id-or-name opts]]
+  {:pre [((some-fn map? nil?) opts)]}
   (if (is-clause? :field id-or-name)
     (let [[_ nested-id-or-name nested-opts] id-or-name]
       (canonicalize-mbql-clause [:field nested-id-or-name (not-empty (merge nested-opts opts))]))
@@ -3615,7 +3623,9 @@ consistent.</p>
    :query        {:source-query remove-empty-clauses-in-source-query
                   :joins        {::sequence remove-empty-clauses-in-join}}
    :parameters   {::sequence remove-empty-clauses-in-parameter}
-   :viz-settings identity})</pre></td></tr><tr><td class="docs"><p>Remove any empty or <code>nil</code> clauses in a query.</p>
+   :viz-settings identity
+   :create-row   identity
+   :update-row   identity})</pre></td></tr><tr><td class="docs"><p>Remove any empty or <code>nil</code> clauses in a query.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- remove-empty-clauses
   ([query]
    (remove-empty-clauses query []))
@@ -3648,7 +3658,12 @@ up-to-date MBQL 2000, and remove empty clauses.</p>
         (catch #?(:clj Throwable :cljs js/Error) e
           (throw (ex-info (i18n/tru &quot;Error normalizing query: {0}&quot; (ex-message e))
                           {:query query}
-                          e)))))))</pre></td></tr><tr><td class="docs"><p>Normalize just a specific fragment of a query, such as just the inner MBQL part or just a filter clause. <code>path</code> is
+                          e)))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn normalize-or-throw :- ::mbql.s/Query
+  &quot;Like [[normalize]], but checks the result against the Malli schema for a legacy query, which will cause it to throw
+  if it fails (at least in dev).&quot;
+  [query :- :map]
+  (normalize query))</pre></td></tr><tr><td class="docs"><p>Normalize just a specific fragment of a query, such as just the inner MBQL part or just a filter clause. <code>path</code> is
 where this fragment would normally live in a full query.</p>
 
 <p>  (normalize-fragment [:query :filter] ["=" 100 200])

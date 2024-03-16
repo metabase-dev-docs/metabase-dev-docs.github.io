@@ -2889,7 +2889,8 @@ those Fields potentially dozens of times in a single query execution.</p>
    [metabase.query-processor.error-type :as qp.error-type]
    [metabase.util :as u]
    [metabase.util.i18n :refer [tru]]
-   [metabase.util.malli :as mu]))</pre></td></tr><tr><td class="docs">
+   [metabase.util.malli :as mu]
+   [metabase.util.malli.registry :as mr]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private uninitialized-store
   (reify
@@ -2910,12 +2911,14 @@ ID is set.</p>
   (not (identical? *store* uninitialized-store)))</pre></td></tr><tr><td class="docs"><p>Store a miscellaneous value in a the cache. Persists for the life of this QP invocation, including for recursive
 calls.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn store-miscellaneous-value!
-  [ks v]
+  [ks :- [:sequential :any]
+   v]
   (swap! *store* assoc-in ks v))</pre></td></tr><tr><td class="docs"><p>Fetch a miscellaneous value from the cache. Unlike other Store functions, does not throw if value is not found.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn miscellaneous-value
   ([ks]
    (miscellaneous-value ks nil))
-  ([ks not-found]
+  ([ks :- [:sequential :any]
+    not-found]
    (get-in @*store* ks not-found)))</pre></td></tr><tr><td class="docs"><p>Attempt to fetch a miscellaneous value from the cache using key sequence <code>ks</code>; if not found, runs <code>thunk</code> to get the
 value, stores it in the cache, and returns the value. You can use this to ensure a given function is only ran once
 during the duration of a QP execution.</p>
@@ -2950,24 +2953,24 @@ macro.</p>
   (or (miscellaneous-value [::metadata-provider])
       (throw (ex-info &quot;QP Store Metadata Provider is not initialized yet; initialize it with `qp.store/with-metadata-provider`.&quot;
                       {}))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::database-id-or-metadata-providerable
+  [:or
+   ::lib.schema.id/database
+   ::lib.schema.metadata/metadata-providerable])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private -&gt;metadata-provider :- ::lib.schema.metadata/metadata-provider
-  [database-id-or-metadata-provider :- [:or
-                                        ::lib.schema.id/database
-                                        ::lib.schema.metadata/metadata-provider]]
-  (if (integer? database-id-or-metadata-provider)
-    (lib.metadata.jvm/application-database-metadata-provider database-id-or-metadata-provider)
-    database-id-or-metadata-provider))</pre></td></tr><tr><td class="docs"><p>Impl for [[with-metadata-provider]]; if there's already a provider, just make sure we're not trying to change the
+  [database-id-or-metadata-providerable :- ::database-id-or-metadata-providerable]
+  (if (integer? database-id-or-metadata-providerable)
+    (lib.metadata.jvm/application-database-metadata-provider database-id-or-metadata-providerable)
+    database-id-or-metadata-providerable))</pre></td></tr><tr><td class="docs"><p>Impl for [[with-metadata-provider]]; if there's already a provider, just make sure we're not trying to change the
 Database. We don't need to replace it.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private validate-existing-provider
-  [database-id-or-metadata-provider :- [:or
-                                        ::lib.schema.id/database
-                                        ::lib.schema.metadata/metadata-provider]]
+  [database-id-or-metadata-providerable :- ::database-id-or-metadata-providerable]
   (let [old-provider (miscellaneous-value [::metadata-provider])]
-    (when-not (identical? old-provider database-id-or-metadata-provider)
-      (let [new-database-id      (if (integer? database-id-or-metadata-provider)
-                                   database-id-or-metadata-provider
+    (when-not (identical? old-provider database-id-or-metadata-providerable)
+      (let [new-database-id      (if (integer? database-id-or-metadata-providerable)
+                                   database-id-or-metadata-providerable
                                    (throw (ex-info &quot;Cannot replace MetadataProvider with another one after it has been bound&quot;
-                                                   {:old-provider old-provider, :new-provider database-id-or-metadata-provider})))
+                                                   {:old-provider old-provider, :new-provider database-id-or-metadata-providerable})))
             existing-database-id (u/the-id (lib.metadata/database old-provider))]
         (when-not (= new-database-id existing-database-id)
           (throw (ex-info (tru &quot;Attempting to initialize metadata provider with new Database {0}. Queries can only reference one Database. Already referencing: {1}&quot;
@@ -2977,10 +2980,8 @@ Database. We don't need to replace it.</p>
                            :new-id      new-database-id
                            :type        qp.error-type/invalid-query})))))))</pre></td></tr><tr><td class="docs"><p>Create a new metadata provider and save it.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private set-metadata-provider!
-  [database-id-or-metadata-provider :- [:or
-                                        ::lib.schema.id/database
-                                        ::lib.schema.metadata/metadata-provider]]
-  (let [new-provider (-&gt;metadata-provider database-id-or-metadata-provider)]
+  [database-id-or-metadata-providerable :- ::database-id-or-metadata-providerable]
+  (let [new-provider (-&gt;metadata-provider database-id-or-metadata-providerable)]
     ;; validate the new provider.
     (try
       (lib.metadata/database new-provider)
@@ -2989,22 +2990,23 @@ Database. We don't need to replace it.</p>
                         {:metadata-provider new-provider}
                         e))))
     (store-miscellaneous-value! [::metadata-provider] new-provider)))</pre></td></tr><tr><td class="docs"><p>Implementation for [[with-metadata-provider]].</p>
-</td><td class="codes"><pre class="brush: clojure">(defn do-with-metadata-provider
-  [database-id-or-metadata-provider thunk]
+</td><td class="codes"><pre class="brush: clojure">(mu/defn do-with-metadata-provider
+  [database-id-or-metadata-providerable :- ::database-id-or-metadata-providerable
+   thunk                                :- [:=&gt; [:cat] :any]]
   (cond
     (or (not (initialized?))
         *TESTS-ONLY-allow-replacing-metadata-provider*)
     (binding [*store*                                        (atom {})
               *TESTS-ONLY-allow-replacing-metadata-provider* false]
-      (do-with-metadata-provider database-id-or-metadata-provider thunk))
+      (do-with-metadata-provider database-id-or-metadata-providerable thunk))
     ;; existing provider
     (miscellaneous-value [::metadata-provider])
     (do
-      (validate-existing-provider database-id-or-metadata-provider)
+      (validate-existing-provider database-id-or-metadata-providerable)
       (thunk))
     :else
     (do
-      (set-metadata-provider! database-id-or-metadata-provider)
+      (set-metadata-provider! database-id-or-metadata-providerable)
       (thunk))))</pre></td></tr><tr><td class="docs"><p>Execute <code>body</code> with an initialized QP store and metadata provider bound. You can either pass
 a [[metabase.lib.metadata.protocols/MetadataProvider]] directly, or pass a Database ID, for which we will create
 a [[metabase.lib.metadata.jvm/application-database-metadata-provider]].</p>
@@ -3012,8 +3014,8 @@ a [[metabase.lib.metadata.jvm/application-database-metadata-provider]].</p>
 <p>If a MetadataProvider is already bound, this is a no-op.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmacro with-metadata-provider
   {:style/indent [:defn]}
-  [database-id-or-metadata-provider &amp; body]
-  `(do-with-metadata-provider ~database-id-or-metadata-provider (^:once fn* [] ~@body)))</pre></td></tr><tr><td class="docs"><p>TODO -- mark this deprecated in favor of the version in <code>lib.metadata</code></p>
+  [database-id-or-metadata-providerable &amp; body]
+  `(do-with-metadata-provider ~database-id-or-metadata-providerable (^:once fn* [] ~@body)))</pre></td></tr><tr><td class="docs"><p>TODO -- mark this deprecated in favor of the version in <code>lib.metadata</code></p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn bulk-metadata :- [:maybe [:sequential [:map
                                                 [:lib/type :keyword]
                                                 [:id pos-int?]]]]

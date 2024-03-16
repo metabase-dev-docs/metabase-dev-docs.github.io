@@ -2870,8 +2870,40 @@ net.brehaut.ClojureTools = (function (SH) {
   (:require
    [clojure.string :as str]
    [metabase.types]
+   [metabase.util :as u]
+   [metabase.util.malli :as mu]
    [metabase.util.malli.registry :as mr]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(comment metabase.types/keep-me)</pre></td></tr><tr><td class="docs"><p>Schema for a string that cannot be blank.</p>
+</td><td class="codes"><pre class="brush: clojure">(comment metabase.types/keep-me)</pre></td></tr><tr><td class="docs"><p>Base normalization behavior for something that should be a keyword: calls [[clojure.core/keyword]] on it if it is a
+string. This is preferable to using [[clojure.core/keyword]] directly, because that will be tried on things that
+should not get converted to keywords, like numbers.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn normalize-keyword
+  [x]
+  (cond-&gt; x
+    (string? x) keyword))</pre></td></tr><tr><td class="docs"><p>Base normalization behavior for a pMBQL map: keywordize keys and keywordize <code>:lib/type</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn normalize-map
+  [m]
+  ;; check to make sure we actually need to update anything before we do it. [[update-keys]] always creates new maps
+  ;; even if nothing has changed, this way we can avoid creating a bunch of garbage for already-normalized maps
+  (let [m (cond-&gt; m
+            (and (map? m)
+                 (some string? (keys m)))
+            (update-keys keyword))]
+    (cond-&gt; m
+      (string? (:lib/type m)) (update :lib/type keyword))))</pre></td></tr><tr><td class="docs"><p>Base normalization behavior for things that should be string map keys. Converts keywords to strings if needed. This
+is mostly to work around the REST API recursively keywordizing the entire request body by default.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn normalize-string-key
+  [x]
+  (cond-&gt; x
+    (keyword? x) u/qualified-name))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn mbql-clause-tag :- [:maybe :keyword]
+  &quot;If `x` is a (possibly not-yet-normalized) MBQL clause, return its `tag`.&quot;
+  [x]
+  (when (and (vector? x)
+             ((some-fn keyword? string?) (first x)))
+    (keyword (first x))))</pre></td></tr><tr><td class="docs"><p>Whether <code>x</code> is a (possibly not-yet-normalized) MBQL clause with <code>tag</code>. Does not check that the clause is valid.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn is-clause?
+  [tag :- :keyword x]
+  (= (mbql-clause-tag x) tag))</pre></td></tr><tr><td class="docs"><p>Schema for a string that cannot be blank.</p>
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::non-blank-string
   [:and
    [:string {:min 1}]
@@ -2885,38 +2917,58 @@ net.brehaut.ClojureTools = (function (SH) {
    {:error/message &quot;positive number&quot;}
    (every-pred number? pos?)])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::uuid
-  ;; TODO -- should this be stricter?
-  [:string {:min 36, :max 36}])</pre></td></tr><tr><td class="docs">
+  [:string
+   {:decode/normalize (fn [x]
+                        (cond-&gt; x
+                          (uuid? x) str))
+    ;; TODO -- should this be stricter?
+    :min 36
+    :max 36}])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- semantic-type? [x]
   (isa? x :Semantic/*))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::semantic-type
-  [:fn
-   {:error/message &quot;valid semantic type&quot;
-    :error/fn      (fn [{:keys [value]} _]
-                     (str &quot;Not a valid semantic type: &quot; (pr-str value)))}
-   semantic-type?])</pre></td></tr><tr><td class="docs">
+  [:and
+   [:keyword
+    {:decode/normalize normalize-keyword}]
+   [:fn
+    {:error/message &quot;valid semantic type&quot;
+     :error/fn      (fn [{:keys [value]} _]
+                      (str &quot;Not a valid semantic type: &quot; (pr-str value)))}
+    semantic-type?]])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- relation-type? [x]
   (isa? x :Relation/*))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::relation-type
-  [:fn
-   {:error/message &quot;valid relation type&quot;
-    :error/fn      (fn [{:keys [value]} _]
-                     (str &quot;Not a valid relation type: &quot; (pr-str value)))}
-   relation-type?])</pre></td></tr><tr><td class="docs">
+  [:and
+   [:keyword
+    {:decode/normalize normalize-keyword}]
+   [:fn
+    {:error/message &quot;valid relation type&quot;
+     :error/fn      (fn [{:keys [value]} _]
+                      (str &quot;Not a valid relation type: &quot; (pr-str value)))}
+    relation-type?]])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::semantic-or-relation-type
-  [:or
-   [:ref ::semantic-type]
-   [:ref ::relation-type]])</pre></td></tr><tr><td class="docs">
+  [:and
+   [:keyword
+    {:decode/normalize normalize-keyword}]
+   [:fn
+    {:error/message &quot;valid semantic or relation type&quot;
+     :error/fn      (fn [{:keys [value]} _]
+                      (str &quot;Not a valid semantic or relation type: &quot; (pr-str value)))}
+    (some-fn semantic-type? relation-type?)]])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- base-type? [x]
   (isa? x :type/*))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::base-type
-  [:fn
-   {:error/message &quot;valid base type&quot;
-    :error/fn      (fn [{:keys [value]} _]
-                     (str &quot;Not a valid base type: &quot; (pr-str value)))}
-   base-type?])</pre></td></tr><tr><td class="docs">
+  [:and
+   [:keyword
+    {:decode/normalize normalize-keyword}]
+   [:fn
+    {:error/message &quot;valid base type&quot;
+     :error/fn      (fn [{:keys [value]} _]
+                      (str &quot;Not a valid base type: &quot; (pr-str value)))}
+    base-type?]])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::options
   [:map
+   {:decode/normalize normalize-map}
    [:lib/uuid ::uuid]
    ;; these options aren't required for any clause in particular, but if they're present they must follow these schemas.
    [:base-type      {:optional true} [:maybe ::base-type]]
@@ -2929,7 +2981,9 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::external-op
   [:map
    [:lib/type [:= :lib/external-op]]
-   [:operator [:or :string :keyword]]
+   [:operator [:multi {:dispatch string?}
+               [true  :string]
+               [false :keyword]]]
    [:args     [:sequential :any]]
    [:options {:optional true} ::options]])</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();

@@ -2865,154 +2865,212 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#literal.cljc" name="literal.cljc"><h1 class="project-name">literal.cljc</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Malli schemas for string, temporal, number, and boolean literals.</p>
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.lib.schema.literal
-  (:require
-   #?@(:clj ([metabase.lib.schema.literal.jvm]))
-   [malli.core :as mc]
-   [metabase.lib.schema.common :as common]
-   [metabase.lib.schema.expression :as expression]
-   [metabase.lib.schema.mbql-clause :as mbql-clause]
-   [metabase.shared.util.internal.time-common :as shared.ut.common]
-   [metabase.util.malli.registry :as mr]
-   #?@(:clj
-       ([java-time.api :as t]))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod expression/type-of-method :dispatch-type/nil
-  [_nil]
-  :type/*)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod expression/type-of-method :dispatch-type/boolean
-  [_bool]
-  :type/Boolean)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">#?(:clj
-   (defn- big-int? [x]
-     (or (instance? java.math.BigInteger x)
-         (instance? clojure.lang.BigInt x))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::integer
-  #?(:clj [:multi
-           {:dispatch big-int?}
-           [true  :metabase.lib.schema.literal.jvm/big-integer]
-           [false :int]]
-     :cljs :int))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod expression/type-of-method :dispatch-type/integer
-  [_int]
-  :type/Integer)</pre></td></tr><tr><td class="docs"><p>we should probably also restrict this to disallow NaN and positive/negative infinity, I don't know in what
-universe we'd want to allow those if they're not disallowed already.</p>
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::non-integer-real
-  #?(:clj [:or
-           :double
-           :metabase.lib.schema.literal.jvm/float
-           :metabase.lib.schema.literal.jvm/big-decimal]
-     :cljs :double))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod expression/type-of-method :dispatch-type/number
-  [_non-integer-real]
-  ;; `:type/Float` is the 'base type' of all non-integer real number types in [[metabase.types]] =(
-  :type/Float)</pre></td></tr><tr><td class="docs"><p>TODO -- these temporal literals could be a little stricter, right now they are pretty permissive, you shouldn't be
-allowed to have month <code>13</code> or <code>02-29</code> for example</p>
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::string.date
-  [:re
-   {:error/message &quot;date string literal&quot;}
-   shared.ut.common/local-date-regex])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::string.zone-offset
-  [:re
-   {:error/message &quot;timezone offset string literal&quot;}
-   shared.ut.common/zone-offset-part-regex])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::string.time
-  [:or
-   [:re
-    {:error/message &quot;local time string literal&quot;}
-    shared.ut.common/local-time-regex]
-   [:re
-    {:error/message &quot;offset time string literal&quot;}
-    shared.ut.common/offset-time-regex]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::string.datetime
-  [:or
-   [:re
-    {:error/message &quot;local date time string literal&quot;}
-    shared.ut.common/local-datetime-regex]
-   [:re
-    {:error/message &quot;offset date time string literal&quot;}
-    shared.ut.common/offset-datetime-regex]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod expression/type-of-method :dispatch-type/string
-  [s]
-  (condp mc/validate s
-    ::string.datetime #{:type/Text :type/DateTime}
-    ::string.date     #{:type/Text :type/Date}
-    ::string.time     #{:type/Text :type/Time}
-    :type/Text))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::date
-  #?(:clj  [:or
-            [:time/local-date
-             {:error/message    &quot;instance of java.time.LocalDate&quot;
-              :encode/serialize str}]
-            ::string.date]
-     :cljs ::string.date))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::time
-  #?(:clj [:or
-           ::string.time
-           [:time/local-time
-            {:error/message    &quot;instance of java.time.LocalTime&quot;
-             :encode/serialize str}]
-           [:time/offset-time
-            {:error/message    &quot;instance of java.time.OffsetTime&quot;
-             :encode/serialize str}]]
-     :cljs ::string.time))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::datetime
-  #?(:clj [:or
-           ::string.datetime
-           [:time/local-date-time
-            {:error/message    &quot;instance of java.time.LocalDateTime&quot;
-             :encode/serialize str}]
-           [:time/offset-date-time
-            {:error/message    &quot;instance of java.time.OffsetDateTime&quot;
-             :encode/serialize str}]
-           [:time/zoned-date-time
-            {:error/message    &quot;instance of java.time.ZonedDateTime&quot;
-             :encode/serialize #(str (t/offset-date-time %))}]]
-     :cljs ::string.datetime))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::temporal
-  [:or
-   ::date
-   ::time
-   ::datetime])</pre></td></tr><tr><td class="docs"><p>these are currently only allowed inside <code>:absolute-datetime</code></p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::string.year-month
-  [:re
-   {:error/message &quot;year-month string literal&quot;}
-   shared.ut.common/year-month-regex])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::string.year
-  [:re
-   {:error/message &quot;year string literal&quot;}
-   shared.ut.common/year-regex])</pre></td></tr><tr><td class="docs"><p><code>:effective-type</code> is required for <code>:value</code> clauses. This was not a rule in the legacy MBQL schema, but in actual
-usage they basically always have <code>:base-type</code>; in MLv2 we're trying to use <code>:effective-type</code> everywhere instead;
-These clauses are useless/pointless without type information anyway, so let's enforce this rule going forward.
-Conversion can take care of <code>:base-type</code> &lt;=> <code>:effective-type</code> as needed.</p>
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::value.options
-  [:merge
-   [:ref ::common/options]
-   [:map
-    [:effective-type ::common/base-type]]])</pre></td></tr><tr><td class="docs"><p>[:value <opts> <value>] clauses are mostly used internally by the query processor to add type information to
-literals, to make it easier for drivers to process queries; see
-the [[metabase.query-processor.middleware.wrap-value-literals]] middleware. It is also used to differentiate <code>nil</code>
-(as in no clause or value) from something intended to be <code>NULL</code> in a compiled query, and to associate type
-information with that <code>nil</code>. Even if this is mostly used internally, the schema still needs to know about it.</p>
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.lib.schema.parameter" name="metabase.lib.schema.parameter"><h1 class="project-name">metabase.lib.schema.parameter</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p><code>:parameters</code> specify the <em>values</em> of parameters previously definied for a Dashboard or Card (native query template
+tag parameters.) See [[metabase.lib.schema.template-tag]] above for more information on the later.</p>
 
-<p>The schema itself does not currently enforce that the actual <value> matches up with the <code>:effective-type</code> in the
-options map; this is only enforced in the QP. For now, it assumes you know what you are doing and takes your word
-for it when you say something has a given <code>:effective-type</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(mbql-clause/define-mbql-clause :value
+<p>There are three things called 'type' in play when we talk about parameters and template tags.</p>
+
+<p>Two are used when the parameters are specified/declared, in a [[TemplateTag]] or in a Dashboard parameter:</p>
+
+<ol>
+<li><p>Dashboard parameter/template tag <code>:type</code> -- <code>:dimension</code> (for a Field filter parameter),
+otherwise <code>:text</code>, <code>:number</code>, <code>:boolean</code>, or <code>:date</code></p></li>
+<li><p><code>:widget-type</code> -- only specified for Field filter parameters (where type is <code>:dimension</code>). This tells the FE
+what type of widget to display, and also tells us what types of parameters we should allow. Examples:
+<code>:date/all-options</code>, <code>:category</code>, etc.</p></li>
+</ol>
+
+<p>One type is used in the [[Parameter]] list (<code>:parameters</code>):</p>
+
+<ol>
+<li>Parameter <code>:type</code> -- specifies the type of the value being passed in. e.g. <code>:text</code> or <code>:string/!=</code></li>
+</ol>
+
+<p>Note that some types that makes sense as widget types (e.g. <code>:date/all-options</code>) but not as actual value types are
+currently still allowed for backwards-compatibility purposes -- currently the FE client will just parrot back the
+<code>:widget-type</code> in some cases. In these cases, the backend is just supposed to infer the actual type of the parameter
+value.</p>
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.lib.schema.parameter
+  (:require
+   [metabase.lib.schema.common :as lib.schema.common]
+   [metabase.util.malli.registry :as mr]))</pre></td></tr><tr><td class="docs"><p>Map of parameter-type -> info. Info is a map with the following keys:</p>
+
+<h3>`:type`</h3>
+
+<p>The general type of this parameter. <code>:numeric</code>, <code>:string</code>, <code>:boolean</code>, or <code>:date</code>, if applicable. Some parameter
+types like <code>:id</code> and <code>:category</code> don't have a particular <code>:type</code>. This is offered mostly so we can group stuff
+together or determine things like whether a given parameter is a date parameter.</p>
+
+<h3>`:operator`</h3>
+
+<p>Signifies this is one of the new 'operator' parameter types added in 0.39.0 or so. These parameters can only be used
+for [[TemplateTag:FieldFilter]]s or for Dashboard parameters mapped to MBQL queries. The value of this key is the
+arity for the parameter, either <code>:unary</code>, <code>:binary</code>, or <code>:variadic</code>. See
+the [[metabase.driver.common.parameters.operators]] namespace for more information.</p>
+
+<h3>`:allowed-for`</h3>
+
+<p>[[Parameter]]s with this <code>:type</code> may be supplied for [[TemplateTag]]s with these <code>:type</code>s (or <code>:widget-type</code> if
+<code>:type</code> is <code>:dimension</code>) types. Example: it is ok to pass a parameter of type <code>:date/range</code> for template tag with
+<code>:widget-type</code> <code>:date/all-options</code>; but it is NOT ok to pass a parameter of type <code>:date/range</code> for a template tag
+with a widget type <code>:date</code>. Why? It's a potential security risk if someone creates a Card with an "exact-match"
+Field filter like <code>:date</code> or <code>:text</code> and you pass in a parameter like <code>string/!=</code> <code>NOTHING_WILL_MATCH_THIS</code>.
+Non-exact-match parameters can be abused to enumerate <em>all</em> the rows in a table when the parameter was supposed to
+lock the results down to a single row or set of rows.</p>
+</td><td class="codes"><pre class="brush: clojure">(def types
+  {;; the basic raw-value types. These can be used with [[TemplateTag:RawValue]] template tags as well as
+   ;; [[TemplateTag:FieldFilter]] template tags.
+   :number  {:type :numeric, :allowed-for #{:number :number/= :id :category :location/zip_code}}
+   :text    {:type :string,  :allowed-for #{:text :string/= :id :category
+                                            :location/city :location/state :location/zip_code :location/country}}
+   :date    {:type :date,    :allowed-for #{:date :date/single :date/all-options :id :category}}
+   ;; I don't think `:boolean` is actually used on the FE at all.
+   :boolean {:type :boolean, :allowed-for #{:boolean :id :category}}
+   ;; as far as I can tell this is basically just an alias for `:date`... I'm not sure what the difference is TBH
+   :date/single {:type :date, :allowed-for #{:date :date/single :date/all-options :id :category}}
+   ;; everything else can't be used with raw value template tags -- they can only be used with Dashboard parameters
+   ;; for MBQL queries or Field filters in native queries
+   ;; `:id` and `:category` conceptually aren't types in a &quot;the parameter value is of this type&quot; sense, but they are
+   ;; widget types. They have something to do with telling the frontend to show FieldValues list/search widgets or
+   ;; something like that.
+   ;;
+   ;; Apparently the frontend might still pass in parameters with these types, in which case we're supposed to infer
+   ;; the actual type of the parameter based on the Field we're filtering on. Or something like that. Parameters with
+   ;; these types are only allowed if the widget type matches exactly, but you can also pass in something like a
+   ;; `:number/=` for a parameter with widget type `:category`.
+   ;;
+   ;; TODO FIXME -- actually, it turns out the the FE client passes parameter type `:category` for parameters in
+   ;; public Cards. Who knows why! For now, we'll continue allowing it. But we should fix it soon. See
+   ;; [[metabase.api.public-test/execute-public-card-with-parameters-test]]
+   :id       {:allowed-for #{:id}}
+   :category {:allowed-for #{:category #_FIXME :number :text :date :boolean}}
+   ;; Like `:id` and `:category`, the `:location/*` types are primarily widget types. They don't really have a meaning
+   ;; as a parameter type, so in an ideal world they wouldn't be allowed; however it seems like the FE still passed
+   ;; these in as parameter type on occasion anyway. In this case the backend is just supposed to infer the actual
+   ;; type -- which should be `:text` and, in the case of ZIP code, possibly `:number`.
+   ;;
+   ;; As with `:id` and `:category`, it would be preferable to just pass in a parameter with type `:text` or `:number`
+   ;; for these widget types, but for compatibility we'll allow them to continue to be used as parameter types for the
+   ;; time being. We'll only allow that if the widget type matches exactly, however.
+   :location/city     {:allowed-for #{:location/city}}
+   :location/state    {:allowed-for #{:location/state}}
+   :location/zip_code {:allowed-for #{:location/zip_code}}
+   :location/country  {:allowed-for #{:location/country}}
+   ;; date range types -- these match a range of dates
+   :date/range        {:type :date, :allowed-for #{:date/range :date/all-options}}
+   :date/month-year   {:type :date, :allowed-for #{:date/month-year :date/all-options}}
+   :date/quarter-year {:type :date, :allowed-for #{:date/quarter-year :date/all-options}}
+   :date/relative     {:type :date, :allowed-for #{:date/relative :date/all-options}}
+   ;; Like `:id` and `:category` above, `:date/all-options` is primarily a widget type. It means that we should allow
+   ;; any date option above.
+   :date/all-options {:type :date, :allowed-for #{:date/all-options}}
+   ;; &quot;operator&quot; parameter types.
+   :number/!=               {:type :numeric, :operator :variadic, :allowed-for #{:number/!=}}
+   :number/&lt;=               {:type :numeric, :operator :unary, :allowed-for #{:number/&lt;=}}
+   :number/=                {:type :numeric, :operator :variadic, :allowed-for #{:number/= :number :id :category
+                                                                                 :location/zip_code}}
+   :number/&gt;=               {:type :numeric, :operator :unary, :allowed-for #{:number/&gt;=}}
+   :number/between          {:type :numeric, :operator :binary, :allowed-for #{:number/between}}
+   :string/!=               {:type :string, :operator :variadic, :allowed-for #{:string/!=}}
+   :string/=                {:type :string, :operator :variadic, :allowed-for #{:string/= :text :id :category
+                                                                                :location/city :location/state
+                                                                                :location/zip_code :location/country}}
+   :string/contains         {:type :string, :operator :unary, :allowed-for #{:string/contains}}
+   :string/does-not-contain {:type :string, :operator :unary, :allowed-for #{:string/does-not-contain}}
+   :string/ends-with        {:type :string, :operator :unary, :allowed-for #{:string/ends-with}}
+   :string/starts-with      {:type :string, :operator :unary, :allowed-for #{:string/starts-with}}})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::type
+  (into [:enum {:error/message    &quot;valid parameter type&quot;
+                :decode/normalize lib.schema.common/normalize-keyword}]
+        (keys types)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::widget-type
+  (into [:enum
+         {:error/message    &quot;valid template tag widget type&quot;
+          :decode/normalize lib.schema.common/normalize-keyword}
+         :none]
+        (keys types)))</pre></td></tr><tr><td class="docs"><p>the next few clauses are used for parameter <code>:target</code>... this maps the parameter to an actual template tag in a
+native query or Field for MBQL queries.</p>
+
+<p>examples:</p>
+
+<p>   {:target [:dimension [:template-tag "my_tag"]]}
+   {:target [:dimension [:template-tag {:id "my<em>tag</em>id"}]]}
+   {:target [:variable [:template-tag "another_tag"]]}
+   {:target [:variable [:template-tag {:id "another<em>tag</em>id"}]]}
+   {:target [:dimension [:field 100 nil]]}
+   {:target [:field 100 nil]}</p>
+
+<p>I'm not 100% clear on which situations we'll get which version. But I think the following is generally true:</p>
+
+<ul>
+<li>Things are wrapped in <code>:dimension</code> when we're dealing with Field filter template tags</li>
+<li>Raw value template tags wrap things in <code>:variable</code> instead</li>
+<li>Dashboard parameters are passed in with plain Field clause targets.</li>
+</ul>
+
+<p>One more thing to note: apparently <code>:expression</code>... is allowed below as well. I'm not sure how this is actually
+supposed to work, but we have test #18747 that attempts to set it. I'm not convinced this should actually be
+allowed.</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>These are all legacy-style MBQL clauses FOR NOW, obviously at some point in the future we need to
+update [[metabase.lib.convert]] to convert <code>:parameters</code> back and forth and add UUIDs and what not. But parameters
+is not ported to MLv2 yet, so conversion isn't implemented YET.</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::legacy-field-ref
+  [:ref :metabase.mbql.schema/field])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::legacy-expression-ref
+  [:ref :metabase.mbql.schema/expression])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::dimension.target
+  [:multi {:dispatch lib.schema.common/mbql-clause-tag
+           :error/fn (fn [{:keys [value]} _]
+                       (str &quot;Invalid :dimension target: must be either a :field or a :template-tag, got: &quot;
+                            (pr-str value)))}
+   [:field        [:ref ::legacy-field-ref]]
+   [:expression   [:ref ::legacy-expression-ref]]
+   [:template-tag [:ref ::template-tag]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::dimension
   [:tuple
-   {:error/message &quot;Value :value clause&quot;}
-   #_tag   [:= {:decode/normalize common/normalize-keyword} :value]
-   #_opts  [:ref ::value.options]
-   #_value any?])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::literal
-  [:or
-   :nil
-   :boolean
-   :string
-   ::integer
-   ::non-integer-real
-   ::temporal])</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+   #_tag    [:= {:decode/normalize lib.schema.common/normalize-keyword} :dimension]
+   #_target [:ref ::dimension.target]])</pre></td></tr><tr><td class="docs"><p>this is the reference like [:template-tag <whatever>], not the schema for native query template tags -- that lives
+in [[metabase.lib.schema.template-tag]]</p>
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::template-tag
+  [:tuple
+   #_tag      [:= {:decode/normalize lib.schema.common/normalize-keyword} :template-tag]
+   #_tag-name [:multi {:dispatch map?}
+               [true  [:map
+                       [:id ::lib.schema.common/non-blank-string]]]
+               [false ::lib.schema.common/non-blank-string]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::variable
+  [:tuple
+   #_tag    [:= {:decode/normalize lib.schema.common/normalize-keyword} :variable]
+   #_target [:ref ::template-tag]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::target
+  [:multi {:dispatch lib.schema.common/mbql-clause-tag
+           :error/fn (fn [{:keys [value]} _]
+                       (str &quot;Invalid parameter :target, must be either :field, :dimension, or :variable; got: &quot;
+                            (pr-str value)))}
+   [:field     [:ref ::legacy-field-ref]]
+   [:dimension [:ref ::dimension]]
+   [:variable  [:ref ::variable]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::parameter
+  [:map
+   [:type [:ref ::type]]
+   ;; TODO -- these definitely SHOULD NOT be optional but a ton of tests aren't passing them in like they should be.
+   ;; At some point we need to go fix those tests and then make these keys required
+   [:id       {:optional true} ::lib.schema.common/non-blank-string]
+   [:target   {:optional true} [:ref ::target]]
+   ;; not specified if the param has no value. TODO - make this stricter; type of `:value` should be validated based
+   ;; on the [[ParameterType]]
+   [:value    {:optional true} :any]
+   ;; the name of the parameter we're trying to set -- this is actually required now I think, or at least needs to get
+   ;; merged in appropriately
+   [:name     {:optional true} ::lib.schema.common/non-blank-string]
+   ;; The following are not used by the code in this namespace but may or may not be specified depending on what the
+   ;; code that constructs the query params is doing. We can go ahead and ignore these when present.
+   [:slug     {:optional true} ::lib.schema.common/non-blank-string]
+   [:default  {:optional true} :any]
+   [:required {:optional true} :any]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::parameters
+  [:sequential [:ref ::parameter]])</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

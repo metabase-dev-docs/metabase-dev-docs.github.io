@@ -2885,16 +2885,6 @@ net.brehaut.ClojureTools = (function (SH) {
     (if unit-schema
       (mc/validate unit-schema unit)
       true)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::args.temporal
-  [:and
-   [:catn
-    [:expr      [:schema [:ref ::expression/temporal]]]
-    [:intervals [:+ [:ref :mbql.clause/interval]]]]
-   [:fn
-    {:error/message &quot;Temporal arithmetic expression with valid interval units for the expression type&quot;}
-    (fn [[expr &amp; intervals]]
-      (let [expr-type (expression/type-of expr)]
-        (every? #(valid-interval-for-type? % expr-type) intervals)))]])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::args.numbers
   [:repeat {:min 2} [:schema [:ref ::expression/number]]])</pre></td></tr><tr><td class="docs"><p>Validate a <code>:+</code> or <code>:-</code> expression with temporal args. Return a string describing any errors found, or <code>nil</code> if it
 looks ok.</p>
@@ -2911,45 +2901,47 @@ looks ok.</p>
         (some (fn [[_tag _opts _n unit :as interval]]
                 (when-not (valid-interval-for-type? interval expr-type)
                   (str &quot;Cannot add a &quot; unit &quot; interval to a &quot; expr-type &quot; expression&quot;)))
-              intervals)))))</pre></td></tr><tr><td class="docs"><p>Create a schema for <code>:+</code> or <code>:-</code> with temporal args: <temporal> ± <interval(s)> in any order</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- plus-minus-temporal-interval-schema
-  [tag]
+              intervals)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::plus-minus-temporal-interval-schema
   [:and
-   {:error/message (str tag &quot; clause with a temporal expression and one or more :interval clauses&quot;)}
+   {:error/message &quot;:+ or :- clause with a temporal expression and one or more :interval clauses&quot;}
    [:cat
-    [:= tag]
+    {:min 4}
+    [:enum :+ :-]
     [:schema [:ref ::common/options]]
     [:repeat [:schema [:ref :mbql.clause/interval]]]
     [:schema [:ref ::expression/temporal]]
     [:repeat [:schema [:ref :mbql.clause/interval]]]]
    [:fn
     {:error/fn (fn [{:keys [value]} _]
-                 (str &quot;Invalid &quot; tag &quot; clause: &quot; (validate-plus-minus-temporal-arithmetic-expression value)))}
-    (complement validate-plus-minus-temporal-arithmetic-expression)]])</pre></td></tr><tr><td class="docs"><p>Create a schema for <code>:+</code> or <code>:-</code> with numeric args.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- plus-minus-numeric-schema
-  [tag]
+                 (str &quot;Invalid :+ or :- clause: &quot; (validate-plus-minus-temporal-arithmetic-expression value)))}
+    (complement validate-plus-minus-temporal-arithmetic-expression)]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::plus-minus-numeric-schema
   [:cat
-   {:error/message (str tag &quot; clause with numeric args&quot;)}
-   [:= tag]
+   {:error/message &quot;:+ or :- clause with numeric args&quot;}
+   :keyword
    [:schema [:ref ::common/options]]
-   [:repeat {:min 2} [:schema [:ref ::expression/number]]]])</pre></td></tr><tr><td class="docs"><p>Given a sequence of args to a numeric arithmetic expression like <code>:+</code>, determine the type returned by the expression
+   [:repeat {:min 2} [:schema [:ref ::expression/number]]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- type-of-numeric-arithmetic-arg [expr]
+  (let [expr-type (expression/type-of expr)]
+    (if (and (isa? expr-type ::expression/type.unknown)
+             (mr/validate :metabase.lib.schema.ref/ref expr))
+      :type/Number
+      expr-type)))</pre></td></tr><tr><td class="docs"><p>Given a sequence of args to a numeric arithmetic expression like <code>:+</code>, determine the type returned by the expression
 by calculating the most-specific common ancestor type of all the args. E.g. <code>[:+ ... 2.0 2.0]</code> has two <code>:type/Float</code>
 args, and thus the most-specific common ancestor type is <code>:type/Float</code>. <code>[:+ ... 2.0 2]</code> has a <code>:type/Float</code> and a
 <code>:type/Integer</code> arg; the most-specific common ancestor type is <code>:type/Number</code>. For refs without type
 information (e.g. <code>:field</code> clauses), assume <code>:type/Number</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- type-of-numeric-arithmetic-args
   [args]
-  ;; Okay to use reduce without an init value here since we know we have &gt;= 2 args
-  #_{:clj-kondo/ignore [:reduce-without-init]}
-  (reduce
-   types/most-specific-common-ancestor
-   (map (fn [expr]
-          (let [expr-type (expression/type-of expr)]
-            (if (and (isa? expr-type ::expression/type.unknown)
-                     (mc/validate :metabase.lib.schema.ref/ref expr))
-              :type/Number
-              expr-type)))
-        args)))</pre></td></tr><tr><td class="docs"><p>Given a temporal value plus one or more intervals <code>args</code> passed to an arithmetic expression like <code>:+</code>, determine the
+  (transduce
+   (map type-of-numeric-arithmetic-arg)
+   (completing (fn [x y]
+                 (if (nil? x)
+                   y
+                   (types/most-specific-common-ancestor x y))))
+   nil
+   args))</pre></td></tr><tr><td class="docs"><p>Given a temporal value plus one or more intervals <code>args</code> passed to an arithmetic expression like <code>:+</code>, determine the
 overall type returned by the expression. This is the type of the temporal value (the arg that is not an interval),
 or assume <code>:type/Temporal</code> if it is a ref without type information.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- type-of-temporal-arithmetic-args
@@ -2982,22 +2974,47 @@ returns. There are three types of arithmetic expressions:</p>
     :type/Interval
     ;; fall back to numeric args
     :else (type-of-numeric-arithmetic-args args)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private temporal-difference-schema
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::temporal-difference-schema
   [:cat
    {:error/message &quot;:- clause taking the difference of two temporal expressions&quot;}
-   [:= :-]
+   [:= {:decode/normalize common/normalize-keyword} :-]
    [:schema [:ref ::common/options]]
    [:schema [:ref ::expression/temporal]]
    [:schema [:ref ::expression/temporal]]])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mbql-clause/define-mbql-clause :+
-  [:or
-   (plus-minus-temporal-interval-schema :+)
-   (plus-minus-numeric-schema :+)])</pre></td></tr><tr><td class="docs"><p>TODO -- should <code>:-</code> support just a single arg (for numbers)? What about <code>:+</code>?</p>
+  [:and
+   {:error/message &quot;valid :+ clause&quot;}
+   [:cat
+    [:= {:decode/normalize common/normalize-keyword} :+]
+    [:schema [:ref ::common/options]]
+    [:+ {:min 2} :any]]
+   [:multi
+    {:dispatch (fn [[_tag _opts &amp; args]]
+                 (if (some #(common/is-clause? :interval %)
+                           args)
+                   :temporal
+                   :numeric))}
+    [:temporal [:ref ::plus-minus-temporal-interval-schema]]
+    [:numeric  [:ref ::plus-minus-numeric-schema]]]])</pre></td></tr><tr><td class="docs"><p>TODO -- should <code>:-</code> support just a single arg (for numbers)? What about <code>:+</code>?</p>
 </td><td class="codes"><pre class="brush: clojure">(mbql-clause/define-mbql-clause :-
-  [:or
-   (plus-minus-temporal-interval-schema :-)
-   temporal-difference-schema
-   (plus-minus-numeric-schema :-)])</pre></td></tr><tr><td class="docs">
+  [:and
+   [:cat
+    [:= {:decode/normalize common/normalize-keyword} :-]
+    [:schema [:ref ::common/options]]
+    [:+ {:min 2} :any]]
+   [:multi
+    {:dispatch (fn [[_tag _opts &amp; args]]
+                 (cond
+                   (some #(common/is-clause? :interval %) args) :temporal
+                   (&gt; (count args) 2)                           :numeric
+                   :else                                        :numeric-or-temporal-difference))}
+    [:temporal [:ref ::plus-minus-temporal-interval-schema]]
+    [:numeric  [:ref ::plus-minus-numeric-schema]]
+    ;; TODO -- figure out a way to know definitively what type of `:-` this should be so we don't need to use `:or`
+    [:numeric-or-temporal-difference
+     [:or
+      [:ref ::plus-minus-numeric-schema]
+      [:ref ::temporal-difference-schema]]]]])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mbql-clause/define-catn-mbql-clause :*
   [:args ::args.numbers])</pre></td></tr><tr><td class="docs"><p>we always do non-integer real division even if all the expressions are integers, e.g.</p>
 

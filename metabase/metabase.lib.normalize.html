@@ -2868,114 +2868,81 @@ net.brehaut.ClojureTools = (function (SH) {
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.lib.normalize" name="metabase.lib.normalize"><h1 class="project-name">metabase.lib.normalize</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.lib.normalize
   (:require
-   [metabase.lib.dispatch :as lib.dispatch]
-   [metabase.lib.hierarchy :as lib.hierarchy]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- mbql-clause-type [x]
-  (when (and (vector? x)
-             ((some-fn keyword? string?) (first x)))
-    (keyword (first x))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- map-type [m]
-  (when (map? m)
-    (some-&gt; (or
-             (:lib/type m)
-             (get m &quot;lib/type&quot;))
-            keyword)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- dispatch-value [x]
-  (or
-   (mbql-clause-type x)
-   (map-type x)
-   (keyword (lib.dispatch/dispatch-value x))))</pre></td></tr><tr><td class="docs"><p>Ensure some part of an MBQL query <code>x</code>, e.g. a clause or map, is in the right shape after coming in from JavaScript or
+   [malli.core :as mc]
+   [malli.transform :as mtx]
+   [metabase.lib.schema :as lib.schema]
+   [metabase.lib.schema.mbql-clause :as lib.schema.mbql-clause]
+   [metabase.lib.schema.metadata :as lib.schema.metadata]
+   [metabase.shared.util.i18n :as i18n]
+   [metabase.util :as u]
+   [metabase.util.log :as log]
+   [metabase.util.malli.registry :as mr]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- lib-type [x]
+  (when (map? x)
+    (keyword (some #(get x %) [:lib/type &quot;lib/type&quot;]))))</pre></td></tr><tr><td class="docs"><p>TODO -- we are missing some stuff for sure.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private lib-type-&gt;schema
+  {:mbql/query        ::lib.schema/query
+   :mbql.stage/mbql   ::lib.schema/stage.mbql
+   :mbql.stage/native ::lib.schema/stage.native
+   :metadata/database ::lib.schema.metadata/database
+   :metadata/table    ::lib.schema.metadata/table
+   :metadata/column   ::lib.schema.metadata/column
+   :metadata/card     ::lib.schema.metadata/card
+   :metadata/segment  ::lib.schema.metadata/segment
+   :metadata/metric   ::lib.schema.metadata/metric})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- infer-schema [x]
+  (cond
+    (map? x)
+    (or (-&gt; x lib-type lib-type-&gt;schema)
+        :map)
+    (and (vector? x)
+         ((some-fn simple-keyword? string?) (first x)))
+    (lib.schema.mbql-clause/tag-&gt;registered-schema-name (first x))
+    :else
+    :any))</pre></td></tr><tr><td class="docs"><p>If normalization errors somewhere, just log the error and return the partially-normalized result. Easier to debug
+this way.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- default-error-fn
+  [error]
+  (log/warnf &quot;Error normalizing pMBQL:\n%s&quot; (u/pprint-to-str error))
+  (:value error))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^:dynamic *error-fn*
+  default-error-fn)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- coercer [schema]
+  (mr/cached ::coercer
+             schema
+             (fn []
+               (let [respond identity
+                     raise   #'*error-fn*] ; capture var rather than the bound value at the time this is eval'ed
+                 (mc/coercer schema (mtx/transformer {:name :normalize}) respond raise)))))</pre></td></tr><tr><td class="docs"><p>Ensure some part of an MBQL query <code>x</code>, e.g. a clause or map, is in the right shape after coming in from JavaScript or
 deserialized JSON (from the app DB or a REST API request). This is intended for things that are already in a
 generally correct pMBQL; to 'normalize' things from legacy MBQL, use [[metabase.lib.convert]].</p>
+
+<p>Normalization logic is defined in various schemas; grep for <code>:decode/normalize</code> in the <code>metabase.lib.schema*</code>
+namespaces.</p>
 
 <p>The default implementation will keywordize keys for maps, and convert some known keys
 using [[default-map-value-fns]]; for MBQL clauses, it will convert the clause name to a keyword and recursively
 normalize its options and arguments. Implement this method if you need custom behavior for something.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti normalize
-  {:arglists '([x])}
-  dispatch-value
-  :hierarchy lib.hierarchy/hierarchy)</pre></td></tr><tr><td class="docs"><p>Default normalization functions keys when doing map normalization.</p>
-</td><td class="codes"><pre class="brush: clojure">(def default-map-value-fns
-  {:base-type      keyword
-   :effective-type keyword
-   :semantic-type  keyword
-   :type           keyword
-   ;; we can calculate `:field_ref` now using [[metabase.lib.ref/ref]]; `:field_ref` is wrong half of the time anyway,
-   ;; so ignore it.
-   :field_ref      (constantly ::do-not-use-me)
-   :lib/type       keyword
-   :lib/options    normalize})</pre></td></tr><tr><td class="docs"><p>[[normalize]] a map using <code>key-fn</code> (default [[clojure.core/keyword]]) for keys and
-<code>value-fns</code> (default [[default-map-value-fns]]; additional functions are merged into this map).</p>
 
-<p>This is the default implementation for maps. Custom map implementations can call this with a different <code>key-fn</code> or
-additional <code>value-fns</code> as needed.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn normalize-map
-  ([m]
-   (normalize-map m keyword))
-  ([m key-fn]
-   (normalize-map m key-fn nil))
-  ([m key-fn value-fns]
-   (let [value-fns (merge default-map-value-fns value-fns)]
-     (into {}
-           (map (fn [[k v]]
-                  (let [k (key-fn k)]
-                    [k
-                     (if-let [f (get value-fns k)]
-                       (f v)
-                       v)])))
-           m))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod normalize :dispatch-type/map
-  [m]
-  (normalize-map m))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- default-normalize-mbql-clause [[tag opts &amp; args]]
-  (into [(keyword tag) (normalize opts)]
-        (map normalize)
-        args))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod normalize :default
-  [x]
-  (cond
-    (mbql-clause-type x) (default-normalize-mbql-clause x)
-    (map-type x)         (normalize-map x)
-    :else                x))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- maybe-normalize-token
-  [expression k]
-  (cond-&gt; expression
-    (string? (get expression k)) (update k keyword)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod normalize :time-interval
-  [[_ _ _ amount _unit :as expression]]
-  (cond-&gt; (default-normalize-mbql-clause expression)
-    (= &quot;current&quot; amount) (update 3 keyword)
-    :always (maybe-normalize-token 4)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod normalize :relative-datetime
-  [[_ _ amount _unit :as expression]]
-  (cond-&gt; (default-normalize-mbql-clause expression)
-    (= &quot;current&quot; amount) (update 2 keyword)
-    :always (maybe-normalize-token 3)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod normalize :interval
-  [expression]
-  (-&gt; (default-normalize-mbql-clause expression)
-      (maybe-normalize-token 3)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod normalize :datetime-add
-  [expression]
-  (-&gt; (default-normalize-mbql-clause expression)
-      (maybe-normalize-token 4)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod normalize :datetime-subtract
-  [expression]
-  (-&gt; (default-normalize-mbql-clause expression)
-      (maybe-normalize-token 4)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod normalize :get-week
-  [expression]
-  (-&gt; (default-normalize-mbql-clause expression)
-      (maybe-normalize-token 3)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod normalize :temporal-extract
-  [expression]
-  (-&gt; (default-normalize-mbql-clause expression)
-      (maybe-normalize-token 3)
-      (maybe-normalize-token 4)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod normalize :datetime-diff
-  [expression]
-  (-&gt; (default-normalize-mbql-clause expression)
-      (maybe-normalize-token 4)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+<p>Pass in a <code>nil</code> schema to automatically attempt to infer the schema based on <code>x</code> itself.</p>
+
+<p>By default, does not throw Exceptions -- just logs them and returns what it was able to normalize, but you can pass
+in the option <code>{:throw? true}</code> to have it throw exceptions when normalization fails.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn normalize
+  ([x]
+   (normalize nil x))
+  ([schema x]
+   (normalize schema x nil))
+  ([schema x {:keys [throw?], :or {throw? false}, :as _options}]
+   (let [schema (or schema (infer-schema x))
+         thunk  (^:once fn* []
+                 ((coercer schema) x))]
+     (if throw?
+       (binding [*error-fn* (fn [error]
+                              (throw (ex-info (i18n/tru &quot;Normalization error&quot;)
+                                              {:schema schema, :x x, :error error})))]
+         (thunk))
+       (thunk)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

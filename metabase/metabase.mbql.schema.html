@@ -2873,10 +2873,13 @@ net.brehaut.ClojureTools = (function (SH) {
    [clojure.set :as set]
    [malli.core :as mc]
    [malli.error :as me]
+   [metabase.lib.schema.actions :as lib.schema.actions]
    [metabase.lib.schema.common :as lib.schema.common]
    [metabase.lib.schema.expression.temporal :as lib.schema.expression.temporal]
    [metabase.lib.schema.id :as lib.schema.id]
+   [metabase.lib.schema.info :as lib.schema.info]
    [metabase.lib.schema.literal :as lib.schema.literal]
+   [metabase.lib.schema.template-tag :as lib.schema.template-tag]
    [metabase.mbql.schema.helpers :as helpers :refer [is-clause?]]
    [metabase.mbql.schema.macros :refer [defclause one-of]]
    [metabase.shared.util.i18n :as i18n]
@@ -2909,8 +2912,6 @@ features needed to run the query in question.</p></li>
   [:ref ::lib.schema.common/int-greater-than-or-equal-to-zero])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private FieldID
   [:ref ::lib.schema.id/field])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private CardID
-  [:ref ::lib.schema.id/card])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private TableID
   [:ref ::lib.schema.id/table])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private RawDateLiteral
@@ -3762,9 +3763,7 @@ the query itself runs. There are four basic types of template tag for native que
     ;; default value for this parameter
     [:default  {:optional true} :any]
     ;; whether or not a value for this parameter is required in order to run the query
-    [:required {:optional true} :boolean]]])</pre></td></tr><tr><td class="docs"><p>Schema for valid values of <code>:type</code> for a [[Parameter]].</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ParameterType
-  [:ref ::ParameterType])</pre></td></tr><tr><td class="docs"><p>Schema for valid values of <code>:widget-type</code> for a [[TemplateTag:FieldFilter]].</p>
+    [:required {:optional true} :boolean]]])</pre></td></tr><tr><td class="docs"><p>Schema for valid values of <code>:widget-type</code> for a [[TemplateTag:FieldFilter]].</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private WidgetType
   [:ref ::WidgetType])</pre></td></tr><tr><td class="docs"><p>Example:</p>
 
@@ -3785,12 +3784,7 @@ the query itself runs. There are four basic types of template tag for native que
     ;; are allowed to be specified for it.
     [:widget-type WidgetType]
     ;; optional map to be appended to filter clause
-    [:options {:optional true} [:maybe [:map-of :keyword :any]]]]])</pre></td></tr><tr><td class="docs"><p>Set of valid values of <code>:type</code> for raw value template tags.</p>
-</td><td class="codes"><pre class="brush: clojure">(def raw-value-template-tag-types
-  #{:number :text :date :boolean})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private TemplateTag:RawValue:Type
-  &quot;Valid values of `:type` for raw value template tags.&quot;
-  (into [:enum] raw-value-template-tag-types))</pre></td></tr><tr><td class="docs"><p>Example:</p>
+    [:options {:optional true} [:maybe [:map-of :keyword :any]]]]])</pre></td></tr><tr><td class="docs"><p>Example:</p>
 
 <p>   {:id           "35f1ecd4-d622-6d14-54be-750c498043cb"
     :name         "id"
@@ -3805,7 +3799,7 @@ the query itself runs. There are four basic types of template tag for native que
    ;; `:type` is used be the FE to determine which type of widget to display for the template tag, and to determine
    ;; which types of parameters are allowed to be passed in for this template tag.
    [:map
-    [:type TemplateTag:RawValue:Type]]])</pre></td></tr><tr><td class="docs">
+    [:type ::lib.schema.template-tag/raw-value.type]]])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::TemplateTag
   [:multi
    {:dispatch :type}
@@ -4018,143 +4012,9 @@ the <code>:field</code> options, e.g.</p>
     {:error/message &quot;Fields specified in `:breakout` should not be specified in `:fields`; this is implied.&quot;}
     (fn [{:keys [breakout fields]}]
       (empty? (set/intersection (set breakout) (set fields))))]])</pre></td></tr><tr><td class="docs"><p>----------------------------------------------------- Params -----------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p><code>:parameters</code> specify the <em>values</em> of parameters previously definied for a Dashboard or Card (native query template
-tag parameters.) See [[TemplateTag]] above for more information on the later.</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>There are three things called 'type' in play when we talk about parameters and template tags.</p>
-
-<p>Two are used when the parameters are specified/declared, in a [[TemplateTag]] or in a Dashboard parameter:</p>
-
-<ol>
-<li><p>Dashboard parameter/template tag <code>:type</code> -- <code>:dimension</code> (for a Field filter parameter),
-otherwise <code>:text</code>, <code>:number</code>, <code>:boolean</code>, or <code>:date</code></p></li>
-<li><p><code>:widget-type</code> -- only specified for Field filter parameters (where type is <code>:dimension</code>). This tells the FE
-what type of widget to display, and also tells us what types of parameters we should allow. Examples:
-<code>:date/all-options</code>, <code>:category</code>, etc.</p></li>
-</ol>
-
-<p>One type is used in the [[Parameter]] list (<code>:parameters</code>):</p>
-
-<ol>
-<li>Parameter <code>:type</code> -- specifies the type of the value being passed in. e.g. <code>:text</code> or <code>:string/!=</code></li>
-</ol>
-
-<p>Note that some types that makes sense as widget types (e.g. <code>:date/all-options</code>) but not as actual value types are
-currently still allowed for backwards-compatibility purposes -- currently the FE client will just parrot back the
-<code>:widget-type</code> in some cases. In these cases, the backend is just supposed to infer the actual type of the
-parameter value.</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Map of parameter-type -> info. Info is a map with the following keys:</p>
-
-<h3>`:type`</h3>
-
-<p>The general type of this parameter. <code>:numeric</code>, <code>:string</code>, <code>:boolean</code>, or <code>:date</code>, if applicable. Some parameter
-types like <code>:id</code> and <code>:category</code> don't have a particular <code>:type</code>. This is offered mostly so we can group stuff
-together or determine things like whether a given parameter is a date parameter.</p>
-
-<h3>`:operator`</h3>
-
-<p>Signifies this is one of the new 'operator' parameter types added in 0.39.0 or so. These parameters can only be used
-for [[TemplateTag:FieldFilter]]s or for Dashboard parameters mapped to MBQL queries. The value of this key is the
-arity for the parameter, either <code>:unary</code>, <code>:binary</code>, or <code>:variadic</code>. See
-the [[metabase.driver.common.parameters.operators]] namespace for more information.</p>
-
-<h3>`:allowed-for`</h3>
-
-<p>[[Parameter]]s with this <code>:type</code> may be supplied for [[TemplateTag]]s with these <code>:type</code>s (or <code>:widget-type</code> if
-<code>:type</code> is <code>:dimension</code>) types. Example: it is ok to pass a parameter of type <code>:date/range</code> for template tag with
-<code>:widget-type</code> <code>:date/all-options</code>; but it is NOT ok to pass a parameter of type <code>:date/range</code> for a template tag
-with a widget type <code>:date</code>. Why? It's a potential security risk if someone creates a Card with an "exact-match"
-Field filter like <code>:date</code> or <code>:text</code> and you pass in a parameter like <code>string/!=</code> <code>NOTHING_WILL_MATCH_THIS</code>.
-Non-exact-match parameters can be abused to enumerate <em>all</em> the rows in a table when the parameter was supposed to
-lock the results down to a single row or set of rows.</p>
-</td><td class="codes"><pre class="brush: clojure">(def parameter-types
-  {;; the basic raw-value types. These can be used with [[TemplateTag:RawValue]] template tags as well as
-   ;; [[TemplateTag:FieldFilter]] template tags.
-   :number  {:type :numeric, :allowed-for #{:number :number/= :id :category :location/zip_code}}
-   :text    {:type :string,  :allowed-for #{:text :string/= :id :category
-                                            :location/city :location/state :location/zip_code :location/country}}
-   :date    {:type :date,    :allowed-for #{:date :date/single :date/all-options :id :category}}
-   ;; I don't think `:boolean` is actually used on the FE at all.
-   :boolean {:type :boolean, :allowed-for #{:boolean :id :category}}
-   ;; as far as I can tell this is basically just an alias for `:date`... I'm not sure what the difference is TBH
-   :date/single {:type :date, :allowed-for #{:date :date/single :date/all-options :id :category}}
-   ;; everything else can't be used with raw value template tags -- they can only be used with Dashboard parameters
-   ;; for MBQL queries or Field filters in native queries
-   ;; `:id` and `:category` conceptually aren't types in a &quot;the parameter value is of this type&quot; sense, but they are
-   ;; widget types. They have something to do with telling the frontend to show FieldValues list/search widgets or
-   ;; something like that.
-   ;;
-   ;; Apparently the frontend might still pass in parameters with these types, in which case we're supposed to infer
-   ;; the actual type of the parameter based on the Field we're filtering on. Or something like that. Parameters with
-   ;; these types are only allowed if the widget type matches exactly, but you can also pass in something like a
-   ;; `:number/=` for a parameter with widget type `:category`.
-   ;;
-   ;; TODO FIXME -- actually, it turns out the the FE client passes parameter type `:category` for parameters in
-   ;; public Cards. Who knows why! For now, we'll continue allowing it. But we should fix it soon. See
-   ;; [[metabase.api.public-test/execute-public-card-with-parameters-test]]
-   :id       {:allowed-for #{:id}}
-   :category {:allowed-for #{:category #_FIXME :number :text :date :boolean}}
-   ;; Like `:id` and `:category`, the `:location/*` types are primarily widget types. They don't really have a meaning
-   ;; as a parameter type, so in an ideal world they wouldn't be allowed; however it seems like the FE still passed
-   ;; these in as parameter type on occasion anyway. In this case the backend is just supposed to infer the actual
-   ;; type -- which should be `:text` and, in the case of ZIP code, possibly `:number`.
-   ;;
-   ;; As with `:id` and `:category`, it would be preferable to just pass in a parameter with type `:text` or `:number`
-   ;; for these widget types, but for compatibility we'll allow them to continue to be used as parameter types for the
-   ;; time being. We'll only allow that if the widget type matches exactly, however.
-   :location/city     {:allowed-for #{:location/city}}
-   :location/state    {:allowed-for #{:location/state}}
-   :location/zip_code {:allowed-for #{:location/zip_code}}
-   :location/country  {:allowed-for #{:location/country}}
-   ;; date range types -- these match a range of dates
-   :date/range        {:type :date, :allowed-for #{:date/range :date/all-options}}
-   :date/month-year   {:type :date, :allowed-for #{:date/month-year :date/all-options}}
-   :date/quarter-year {:type :date, :allowed-for #{:date/quarter-year :date/all-options}}
-   :date/relative     {:type :date, :allowed-for #{:date/relative :date/all-options}}
-   ;; Like `:id` and `:category` above, `:date/all-options` is primarily a widget type. It means that we should allow
-   ;; any date option above.
-   :date/all-options {:type :date, :allowed-for #{:date/all-options}}
-   ;; &quot;operator&quot; parameter types.
-   :number/!=               {:type :numeric, :operator :variadic, :allowed-for #{:number/!=}}
-   :number/&lt;=               {:type :numeric, :operator :unary, :allowed-for #{:number/&lt;=}}
-   :number/=                {:type :numeric, :operator :variadic, :allowed-for #{:number/= :number :id :category
-                                                                                 :location/zip_code}}
-   :number/&gt;=               {:type :numeric, :operator :unary, :allowed-for #{:number/&gt;=}}
-   :number/between          {:type :numeric, :operator :binary, :allowed-for #{:number/between}}
-   :string/!=               {:type :string, :operator :variadic, :allowed-for #{:string/!=}}
-   :string/=                {:type :string, :operator :variadic, :allowed-for #{:string/= :text :id :category
-                                                                                :location/city :location/state
-                                                                                :location/zip_code :location/country}}
-   :string/contains         {:type :string, :operator :unary, :allowed-for #{:string/contains}}
-   :string/does-not-contain {:type :string, :operator :unary, :allowed-for #{:string/does-not-contain}}
-   :string/ends-with        {:type :string, :operator :unary, :allowed-for #{:string/ends-with}}
-   :string/starts-with      {:type :string, :operator :unary, :allowed-for #{:string/starts-with}}})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::ParameterType
-  (into [:enum {:error/message &quot;valid parameter type&quot;}] (keys parameter-types)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::WidgetType
-  (into [:enum {:error/message &quot;valid template tag widget type&quot;} :none] (keys parameter-types)))</pre></td></tr><tr><td class="docs"><p>the next few clauses are used for parameter <code>:target</code>... this maps the parameter to an actual template tag in a
-native query or Field for MBQL queries.</p>
-
-<p>examples:</p>
-
-<p>   {:target [:dimension [:template-tag "my_tag"]]}
-   {:target [:dimension [:template-tag {:id "my<em>tag</em>id"}]]}
-   {:target [:variable [:template-tag "another_tag"]]}
-   {:target [:variable [:template-tag {:id "another<em>tag</em>id"}]]}
-   {:target [:dimension [:field 100 nil]]}
-   {:target [:field 100 nil]}</p>
-
-<p>I'm not 100% clear on which situations we'll get which version. But I think the following is generally true:</p>
-
-<ul>
-<li>Things are wrapped in <code>:dimension</code> when we're dealing with Field filter template tags</li>
-<li>Raw value template tags wrap things in <code>:variable</code> instead</li>
-<li>Dashboard parameters are passed in with plain Field clause targets.</li>
-</ul>
-
-<p>One more thing to note: apparently <code>:expression</code>... is allowed below as well. I'm not sure how this is actually
-supposed to work, but we have test #18747 that attempts to set it. I'm not convinced this should actually be
-allowed.</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>this is the reference like [:template-tag <whatever>], not the [[TemplateTag]] schema for when it's declared in
+  [:ref :metabase.lib.schema.parameter/widget-type])</pre></td></tr><tr><td class="docs"><p>this is the reference like [:template-tag <whatever>], not the [[TemplateTag]] schema for when it's declared in
 <code>:template-tags</code></p>
 </td><td class="codes"><pre class="brush: clojure">(defclause template-tag
   tag-name [:or
@@ -4170,36 +4030,27 @@ allowed.</p>
   ;; `dimension` it comes from a Field filter template tag parameter (don't quote me on this -- working theory)
   [:or
    Field
-   (one-of dimension variable)])</pre></td></tr><tr><td class="docs"><p>Schema for the <em>value</em> of a parameter (e.g. a Dashboard parameter or a native query template tag) as passed in as
+   (one-of dimension variable)])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::Parameter
+  [:merge
+   [:ref :metabase.lib.schema.parameter/parameter]
+   [:map
+    [:target {:optional true} ParameterTarget]]])</pre></td></tr><tr><td class="docs"><p>Schema for the <em>value</em> of a parameter (e.g. a Dashboard parameter or a native query template tag) as passed in as
 part of the <code>:parameters</code> list in a query.</p>
 </td><td class="codes"><pre class="brush: clojure">(def Parameter
-  [:map
-   [:type ParameterType]
-   ;; TODO -- these definitely SHOULD NOT be optional but a ton of tests aren't passing them in like they should be.
-   ;; At some point we need to go fix those tests and then make these keys required
-   [:id       {:optional true} NonBlankString]
-   [:target   {:optional true} ParameterTarget]
-   ;; not specified if the param has no value. TODO - make this stricter; type of `:value` should be validated based
-   ;; on the [[ParameterType]]
-   [:value    {:optional true} :any]
-   ;; the name of the parameter we're trying to set -- this is actually required now I think, or at least needs to get
-   ;; merged in appropriately
-   [:name     {:optional true} NonBlankString]
-   ;; The following are not used by the code in this namespace but may or may not be specified depending on what the
-   ;; code that constructs the query params is doing. We can go ahead and ignore these when present.
-   [:slug     {:optional true} NonBlankString]
-   [:default  {:optional true} :any]
-   [:required {:optional true} :any]])</pre></td></tr><tr><td class="docs"><p>Schema for a list of <code>:parameters</code> as passed in to a query.</p>
+  [:ref ::Parameter])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::ParameterList
+  [:maybe [:sequential Parameter]])</pre></td></tr><tr><td class="docs"><p>Schema for a list of <code>:parameters</code> as passed in to a query.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ParameterList
-  [:maybe [:sequential Parameter]])</pre></td></tr><tr><td class="docs"><p>---------------------------------------------------- Options -----------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Options that tweak the behavior of the query processor.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private Settings
+  [:ref ::ParameterList])</pre></td></tr><tr><td class="docs"><p>---------------------------------------------------- Options -----------------------------------------------------</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::Settings
   [:map
    ;; The timezone the query should be ran in, overriding the default report timezone for the instance.
-   [:report-timezone {:optional true} TimezoneId]])</pre></td></tr><tr><td class="docs"><p>Additional constraints added to a query limiting the maximum number of rows that can be returned. Mostly useful
-because native queries don't support the MBQL <code>:limit</code> clause. For MBQL queries, if <code>:limit</code> is set, it will
-override these values.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private Constraints
+   [:report-timezone {:optional true} TimezoneId]])</pre></td></tr><tr><td class="docs"><p>Options that tweak the behavior of the query processor.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private Settings
+  [:ref ::Settings])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::Constraints
   [:and
    [:map
     ;; maximum number of results to allow for a query with aggregations. If `max-results-bare-rows` is unset, this
@@ -4213,8 +4064,12 @@ override these values.</p>
     (fn [{:keys [max-results max-results-bare-rows]}]
       (if-not (core/and max-results max-results-bare-rows)
         true
-        (core/&gt;= max-results max-results-bare-rows)))]])</pre></td></tr><tr><td class="docs"><p>Additional options that can be used to toggle middleware on or off.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private MiddlewareOptions
+        (core/&gt;= max-results max-results-bare-rows)))]])</pre></td></tr><tr><td class="docs"><p>Additional constraints added to a query limiting the maximum number of rows that can be returned. Mostly useful
+because native queries don't support the MBQL <code>:limit</code> clause. For MBQL queries, if <code>:limit</code> is set, it will
+override these values.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private Constraints
+  [:ref ::Constraints])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::MiddlewareOptions
   [:map
    ;; should we skip adding results_metadata to query results after running the query? Used by
    ;; [[metabase.query-processor.middleware.results-metadata]]; default `false`
@@ -4239,68 +4094,10 @@ override these values.</p>
    [:add-default-userland-constraints? {:optional true} [:maybe :boolean]]
    ;; Whether to process a question's visualization settings and include them in the result metadata so that they can
    ;; incorporated into an export. Used by `metabase.query-processor.middleware.visualization-settings`; default `false`.
-   [:process-viz-settings? {:optional true} [:maybe :boolean]]])</pre></td></tr><tr><td class="docs"><p>------------------------------------------------------ Info ------------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>This stuff is used for informational purposes, primarily to record QueryExecution entries when a query is ran. Pass
-them along if applicable when writing code that creates queries, but when working on middleware and the like you
-can most likely ignore this stuff entirely.</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Schema for <code>info.context</code>; used for informational purposes to record how a query was executed.</p>
-</td><td class="codes"><pre class="brush: clojure">(def Context
-  [:enum
-   :action
-   :ad-hoc
-   :collection
-   :map-tiles
-   :pulse
-   :dashboard
-   :question
-   :csv-download
-   :xlsx-download
-   :json-download
-   :public-dashboard
-   :public-question
-   :embedded-dashboard
-   :embedded-question
-   :embedded-csv-download
-   :embedded-xlsx-download
-   :embedded-json-download])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private Hash
-  #?(:clj bytes?
-     :cljs :any))</pre></td></tr><tr><td class="docs"><p>TODO - this schema is somewhat misleading because if you use a function
-like [[metabase.query-processor/userland-query]] some of these keys (e.g. <code>:context</code>) are in fact required</p>
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::Info
-  [:map
-   ;; These keys are nice to pass in if you're running queries on the backend and you know these values. They aren't
-   ;; used for permissions checking or anything like that so don't try to be sneaky
-   [:context                   {:optional true} [:maybe Context]]
-   [:executed-by               {:optional true} [:maybe PositiveInt]]
-   [:action-id                 {:optional true} [:maybe PositiveInt]]
-   [:card-id                   {:optional true} [:maybe CardID]]
-   [:card-name                 {:optional true} [:maybe NonBlankString]]
-   [:dashboard-id              {:optional true} [:maybe PositiveInt]]
-   [:alias/escaped-&gt;original   {:optional true} [:maybe [:map-of :any :any]]]
-   [:pulse-id                  {:optional true} [:maybe PositiveInt]]
-   ;; Metadata for datasets when querying the dataset. This ensures that user edits to dataset metadata are blended in
-   ;; with runtime computed metadata so that edits are saved.
-   [:metadata/model-metadata   {:optional true} [:maybe [:sequential [:map-of :any :any]]]]
-   ;; `:hash` gets added automatically for userland queries (see [[metabase.query-processor/userland-query]]), so
-   ;; don't try passing these in yourself. In fact, I would like this a lot better if we could take these keys xout of
-   ;; `:info` entirely and have the code that saves QueryExceutions figure out their values when it goes to save them
-   [:query-hash                {:optional true} [:maybe Hash]]])</pre></td></tr><tr><td class="docs"><p>Schema for query <code>:info</code> dictionary, which is used for informational purposes to record information about how a query
-was executed in QueryExecution and other places. It is considered bad form for middleware to change its behavior
-based on this information, don't do it!</p>
-</td><td class="codes"><pre class="brush: clojure">(def Info
-  [:ref ::Info])</pre></td></tr><tr><td class="docs"><p>--------------------------------------------- Metabase [Outer] Query ---------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>The ID used to signify that a database is 'virtual' rather than physical.</p>
-
-<p> A fake integer ID is used so as to minimize the number of changes that need to be made on the frontend -- by using
- something that would otherwise be a legal ID, <em>nothing</em> need change there, and the frontend can query against this
- 'database' none the wiser. (This integer ID is negative which means it will never conflict with a <em>real</em> database
- ID.)</p>
-
-<p> This ID acts as a sort of flag. The relevant places in the middleware can check whether the DB we're querying is
- this 'virtual' database and take the appropriate actions.</p>
-</td><td class="codes"><pre class="brush: clojure">(def saved-questions-virtual-database-id
-  lib.schema.id/saved-questions-virtual-database-id)</pre></td></tr><tr><td class="docs"><p>To the reader: yes, this seems sort of hacky, but one of the goals of the Nested Query Initiative™ was to minimize
+   [:process-viz-settings? {:optional true} [:maybe :boolean]]])</pre></td></tr><tr><td class="docs"><p>Additional options that can be used to toggle middleware on or off.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private MiddlewareOptions
+  [:ref ::MiddlewareOptions])</pre></td></tr><tr><td class="docs"><p>--------------------------------------------- Metabase [Outer] Query ---------------------------------------------</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>To the reader: yes, this seems sort of hacky, but one of the goals of the Nested Query Initiative™ was to minimize
 if not completely eliminate any changes to the frontend. After experimenting with several possible ways to do this
 implementation seemed simplest and best met the goal. Luckily this is the only place this "magic number" is defined
 and the entire frontend can remain blissfully unaware of its value.</p>
@@ -4313,10 +4110,8 @@ actual DB for that source query.)</p>
    {:error/message &quot;valid Database ID&quot;}
    [:ref ::lib.schema.id/saved-questions-virtual-database]
    [:ref ::lib.schema.id/database]])</pre></td></tr><tr><td class="docs"><p>Make sure we have the combo of query <code>:type</code> and <code>:native</code>/<code>:query</code></p>
-</td><td class="codes"><pre class="brush: clojure">(defn- check-keys-for-query-type
-  [schema]
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::check-keys-for-query-type
   [:and
-   schema
    [:fn
     {:error/message &quot;Query must specify either `:native` or `:query`, but not both.&quot;}
     (every-pred
@@ -4330,49 +4125,52 @@ actual DB for that source query.)</p>
         :query  mbql))]])</pre></td></tr><tr><td class="docs"><p><code>:source-metadata</code> is added to queries when <code>card__id</code> source queries are resolved. It contains info about the
 columns in the source query.</p>
 
-<p> Where this is added was changed in Metabase 0.33.0 -- previously, when <code>card__id</code> source queries were resolved, the
-middleware would add <code>:source-metadata</code> to the top-level; to support joins against source queries, this has been
-changed so it is always added at the same level the resolved <code>:source-query</code> is added.</p>
+<p>Where this is added was changed in Metabase 0.33.0 -- previously, when <code>card__id</code> source queries were resolved,
+the middleware would add <code>:source-metadata</code> to the top-level; to support joins against source queries, this has
+been changed so it is always added at the same level the resolved <code>:source-query</code> is added.</p>
 
-<p> This should automatically be fixed by <code>normalize</code>; if we encounter it, it means some middleware is not functioning
+<p>This should automatically be fixed by <code>normalize</code>; if we encounter it, it means some middleware is not functioning
 properly.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- check-query-does-not-have-source-metadata
-  [schema]
-  [:and
-   schema
-   [:fn
-    {:error/message &quot;`:source-metadata` should be added in the same level as `:source-query` (i.e., the 'inner' MBQL query.)&quot;}
-    (complement :source-metadata)]])</pre></td></tr><tr><td class="docs"><p>Schema for an [outer] query, e.g. the sort of thing you'd pass to the query processor or save in
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::check-query-does-not-have-source-metadata
+  [:fn
+   {:error/message &quot;`:source-metadata` should be added in the same level as `:source-query` (i.e., the 'inner' MBQL query.)&quot;}
+   (complement :source-metadata)])</pre></td></tr><tr><td class="docs"><p>Schema for an [outer] query, e.g. the sort of thing you'd pass to the query processor or save in
 <code>Card.dataset_query</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(def Query
   [:ref ::Query])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::Query
-  (-&gt; [:map
-       [:database DatabaseID]
-       ;; Type of query. `:query` = MBQL; `:native` = native.
-       [:type [:enum :query :native]]
-       [:native     {:optional true} NativeQuery]
-       [:query      {:optional true} MBQLQuery]
-       [:parameters {:optional true} ParameterList]
-       ;;
-       ;; OPTIONS
-       ;;
-       ;; These keys are used to tweak behavior of the Query Processor.
-       ;; TODO - can we combine these all into a single `:options` map?
-       ;;
-       [:settings    {:optional true} [:maybe Settings]]
-       [:constraints {:optional true} [:maybe Constraints]]
-       [:middleware  {:optional true} [:maybe MiddlewareOptions]]
-       ;;
-       ;; INFO
-       ;;
-       ;; Used when recording info about this run in the QueryExecution log; things like context query was ran in and
-       ;; User who ran it
-       [:info {:optional true} [:maybe Info]]]
-      ;;
-      ;; CONSTRAINTS
-      check-keys-for-query-type
-      check-query-does-not-have-source-metadata))</pre></td></tr><tr><td class="docs"><p>Is this a valid outer query? (Pre-compling a validator is more efficient.)</p>
+  [:and
+   [:map
+    [:database DatabaseID]
+    ;; Type of query. `:query` = MBQL; `:native` = native.
+    [:type [:enum :query :native]]
+    [:native     {:optional true} NativeQuery]
+    [:query      {:optional true} MBQLQuery]
+    [:parameters {:optional true} ParameterList]
+    ;;
+    ;; OPTIONS
+    ;;
+    ;; These keys are used to tweak behavior of the Query Processor.
+    ;;
+    [:settings    {:optional true} [:maybe Settings]]
+    [:constraints {:optional true} [:maybe Constraints]]
+    [:middleware  {:optional true} [:maybe MiddlewareOptions]]
+    ;;
+    ;; INFO
+    ;;
+    ;; Used when recording info about this run in the QueryExecution log; things like context query was ran in and
+    ;; User who ran it
+    [:info {:optional true} [:maybe [:ref ::lib.schema.info/info]]]
+    ;;
+    ;; ACTIONS
+    ;;
+    ;; This stuff is only used for Actions.
+    [:create-row {:optional true} [:maybe [:ref ::lib.schema.actions/row]]]
+    [:update-row {:optional true} [:maybe [:ref ::lib.schema.actions/row]]]]
+   ;;
+   ;; CONSTRAINTS
+   [:ref ::check-keys-for-query-type]
+   [:ref ::check-query-does-not-have-source-metadata]])</pre></td></tr><tr><td class="docs"><p>Is this a valid outer query? (Pre-compling a validator is more efficient.)</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^{:arglists '([query])} valid-query?
   (mr/validator Query))</pre></td></tr><tr><td class="docs"><p>Validator for an outer query; throw an Exception explaining why the query is invalid if it is.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^{:arglists '([query])} validate-query

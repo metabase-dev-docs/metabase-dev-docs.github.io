@@ -2869,8 +2869,10 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.lib.schema.ref
   (:require
    [clojure.string :as str]
+   [medley.core :as m]
    [metabase.lib.dispatch :as lib.dispatch]
    [metabase.lib.hierarchy :as lib.hierarchy]
+   [metabase.lib.schema.binning :as binning]
    [metabase.lib.schema.common :as common]
    [metabase.lib.schema.expression :as expression]
    [metabase.lib.schema.id :as id]
@@ -2881,14 +2883,21 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(comment metabase.types/keep-me)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::field.options
   [:merge
+   {:encode/serialize (fn [opts]
+                        (m/filter-keys (fn [k]
+                                         (or (simple-keyword? k)
+                                             (= (namespace k) &quot;lib&quot;)))
+                                       opts))}
    ::common/options
    [:map
-    [:temporal-unit {:optional true} ::temporal-bucketing/unit]]])</pre></td></tr><tr><td class="docs">
+    [:temporal-unit                              {:optional true} [:ref ::temporal-bucketing/unit]]
+    [:binning                                    {:optional true} [:ref ::binning/binning]]
+    [:metabase.lib.field/original-effective-type {:optional true} [:ref ::common/base-type]]]])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::field.literal.options
   [:merge
    ::field.options
    [:map
-    [:base-type ::common/base-type]]])</pre></td></tr><tr><td class="docs"><p><code>:field</code> clause</p>
+    [:base-type [:ref ::common/base-type]]]])</pre></td></tr><tr><td class="docs"><p><code>:field</code> clause</p>
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::field.literal
   [:tuple
    [:= :field]
@@ -2902,8 +2911,8 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(mbql-clause/define-mbql-clause :field
   [:and
    [:tuple
-    [:= :field]
-    ::field.options
+    [:= {:decode/normalize common/normalize-keyword} :field]
+    [:ref ::field.options]
     [:or ::id/field ::common/non-blank-string]]
    [:multi {:dispatch      (fn [clause]
                              ;; apparently it still tries to dispatch when humanizing errors even if the `:tuple`
@@ -2922,7 +2931,7 @@ net.brehaut.ClojureTools = (function (SH) {
   (or ((some-fn :effective-type :base-type) opts)
       ::expression/type.unknown))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mbql-clause/define-tuple-mbql-clause :expression
-  ::common/non-blank-string)</pre></td></tr><tr><td class="docs">
+  #_expression-name ::common/non-blank-string)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod expression/type-of-method :expression
   [[_tag opts _expression-name]]
   (or ((some-fn :effective-type :base-type) opts)
@@ -2937,7 +2946,7 @@ net.brehaut.ClojureTools = (function (SH) {
     [:lib/source-name {:optional true} ::common/non-blank-string]]])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mbql-clause/define-mbql-clause :aggregation
   [:tuple
-   [:= :aggregation]
+   [:= {:decode/normalize common/normalize-keyword} :aggregation]
    ::aggregation-options
    :string])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod expression/type-of-method :aggregation
@@ -2953,7 +2962,11 @@ net.brehaut.ClojureTools = (function (SH) {
   ;; (see metabase.lib.convert-test/round-trip-test for examples).
   ;; :string should be removed once the legacy questions don't have to be
   ;; supported.
-  #_metric-id [:schema [:ref ::id/metric]])</pre></td></tr><tr><td class="docs">
+  #_metric-id [:schema
+               [:or
+                [:ref ::id/metric]
+                ;; GA metric ref
+                ::common/non-blank-string]])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(lib.hierarchy/derive :metric ::ref)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::ref
   [:and

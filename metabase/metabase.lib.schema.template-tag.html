@@ -2871,24 +2871,34 @@ net.brehaut.ClojureTools = (function (SH) {
    [malli.core :as mc]
    [metabase.lib.schema.common :as common]
    [metabase.lib.schema.id :as id]
-   [metabase.mbql.schema :as mbql.s]
+   [metabase.lib.schema.parameter :as lib.schema.parameter]
    [metabase.util.malli.registry :as mr]))</pre></td></tr><tr><td class="docs"><p>Schema for valid values of <code>:widget-type</code> for a [[TemplateTag:FieldFilter]].</p>
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::widget-type
   (into
    [:enum
     ;; this will be a nicer error message than Malli trying to list every single possible allowed type.
-    {:error/message &quot;Valid template tag :widget-type&quot;}
+    {:decode/normalize common/normalize-keyword
+     :error/message    &quot;Valid template tag :widget-type&quot;}
     :none]
-   (keys mbql.s/parameter-types)))</pre></td></tr><tr><td class="docs"><p>Schema for valid values of template tag <code>:type</code>.</p>
+   ;; TODO -- move this stuff into `metabase.lib`
+   (keys lib.schema.parameter/types)))</pre></td></tr><tr><td class="docs"><p>Schema for valid values of template tag <code>:type</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::type
-  [:enum :snippet :card :dimension :number :text :date])</pre></td></tr><tr><td class="docs"><p>Things required by all template tag types.</p>
+  [:enum
+   {:decode/normalize common/normalize-keyword}
+   :snippet :card :dimension :number :text :date])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::name
+  [:ref
+   {:decode/normalize common/normalize-string-key}
+   ::common/non-blank-string])</pre></td></tr><tr><td class="docs"><p>Things required by all template tag types.</p>
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::common
   [:map
-   [:name         ::common/non-blank-string]
+   [:name         ::name]
    [:display-name ::common/non-blank-string]
    ;; TODO -- `:id` is actually 100% required but we have a lot of tests that don't specify it because this constraint
    ;; wasn't previously enforced; we need to go in and fix those tests and make this non-optional
-   [:id {:optional true} [:or ::common/non-blank-string :uuid]]])</pre></td></tr><tr><td class="docs"><p>Stuff shared between the Field filter and raw value template tag schemas.</p>
+   [:id {:optional true} [:multi {:dispatch uuid?}
+                          [true  :uuid]
+                          [false ::common/non-blank-string]]]])</pre></td></tr><tr><td class="docs"><p>Stuff shared between the Field filter and raw value template tag schemas.</p>
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::value.common
   [:merge
    [:ref ::common]
@@ -2914,7 +2924,12 @@ net.brehaut.ClojureTools = (function (SH) {
     ;; are allowed to be specified for it.
     [:widget-type [:ref ::widget-type]]
     ;; optional map to be appended to filter clause
-    [:options {:optional true} [:maybe :map]]]])</pre></td></tr><tr><td class="docs"><p>Example:</p>
+    [:options {:optional true} [:maybe :map]]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::disallow-dimension
+  [:fn
+   {:decode/normalize #(dissoc % :dimension)
+    :error/message    &quot;:dimension is only allowed for :type :dimension template tags&quot;}
+   #(not (contains? % :dimension))])</pre></td></tr><tr><td class="docs"><p>Example:</p>
 
 <p>   {:id           "c2fc7310-44eb-4f21-c3a0-63806ffb7ddd"
     :name         "snippet: select"
@@ -2923,14 +2938,16 @@ net.brehaut.ClojureTools = (function (SH) {
     :snippet-name "select"
     :snippet-id   1}</p>
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::snippet
-  [:merge
-   [:ref ::common]
-   [:map
-    [:type         [:= :snippet]]
-    [:snippet-name ::common/non-blank-string]
-    [:snippet-id {:optional true} ::id/snippet]
-    ;; database to which this Snippet belongs. Doesn't always seem to be specified.
-    [:database {:optional true} ::id/database]]])</pre></td></tr><tr><td class="docs"><p>Example:</p>
+  [:and
+   [:merge
+    [:ref ::common]
+    [:map
+     [:type         [:= :snippet]]
+     [:snippet-name ::common/non-blank-string]
+     [:snippet-id {:optional true} ::id/snippet]
+     ;; database to which this Snippet belongs. Doesn't always seem to be specified.
+     [:database {:optional true} ::id/database]]]
+   [:ref ::disallow-dimension]])</pre></td></tr><tr><td class="docs"><p>Example:</p>
 
 <p>   {:id           "fc5e14d9-7d14-67af-66b2-b2a6e25afeaf"
     :name         "#1635"
@@ -2938,13 +2955,17 @@ net.brehaut.ClojureTools = (function (SH) {
     :type         :card
     :card-id      1635}</p>
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::source-query
-  [:merge
-   [:ref ::common]
-   [:map
-    [:type    [:= :card]]
-    [:card-id ::id/card]]])</pre></td></tr><tr><td class="docs"><p>Valid values of <code>:type</code> for raw value template tags.</p>
+  [:and
+   [:merge
+    [:ref ::common]
+    [:map
+     [:type    [:= :card]]
+     [:card-id ::id/card]]]
+   [:ref ::disallow-dimension]])</pre></td></tr><tr><td class="docs"><p>Set of valid values of <code>:type</code> for raw value template tags.</p>
+</td><td class="codes"><pre class="brush: clojure">(def raw-value-template-tag-types
+  #{:number :text :date :boolean})</pre></td></tr><tr><td class="docs"><p>Valid values of <code>:type</code> for raw value template tags.</p>
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::raw-value.type
-  (into [:enum] mbql.s/raw-value-template-tag-types))</pre></td></tr><tr><td class="docs"><p>Example:</p>
+  (into [:enum] raw-value-template-tag-types))</pre></td></tr><tr><td class="docs"><p>Example:</p>
 
 <p>   {:id           "35f1ecd4-d622-6d14-54be-750c498043cb"
     :name         "id"
@@ -2953,17 +2974,20 @@ net.brehaut.ClojureTools = (function (SH) {
     :required     true
     :default      "1"}</p>
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::raw-value
-  [:merge
-   [:ref ::value.common]
-   ;; `:type` is used be the FE to determine which type of widget to display for the template tag, and to determine
-   ;; which types of parameters are allowed to be passed in for this template tag.
-   [:map
-    [:type [:ref ::raw-value.type]]]])</pre></td></tr><tr><td class="docs">
+  [:and
+   [:merge
+    [:ref ::value.common]
+    ;; `:type` is used be the FE to determine which type of widget to display for the template tag, and to determine
+    ;; which types of parameters are allowed to be passed in for this template tag.
+    [:map
+     [:type [:ref ::raw-value.type]]]]
+   [:ref ::disallow-dimension]])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::template-tag
   [:and
+   {:decode/normalize common/normalize-map}
    [:map
     [:type [:ref ::type]]]
-   [:multi {:dispatch :type}
+   [:multi {:dispatch #(keyword (:type %))}
     [:dimension   [:ref ::field-filter]]
     [:snippet     [:ref ::snippet]]
     [:card        [:ref ::source-query]]
@@ -2971,7 +2995,7 @@ net.brehaut.ClojureTools = (function (SH) {
     [::mc/default [:ref ::raw-value]]]])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::template-tag-map
   [:and
-   [:map-of ::common/non-blank-string [:ref ::template-tag]]
+   [:map-of ::name ::template-tag]
    ;; make sure people don't try to pass in a `:name` that's different from the actual key in the map.
    [:fn
     {:error/message &quot;keys in template tag map must match the :name of their values&quot;}

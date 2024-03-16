@@ -2869,21 +2869,18 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.actions
   (:require
    [clojure.spec.alpha :as s]
-   [malli.core :as mc]
-   [malli.error :as me]
    [metabase.api.common :as api]
    [metabase.driver :as driver]
    [metabase.lib.metadata :as lib.metadata]
+   [metabase.lib.schema.actions :as lib.schema.actions]
    [metabase.mbql.normalize :as mbql.normalize]
-   [metabase.mbql.schema :as mbql.s]
-   [metabase.mbql.util :as mbql.u]
    [metabase.models :refer [Database]]
    [metabase.models.setting :as setting]
-   [metabase.query-processor.error-type :as qp.error-type]
    [metabase.query-processor.middleware.permissions :as qp.perms]
    [metabase.query-processor.store :as qp.store]
    [metabase.util :as u]
    [metabase.util.i18n :as i18n]
+   [metabase.util.malli :as mu]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(setting/defsetting database-enable-actions
   (i18n/deferred-tru &quot;Whether to enable Actions for a specific Database.&quot;)
@@ -2993,8 +2990,11 @@ calculate the value using <code>value-thunk</code>, cache it, then return it.</p
 implement [[perform-action!*]] to add support for a new driver/action combo. The shape of <code>arg-map</code> depends on the
 <code>action</code> being performed. [[action-arg-map-spec]] returns the specific spec used to validate <code>arg-map</code> for a given
 <code>action</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn perform-action!
-  [action arg-map]
+</td><td class="codes"><pre class="brush: clojure">(mu/defn perform-action!
+  [action
+   arg-map :- [:map
+               [:create-row {:optional true} [:maybe ::lib.schema.actions/row]]
+               [:update-row {:optional true} [:maybe ::lib.schema.actions/row]]]]
   (let [action  (keyword action)
         spec    (action-arg-map-spec action)
         arg-map (normalize-action-arg-map action arg-map)] ; is arg-map always just a regular query?
@@ -3030,22 +3030,7 @@ implement [[perform-action!*]] to add support for a new driver/action combo. The
 </td><td class="codes"><pre class="brush: clojure">(s/def :actions.args.crud.row/common
   (s/merge
    :actions.args/common
-   (s/keys :req-un [:actions.args.crud.row.common/query])))</pre></td></tr><tr><td class="docs"><p>the various <code>:row/*</code> Actions all treat their args map as an MBQL query.</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Normalize <code>query</code> as an MBQL query. Optional arg <code>:exclude</code> is a set of <em>normalized</em> keys to exclude from recursive
-normalization, e.g. <code>:create-row</code> for the <code>:row/create</code> Action (we don't want to normalize the row input since
-preserving case and <code>snake_keys</code> in the request body is important).</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- normalize-as-mbql-query
-  ([query]
-   (let [query (mbql.normalize/normalize (assoc query :type :query))]
-     (when-let [error (me/humanize (mc/explain mbql.s/Query query))]
-       (throw (ex-info
-               (i18n/tru &quot;Invalid query: {0}&quot; (pr-str error))
-               {:status-code 400, :type qp.error-type/invalid-query})))
-     query))
-  ([query &amp; {:keys [exclude]}]
-   (let [query (update-keys query mbql.u/normalize-token)]
-     (merge (select-keys query exclude)
-            (normalize-as-mbql-query (apply dissoc query exclude))))))</pre></td></tr><tr><td class="docs"><p><code>:row/create</code></p>
+   (s/keys :req-un [:actions.args.crud.row.common/query])))</pre></td></tr><tr><td class="docs"><p><code>:row/create</code></p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>row/create requires at least</p>
 
 <p>   {:database   <id>
@@ -3054,9 +3039,9 @@ preserving case and <code>snake_keys</code> in the request body is important).</
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod normalize-action-arg-map :row/create
   [_action query]
-  (normalize-as-mbql-query query :exclude #{:create-row}))</pre></td></tr><tr><td class="docs">
+  (mbql.normalize/normalize-or-throw query))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(s/def :actions.args.crud.row.create/create-row
-  (s/map-of keyword? any?))</pre></td></tr><tr><td class="docs">
+  (s/map-of string? any?))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(s/def :actions.args.crud/row.create
   (s/merge
    :actions.args.crud.row/common
@@ -3072,7 +3057,7 @@ preserving case and <code>snake_keys</code> in the request body is important).</
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod normalize-action-arg-map :row/update
   [_action query]
-  (normalize-as-mbql-query query :exclude #{:update-row}))</pre></td></tr><tr><td class="docs">
+  (mbql.normalize/normalize-or-throw query))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(s/def :actions.args.crud.row.update.query/filter
   vector?) ; MBQL filter clause</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(s/def :actions.args.crud.row.update/query
@@ -3080,7 +3065,7 @@ preserving case and <code>snake_keys</code> in the request body is important).</
    :actions.args.crud.row.common/query
    (s/keys :req-un [:actions.args.crud.row.update.query/filter])))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(s/def :actions.args.crud.row.update/update-row
-  (s/map-of keyword? any?))</pre></td></tr><tr><td class="docs">
+  (s/map-of string? any?))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(s/def :actions.args.crud/row.update
   (s/merge
    :actions.args.crud.row/common
@@ -3096,7 +3081,7 @@ preserving case and <code>snake_keys</code> in the request body is important).</
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod normalize-action-arg-map :row/delete
   [_action query]
-  (normalize-as-mbql-query query))</pre></td></tr><tr><td class="docs">
+  (mbql.normalize/normalize-or-throw query))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(s/def :actions.args.crud.row.delete.query/filter
   vector?) ; MBQL filter clause</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(s/def :actions.args.crud.row.delete/query
