@@ -3337,26 +3337,31 @@ Returns the newly created model. May throw validation, permimissions, or DB erro
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Returns the most specific upload type for the given base type.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- base-type-&gt;upload-type
   [base-type]
-  (condp #(isa? %2 %1) base-type
-    :type/Float                  ::float
-    :type/BigInteger             ::int
-    :type/Integer                ::int
-    :type/Boolean                ::boolean
-    :type/DateTimeWithTZ         ::offset-datetime
-    :type/DateTime               ::datetime
-    :type/Date                   ::date
-    :type/Text                   ::text))</pre></td></tr><tr><td class="docs">
+  (when base-type
+    (condp #(isa? %2 %1) base-type
+      :type/Float                  ::float
+      :type/BigInteger             ::int
+      :type/Integer                ::int
+      :type/Boolean                ::boolean
+      :type/DateTimeWithTZ         ::offset-datetime
+      :type/DateTime               ::datetime
+      :type/Date                   ::date
+      :type/Text                   ::text)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- not-blank [s]
   (when-not (str/blank? s)
     s))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- extra-and-missing-error-markdown [extra missing]
-  (-&gt;&gt; [[(tru &quot;The CSV file contains extra columns that are not in the table:&quot;) extra]
-        [(tru &quot;The CSV file is missing columns that are in the table:&quot;) missing]]
-       (keep (fn [[header columns]]
-               (when (seq columns)
-                 (str/join &quot;\n&quot; (cons header (map #(str &quot;- &quot; %) columns))))))
-       (str/join &quot;\n\n&quot;)
-       (not-blank)))</pre></td></tr><tr><td class="docs"><p>A mapping of which types a column can be implicitly relaxed to, based on the content of appended values.</p>
+  (when (seq missing)
+    (-&gt;&gt; [[(tru &quot;The CSV file is missing columns that are in the table:&quot;) missing]
+          ;; Even though we allow new columns to be implicitly added by uploads, we mention then in the error messages
+          ;; for missing fields as a common case will be the misspelling of names. Seeing the actual and expected
+          ;; names together could help customers spot the root cause more easily.
+          [(tru &quot;There are new columns in the CSV file that are not in the table:&quot;) extra]]
+         (keep (fn [[header columns]]
+                 (when (seq columns)
+                   (str/join &quot;\n&quot; (cons header (map #(str &quot;- &quot; %) columns))))))
+         (str/join &quot;\n\n&quot;)
+         (not-blank))))</pre></td></tr><tr><td class="docs"><p>A mapping of which types a column can be implicitly relaxed to, based on the content of appended values.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private allowed-type-upgrades
   {::int #{::float}})</pre></td></tr><tr><td class="docs"><p>Throws an exception if:
   - the CSV file contains duplicate column names
@@ -3368,31 +3373,44 @@ Returns the newly created model. May throw validation, permimissions, or DB erro
   ;; Assumes table-cols are unique when normalized
   (let [normalized-field-names (keys fields-by-normed-name)
         normalized-header      (map normalize-column-name header)
-        [extra missing _both] (data/diff (set normalized-header) (set normalized-field-names))]
+        [extra missing _both]  (data/diff (set normalized-header) (set normalized-field-names))]
     ;; check for duplicates
     (when (some #(&lt; 1 %) (vals (frequencies normalized-header)))
       (throw (ex-info (tru &quot;The CSV file contains duplicate column names.&quot;)
                       {:status-code 422})))
-    (when (or extra missing)
-      (let [error-message (extra-and-missing-error-markdown extra missing)]
-        (throw (ex-info error-message {:status-code 422}))))))</pre></td></tr><tr><td class="docs">
+    (when-let [error-message (extra-and-missing-error-markdown extra missing)]
+      (throw (ex-info error-message {:status-code 422})))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- matching-or-upgradable? [current-type relaxed-type]
-  (or (= current-type relaxed-type)
+  (or (nil? current-type)
+      (= current-type relaxed-type)
       (when-let [f (allowed-type-upgrades current-type)]
-        (f relaxed-type))))</pre></td></tr><tr><td class="docs"><p>Given some fields and old and new types, filter out fields with unchanged types, then pair with the new types.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- changed-field-&gt;new-type
-  [fields old-types new-types]
-  (let [new-if-changed #(when (not= %1 %2) %2)]
-    (-&gt;&gt; (map new-if-changed old-types new-types)
-         (map vector fields)
-         (filter second)
-         (into {}))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- alter-columns! [driver database table field-&gt;new-type]
-  (driver/alter-columns! driver (:id database) (table-identifier table)
-                         (m/map-kv (fn [field column-type]
-                                     [(keyword (:name field))
-                                      (driver/upload-type-&gt;database-type driver column-type)])
-                                   field-&gt;new-type)))</pre></td></tr><tr><td class="docs">
+        (f relaxed-type))))</pre></td></tr><tr><td class="docs"><p>Given existing and newly inferred types for the given <code>field-names</code>, calculate which fields need to be added or updated, along with their new types.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- field-changes
+  [field-names existing-types new-types]
+  (reduce
+   (fn [m [f e n]]
+     (cond
+       (nil? e)   (assoc-in m [:added f] n)
+       (not= e n) (assoc-in m [:updated f] n)
+       :else      m))
+   {:added {}, :updated {}}
+   (map vector field-names existing-types new-types)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- field-&gt;db-type [driver field-&gt;col-type]
+  (m/map-kv
+   (fn [field-name col-type]
+     [(keyword field-name)
+      (driver/upload-type-&gt;database-type driver col-type)])
+   field-&gt;col-type))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- add-columns! [driver database table field-&gt;type &amp; args]
+  (when (seq field-&gt;type)
+    (apply driver/add-columns! driver (:id database) (table-identifier table)
+           (field-&gt;db-type driver field-&gt;type)
+           args)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- alter-columns! [driver database table field-&gt;new-type &amp; args]
+  (when (seq field-&gt;new-type)
+    (apply driver/alter-columns! driver (:id database) (table-identifier table)
+           (field-&gt;db-type driver field-&gt;new-type)
+            args)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- append-csv!*
   [database table file]
   (try
@@ -3408,24 +3426,25 @@ Returns the newly created model. May throw validation, permimissions, or DB erro
                                 (not (contains? normed-name-&gt;field auto-pk-column-name)))
             _                  (check-schema (dissoc normed-name-&gt;field auto-pk-column-name) header)
             settings           (upload-parsing/get-settings)
-            old-column-types   (map (comp base-type-&gt;upload-type :base_type normed-name-&gt;field) normed-header)
+            old-types          (map (comp base-type-&gt;upload-type :base_type normed-name-&gt;field) normed-header)
             ;; in the happy, and most common, case all the values will match the existing types
             ;; for now we just plan for the worst and perform a fairly expensive operation to detect any type changes
             ;; we can come back and optimize this to an optimistic-with-fallback approach later.
-            detected-types     (column-types-from-rows settings old-column-types rows)
-            new-column-types   (map #(if (matching-or-upgradable? %1 %2) %2 %1) old-column-types detected-types)
-            _                  (when (and (not= old-column-types new-column-types)
-                                          ;; if we cannot coerce all the columns, don't bother coercing any of them
-                                          ;; we will instead throw an error when we try to parse as the old type
-                                          (= detected-types new-column-types))
-                                 (let [fields (map normed-name-&gt;field normed-header)]
-                                   (-&gt;&gt; (changed-field-&gt;new-type fields old-column-types detected-types)
-                                        (alter-columns! driver database table))))
+            detected-types     (column-types-from-rows settings old-types rows)
+            new-types          (map #(if (matching-or-upgradable? %1 %2) %2 %1) old-types detected-types)
+            ;; avoid any schema modification unless we are able to fully upgrade to supporting the given file
+            ;; choosing to not upgrade means that we will defer failure until we hit the first value that cannot
+            ;; be parsed as its previous type - there is scope to improve these error messages in the future.
+            modify-schema?     (and (not= old-types new-types) (= detected-types new-types))
+            _                  (when modify-schema?
+                                 (let [changes (field-changes normed-header old-types new-types)]
+                                   (add-columns! driver database table (:added changes))
+                                   (alter-columns! driver database table (:updated changes))))
             ;; this will fail if any of our required relaxations were rejected.
-            parsed-rows        (parse-rows settings new-column-types rows)
+            parsed-rows        (parse-rows settings new-types rows)
             row-count          (count parsed-rows)
             stats              {:num-rows          row-count
-                                :num-columns       (count new-column-types)
+                                :num-columns       (count new-types)
                                 :generated-columns (if create-auto-pk? 1 0)
                                 :size-mb           (file-size-mb file)
                                 :upload-seconds    (since-ms timer)}]
@@ -3434,11 +3453,9 @@ Returns the newly created model. May throw validation, permimissions, or DB erro
           (catch Throwable e
             (throw (ex-info (ex-message e) {:status-code 422}))))
         (when create-auto-pk?
-          (driver/add-columns! driver
-                               (:id database)
-                               (table-identifier table)
-                               {auto-pk-column-keyword (driver/upload-type-&gt;database-type driver ::auto-incrementing-int-pk)}
-                               :primary-key [auto-pk-column-keyword]))
+          (add-columns! driver database table
+                        {auto-pk-column-keyword ::auto-incrementing-int-pk}
+                        :primary-key [auto-pk-column-keyword]))
         (scan-and-sync-table! database table)
         (when create-auto-pk?
           (let [auto-pk-field (table-id-&gt;auto-pk-column (:id table))]

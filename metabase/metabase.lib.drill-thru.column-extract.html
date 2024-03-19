@@ -2880,6 +2880,7 @@ net.brehaut.ClojureTools = (function (SH) {
 </ul>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.lib.drill-thru.column-extract
   (:require
+   [medley.core :as m]
    [metabase.lib.drill-thru.column-filter :as lib.drill-thru.column-filter]
    [metabase.lib.drill-thru.common :as lib.drill-thru.common]
    [metabase.lib.expression :as lib.expression]
@@ -2902,21 +2903,74 @@ net.brehaut.ClojureTools = (function (SH) {
                               date-units))]
            {:key          unit
             :display-name (lib.temporal-bucket/describe-temporal-unit unit)}))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private url-&gt;host-regex
+  ;;    protocol       host    etc.
+  #&quot;^(?:[^:/?#]*:?//)?([^/?#]*).*$&quot;)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private host-&gt;domain-regex
+  ;; Deliberately no ^ at the start; there might be several subdomains before this spot.
+  ;; By &quot;short tail&quot; below, I mean a pseudo-TLD nested under a proper TLD. For example, mycompany.co.uk.
+  ;; This can accidentally capture a short domain name, eg. &quot;subdomain.aol.com&quot; -&gt; &quot;subdomain&quot;, oops.
+  ;; But there's a load of these, not a short list we can include here, so it's either preprocess the (huge) master list
+  ;; from Mozilla or accept that this regex is a bit best-effort.
+  ;; Skip www  domain   maybe short tail  TLD
+  #&quot;(?:www\.)?([^\.]+)\.(?:[^\.]{1,3}\.)?[^\.]+$&quot;)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private email-&gt;domain-regex
+  ;; See [[host-&gt;domain-regex]] on the challenges of parsing domains with regexes.
+  ;; Referencing the indexes below:
+  ;; 1. Positive lookbehind: Starting after @ or .
+  ;; 2. Negative lookahead: Don't capture www as the domain
+  ;; 3. One domain segment
+  ;; 4. Positive lookahead:
+  ;;      Either:
+  ;; 5.     Short final segment (eg. .co.uk)
+  ;; 6.     Top-level domain
+  ;; 7.     Anchor to end
+  ;;      Or:
+  ;; 8.     Top-level domain
+  ;; 9.     Anchor to end
+  ;;1         2        3      (4   5            6      7|  8      9)
+  #&quot;(?&lt;=[@\.])(?!www\.)[^@\.]+(?=\.[^@\.]{1,3}\.[^@\.]+$|\.[^@\.]+$)&quot;)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private host-&gt;subdomain-regex
+  ;; This grabs the first segment that isn't &quot;www&quot;, AND excludes the main domain name.
+  ;; See [[host-&gt;domain-regex]] for more details about how those are matched.
+  ;; Referencing the indexes below:
+  ;; 1.  Only at the start of the input
+  ;; 2.  Consume &quot;www.&quot; if present
+  ;; 3.  Start capturing the subdomain we want
+  ;; 4.  Negative lookahead: That subdomain can't be &quot;www&quot;; we don't want to backtrack and find &quot;www&quot;.
+  ;; 5.  Negative lookahead to make sure this isn't the proper domain:
+  ;; 6.      Main domain name
+  ;; 7.      Optional short tail (eg. co.uk)
+  ;; 8.      Top-level domain, ending the input
+  ;; 9.  Matching the actual subdomain
+  ;; 10. And its dot, which is outside the capture.
+  ;;12         34        5  6       7                8       9      10
+  #&quot;^(?:www\.)?((?!www\.)(?![^\.]+\.(?:[^\.]{1,3}\.)?[^\.]+$)[^\.]+)\.&quot;)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- column-extract-drill-for-column [column]
+  (cond
+    (lib.types.isa/temporal? column) {:display-name (i18n/tru &quot;Extract day, month…&quot;)
+                                      :extractions  (column-extract-temporal-units column)}
+    (lib.types.isa/email? column)    {:display-name (i18n/tru &quot;Extract domain&quot;)
+                                      :extractions  [{:key          :email-domain
+                                                      :display-name (i18n/tru &quot;Domain&quot;)}]}
+    (lib.types.isa/URL? column)      {:display-name (i18n/tru &quot;Extract domain, subdomain…&quot;)
+                                      :extractions  [{:key          :domain
+                                                      :display-name (i18n/tru &quot;Domain&quot;)}
+                                                     {:key          :subdomain
+                                                      :display-name (i18n/tru &quot;Subdomain&quot;)}]}))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn column-extract-drill :- [:maybe ::lib.schema.drill-thru/drill-thru.column-extract]
   &quot;Column clicks on temporal columns only.
   Might add a stage, like `:drill-thru/column-filter` does, if the current stage has aggregations.&quot;
   [query                       :- ::lib.schema/query
    stage-number                :- :int
    {:keys [column column-ref value]} :- ::lib.schema.drill-thru/context]
-  (when (and column
-             (nil? value)
-             (lib.types.isa/temporal? column))
-    (merge {:lib/type     :metabase.lib.drill-thru/drill-thru
-            :type         :drill-thru/column-extract
-            :display-name (i18n/tru &quot;Extract day, month…&quot;)
-            :extractions  (column-extract-temporal-units column)}
-           (lib.drill-thru.column-filter/prepare-query-for-drill-addition
-             query stage-number column column-ref :expression))))</pre></td></tr><tr><td class="docs">
+  (when (and column (nil? value))
+    (when-let [drill (column-extract-drill-for-column column)]
+      (merge drill
+             {:lib/type :metabase.lib.drill-thru/drill-thru
+              :type     :drill-thru/column-extract}
+             (lib.drill-thru.column-filter/prepare-query-for-drill-addition
+               query stage-number column column-ref :expression)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod lib.drill-thru.common/drill-thru-info-method :drill-thru/column-extract
   [_query _stage-number drill]
   (select-keys drill [:display-name :extractions :type]))</pre></td></tr><tr><td class="docs"><p>Creates a case expression with a condition for each value of the unit.</p>
@@ -2928,16 +2982,27 @@ net.brehaut.ClojureTools = (function (SH) {
     &quot;&quot;))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- extraction-expression [column tag]
   (case tag
+    ;; Temporal extractions
     :hour-of-day     (lib.expression/get-hour column)
     :day-of-month    (lib.expression/get-day column)
     :day-of-week     (case-expression #(lib.expression/get-day-of-week column) tag 7)
     :month-of-year   (case-expression #(lib.expression/get-month column) tag 12)
     :quarter-of-year (case-expression #(lib.expression/get-quarter column) tag 4)
-    :year            (lib.expression/get-year column)))</pre></td></tr><tr><td class="docs">
+    :year            (lib.expression/get-year column)
+    ;; URLs
+    :domain          (-&gt; column
+                         (lib.expression/regex-match-first url-&gt;host-regex)
+                         (lib.expression/regex-match-first host-&gt;domain-regex))
+    :subdomain       (-&gt; column
+                         (lib.expression/regex-match-first url-&gt;host-regex)
+                         (lib.expression/regex-match-first host-&gt;subdomain-regex))
+    ;; Emails
+    :email-domain    (lib.expression/regex-match-first column email-&gt;domain-regex)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod lib.drill-thru.common/drill-thru-method :drill-thru/column-extract
-  [_query _stage-number {:keys [query stage-number column]} &amp; [tag]]
-  (let [unit           (keyword tag)
-        unique-name-fn (lib.util/unique-name-generator)]
+  [_query _stage-number {:keys [query stage-number column extractions]} &amp; [tag]]
+  (let [tag                    (keyword tag)
+        {:keys [display-name]} (m/find-first #(= (:key %) tag) extractions)
+        unique-name-fn         (lib.util/unique-name-generator)]
     (doseq [col-name (-&gt;&gt; (lib.util/query-stage query stage-number)
                           (lib.metadata.calculation/returned-columns query stage-number)
                           (map :name))]
@@ -2945,8 +3010,8 @@ net.brehaut.ClojureTools = (function (SH) {
     (lib.expression/expression
       query
       stage-number
-      (unique-name-fn (lib.temporal-bucket/describe-temporal-unit unit))
-      (extraction-expression column unit))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+      (unique-name-fn display-name)
+      (extraction-expression column tag))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
