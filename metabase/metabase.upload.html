@@ -2901,72 +2901,113 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.util.i18n :refer [tru]]
    [metabase.util.malli :as mu]
    [metabase.util.malli.schema :as ms]
-   [metabase.util.ordered-hierarchy :as ordered-hierarchy :refer [derive make-hierarchy]]
+   [metabase.util.ordered-hierarchy :as ordered-hierarchy :refer [make-hierarchy]]
    [toucan2.core :as t2])
   (:import
    (java.io File)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p><pre><code></p>
-
-<p>+------------------+
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>+------------------+
 | Schema detection |
 +------------------+</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Upload types form a DAG (directed acyclic graph) where each type can be coerced into any
-of its ancestors types. We parse each value in the CSV file to the most-specific possible
-type for each column. The most-specific possible type for a column is the lowest common
-ancestor of the types for each value in the column.</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Upload value-types form a DAG (directed acyclic graph) where each type can be relaxed into any of its ancestors.
+We parse each value in the CSV file to the most-specific possible type for each column.</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>The most-specific possible type for a column is the closest common ancestor of the types for each value in the
+column, found by walking through the graph in topological order, following edges from left to right.
+Note that this type is not guaranteed to be one of the least common ancestors!</p>
 
-<pre><code>         text
-          |
-          |
-     varchar-255┐
-   /     / \    │
-  /     /   \   └──────────┬
- /     /     \             │
+<p>See [[metabase.util.ordered-hierarchy/first-common-ancestor]] for more details.</p>
+
+<pre><code>
+
+             text
+              |
+              |
+         varchar-255──────
+       /      /  \        \
+     /      /      \       \
+ boolean  float   datetime  offset-datetime
+    |       │        │
+    |       │        │
+    │ *float-or-int* │
+    │       │        │
+    │       │        │
+    |      int      date
+    |   /       \
+    |  /         \
+*boolean-int*  auto-incrementing-int-pk
+
 </code></pre>
 
-<p> boolean float   datetime  offset-datetime
-    |     │       │
-    │     │       │
-    |    int     date
-    |   /   \
-    |  /     \
-    | /       \
-    |/         \
-boolean-or-int  auto-incrementing-int-pk</p>
+<p>We have a number of special "abstract" nodes in this graph:</p>
 
-<p><code>boolean-or-int</code> is a special type with two parents, where we parse it as a boolean if the whole
-column's values are of that type. additionally a column cannot have a boolean-or-int type, but
-a value can. if there is a column with a boolean-or-int value and an integer value, the column will be int
-if there is a column with a boolean-or-int value and a boolean value, the column will be boolean
-if there is a column with only boolean-or-int values, the column will be parsed as if it were boolean</p>
+<ul>
+<li><code>*boolean-int*</code> is an ambiguous node, that could either be parsed as a boolean or as an integer.</li>
+<li><code>*float-or-int*</code> is any integer, whether it has an explicit decimal point or not.</li>
+</ul>
 
-<p></code></pre></p>
+<p>While a <code>*boolean-int*</code> is a genuinely ambiguous value, <code>*float-or-int*</code> exist to power our desired value-type
+coercion and column-type promotion behaviour.</p>
+
+<ul>
+<li>If we encounter a <code>*float-or-int*</code> inside an <code>int</code> column, then we can safely coerce it down to an integer.</li>
+<li>If we encounter a <code>float</code> (i.e. a non-zero fraction component), then we need to promote the column to a <code>float.</code></li>
+</ul>
+
+<p>Columns can not have an abstract type, which has no meaning outside of inference and reconciliation.
+If we are left with an abstract type after having processed all the values, we first check whether we can coerce
+the type to the existing column type, and otherwise traverse further up the graph until we reach a concrete type.</p>
+
+<p>For ease of reference and explicitness these corresponding values are given in the <code>abstract-&gt;concrete</code> map.
+One can figure out these mappings by simply looking up through the ancestors. For now, we require that it is always
+a direct ancestor, and lay out or graph so that it is the left-most one.</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>This hierarchy defines a relationship between value types and their specializations.
 We use an [[metabase.util.ordered-hierarchy]] for its topological sorting, which simplify writing efficient and
 consistent implementations for of our type inference, parsing, and relaxation.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private h
-  (-&gt; (make-hierarchy)
-      (derive ::boolean-or-int ::boolean)
-      (derive ::boolean-or-int ::int)
-      (derive ::auto-incrementing-int-pk ::int)
-      (derive ::int ::float)
-      (derive ::date ::datetime)
-      (derive ::boolean ::varchar-255)
-      (derive ::offset-datetime ::varchar-255)
-      (derive ::datetime ::varchar-255)
-      (derive ::float ::varchar-255)
-      (derive ::varchar-255 ::text)))</pre></td></tr><tr><td class="docs"><p>Not all value types correspond to database types. For those that don't, this maps to their concrete ancestor.</p>
+  (make-hierarchy
+   [::text
+    [::varchar-255
+     [::boolean ::*boolean-int*]
+     [::float
+      ;; A number value with a decimal separator, but a zero fractional component.
+      [::*float-or-int*
+       [::int
+        ;; A value that could be legally parsed as either a boolean OR an integer
+        ::*boolean-int*
+        ::auto-incrementing-int-pk]]]
+     [::datetime ::date]
+     ::offset-datetime]]))</pre></td></tr><tr><td class="docs"><p>Not all value types correspond to column types. We refer to these as "abstract" types, and give them <em>ear-muffs</em>.
+This maps implicitly defines the abstract types, by mapping them each to a default concretion.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private abstract-&gt;concrete
-  {::boolean-or-int ::boolean})</pre></td></tr><tr><td class="docs"><p>All type tags which values can be inferred as. An ordered set from most to least specialized.</p>
+  {::*boolean-int*  ::boolean
+   ::*float-or-int* ::float})</pre></td></tr><tr><td class="docs"><p>A mapping of which types a column can be implicitly relaxed to, based on the content of appended values.
+If we require a relaxation which is not allow-listed here, we will reject the corresponding file.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private allowed-promotions
+  {::int #{::float}})</pre></td></tr><tr><td class="docs"><p>A mapping of which value types should be coerced to the given existing type, rather than triggering promotion.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private column-type-&gt;coercible-value-types
+  {::int #{::*float-or-int*}})</pre></td></tr><tr><td class="docs"><p>Can values of the given type be coerced to the given existing column type, in a lossless fashion?</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- coerce?
+  [column-type value-type]
+  (contains? (column-type-&gt;coercible-value-types column-type) value-type))</pre></td></tr><tr><td class="docs"><p>All type tags which values can be inferred as. An ordered set from most to least specialized.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private value-types
   (ordered-hierarchy/sorted-tags h))</pre></td></tr><tr><td class="docs"><p>All type tags that correspond to concrete column types.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private column-types
-  (into #{} (remove abstract-&gt;concrete) value-types))</pre></td></tr><tr><td class="docs"><p>The most specific column type corresponding to the given value type.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ^:private column-type
+  (into #{} (remove abstract-&gt;concrete) value-types))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- column-type?
   [value-type]
-  (or (abstract-&gt;concrete value-type value-type)
-      ;; If we know nothing about the value type, treat it as an arbitrary string.
-      ::text))</pre></td></tr><tr><td class="docs"><p>[[value->type]] helpers</p>
+  (contains? column-types value-type))</pre></td></tr><tr><td class="docs"><p>Determine the desired column-type given the existing column-type (nil if it's new) and the value-type of the data.
+If there's a valid coercion to the existing type, we will preserve it, but otherwise we will relax abstract types
+further to a concrete type.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn ^:private concretize
+  [existing-type value-type]
+  (cond
+    ;; If the type is concrete, there is nothing to do.
+    (column-type? value-type) value-type
+    ;; If we know nothing about the value type, treat it as an arbitrary string.
+    (nil? value-type) ::text
+    ;; If configured, coerce the value to the existing type
+    (coerce? existing-type value-type) existing-type
+    ;; Otherwise, project it to its canonical concretion.
+    :else (abstract-&gt;concrete value-type)))</pre></td></tr><tr><td class="docs"><p>[[value->type]] helpers</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Returns a regex that matches the argument, with or without surrounding parentheses.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- with-parens
   [number-regex]
@@ -2986,6 +3027,14 @@ consistent implementations for of our type inference, parsing, and relaxation.</
         &quot;,.&quot; #&quot;\d[\d.]*&quot;
         &quot;, &quot; #&quot;\d[\d \u00A0]*&quot;
         &quot;.’&quot; #&quot;\d[\d’]*&quot;))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- float-or-int-regex [number-separators]
+  (with-parens
+   (with-currency
+    (case number-separators
+      (&quot;.&quot; &quot;.,&quot;) #&quot;\d[\d,]*(\.0+)?&quot;
+      &quot;,.&quot; #&quot;\d[\d.]*(\,[0]+)?&quot;
+      &quot;, &quot; #&quot;\d[\d \u00A0]*(\,[0.]+)?&quot;
+      &quot;.’&quot; #&quot;\d[\d’]*(\.[0.]+)?&quot;))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- float-regex [number-separators]
   (with-parens
     (with-currency
@@ -3009,7 +3058,7 @@ consistent implementations for of our type inference, parsing, and relaxation.</
   (does-not-throw? (upload-parsing/parse-offset-datetime s)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- boolean-string? [s]
   (boolean (re-matches #&quot;(?i)true|t|yes|y|1|false|f|no|n|0&quot; s)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- boolean-or-int-string? [s]
+</td><td class="codes"><pre class="brush: clojure">(defn- boolean-int-string? [s]
   (contains? #{&quot;0&quot; &quot;1&quot;} s))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- varchar-255? [s]
   (&lt;= (count s) 255))</pre></td></tr><tr><td class="docs">
@@ -3024,15 +3073,19 @@ consistent implementations for of our type inference, parsing, and relaxation.</
                     (remove non-inferable-types value-types))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private settings-&gt;type-&gt;check :- type-&gt;check-schema
   [{:keys [number-separators] :as _settings}]
-  {::boolean-or-int  boolean-or-int-string?
-   ::boolean         boolean-string?
-   ::offset-datetime offset-datetime-string?
-   ::date            date-string?
-   ::datetime        datetime-string?
-   ::int             (regex-matcher (int-regex number-separators))
-   ::float           (regex-matcher (float-regex number-separators))
-   ::varchar-255     varchar-255?
-   ::text            (constantly true)})</pre></td></tr><tr><td class="docs"><p>Determine the most specific type that is compatible with the given value.
+  (let [int?          (regex-matcher (int-regex number-separators))
+        float-or-int? (regex-matcher (float-or-int-regex number-separators))
+        float?        (regex-matcher (float-regex number-separators))]
+    {::*boolean-int*   boolean-int-string?
+     ::boolean         boolean-string?
+     ::offset-datetime offset-datetime-string?
+     ::date            date-string?
+     ::datetime        datetime-string?
+     ::int             int?
+     ::*float-or-int*  float-or-int?
+     ::float           float?
+     ::varchar-255     varchar-255?
+     ::text            (constantly true)}))</pre></td></tr><tr><td class="docs"><p>Determine the most specific type that is compatible with the given value.
 Numbers are assumed to use separators corresponding to the locale defined in the application settings</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- value-&gt;type
   [type-&gt;check value]
@@ -3073,7 +3126,8 @@ Numbers are assumed to use separators corresponding to the locale defined in the
 </td><td class="codes"><pre class="brush: clojure">(mu/defn column-types-from-rows :- [:sequential (into [:enum] column-types)]
   &quot;Given the types of the existing columns (if there are any), and rows to be added, infer the best supporting types.&quot;
   [settings existing-types rows]
-  (map column-type (reduce (type-relaxer settings) existing-types rows)))</pre></td></tr><tr><td class="docs"><p>Consumes the header and rows from a CSV file.</p>
+  (-&gt;&gt; (reduce (type-relaxer settings) existing-types rows)
+       (u/map-all concretize existing-types)))</pre></td></tr><tr><td class="docs"><p>Consumes the header and rows from a CSV file.</p>
 
 <p> Returns a map with two keys:
    - <code>:extant-columns</code>: an ordered map of columns found in the CSV file, excluding columns that have the same normalized name as the generated columns.
@@ -3361,9 +3415,7 @@ Returns the newly created model. May throw validation, permimissions, or DB erro
                  (when (seq columns)
                    (str/join &quot;\n&quot; (cons header (map #(str &quot;- &quot; %) columns))))))
          (str/join &quot;\n\n&quot;)
-         (not-blank))))</pre></td></tr><tr><td class="docs"><p>A mapping of which types a column can be implicitly relaxed to, based on the content of appended values.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private allowed-type-upgrades
-  {::int #{::float}})</pre></td></tr><tr><td class="docs"><p>Throws an exception if:
+         (not-blank))))</pre></td></tr><tr><td class="docs"><p>Throws an exception if:
   - the CSV file contains duplicate column names
   - the schema of the CSV file does not match the schema of the table</p>
 
@@ -3380,10 +3432,10 @@ Returns the newly created model. May throw validation, permimissions, or DB erro
                       {:status-code 422})))
     (when-let [error-message (extra-and-missing-error-markdown extra missing)]
       (throw (ex-info error-message {:status-code 422})))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- matching-or-upgradable? [current-type relaxed-type]
+</td><td class="codes"><pre class="brush: clojure">(defn- matching-or-promotable? [current-type relaxed-type]
   (or (nil? current-type)
       (= current-type relaxed-type)
-      (when-let [f (allowed-type-upgrades current-type)]
+      (when-let [f (allowed-promotions current-type)]
         (f relaxed-type))))</pre></td></tr><tr><td class="docs"><p>Given existing and newly inferred types for the given <code>field-names</code>, calculate which fields need to be added or updated, along with their new types.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- field-changes
   [field-names existing-types new-types]
@@ -3431,10 +3483,10 @@ Returns the newly created model. May throw validation, permimissions, or DB erro
             ;; for now we just plan for the worst and perform a fairly expensive operation to detect any type changes
             ;; we can come back and optimize this to an optimistic-with-fallback approach later.
             detected-types     (column-types-from-rows settings old-types rows)
-            new-types          (map #(if (matching-or-upgradable? %1 %2) %2 %1) old-types detected-types)
-            ;; avoid any schema modification unless we are able to fully upgrade to supporting the given file
-            ;; choosing to not upgrade means that we will defer failure until we hit the first value that cannot
-            ;; be parsed as its previous type - there is scope to improve these error messages in the future.
+            new-types          (map #(if (matching-or-promotable? %1 %2) %2 %1) old-types detected-types)
+            ;; avoid any schema modification unless all the promotions required by the file are supported,
+            ;; choosing to not promote means that we will defer failure until we hit the first value that cannot
+            ;; be parsed as its existing type - there is scope to improve these error messages in the future.
             modify-schema?     (and (not= old-types new-types) (= detected-types new-types))
             _                  (when modify-schema?
                                  (let [changes (field-changes normed-header old-types new-types)]
