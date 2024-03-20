@@ -2865,7 +2865,7 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.api.metric" name="metabase.api.metric"><h1 class="project-name">metabase.api.metric</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>/api/metric endpoints.</p>
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.api.metric" name="metabase.api.metric"><h1 class="project-name">metabase.api.metric</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>/api/legacy-metric endpoints.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.api.metric
   (:require
    [clojure.data :as data]
@@ -2873,7 +2873,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.api.common :as api]
    [metabase.events :as events]
    [metabase.mbql.normalize :as mbql.normalize]
-   [metabase.models :refer [Metric  MetricImportantField Table]]
+   [metabase.models :refer [LegacyMetric  LegacyMetricImportantField Table]]
    [metabase.models.interface :as mi]
    [metabase.models.revision :as revision]
    [metabase.related :as related]
@@ -2884,16 +2884,16 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.util.malli.schema :as ms]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs"><p>/</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint POST 
-  &quot;Create a new `Metric`.&quot;
+  &quot;Create a new `LegacyMetric`.&quot;
   [:as {{:keys [name description table_id definition], :as body} :body}]
   {name        ms/NonBlankString
    table_id    ms/PositiveInt
    definition  :map
    description [:maybe :string]}
-  ;; TODO - why can't set the other properties like `show_in_getting_started` when you create a Metric?
-  (api/create-check Metric body)
+  ;; TODO - why can't set the other properties like `show_in_getting_started` when you create a LegacyMetric?
+  (api/create-check LegacyMetric body)
   (let [metric (api/check-500
-                (first (t2/insert-returning-instances! Metric
+                (first (t2/insert-returning-instances! LegacyMetric
                                                        :table_id    table_id
                                                        :creator_id  api/*current-user-id*
                                                        :name        name
@@ -2902,10 +2902,10 @@ net.brehaut.ClojureTools = (function (SH) {
     (events/publish-event! :event/metric-create {:object metric :user-id api/*current-user-id*})
     (t2/hydrate metric :creator)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private hydrated-metric [id :- ms/PositiveInt]
-  (-&gt; (api/read-check (t2/select-one Metric :id id))
+  (-&gt; (api/read-check (t2/select-one LegacyMetric :id id))
       (t2/hydrate :creator)))</pre></td></tr><tr><td class="docs"><p>/:id</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
-  &quot;Fetch `Metric` with ID.&quot;
+  &quot;Fetch `LegacyMetric` with ID.&quot;
   [id]
   {id ms/PositiveInt}
   (hydrated-metric id))</pre></td></tr><tr><td class="docs"><p>Add <code>:database_id</code> fields to <code>metrics</code> by looking them up from their <code>:table_id</code>.</p>
@@ -2916,17 +2916,17 @@ net.brehaut.ClojureTools = (function (SH) {
       (for [metric metrics]
         (assoc metric :database_id (table-id-&gt;db-id (:table_id metric)))))))</pre></td></tr><tr><td class="docs"><p>/</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
-  &quot;Fetch *all* `Metrics`.&quot;
+  &quot;Fetch *all* `LegacyMetrics`.&quot;
   []
-  (as-&gt; (t2/select Metric, :archived false, {:order-by [:%lower.name]}) metrics
+  (as-&gt; (t2/select LegacyMetric, :archived false, {:order-by [:%lower.name]}) metrics
     (t2/hydrate metrics :creator :definition_description)
     (add-db-ids metrics)
     (filter mi/can-read? metrics)
-    metrics))</pre></td></tr><tr><td class="docs"><p>Check whether current user has write permissions, then update Metric with values in <code>body</code>. Publishes appropriate
-event and returns updated/hydrated Metric.</p>
+    metrics))</pre></td></tr><tr><td class="docs"><p>Check whether current user has write permissions, then update LegacyMetric with values in <code>body</code>. Publishes appropriate
+event and returns updated/hydrated LegacyMetric.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- write-check-and-update-metric!
   [id {:keys [revision_message] :as body}]
-  (let [existing   (api/write-check Metric id)
+  (let [existing   (api/write-check LegacyMetric id)
         clean-body (u/select-keys-when body
                      :present #{:description :caveats :how_is_this_calculated :points_of_interest}
                      :non-nil #{:archived :definition :name :show_in_getting_started})
@@ -2938,12 +2938,12 @@ event and returns updated/hydrated Metric.</p>
                      new-body)
         archive?   (:archived changes)]
     (when changes
-      (t2/update! Metric id changes))
+      (t2/update! LegacyMetric id changes))
     (u/prog1 (hydrated-metric id)
       (events/publish-event! (if archive? :event/metric-delete :event/metric-update)
                              {:object &lt;&gt;  :user-id api/*current-user-id* :revision-message revision_message}))))</pre></td></tr><tr><td class="docs"><p>/:id</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint PUT 
-  &quot;Update a `Metric` with ID.&quot;
+  &quot;Update a `LegacyMetric` with ID.&quot;
   [id :as {{:keys [name definition revision_message archived caveats description how_is_this_calculated
                    points_of_interest show_in_getting_started]
             :as   body} :body}]
@@ -2959,47 +2959,47 @@ event and returns updated/hydrated Metric.</p>
    show_in_getting_started [:maybe :boolean]}
   (write-check-and-update-metric! id body))</pre></td></tr><tr><td class="docs"><p>/:id/important_fields</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint PUT 
-  &quot;Update the important `Fields` for a `Metric` with ID.
+  &quot;Update the important `Fields` for a `LegacyMetric` with ID.
    (This is used for the Getting Started guide).&quot;
   [id :as {{:keys [important_field_ids]} :body}]
   {id                  ms/PositiveInt
    important_field_ids [:sequential ms/PositiveInt]}
   (api/check-superuser)
-  (api/write-check Metric id)
+  (api/write-check LegacyMetric id)
   (api/check (&lt;= (count important_field_ids) 3)
     [400 &quot;A Metric can have a maximum of 3 important fields.&quot;])
-  (let [[fields-to-remove fields-to-add] (data/diff (set (t2/select-fn-set :field_id 'MetricImportantField :metric_id id))
+  (let [[fields-to-remove fields-to-add] (data/diff (set (t2/select-fn-set :field_id 'LegacyMetricImportantField :metric_id id))
                                                     (set important_field_ids))]
     ;; delete old fields as needed
     (when (seq fields-to-remove)
-      (t2/delete! (t2/table-name MetricImportantField) {:metric_id id, :field_id [:in fields-to-remove]}))
+      (t2/delete! (t2/table-name LegacyMetricImportantField) {:metric_id id, :field_id [:in fields-to-remove]}))
     ;; add new fields as needed
-    (t2/insert! 'MetricImportantField (for [field-id fields-to-add]
-                                        {:metric_id id, :field_id field-id}))
+    (t2/insert! 'LegacyMetricImportantField (for [field-id fields-to-add]
+                                              {:metric_id id, :field_id field-id}))
     {:success true}))</pre></td></tr><tr><td class="docs"><p>/:id</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint DELETE 
-  &quot;Archive a Metric. (DEPRECATED -- Just pass updated value of `:archived` to the `PUT` endpoint instead.)&quot;
+  &quot;Archive a LegacyMetric. (DEPRECATED -- Just pass updated value of `:archived` to the `PUT` endpoint instead.)&quot;
   [id revision_message]
   {id               ms/PositiveInt
    revision_message ms/NonBlankString}
   (log/warn
-   (trs &quot;DELETE /api/metric/:id is deprecated. Instead, change its `archived` value via PUT /api/metric/:id.&quot;))
+   (trs &quot;DELETE /api/legacy-metric/:id is deprecated. Instead, change its `archived` value via PUT /api/legacy-metric/:id.&quot;))
   (write-check-and-update-metric! id {:archived true, :revision_message revision_message})
   api/generic-204-no-content)</pre></td></tr><tr><td class="docs"><p>/:id/revisions</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
-  &quot;Fetch `Revisions` for `Metric` with ID.&quot;
+  &quot;Fetch `Revisions` for `LegacyMetric` with ID.&quot;
   [id]
   {id ms/PositiveInt}
-  (api/read-check Metric id)
-  (revision/revisions+details Metric id))</pre></td></tr><tr><td class="docs"><p>/:id/revert</p>
+  (api/read-check LegacyMetric id)
+  (revision/revisions+details LegacyMetric id))</pre></td></tr><tr><td class="docs"><p>/:id/revert</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint POST 
-  &quot;Revert a `Metric` to a prior `Revision`.&quot;
+  &quot;Revert a `LegacyMetric` to a prior `Revision`.&quot;
   [id :as {{:keys [revision_id]} :body}]
   {id          ms/PositiveInt
    revision_id ms/PositiveInt}
-  (api/write-check Metric id)
+  (api/write-check LegacyMetric id)
   (revision/revert!
-   {:entity      Metric
+   {:entity      LegacyMetric
     :id          id
     :user-id     api/*current-user-id*
     :revision-id revision_id}))</pre></td></tr><tr><td class="docs"><p>/:id/related</p>
@@ -3007,7 +3007,7 @@ event and returns updated/hydrated Metric.</p>
   &quot;Return related entities.&quot;
   [id]
   {id ms/PositiveInt}
-  (-&gt; (t2/select-one Metric :id id) api/read-check related/related))</pre></td></tr><tr><td class="docs">
+  (-&gt; (t2/select-one LegacyMetric :id id) api/read-check related/related))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(api/define-routes)</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 

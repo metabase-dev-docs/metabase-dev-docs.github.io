@@ -2878,8 +2878,6 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.mbql.schema :as mbql.s]
    [metabase.mbql.util :as mbql.u]
    [metabase.models.card :as card :refer [Card]]
-   [metabase.models.dashboard :refer [Dashboard]]
-   [metabase.models.database :refer [Database]]
    [metabase.models.query :as query]
    [metabase.public-settings :as public-settings]
    [metabase.public-settings.premium-features
@@ -2893,35 +2891,28 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.query-processor.streaming :as qp.streaming]
    [metabase.query-processor.util :as qp.util]
    [metabase.util :as u]
-   [metabase.util.i18n :refer [trs tru]]
+   [metabase.util.i18n :refer [tru]]
    [metabase.util.log :as log]
    [metabase.util.malli :as mu]
    #_{:clj-kondo/ignore [:discouraged-namespace]}
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Compute a 'magic' cache TTL time (in seconds) for <code>query</code> by multipling its historic average execution times by the
-<code>query-caching-ttl-ratio</code>. If the TTL is less than a second, this returns <code>nil</code> (i.e., the cache should not be
-utilized.)</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- query-magic-ttl
-  [query]
-  (when-let [average-duration (query/average-execution-time-ms (qp.util/query-hash query))]
-    (let [ttl-seconds (Math/round (float (/ (* average-duration (public-settings/query-caching-ttl-ratio))
-                                            1000.0)))]
-      (when-not (zero? ttl-seconds)
-        (log/info (trs &quot;Question''s average execution duration is {0}; using ''magic'' TTL of {1}&quot;
-                       (u/format-milliseconds average-duration) (u/format-seconds ttl-seconds))
-                  (u/emoji &quot;💾&quot;))
-        ttl-seconds))))</pre></td></tr><tr><td class="docs"><p>Returns the granular cache ttl (in seconds) for a card. On EE, this first checking whether there is a stored value
- for the card, dashboard, or database (in that order of decreasing preference). Returns nil on OSS.</p>
-</td><td class="codes"><pre class="brush: clojure">(defenterprise granular-ttl
-  metabase-enterprise.advanced-config.caching
-  [_card _dashboard _database])</pre></td></tr><tr><td class="docs"><p>Returns the cache ttl (in seconds), by first checking whether there is a stored value for the database,
-  dashboard, or card (in that order of increasing preference), and if all of those don't exist, then the
-  <code>query-magic-ttl</code>, which is based on average execution time.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- ttl-hierarchy
-  [card dashboard database query]
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Returns cache strategy for a card. On EE, this checks the hierarchy for the card, dashboard, or
+ database (in that order). Returns nil on OSS.</p>
+</td><td class="codes"><pre class="brush: clojure">(defenterprise granular-cache-strategy
+  metabase-enterprise.caching.strategies
+  [_card _dashboard-id])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- cache-strategy
+  [card dashboard-id]
   (when (public-settings/enable-query-caching)
-    (or (granular-ttl card dashboard database)
-        (query-magic-ttl query))))</pre></td></tr><tr><td class="docs"><p>Generate a query for a saved Card</p>
+    (or (granular-cache-strategy card dashboard-id)
+        {:type            :ttl
+         :multiplier      (public-settings/query-caching-ttl-ratio)
+         :min_duration_ms (long (* (public-settings/query-caching-min-ttl) 1000))})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- enrich-strategy [strategy query]
+  (case (:type strategy)
+    :ttl (let [et (query/average-execution-time-ms (qp.util/query-hash query))]
+           (assoc strategy :avg-execution-ms (or et 0)))
+    strategy))</pre></td></tr><tr><td class="docs"><p>Generate a query for a saved Card</p>
 </td><td class="codes"><pre class="brush: clojure">(defn query-for-card
   [{query :dataset_query
     :as   card} parameters constraints middleware &amp; [ids]]
@@ -2931,10 +2922,9 @@ utilized.)</p>
                       (assoc :constraints constraints
                              :parameters  parameters
                              :middleware  middleware))
-        dashboard (t2/select-one [Dashboard :cache_ttl] :id (:dashboard-id ids))
-        database  (t2/select-one [Database :cache_ttl] :id (:database_id card))
-        ttl-secs  (ttl-hierarchy card dashboard database query)]
-    (assoc query :cache-ttl ttl-secs)))</pre></td></tr><tr><td class="docs"><p>In 0.41.0+ you can no longer add arbitrary <code>:parameters</code> to a query for a saved question -- only parameters for
+        cs        (-&gt; (cache-strategy card (:dashboard-id ids))
+                      (enrich-strategy query))]
+    (assoc query :cache-strategy cs)))</pre></td></tr><tr><td class="docs"><p>In 0.41.0+ you can no longer add arbitrary <code>:parameters</code> to a query for a saved question -- only parameters for
 template tags that are part of a /native/ query may be supplied (only native queries can have template tags); the
 type of the parameter has to agree with the type of the template tag as well. This variable controls whether or not
 this constraint is enforced.</p>

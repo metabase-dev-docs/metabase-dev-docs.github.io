@@ -2910,15 +2910,17 @@ but it may be more instructive to look at examples in our codebase.</li>
    [clojure.set :as set]
    [clojure.spec.alpha :as s]
    [clojure.string :as str]
+   [clojure.tools.macro :as macro]
    [compojure.core :as compojure]
    [medley.core :as m]
    [metabase.api.common.internal
     :refer [add-route-param-schema
             auto-coerce
             route-dox
-            validate-params
             route-fn-name
+            validate-params
             wrap-response-if-needed]]
+   [metabase.api.common.openapi :as openapi]
    [metabase.config :as config]
    [metabase.events :as events]
    [metabase.models.interface :as mi]
@@ -2927,9 +2929,11 @@ but it may be more instructive to look at examples in our codebase.</li>
    [metabase.util.log :as log]
    [metabase.util.malli :as mu]
    [metabase.util.malli.schema :as ms]
+   [potemkin :as p]
    [ring.middleware.multipart-params :as mp]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(declare check-403 check-404)</pre></td></tr><tr><td class="docs"><p>----------------------------------------------- DYNAMIC VARIABLES ------------------------------------------------
+</td><td class="codes"><pre class="brush: clojure">(declare check-403 check-404)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(p/import-vars [openapi openapi-object])</pre></td></tr><tr><td class="docs"><p>----------------------------------------------- DYNAMIC VARIABLES ------------------------------------------------
 These get bound by middleware for each HTTP request.</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Int ID or <code>nil</code> of user associated with current API call.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:dynamic ^Integer *current-user-id*
@@ -3091,14 +3095,14 @@ ex.</p>
           route                                               (add-route-param-schema arg-&gt;schema route)
           ;; eval the vals in arg-&gt;schema to make sure the actual schemas are resolved so we can document
           ;; their API error messages
-          docstr                                              (route-dox method route docstr args
-                                                                               (m/map-vals #_{:clj-kondo/ignore [:discouraged-var]} eval arg-&gt;schema)
-                                                                               body)]
+          route-doc                                           (route-dox method route docstr args
+                                                                         (m/map-vals #_{:clj-kondo/ignore [:discouraged-var]} eval arg-&gt;schema)
+                                                                            body)]
       ;; Don't i18n this, it's dev-facing only
       (when-not docstr
         (log/warn (u/format-color 'red &quot;Warning: endpoint %s/%s does not have a docstring. Go add one.&quot;
                                   (ns-name *ns*) fn-name)))
-      (assoc parsed :fn-name fn-name, :route route, :docstr docstr))))</pre></td></tr><tr><td class="docs"><p>Log a warning if the request body contains any parameters not included in <code>expected-params</code> (which is presumably
+      (assoc parsed :fn-name fn-name, :route route, :route-doc route-doc, :docstr docstr))))</pre></td></tr><tr><td class="docs"><p>Log a warning if the request body contains any parameters not included in <code>expected-params</code> (which is presumably
 populated by the defendpoint schema)</p>
 </td><td class="codes"><pre class="brush: clojure">(defn validate-param-values
   [{method :request-method uri :uri body :body} expected-params]
@@ -3117,17 +3121,24 @@ Compojure (:put, :post, ...)</p>
       u/lower-case-en
       keyword))</pre></td></tr><tr><td class="docs"><p>Impl macro for [[defendpoint]]; don't use this directly.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmacro defendpoint*
-  [{:keys [method route fn-name docstr args body arg-&gt;schema]}]
+  [{:keys [method route fn-name route-doc docstr args body arg-&gt;schema]}]
   {:pre [(or (string? route) (vector? route))]}
   (let [method-kw       (method-symbol-&gt;keyword method)
         allowed-params  (mapv keyword (keys arg-&gt;schema))
         prep-route      #'compojure/prepare-route
         multipart?      (get (meta method) :multipart false)
-        handler-wrapper (if multipart? mp/wrap-multipart-params identity)]
+        handler-wrapper (if multipart? mp/wrap-multipart-params identity)
+        schema          (into [:map] (for [[k v] arg-&gt;schema]
+                                       [(keyword k) v]))]
     `(def ~(vary-meta fn-name
-                      assoc
-                      :doc          docstr
-                      :is-endpoint? true)
+                      merge
+                      {:doc          route-doc
+                       :orig-doc     docstr
+                       :method       method-kw
+                       :path         route
+                       :schema       schema
+                       :is-endpoint? true}
+                      (meta method))
        ;; The next form is a copy of `compojure/compile-route`, with the sole addition of the call to
        ;; `validate-param-values`. This is because to validate the request body we need to intercept the request
        ;; before the destructuring takes place. I.e., we need to validate the value of `(:body request#)`, and that's
@@ -3190,14 +3201,25 @@ current namespace. Optionally specify middleware that will apply to all of the e
 </td><td class="codes"><pre class="brush: clojure">(defmacro define-routes
   {:style/indent 0}
   [&amp; middleware]
-  (let [api-route-fns (namespace-&gt;api-route-fns *ns*)
-        routes        `(compojure/routes ~@api-route-fns)
+  (let [api-route-fns (vec (namespace-&gt;api-route-fns *ns*))
+        routes        `(with-meta (compojure/routes ~@api-route-fns) {:routes ~api-route-fns})
         docstring     (str &quot;Routes for &quot; *ns*)]
-    `(def ~(vary-meta 'routes assoc :doc (api-routes-docstring *ns* api-route-fns middleware))
+    `(def ~(vary-meta 'routes assoc
+                      :doc    (api-routes-docstring *ns* api-route-fns middleware)
+                      :routes api-route-fns)
        ~docstring
        ~(if (seq middleware)
           `(-&gt; ~routes ~@middleware)
-          routes))))</pre></td></tr><tr><td class="docs"><p>Wrap a Ring handler to make sure the current user is a superuser before handling any requests.</p>
+          routes))))</pre></td></tr><tr><td class="docs"><p>Replacement for <code>compojure.core/context</code>, but with metadata</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro context
+  [path args &amp; routes]
+  `(with-meta (compojure/context ~path ~args ~@routes) {:routes (vector ~@routes)
+                                                        :path   ~path}))</pre></td></tr><tr><td class="docs"><p>Replacement for `compojure.core/defroutes, but with metadata</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro defroutes
+  [name &amp; routes]
+  (let [[name routes] (macro/name-with-attributes name routes)
+        name          (vary-meta name assoc :routes (vec routes))]
+    `(def ~name (compojure/routes ~@routes))))</pre></td></tr><tr><td class="docs"><p>Wrap a Ring handler to make sure the current user is a superuser before handling any requests.</p>
 
 <p>  (api/+check-superuser routes)</p>
 </td><td class="codes"><pre class="brush: clojure">(defn +check-superuser
