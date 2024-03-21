@@ -2876,10 +2876,10 @@ for [[metabase.models.permissions]] for a high-level overview of the Metabase pe
    [metabase-enterprise.sandbox.models.group-table-access-policy :as gtap]
    [metabase.api.common :as api :refer [*current-user* *current-user-id*]]
    [metabase.db :as mdb]
+   [metabase.legacy-mbql.schema :as mbql.s]
    [metabase.lib.metadata :as lib.metadata]
    [metabase.lib.metadata.protocols :as lib.metadata.protocols]
-   [metabase.mbql.schema :as mbql.s]
-   [metabase.mbql.util :as mbql.u]
+   [metabase.lib.util.match :as lib.util.match]
    [metabase.models.card :refer [Card]]
    [metabase.models.query.permissions :as query-perms]
    [metabase.public-settings.premium-features :refer [defenterprise]]
@@ -2899,7 +2899,7 @@ for [[metabase.models.permissions]] for a high-level overview of the Metabase pe
 +----------------------------------------------------------------------------------------------------------------+</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- all-table-ids [m]
-  (into #{} cat (mbql.u/match m
+  (into #{} cat (lib.util.match/match m
                   (_ :guard (every-pred map? :source-table (complement ::gtap?)))
                   (let [recursive-ids (all-table-ids (dissoc &amp;match :source-table))]
                     (cons (:source-table &amp;match) recursive-ids)))))</pre></td></tr><tr><td class="docs">
@@ -2938,7 +2938,7 @@ for [[metabase.models.permissions]] for a high-level overview of the Metabase pe
   &quot;If the `:target` of a parameter contains a `:field` clause, return the base type corresponding to the Field it
   references. Otherwise returns `nil`.&quot;
   [[_ target-field-clause]]
-  (when-let [field-id (mbql.u/match-one target-field-clause [:field (field-id :guard integer?) _] field-id)]
+  (when-let [field-id (lib.util.match/match-one target-field-clause [:field (field-id :guard integer?) _] field-id)]
     (:base-type (lib.metadata.protocols/field (qp.store/metadata-provider) field-id))))</pre></td></tr><tr><td class="docs"><p>Take an <code>attr-value</code> with a desired <code>target-type</code> and coerce to that type if need be. If not type is given or it's
 already correct, return the original <code>attr-value</code></p>
 </td><td class="codes"><pre class="brush: clojure">(defn- attr-value-&gt;param-value
@@ -3073,7 +3073,7 @@ excluded from subsequent permission checks in order to run the sandboxed query.<
   [{table-id :table_id, attribute-remappings :attribute_remappings}]
   (-&gt;&gt;
    (for [target-field-clause (vals attribute-remappings)]
-     (mbql.u/match-one target-field-clause
+     (lib.util.match/match-one target-field-clause
        [:field (field-id :guard integer?) _]
        (:table-id (lib.metadata.protocols/field (qp.store/metadata-provider) field-id))))
    (cons table-id)
@@ -3120,7 +3120,7 @@ from their GTAPs.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- apply-gtaps
   [m table-id-&gt;gtap]
   ;; replace maps that have `:source-table` key and a matching entry in `table-id-&gt;gtap`, but do not have `::gtap?` key
-  (mbql.u/replace m
+  (lib.util.match/replace m
     (_ :guard (every-pred map? (complement ::gtap?) :source-table #(get table-id-&gt;gtap (:source-table %))))
     (let [updated             (apply-gtap &amp;match (get table-id-&gt;gtap (:source-table &amp;match)))
           ;; now recursively apply gtaps anywhere else they might exist at this level, e.g. `:joins`
@@ -3129,7 +3129,7 @@ from their GTAPs.</p>
                                (apply-gtaps (dissoc updated :source-table :source-query) table-id-&gt;gtap))]
       ;; add a `::gtap?` key next to every `:source-table` key so when we do a second pass after adding JOINs they
       ;; don't get processed again
-      (mbql.u/replace recursively-updated
+      (lib.util.match/replace recursively-updated
         (_ :guard (every-pred map? :source-table))
         (assoc &amp;match ::gtap? true)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- expected-cols [query]

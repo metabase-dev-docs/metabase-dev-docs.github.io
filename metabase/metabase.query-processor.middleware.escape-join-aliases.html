@@ -2875,7 +2875,8 @@ function, [[escape-join-aliases]] for more info.</p>
   (:require
    [clojure.set :as set]
    [metabase.driver :as driver]
-   [metabase.mbql.util :as mbql.u]
+   [metabase.legacy-mbql.util :as mbql.u]
+   [metabase.lib.util.match :as lib.util.match]
    [metabase.util :as u]
    [metabase.util.log :as log]))</pre></td></tr><tr><td class="docs"><p>this is done in a series of discrete steps</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
@@ -2892,7 +2893,7 @@ function, [[escape-join-aliases]] for more info.</p>
         (partial escape-alias driver)))</pre></td></tr><tr><td class="docs"><p>Walk the query and add an <code>::alias</code> key to every join in the query.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- add-escaped-aliases
   [query escape-fn]
-  (mbql.u/replace query
+  (lib.util.match/replace query
     (join :guard (every-pred map? :condition :alias (complement ::alias)))
     (let [join (assoc join ::alias (escape-fn (:alias join)))]
       ;; now recursively add escaped aliases for `:source-query` etc.
@@ -2900,7 +2901,7 @@ function, [[escape-join-aliases]] for more info.</p>
 <code>:source-query</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- add-original-&gt;escaped-alias-maps
   [query]
-  (mbql.u/replace query
+  (lib.util.match/replace query
     (m :guard (every-pred map? (some-fn :source-table :source-query) (complement ::original-&gt;escaped)))
     (let [original-&gt;escaped (into {} (map (juxt :alias ::alias) (:joins m)))
           m                 (assoc m ::original-&gt;escaped original-&gt;escaped)]
@@ -2920,7 +2921,7 @@ order:</p>
 <code>::original-&gt;escaped</code> map from the parent level into the maps in its <code>:joins</code> as well.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- merge-original-&gt;escaped-maps
   [query]
-  (mbql.u/replace query
+  (lib.util.match/replace query
     (m :guard (every-pred map? ::original-&gt;escaped))
     ;; first, recursively merge all the stuff in the source levels (`:source-query` and `:joins`)
     (let [m'                                 (merge-original-&gt;escaped-maps (dissoc m ::original-&gt;escaped))
@@ -2946,20 +2947,20 @@ order:</p>
                                                  joins)))))))</pre></td></tr><tr><td class="docs"><p>Walk the query and add an <code>::join-alias</code> to all <code>:field</code> clauses.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- add-escaped-join-aliases-to-fields
   [query]
-  (mbql.u/replace query
+  (lib.util.match/replace query
     (m :guard (every-pred map? ::original-&gt;escaped))
     (let [original-&gt;escaped (::original-&gt;escaped m)
           ;; recursively update source levels *first*
           m'                (assoc (add-escaped-join-aliases-to-fields (dissoc m ::original-&gt;escaped))
                                    ::original-&gt;escaped original-&gt;escaped)]
       ;; now update any `:field` clauses that don't have an `::join-alias`
-      (mbql.u/replace m'
+      (lib.util.match/replace m'
         [:field id-or-name (field-options :guard (every-pred map? :join-alias (complement ::join-alias)))]
         [:field id-or-name (assoc field-options ::join-alias (get original-&gt;escaped (:join-alias field-options)))]))))</pre></td></tr><tr><td class="docs"><p>Build a map of escaped alias -> original alias for the query (current level and all nested levels). Remove keys where
 the original alias is identical to the escaped alias; that's not useful information to include in <code>:info</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- merged-escaped-&gt;original-with-no-ops-removed
   [query]
-  (let [escaped-&gt;original-maps (mbql.u/match query
+  (let [escaped-&gt;original-maps (lib.util.match/match query
                                  (m :guard (every-pred map? ::original-&gt;escaped))
                                  (merge
                                   (set/map-invert (::original-&gt;escaped m))
@@ -2990,7 +2991,7 @@ map. For <code>:field</code> clauses, we need to keep track of whether we alread
 original alias and escaped alias might be different based on the level of query we're at.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- replace-original-aliases-with-escaped-aliases
   [query]
-  (mbql.u/replace query
+  (lib.util.match/replace query
     ;; update inner queries that have `::original-&gt;escaped` maps
     (m :guard (every-pred map? ::original-&gt;escaped))
     (-&gt; (dissoc m ::original-&gt;escaped)
@@ -3059,7 +3060,7 @@ try to take stuff like the field refs and manipulate the original query with the
       (do
         (log/tracef &quot;Rewriting join aliases:\n%s&quot; (u/pprint-to-str original-&gt;new))
         (letfn [(rename-join-aliases* [query]
-                  (mbql.u/replace query
+                  (lib.util.match/replace query
                     [:field id-or-name (opts :guard (comp aliases-to-replace :join-alias))]
                     [:field id-or-name (update opts :join-alias original-&gt;new)]
                     (join :guard (every-pred map? :condition (comp aliases-to-replace :alias)))
