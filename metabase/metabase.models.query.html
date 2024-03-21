@@ -2871,9 +2871,15 @@ net.brehaut.ClojureTools = (function (SH) {
    [cheshire.core :as json]
    [clojure.walk :as walk]
    [metabase.db :as mdb]
-   [metabase.mbql.normalize :as mbql.normalize]
+   [metabase.lib.core :as lib]
+   [metabase.lib.metadata :as lib.metadata]
+   [metabase.lib.schema.id :as lib.schema.id]
+   [metabase.lib.util :as lib.util]
    [metabase.models.interface :as mi]
    [metabase.util.honey-sql-2 :as h2x]
+   [metabase.util.malli :as mu]
+   [metabase.util.malli.registry :as mr]
+   [metabase.util.malli.schema :as ms]
    [methodical.core :as methodical]
    [toucan2.core :as t2]
    [toucan2.model :as t2.model]))</pre></td></tr><tr><td class="docs">
@@ -2936,27 +2942,49 @@ We'll keep this till we replace all these symbols in our codebase.</p>
         (catch Throwable e
           (or (update-rolling-average-execution-time! query query-hash execution-time-ms)
               ;; rethrow e if updating an existing average execution time failed
-              (throw e))))))</pre></td></tr><tr><td class="docs"><p>Return a map with <code>:database-id</code> and source <code>:table-id</code> that should be saved for a Card. Handles queries that use
- other queries as their source (ones that come in with a <code>:source-table</code> like <code>card__100</code>, or <code>:source-query</code>)
- recursively, as well as normal queries.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn query-&gt;database-and-table-ids
-  [{database-id :database, query-type :type, {:keys [source-table source-query]} :query}]
+              (throw e))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::database-and-table-ids
+  [:map
+   [:database-id ::lib.schema.id/database]
+   [:table-id    [:maybe ::lib.schema.id/table]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private pmbql-query-&gt;database-and-table-ids :- ::database-and-table-ids
+  [{database-id :database, :as query} :- [:map
+                                          [:lib/type [:= :mbql/query]]]]
+  (if-let [source-card-id (lib.util/source-card-id query)]
+    (let [card (lib.metadata/card query source-card-id)]
+      (merge {:table-id nil} (select-keys card [:database-id :table-id])))
+    (let [table-id (lib.util/source-table-id query)]
+      {:database-id database-id
+       :table-id    table-id})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private legacy-query-&gt;database-and-table-ids :- ::database-and-table-ids
+  [{database-id :database, query-type :type, {:keys [source-table source-query]} :query} :- [:map
+                                                                                             [:type [:enum :query :native]]]]
   (cond
     (= :native query-type)  {:database-id database-id, :table-id nil}
     (integer? source-table) {:database-id database-id, :table-id source-table}
     (string? source-table)  (let [[_ card-id] (re-find #&quot;^card__(\d+)$&quot; source-table)]
-                              (t2/select-one ['Card [:table_id :table-id] [:database_id :database-id]]
-                                :id (Integer/parseInt card-id)))
-    (map? source-query)     (query-&gt;database-and-table-ids {:database database-id
-                                                            :type     query-type
-                                                            :query    source-query})))</pre></td></tr><tr><td class="docs"><p>Return the ID of the card used as source table, if applicable; otherwise return <code>nil</code>.</p>
+                              (t2/select-one [:model/Card [:table_id :table-id] [:database_id :database-id]]
+                                             :id (Integer/parseInt card-id)))
+    (map? source-query)     (legacy-query-&gt;database-and-table-ids {:database database-id
+                                                                   :type     query-type
+                                                                   :query    source-query})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn query-&gt;database-and-table-ids :- [:maybe ::database-and-table-ids]
+  &quot;Return a map with `:database-id` and source `:table-id` that should be saved for a Card.
+  Handles either pMBQL (MLv2) queries or legacy MBQL queries. Handles source Cards by fetching them as needed.&quot;
+  [query :- [:maybe :map]]
+  (when query
+    (when-let [f (case (lib/normalized-query-type query)
+                   :mbql/query      pmbql-query-&gt;database-and-table-ids
+                   (:native :query) legacy-query-&gt;database-and-table-ids
+                   nil)]
+      (f (mi/maybe-normalize-query :out query)))))</pre></td></tr><tr><td class="docs"><p>Return the ID of the card used as source table, if applicable; otherwise return <code>nil</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- parse-source-query-id
   [source-table]
   (when (string? source-table)
     (when-let [[_ card-id-str] (re-matches #&quot;card__(\d+)&quot; source-table)]
-      (parse-long card-id-str))))</pre></td></tr><tr><td class="docs"><p>Return a sequence of model ids referenced in the MBQL query <code>mbql-form</code>.</p>
+      (parse-long card-id-str))))</pre></td></tr><tr><td class="docs"><p>Return a sequence of model ids referenced in the MBQL <code>query</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn collect-card-ids
-  [mbql-form]
+  [query]
   (let [ids (java.util.HashSet.)
         walker (fn [form]
                  (when (map? form)
@@ -2965,18 +2993,32 @@ We'll keep this till we replace all these symbols in our codebase.</p>
                      (when (int? card-id)
                        (.add ids card-id)))
                    ;; source tables (possibly in joins)
+                   ;;
+                   ;; MLv2 `:source-card`
+                   (when-let [card-id (:source-card form)]
+                     (.add ids card-id))
+                   ;; legacy MBQL card__&lt;id&gt; `:source-table`
                    (when-let [card-id (parse-source-query-id (:source-table form))]
                      (.add ids card-id)))
                  form)]
-    (walk/prewalk walker mbql-form)
-    (seq ids)))</pre></td></tr><tr><td class="docs"><p>Wrap query map into a Query object (mostly to facilitate type dispatch).</p>
-</td><td class="codes"><pre class="brush: clojure">(defn adhoc-query
-  [query]
-  (-&gt;&gt; query
-       mbql.normalize/normalize
-       (hash-map :dataset_query)
-       (merge (query-&gt;database-and-table-ids query))
-       (mi/instance Query)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+    (walk/prewalk walker query)
+    (seq ids)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn adhoc-query :- (ms/InstanceOf :model/Query)
+  &quot;Wrap query map into a Query object (mostly to facilitate type dispatch).&quot;
+  [query :- :map]
+  (mi/instance :model/Query
+               (merge (query-&gt;database-and-table-ids query)
+                      {:dataset_query (mi/maybe-normalize-query :out query)})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn query-is-native? :- :boolean
+  &quot;Whether this query (pMBQL or legacy) has a `:native` first stage. Queries with source Cards are considered to be MBQL
+  regardless of whether the Card has a native query or not.&quot;
+  [query :- :map]
+  (case (lib/normalized-query-type query)
+    :query      false
+    :native     true
+    :mbql/query (let [query (mi/maybe-normalize-query :out query)]
+                  (lib.util/first-stage-is-native? query))
+    false))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

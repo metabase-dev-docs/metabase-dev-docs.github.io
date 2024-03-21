@@ -3051,22 +3051,26 @@ gradually.</p>
      (dissoc :result_metadata))))</pre></td></tr><tr><td class="docs"><p>--------------------------------------------------- Lifecycle ----------------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Lift <code>database_id</code>, <code>table_id</code>, and <code>query_type</code> from query definition when inserting/updating a Card.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn populate-query-fields
-  [{{query-type :type, :as outer-query} :dataset_query, :as card}]
+  [{query :dataset_query, :as card}]
   (merge
    card
    ;; mega HACK FIXME -- don't update this stuff when doing deserialization because it might differ from what's in the
    ;; YAML file and break tests like [[metabase-enterprise.serialization.v2.e2e.yaml-test/e2e-storage-ingestion-test]].
    ;; The root cause of this issue is that we're generating Cards that have a different Database ID or Table ID from
    ;; what's actually in their query -- we need to fix [[metabase.test.generate]], but I'm not sure how to do that
-   (when-not mi/*deserializing?*
-     (when-let [{:keys [database-id table-id]} (and query-type
-                                                    (query/query-&gt;database-and-table-ids outer-query))]
-       (merge
-        {:query_type (keyword query-type)}
-        (when database-id
-          {:database_id database-id})
-        (when table-id
-          {:table_id table-id}))))))</pre></td></tr><tr><td class="docs"><p>When inserting/updating a Card, populate the result metadata column if not already populated by inferring the
+   (when (and (map? query)
+              (not mi/*deserializing?*))
+     (when-let [{:keys [database-id table-id]} (query/query-&gt;database-and-table-ids query)]
+       ;; TODO -- not sure `query_type` is actually used for anything important anyway
+       (let [query-type (if (query/query-is-native? query)
+                          :native
+                          :query)]
+         (merge
+          {:query_type (keyword query-type)}
+          (when database-id
+            {:database_id database-id})
+          (when table-id
+            {:table_id table-id})))))))</pre></td></tr><tr><td class="docs"><p>When inserting/updating a Card, populate the result metadata column if not already populated by inferring the
 metadata from the query.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- populate-result-metadata
   [{query :dataset_query, metadata :result_metadata, existing-card-id :id, :as card}]
@@ -3124,7 +3128,7 @@ forth.)</p>
                (conj ids-already-seen source-card-id))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- maybe-normalize-query [card]
   (cond-&gt; card
-    (seq (:dataset_query card)) (update :dataset_query mbql.normalize/normalize)))</pre></td></tr><tr><td class="docs"><p>Transforms native query's <code>template-tags</code> into <code>parameters</code>.
+    (seq (:dataset_query card)) (update :dataset_query #(mi/maybe-normalize-query :in %))))</pre></td></tr><tr><td class="docs"><p>Transforms native query's <code>template-tags</code> into <code>parameters</code>.
 An older style was to not include <code>:template-tags</code> onto cards as parameters. I think this is a mistake and they
 should always be there. Apparently lots of e2e tests are sloppy about this so this is included as a convenience.</p>
 
@@ -3611,7 +3615,14 @@ included, otherwise the metadata will be saved to the database asynchronously.</
     (when-not (= #{:collection_position}
                  (set (keys card-updates)))
       (events/publish-event! :event/card-update {:object card :user-id api/*current-user-id*}))
-    card))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------- Serialization --------------------------------------------------</p>
+    card))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod mi/to-json :model/Card
+  [card json-generator]
+  ;; we're doing update + dissoc instead of [[medley.core/dissoc-in]] because we don't want it to remove the
+  ;; `:dataset_query` key entirely if it is empty, as it is in a lot of tests.
+  (let [card (cond-&gt; card
+               (map? (:dataset_query card)) (update :dataset_query dissoc :lib/metadata))]
+    (next-method card json-generator)))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------- Serialization --------------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/extract-query &quot;Card&quot; [_ opts]
   (serdes/extract-query-collections Card opts))</pre></td></tr><tr><td class="docs">
