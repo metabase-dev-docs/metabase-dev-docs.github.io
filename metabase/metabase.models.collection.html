@@ -3230,7 +3230,26 @@ This property is being a descendant of a visible collection other than A. Used f
                            [:map
                             [:children [:set [:ref ::children]]]]]}}
    [:ref ::children]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private descendants :- [:set Children]
+</td><td class="codes"><pre class="brush: clojure">(mu/defn descendants-flat :- [:sequential CollectionWithLocationAndIDOrRoot]
+  &quot;Return all descendant collections of a `collection`, including children, grandchildren, and so forth.&quot;
+  [collection :- CollectionWithLocationAndIDOrRoot, &amp; additional-honeysql-where-clauses]
+  (or
+   (t2/select [:model/Collection :name :id :location :description]
+              {:where (apply
+                       vector
+                       :and
+                       [:like :location (str (children-location collection) &quot;%&quot;)]
+                       ;; Only return the Personal Collection belonging to the Current
+                       ;; User, regardless of whether we should actually be allowed to see
+                       ;; it (e.g., admins have perms for all Collections). This is done
+                       ;; to keep the Root Collection View for admins from getting crazily
+                       ;; cluttered with Personal Collections belonging to other users
+                       [:or
+                        [:= :personal_owner_id nil]
+                        [:= :personal_owner_id *current-user-id*]]
+                       additional-honeysql-where-clauses)})
+   []))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn descendants :- [:set Children]
   &quot;Return all descendant Collections of a `collection`, including children, grandchildren, and so forth. This is done
   primarily to power the `effective-children` feature below, and thus the descendants are returned in a hierarchy,
   rather than as a flat set. e.g. results will be something like:
@@ -3244,21 +3263,7 @@ This property is being a descendant of a visible collection other than A. Used f
   [collection :- CollectionWithLocationAndIDOrRoot, &amp; additional-honeysql-where-clauses]
   ;; first, fetch all the descendants of the `collection`, and build a map of location -&gt; children. This will be used
   ;; so we can fetch the immediate children of each Collection
-  (let [location-&gt;children (group-by :location (t2/select [Collection :name :id :location :description]
-                                                 {:where
-                                                  (apply
-                                                   vector
-                                                   :and
-                                                   [:like :location (str (children-location collection) &quot;%&quot;)]
-                                                   ;; Only return the Personal Collection belonging to the Current
-                                                   ;; User, regardless of whether we should actually be allowed to see
-                                                   ;; it (e.g., admins have perms for all Collections). This is done
-                                                   ;; to keep the Root Collection View for admins from getting crazily
-                                                   ;; cluttered with Personal Collections belonging to randos
-                                                   [:or
-                                                    [:= :personal_owner_id nil]
-                                                    [:= :personal_owner_id *current-user-id*]]
-                                                   additional-honeysql-where-clauses)}))
+  (let [location-&gt;children (group-by :location (apply descendants-flat collection additional-honeysql-where-clauses))
         ;; Next, build a function to add children to a given `coll`. This function will recursively call itself to add
         ;; children to each child
         add-children       (fn add-children [coll]
@@ -3905,27 +3910,35 @@ default namespace (namespace = <code>nil</code>).</p>
                                :allowed-namespaces   allowed-namespaces
                                :collection-namespace collection-namespace})))))))</pre></td></tr><tr><td class="docs"><p>Annotate collections with <code>:below</code> and <code>:here</code> keys to indicate which types are in their subtree and which types are
 in the collection at that level.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- annotate-collections
-  [{:keys [dataset card] :as _coll-type-ids} collections]
-  (let [parent-info (reduce (fn [m {:keys [location id] :as _collection}]
-                              (let [parent-ids (set (location-path-&gt;ids location))]
-                                (cond-&gt; m
-                                  (contains? dataset id)
-                                  (update :dataset set/union parent-ids)
-                                  (contains? card id)
-                                  (update :card set/union parent-ids))))
-                            {:dataset #{} :card #{}}
-                            collections)]
+
+<p>The second argument is the list of collections to annotate.</p>
+
+<p>The first argument to this function could use a bit of explanation: <code>child-type-&gt;parent-ids</code> is a map. Keys are
+object types (e.g. <code>:collection</code>), values are sets of collection IDs that are the (direct) parents of one or more
+objects of that type.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn annotate-collections
+  [child-type-&gt;parent-ids collections]
+  (let [child-type-&gt;ancestor-ids
+        (reduce (fn [m {:keys [location id] :as _collection}]
+                  (let [parent-ids (set (location-path-&gt;ids location))]
+                    (reduce (fn [m [t id-set]]
+                              (cond-&gt; m
+                                (contains? id-set id) (update t set/union parent-ids)))
+                            m
+                            child-type-&gt;parent-ids)))
+                (zipmap (keys child-type-&gt;parent-ids) (repeat #{}))
+                collections)]
     (map (fn [{:keys [id] :as collection}]
-           (let [types (cond-&gt; #{}
-                         (contains? (:dataset parent-info) id)
-                         (conj :dataset)
-                         (contains? (:card parent-info) id)
-                         (conj :card))]
+           (let [below (apply set/union
+                              (for [[child-type coll-id-set] child-type-&gt;ancestor-ids]
+                                (when (contains? coll-id-set id)
+                                  #{child-type})))
+                 here (into #{} (for [[child-type coll-id-set] child-type-&gt;parent-ids
+                                      :when (contains? coll-id-set id)]
+                                  child-type))]
              (cond-&gt; collection
-               (seq types) (assoc :below types)
-               (contains? dataset id) (update :here (fnil conj #{}) :dataset)
-               (contains? card id) (update :here (fnil conj #{}) :card))))
+               (seq below) (assoc :below below)
+               (seq here) (assoc :here here))))
          collections)))</pre></td></tr><tr><td class="docs"><p>Convert a flat sequence of Collections into a tree structure e.g.</p>
 
 <p>  (collections->tree {:dataset #{C D} :card #{F C} [A B C D E F G])
@@ -3944,7 +3957,7 @@ in the collection at that level.</p>
                             :children [{:name "G"}]}]}]}
    {:name "H"}]</p>
 </td><td class="codes"><pre class="brush: clojure">(defn collections-&gt;tree
-  [coll-type-ids collections]
+  [child-type-&gt;parent-ids collections]
   (let [;; instead of attempting to re-sort like the database does, keep things consistent by just keeping things in
         ;; the same order they're already in.
         original-position (into {} (map-indexed (fn [i {id :id}]
@@ -3986,7 +3999,7 @@ in the collection at that level.</p>
                         ;; coll-type is `nil` or &quot;instance-analytics&quot;
                         ;; nil sorts first, so we get instance-analytics at the end, which is what we want
                         (original-position coll-id))))))
-     (annotate-collections coll-type-ids collections))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+     (annotate-collections child-type-&gt;parent-ids collections))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
