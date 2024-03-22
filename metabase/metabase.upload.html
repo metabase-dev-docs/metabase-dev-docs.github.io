@@ -3214,7 +3214,7 @@ Empty strings are parsed as nil.</p>
       auto-pk-indices
       (map (partial remove-indices auto-pk-indices)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- file-size-mb [csv-file]
-  (/ (.length ^File csv-file) 1048576.0))</pre></td></tr><tr><td class="docs"><p>Loads a table from a CSV file. If the table already exists, it will throw an error.
+  (/ (.length ^File csv-file) 1048576.0))</pre></td></tr><tr><td class="docs"><p>Creates a table from a CSV file. If the table already exists, it will throw an error.
  Returns the file size, number of rows, and number of columns.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- create-from-csv!
   [driver db-id table-name ^File csv-file]
@@ -3464,8 +3464,7 @@ Returns the newly created model. May throw validation, permimissions, or DB erro
     (apply driver/alter-columns! driver (:id database) (table-identifier table)
            (field-&gt;db-type driver field-&gt;new-type)
             args)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- append-csv!*
-  [database table file]
+</td><td class="codes"><pre class="brush: clojure">(defn- update-with-csv! [database table file &amp; {:keys [replace-rows?]}]
   (try
     (with-open [reader (bom/bom-reader file)]
       (let [timer              (start-timer)
@@ -3502,6 +3501,8 @@ Returns the newly created model. May throw validation, permimissions, or DB erro
                                 :size-mb           (file-size-mb file)
                                 :upload-seconds    (since-ms timer)}]
         (try
+          (when replace-rows?
+            (driver/truncate! driver (:id database) (table-identifier table)))
           (driver/insert-into! driver (:id database) (table-identifier table) normed-header parsed-rows)
           (catch Throwable e
             (throw (ex-info (ex-message e) {:status-code 422}))))
@@ -3526,7 +3527,7 @@ Returns the newly created model. May throw validation, permimissions, or DB erro
     (catch Throwable e
       (snowplow/track-event! ::snowplow/csv-append-failed api/*current-user-id* (fail-stats file))
       (throw e))))</pre></td></tr><tr><td class="docs"><p>Returns an ExceptionInfo object if the user cannot upload to the given database and schema. Returns nil otherwise.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- can-append-error
+</td><td class="codes"><pre class="brush: clojure">(defn- can-update-error
   [db table]
   (or (can-use-uploads-error db)
       (cond
@@ -3536,27 +3537,31 @@ Returns the newly created model. May throw validation, permimissions, or DB erro
         (not (mi/can-read? table))
         (ex-info (tru &quot;You don''t have permissions to do that.&quot;)
                  {:status-code 403}))))</pre></td></tr><tr><td class="docs"><p>Throws an error if the user cannot upload to the given database and schema.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- check-can-append
+</td><td class="codes"><pre class="brush: clojure">(defn- check-can-update
   [db table]
-  (when-let [error (can-append-error db table)]
+  (when-let [error (can-update-error db table)]
     (throw error)))</pre></td></tr><tr><td class="docs"><p>Returns true if the user can upload to the given database and table, and false otherwise.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn can-upload-to-table?
   [db table]
-  (nil? (can-append-error db table)))</pre></td></tr><tr><td class="docs"><p>+--------------------------------------------------
-|  public interface for appending to uploaded table
+  (nil? (can-update-error db table)))</pre></td></tr><tr><td class="docs"><p>+--------------------------------------------------
+|  public interface for updating an uploaded table
 +--------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Main entry point for appending to uploaded tables with a CSV file.
+</td><td class="codes"></td></tr><tr><td class="docs"><p>The :action values supported by [[update-csv!]]</p>
+</td><td class="codes"><pre class="brush: clojure">(def update-action-schema
+  [:enum ::append ::replace])</pre></td></tr><tr><td class="docs"><p>Main entry point for updating an uploaded table with a CSV file.
 This will create an auto-incrementing primary key (auto-pk) column in the table for drivers that supported uploads
-before auto-pk columns were introduced by metabase#36249.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn append-csv!
-  [{:keys [^File file table-id]}
+before auto-pk columns were introduced by metabase#36249, if it does not already exist.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn update-csv!
+  [{:keys [^File file table-id action]}
    :- [:map
        [:table-id ms/PositiveInt]
-       [:file (ms/InstanceOfClass File)]]]
+       [:file (ms/InstanceOfClass File)]
+       [:action update-action-schema]]]
   (let [table    (api/check-404 (t2/select-one :model/Table :id table-id))
-        database (table/database table)]
-    (check-can-append database table)
-    (append-csv!* database table file)))</pre></td></tr><tr><td class="docs"><p>+--------------------------------
+        database (table/database table)
+        replace? (= ::replace action)]
+    (check-can-update database table)
+    (update-with-csv! database table file :replace-rows? replace?)))</pre></td></tr><tr><td class="docs"><p>+--------------------------------
 |  hydrate based<em>on</em>upload for FE
 +--------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Returns the subset of table ids where the user can upload to the table.</p>
