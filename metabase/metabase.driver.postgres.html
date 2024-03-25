@@ -2874,6 +2874,8 @@ for JDBC-based drivers.</p>
    [clojure.string :as str]
    [clojure.walk :as walk]
    [honey.sql :as sql]
+   [honey.sql.helpers :as sql.helpers]
+   [honey.sql.pg-ops :as sql.pg-ops]
    [java-time.api :as t]
    [metabase.db :as mdb]
    [metabase.driver :as driver]
@@ -2885,6 +2887,7 @@ for JDBC-based drivers.</p>
    [metabase.driver.sql-jdbc.connection :as sql-jdbc.conn]
    [metabase.driver.sql-jdbc.execute :as sql-jdbc.execute]
    [metabase.driver.sql-jdbc.sync :as sql-jdbc.sync]
+   [metabase.driver.sql-jdbc.sync.describe-database :as sql-jdbc.describe-database]
    [metabase.driver.sql.query-processor :as sql.qp]
    [metabase.driver.sql.query-processor.util :as sql.qp.u]
    [metabase.driver.sql.util :as sql.u]
@@ -2915,7 +2918,8 @@ for JDBC-based drivers.</p>
 </td><td class="codes"><pre class="brush: clojure">(comment
   ;; method impls live in these namespaces.
   postgres.actions/keep-me
-  postgres.ddl/keep-me)</pre></td></tr><tr><td class="docs">
+  postgres.ddl/keep-me
+  sql.pg-ops/keep-me)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(driver/register! :postgres, :parent :sql-jdbc)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod driver/display-name :postgres [_] &quot;PostgreSQL&quot;)</pre></td></tr><tr><td class="docs"><p>Features that are supported by Postgres and all of its child drivers like Redshift</p>
 </td><td class="codes"><pre class="brush: clojure">(doseq [[feature supported?] {:convert-timezone         true
@@ -3055,7 +3059,65 @@ for JDBC-based drivers.</p>
                     [(str &quot;SELECT nspname, typname &quot;
                           &quot;FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace &quot;
                           &quot;WHERE t.oid IN (SELECT DISTINCT enumtypid FROM pg_enum e)&quot;)])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^:dynamic *enum-types* nil)</pre></td></tr><tr><td class="docs"><p>Describe the Fields present in a <code>table</code>. This just hands off to the normal SQL driver implementation of the same
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^:dynamic *enum-types* nil)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- get-tables-sql
+  [schemas table-names]
+  ;; Ref: https://github.com/davecramer/pgjdbc/blob/a714bfd/pgjdbc/src/main/java/org/postgresql/jdbc/PgDatabaseMetaData.java#L1272
+  (sql/format
+   (cond-&gt;  {:select    [[:n.nspname :schema]
+                         [:c.relname :name]
+                         [[:case-expr :c.relkind
+                           [:inline &quot;r&quot;] [:inline &quot;TABLE&quot;]
+                           [:inline &quot;p&quot;] [:inline &quot;PARTITIONED TABLE&quot;]
+                           [:inline &quot;v&quot;] [:inline &quot;VIEW&quot;]
+                           [:inline &quot;f&quot;] [:inline &quot;FOREIGN TABLE&quot;]
+                           [:inline &quot;m&quot;] [:inline &quot;MATERIALIZED VIEW&quot;]
+                           :else nil]
+                          :type]
+                         [:d.description :description]
+                         [:stat.n_live_tup :estimated_row_count]]
+             :from      [[:pg_catalog.pg_class :c]]
+             :join      [[:pg_catalog.pg_namespace :n]   [:= :c.relnamespace :n.oid]]
+             :left-join [[:pg_catalog.pg_description :d] [:and [:= :c.oid :d.objoid] [:= :d.objsubid 0] [:= :d.classoid [:raw &quot;'pg_class'::regclass&quot;]]]
+                         [:pg_stat_user_tables :stat]    [:and [:= :n.nspname :stat.schemaname] [:= :c.relname :stat.relname]]]
+             :where     [:and [:= :c.relnamespace :n.oid]
+                         ;; filter out system tables
+                         [(keyword &quot;!~&quot;) :n.nspname &quot;^pg_&quot;] [:&lt;&gt; :n.nspname &quot;information_schema&quot;]
+                         ;; only get tables of type: TABLE, PARTITIONED TABLE, VIEW, FOREIGN TABLE, MATERIALIZED VIEW
+                         [:raw &quot;c.relkind in ('r', 'p', 'v', 'f', 'm')&quot;]]
+             :order-by  [:type :schema :name]}
+     (seq schemas)
+     (sql.helpers/where [:in :n.nspname schemas])
+     (seq table-names)
+     (sql.helpers/where [:in :c.relname table-names]))
+   {:dialect :ansi}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- get-tables
+  ;; have it as its own method for ease of testing
+  [database schemas tables]
+  (sql-jdbc.execute/reducible-query database (get-tables-sql schemas tables)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- describe-syncable-tables
+  [{driver :engine :as database}]
+  (reify clojure.lang.IReduceInit
+    (reduce [_ rf init]
+      (sql-jdbc.execute/do-with-connection-with-options
+       driver
+       database
+       nil
+       (fn [^Connection conn]
+         (reduce
+          rf
+          init
+          (when-let [syncable-schemas (seq (driver/syncable-schemas driver database))]
+            (let [have-select-privilege? (sql-jdbc.describe-database/have-select-privilege-fn driver conn)]
+              (eduction
+               (comp (filter have-select-privilege?)
+                     (map #(dissoc % :type)))
+               (get-tables database syncable-schemas nil))))))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod driver/describe-database :postgres
+  [_driver database]
+  ;; TODO: we should figure out how to sync tables using transducer, this way we don't have to hold 100k tables in
+  ;; memrory in a set like this
+  {:tables (into #{} (describe-syncable-tables database))})</pre></td></tr><tr><td class="docs"><p>Describe the Fields present in a <code>table</code>. This just hands off to the normal SQL driver implementation of the same
 name, but first fetches database enum types so we have access to them. These are simply binded to the dynamic var
 and used later in <code>database-type-&gt;base-type</code>, which you will find below.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmethod driver/describe-table :postgres
@@ -3626,9 +3688,9 @@ BigDecimal if so; otherwise, proceeding as normal</p>
           &quot;   NULL as role,&quot;
           &quot;   t.schemaname as schema,&quot;
           &quot;   t.objectname as table,&quot;
-          &quot;   pg_catalog.has_table_privilege(current_user, '\&quot;' || t.schemaname || '\&quot;' || '.' || '\&quot;' || t.objectname || '\&quot;',  'update') as update,&quot;
-          &quot;   pg_catalog.has_table_privilege(current_user, '\&quot;' || t.schemaname || '\&quot;' || '.' || '\&quot;' || t.objectname || '\&quot;',  'select') as select,&quot;
-          &quot;   pg_catalog.has_table_privilege(current_user, '\&quot;' || t.schemaname || '\&quot;' || '.' || '\&quot;' || t.objectname || '\&quot;',  'insert') as insert,&quot;
+          &quot;   pg_catalog.has_any_column_privilege(current_user, '\&quot;' || t.schemaname || '\&quot;' || '.' || '\&quot;' || t.objectname || '\&quot;',  'update') as update,&quot;
+          &quot;   pg_catalog.has_any_column_privilege(current_user, '\&quot;' || t.schemaname || '\&quot;' || '.' || '\&quot;' || t.objectname || '\&quot;',  'select') as select,&quot;
+          &quot;   pg_catalog.has_any_column_privilege(current_user, '\&quot;' || t.schemaname || '\&quot;' || '.' || '\&quot;' || t.objectname || '\&quot;',  'insert') as insert,&quot;
           &quot;   pg_catalog.has_table_privilege(current_user, '\&quot;' || t.schemaname || '\&quot;' || '.' || '\&quot;' || t.objectname || '\&quot;',  'delete') as delete&quot;
           &quot; from (&quot;
           &quot;   select schemaname, tablename as objectname from pg_catalog.pg_tables&quot;
