@@ -2879,6 +2879,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [clojure.core.match :refer [match]]
    [clojure.java.io :as io]
    [clojure.set :as set]
+   [clojure.string :as str]
    [clojure.walk :as walk]
    [clojurewerkz.quartzite.jobs :as jobs]
    [clojurewerkz.quartzite.scheduler :as qs]
@@ -2944,7 +2945,12 @@ similar to the bodies of multi-arity Clojure functions.</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>metabase.util/upper-case-en</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- upper-case-en
   ^String [s]
-  (.toUpperCase (str s) Locale/US))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
+  (when s
+    (.toUpperCase (str s) Locale/US)))</pre></td></tr><tr><td class="docs"><p>metabase.util/lower-case-en</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- lower-case-en
+  ^String [s]
+  (when s
+   (.toLowerCase (str s) Locale/US)))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
 |                                                  MIGRATIONS                                                    |
 +----------------------------------------------------------------------------------------------------------------+</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
@@ -3701,80 +3707,29 @@ For some reasons during data-migration [[metabase.models.setting/get]] return th
   (migrate-remove-admin-from-group-mapping-if-needed))</pre></td></tr><tr><td class="docs"><p>Each unified column is 3 items sequence [table-name, column-name, is-nullable?]</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- db-type-&gt;to-unified-columns
   [db-type]
-  (case db-type
-    :h2      [[:activity :timestamp false]
-              [:application_permissions_revision :created_at false]
-              [:collection_permission_graph_revision :created_at false]
-              [:core_session :created_at false]
-              [:core_user :date_joined false]
-              [:core_user :last_login true]
-              [:core_user :updated_at true]
-              [:dependency :created_at false]
-              [:dimension :created_at false]
-              [:dimension :updated_at false]
-              [:metabase_database :created_at false]
-              [:metabase_database :updated_at false]
-              [:metabase_field :created_at false]
-              [:metabase_field :updated_at false]
-              [:metabase_field :last_analyzed true]
-              [:metabase_fieldvalues :created_at false]
-              [:metabase_table :created_at false]
-              [:metabase_table :updated_at false]
-              [:metric :created_at false]
-              [:metric :updated_at false]
-              [:permissions_revision :created_at false]
-              [:pulse :created_at false]
-              [:pulse :updated_at false]
-              [:pulse_channel :created_at false]
-              [:pulse_channel :updated_at false]
-              [:recent_views :timestamp false]
-              [:report_card :created_at false]
-              [:report_cardfavorite :created_at false]
-              [:report_cardfavorite :updated_at false]
-              [:report_dashboard :created_at false]
-              [:report_dashboard :updated_at false]
-              [:report_dashboardcard :created_at false]
-              [:report_dashboardcard :updated_at false]
-              [:segment :created_at false]
-              [:segment :updated_at false]]
-    :mysql   [[:activity :timestamp false]
-              [:application_permissions_revision :created_at false]
-              [:collection_permission_graph_revision :created_at false]
-              [:core_session :created_at false]
-              [:core_user :date_joined false]
-              [:core_user :last_login true]
-              [:core_user :updated_at true]
-              [:dependency :created_at false]
-              [:dimension :created_at false]
-              [:dimension :updated_at false]
-              [:metabase_field :created_at false]
-              [:metabase_field :last_analyzed true]
-              [:metabase_field :updated_at false]
-              [:metabase_fieldvalues :created_at false]
-              [:metabase_table :created_at false]
-              [:metabase_table :updated_at false]
-              [:metric :created_at false]
-              [:metric :updated_at false]
-              [:permissions_revision :created_at false]
-              [:pulse :created_at false]
-              [:pulse :updated_at false]
-              [:pulse_channel :created_at false]
-              [:pulse_channel :updated_at false]
-              [:recent_views :timestamp false]
-              [:report_card :created_at false]
-              [:report_cardfavorite :created_at false]
-              [:report_cardfavorite :updated_at false]
-              [:report_dashboard :created_at false]
-              [:report_dashboard :updated_at false]
-              [:segment :created_at false]
-              [:segment :updated_at false]]
-   :postgres [[:application_permissions_revision :created_at false]
-              [:collection_permission_graph_revision :created_at false]
-              [:core_user :updated_at true]
-              [:dimension :updated_at false]
-              [:dimension :created_at false]
-              [:permissions_revision :created_at false]
-              [:recent_views :timestamp false]]))</pre></td></tr><tr><td class="docs">
+  (let [query (case db-type
+                :postgres {:select [:table_name :column_name :is_nullable]
+                           :from   [:information_schema.columns]
+                           :where  [:and
+                                    [:= :data_type &quot;timestamp without time zone&quot;]
+                                    [:= :table_schema :%current_schema]
+                                    [:= :table_catalog :%current_database]]}
+                :mysql    {:select [:table_name :column_name :is_nullable]
+                           :from   [:information_schema.columns]
+                           :where  [:and
+                                    [:= :data_type &quot;datetime&quot;]
+                                    [:= :table_schema :%database]]}
+                :h2      {:select [:table_name :column_name :is_nullable]
+                          :from   [:information_schema.columns]
+                          :where  [:= :data_type &quot;TIMESTAMP&quot;]})]
+    (-&gt;&gt; (t2/query query)
+         (map #(update-vals % (comp keyword lower-case-en)))
+         (remove (fn [{:keys [table_name]}]
+                   (or (#{:databasechangelog :databasechangeloglock} table_name)
+                       ;; excludes views
+                       (str/starts-with? (name table_name) &quot;v_&quot;))))
+         (map #(update % :is_nullable (fn [x] (= :yes x))))
+         (map (juxt :table_name :column_name :is_nullable)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- alter-table-column-type-sql
   [db-type table column ttype nullable?]
   (let [ttype (name ttype)

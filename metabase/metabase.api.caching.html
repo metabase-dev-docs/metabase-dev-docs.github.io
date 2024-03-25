@@ -2865,858 +2865,139 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.driver.postgres" name="metabase.driver.postgres"><h1 class="project-name">metabase.driver.postgres</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Database driver for PostgreSQL databases. Builds on top of the SQL JDBC driver, which implements most functionality
-for JDBC-based drivers.</p>
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.driver.postgres
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.api.caching" name="metabase.api.caching"><h1 class="project-name">metabase.api.caching</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.api.caching
   (:require
-   [clojure.java.jdbc :as jdbc]
-   [clojure.set :as set]
-   [clojure.string :as str]
    [clojure.walk :as walk]
-   [honey.sql :as sql]
-   [honey.sql.helpers :as sql.helpers]
-   [honey.sql.pg-ops :as sql.pg-ops]
-   [java-time.api :as t]
-   [metabase.db :as mdb]
-   [metabase.driver :as driver]
-   [metabase.driver.common :as driver.common]
-   [metabase.driver.postgres.actions :as postgres.actions]
-   [metabase.driver.postgres.ddl :as postgres.ddl]
-   [metabase.driver.sql :as driver.sql]
-   [metabase.driver.sql-jdbc.common :as sql-jdbc.common]
-   [metabase.driver.sql-jdbc.connection :as sql-jdbc.conn]
-   [metabase.driver.sql-jdbc.execute :as sql-jdbc.execute]
-   [metabase.driver.sql-jdbc.sync :as sql-jdbc.sync]
-   [metabase.driver.sql-jdbc.sync.describe-database :as sql-jdbc.describe-database]
-   [metabase.driver.sql.query-processor :as sql.qp]
-   [metabase.driver.sql.query-processor.util :as sql.qp.u]
-   [metabase.driver.sql.util :as sql.u]
-   [metabase.driver.sql.util.unprepare :as unprepare]
-   [metabase.lib.field :as lib.field]
-   [metabase.lib.metadata :as lib.metadata]
-   [metabase.lib.schema.common :as lib.schema.common]
-   [metabase.lib.schema.temporal-bucketing
-    :as lib.schema.temporal-bucketing]
-   [metabase.models.secret :as secret]
-   [metabase.query-processor.store :as qp.store]
-   [metabase.query-processor.util.add-alias-info :as add]
-   [metabase.upload :as upload]
+   [compojure.core :refer [GET]]
+   [metabase.api.common :as api]
+   [metabase.api.common.validation :as validation]
+   [metabase.db.query :as mdb.query]
+   [metabase.events :as events]
+   [metabase.public-settings.premium-features :as premium-features :refer [defenterprise]]
    [metabase.util :as u]
-   [metabase.util.date-2 :as u.date]
-   [metabase.util.honey-sql-2 :as h2x]
-   [metabase.util.i18n :refer [trs]]
-   [metabase.util.log :as log]
-   [metabase.util.malli :as mu])
-  (:import
-   (java.io StringReader)
-   (java.sql Connection ResultSet ResultSetMetaData Time Types)
-   (java.time LocalDateTime OffsetDateTime OffsetTime)
-   (java.util Date UUID)
-   (org.postgresql.copy CopyManager)
-   (org.postgresql.jdbc PgConnection)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(comment
-  ;; method impls live in these namespaces.
-  postgres.actions/keep-me
-  postgres.ddl/keep-me
-  sql.pg-ops/keep-me)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(driver/register! :postgres, :parent :sql-jdbc)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod driver/display-name :postgres [_] &quot;PostgreSQL&quot;)</pre></td></tr><tr><td class="docs"><p>Features that are supported by Postgres and all of its child drivers like Redshift</p>
-</td><td class="codes"><pre class="brush: clojure">(doseq [[feature supported?] {:convert-timezone         true
-                              :datetime-diff            true
-                              :now                      true
-                              :persist-models           true
-                              :table-privileges         true
-                              :schemas                  true
-                              :connection-impersonation true}]
-  (defmethod driver/database-supports? [:postgres feature] [_driver _feature _db] supported?))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod driver/database-supports? [:postgres :nested-field-columns]
-  [_driver _feat db]
-  (driver.common/json-unfolding-default db))</pre></td></tr><tr><td class="docs"><p>Features that are supported by postgres only</p>
-</td><td class="codes"><pre class="brush: clojure">(doseq [feature [:actions
-                 :actions/custom
-                 :uploads
-                 :index-info]]
-  (defmethod driver/database-supports? [:postgres feature]
-    [driver _feat _db]
-    (= driver :postgres)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod driver/escape-entity-name-for-metadata :postgres [_driver entity-name]
-  (when entity-name
-    ;; these entities names are used as a pattern for LIKE queries in jdbc
-    ;; so we need to double escape it, first for java, then for sql
-    (str/replace entity-name &quot;\\&quot; &quot;\\\\&quot;)))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
-|                                             metabase.driver impls                                              |
-+----------------------------------------------------------------------------------------------------------------+</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod driver/display-name :postgres [_] &quot;PostgreSQL&quot;)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod driver/humanize-connection-error-message :postgres
-  [_ message]
-  (condp re-matches message
-    #&quot;^FATAL: database \&quot;.*\&quot; does not exist$&quot;
-    :database-name-incorrect
-
-    #&quot;^No suitable driver found for.*$&quot;
-    :invalid-hostname
-
-    #&quot;^Connection refused. Check that the hostname and port are correct and that the postmaster is accepting TCP/IP connections.$&quot;
-    :cannot-connect-check-host-and-port
-
-    #&quot;^FATAL: role \&quot;.*\&quot; does not exist$&quot;
-    :username-incorrect
-
-    #&quot;^FATAL: password authentication failed for user.*$&quot;
-    :password-incorrect
-
-    #&quot;^FATAL: .*$&quot; ; all other FATAL messages: strip off the 'FATAL' part, capitalize, and add a period
-    (let [[_ message] (re-matches #&quot;^FATAL: (.*$)&quot; message)]
-      (str (str/capitalize message) \.))
-
-    message))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod driver/db-default-timezone :postgres
-  [driver database]
-  (sql-jdbc.execute/do-with-connection-with-options
-   driver database nil
-   (fn [^java.sql.Connection conn]
-     (with-open [stmt (.prepareStatement conn &quot;show timezone;&quot;)
-                 rset (.executeQuery stmt)]
-       (when (.next rset)
-         (.getString rset 1))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod driver/connection-properties :postgres
-  [_]
-  (-&gt;&gt;
-   [driver.common/default-host-details
-    (assoc driver.common/default-port-details :placeholder 5432)
-    driver.common/default-dbname-details
-    driver.common/default-user-details
-    driver.common/default-password-details
-    driver.common/cloud-ip-address-info
-    {:name &quot;schema-filters&quot;
-     :type :schema-filters
-     :display-name &quot;Schemas&quot;}
-    driver.common/default-ssl-details
-    {:name         &quot;ssl-mode&quot;
-     :display-name (trs &quot;SSL Mode&quot;)
-     :type         :select
-     :options [{:name  &quot;allow&quot;
-                :value &quot;allow&quot;}
-               {:name  &quot;prefer&quot;
-                :value &quot;prefer&quot;}
-               {:name  &quot;require&quot;
-                :value &quot;require&quot;}
-               {:name  &quot;verify-ca&quot;
-                :value &quot;verify-ca&quot;}
-               {:name  &quot;verify-full&quot;
-                :value &quot;verify-full&quot;}]
-     :default &quot;require&quot;
-     :visible-if {&quot;ssl&quot; true}}
-    {:name         &quot;ssl-root-cert&quot;
-     :display-name (trs &quot;SSL Root Certificate (PEM)&quot;)
-     :type         :secret
-     :secret-kind  :pem-cert
-     ;; only need to specify the root CA if we are doing one of the verify modes
-     :visible-if   {&quot;ssl-mode&quot; [&quot;verify-ca&quot; &quot;verify-full&quot;]}}
-    {:name         &quot;ssl-use-client-auth&quot;
-     :display-name (trs &quot;Authenticate client certificate?&quot;)
-     :type         :boolean
-     ;; TODO: does this somehow depend on any of the ssl-mode vals?  it seems not (and is in fact orthogonal)
-     :visible-if   {&quot;ssl&quot; true}}
-    {:name         &quot;ssl-client-cert&quot;
-     :display-name (trs &quot;SSL Client Certificate (PEM)&quot;)
-     :type         :secret
-     :secret-kind  :pem-cert
-     :visible-if   {&quot;ssl-use-client-auth&quot; true}}
-    {:name         &quot;ssl-key&quot;
-     :display-name (trs &quot;SSL Client Key (PKCS-8/DER)&quot;)
-     :type         :secret
-     ;; since this can be either PKCS-8 or PKCS-12, we can't model it as a :keystore
-     :secret-kind  :binary-blob
-     :visible-if   {&quot;ssl-use-client-auth&quot; true}}
-    {:name         &quot;ssl-key-password&quot;
-     :display-name (trs &quot;SSL Client Key Password&quot;)
-     :type         :secret
-     :secret-kind  :password
-     :visible-if   {&quot;ssl-use-client-auth&quot; true}}
-    driver.common/ssh-tunnel-preferences
-    driver.common/advanced-options-start
-    driver.common/json-unfolding
-
-    (assoc driver.common/additional-options
-           :placeholder &quot;prepareThreshold=0&quot;)
-    driver.common/default-advanced-options]
-   (map u/one-or-many)
-   (apply concat)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod driver/db-start-of-week :postgres
-  [_]
-  :monday)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- get-typenames [{:keys [nspname typname]}]
-  (cond-&gt; [typname]
-    (not= nspname &quot;public&quot;) (conj (format &quot;\&quot;%s\&quot;.\&quot;%s\ nspname typname))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- enum-types [_driver database]
-  (into #{}
-        (comp (mapcat get-typenames)
-              (map keyword))
-        (jdbc/query (sql-jdbc.conn/db-&gt;pooled-connection-spec database)
-                    [(str &quot;SELECT nspname, typname &quot;
-                          &quot;FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace &quot;
-                          &quot;WHERE t.oid IN (SELECT DISTINCT enumtypid FROM pg_enum e)&quot;)])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^:dynamic *enum-types* nil)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- get-tables-sql
-  [schemas table-names]
-  ;; Ref: https://github.com/davecramer/pgjdbc/blob/a714bfd/pgjdbc/src/main/java/org/postgresql/jdbc/PgDatabaseMetaData.java#L1272
-  (sql/format
-   (cond-&gt;  {:select    [[:n.nspname :schema]
-                         [:c.relname :name]
-                         [[:case-expr :c.relkind
-                           [:inline &quot;r&quot;] [:inline &quot;TABLE&quot;]
-                           [:inline &quot;p&quot;] [:inline &quot;PARTITIONED TABLE&quot;]
-                           [:inline &quot;v&quot;] [:inline &quot;VIEW&quot;]
-                           [:inline &quot;f&quot;] [:inline &quot;FOREIGN TABLE&quot;]
-                           [:inline &quot;m&quot;] [:inline &quot;MATERIALIZED VIEW&quot;]
-                           :else nil]
-                          :type]
-                         [:d.description :description]
-                         [:stat.n_live_tup :estimated_row_count]]
-             :from      [[:pg_catalog.pg_class :c]]
-             :join      [[:pg_catalog.pg_namespace :n]   [:= :c.relnamespace :n.oid]]
-             :left-join [[:pg_catalog.pg_description :d] [:and [:= :c.oid :d.objoid] [:= :d.objsubid 0] [:= :d.classoid [:raw &quot;'pg_class'::regclass&quot;]]]
-                         [:pg_stat_user_tables :stat]    [:and [:= :n.nspname :stat.schemaname] [:= :c.relname :stat.relname]]]
-             :where     [:and [:= :c.relnamespace :n.oid]
-                         ;; filter out system tables
-                         [(keyword &quot;!~&quot;) :n.nspname &quot;^pg_&quot;] [:&lt;&gt; :n.nspname &quot;information_schema&quot;]
-                         ;; only get tables of type: TABLE, PARTITIONED TABLE, VIEW, FOREIGN TABLE, MATERIALIZED VIEW
-                         [:raw &quot;c.relkind in ('r', 'p', 'v', 'f', 'm')&quot;]]
-             :order-by  [:type :schema :name]}
-     (seq schemas)
-     (sql.helpers/where [:in :n.nspname schemas])
-     (seq table-names)
-     (sql.helpers/where [:in :c.relname table-names]))
-   {:dialect :ansi}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- get-tables
-  ;; have it as its own method for ease of testing
-  [database schemas tables]
-  (sql-jdbc.execute/reducible-query database (get-tables-sql schemas tables)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- describe-syncable-tables
-  [{driver :engine :as database}]
-  (reify clojure.lang.IReduceInit
-    (reduce [_ rf init]
-      (sql-jdbc.execute/do-with-connection-with-options
-       driver
-       database
-       nil
-       (fn [^Connection conn]
-         (reduce
-          rf
-          init
-          (when-let [syncable-schemas (seq (driver/syncable-schemas driver database))]
-            (let [have-select-privilege? (sql-jdbc.describe-database/have-select-privilege-fn driver conn)]
-              (eduction
-               (comp (filter have-select-privilege?)
-                     (map #(dissoc % :type)))
-               (get-tables database syncable-schemas nil))))))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod driver/describe-database :postgres
-  [_driver database]
-  ;; TODO: we should figure out how to sync tables using transducer, this way we don't have to hold 100k tables in
-  ;; memrory in a set like this
-  {:tables (into #{} (describe-syncable-tables database))})</pre></td></tr><tr><td class="docs"><p>Describe the Fields present in a <code>table</code>. This just hands off to the normal SQL driver implementation of the same
-name, but first fetches database enum types so we have access to them. These are simply binded to the dynamic var
-and used later in <code>database-type-&gt;base-type</code>, which you will find below.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmethod driver/describe-table :postgres
-  [driver database table]
-  (binding [*enum-types* (enum-types driver database)]
-    (sql-jdbc.sync/describe-table driver database table)))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
-|                                           metabase.driver.sql impls                                            |
-+----------------------------------------------------------------------------------------------------------------+</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- -&gt;timestamp [honeysql-form]
-  (h2x/cast-unless-type-in &quot;timestamp&quot; #{&quot;timestamp&quot; &quot;timestamptz&quot; &quot;timestamp with time zone&quot; &quot;date&quot;} honeysql-form))</pre></td></tr><tr><td class="docs"><p>Generate a Postgres 'INTERVAL' literal.</p>
-
-<p>  (sql/format-expr [::interval 2 :day])
-  =>
-  ["INTERVAL '2 day'"]</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- format-interval
-  ;; I tried to write this with Malli but couldn't figure out how to make it work. See
-  ;; https://metaboat.slack.com/archives/CKZEMT1MJ/p1676076592468909
-  [_fn [amount unit]]
-  {:pre [(number? amount)
-         (#{:millisecond :second :minute :hour :day :week :month :year} unit)]}
-  [(format &quot;INTERVAL '%s %s'&quot; (num amount) (name unit))])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(sql/register-fn! ::interval #'format-interval)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- interval [amount unit]
-  (h2x/with-database-type-info [::interval amount unit] &quot;interval&quot;))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/add-interval-honeysql-form :postgres
-  [driver hsql-form amount unit]
-  ;; Postgres doesn't support quarter in intervals (#20683)
-  (if (= unit :quarter)
-    (recur driver hsql-form (* 3 amount) :month)
-    (let [hsql-form (-&gt;timestamp hsql-form)]
-      (-&gt; (h2x/+ hsql-form (interval amount unit))
-          (h2x/with-type-info (h2x/type-info hsql-form))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/current-datetime-honeysql-form :postgres
-  [_driver]
-  (h2x/with-database-type-info :%now &quot;timestamptz&quot;))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/unix-timestamp-&gt;honeysql [:postgres :seconds]
-  [_ _ expr]
-  [:to_timestamp expr])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/cast-temporal-string [:postgres :Coercion/YYYYMMDDHHMMSSString-&gt;Temporal]
-  [_driver _coercion-strategy expr]
-  [:to_timestamp expr (h2x/literal &quot;YYYYMMDDHH24MISS&quot;)])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/cast-temporal-byte [:postgres :Coercion/YYYYMMDDHHMMSSBytes-&gt;Temporal]
-  [driver _coercion-strategy expr]
-  (sql.qp/cast-temporal-string driver :Coercion/YYYYMMDDHHMMSSString-&gt;Temporal
-                               [:convert_from expr (h2x/literal &quot;UTF8&quot;)]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- extract [unit expr]
-  [::h2x/extract unit expr])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- make-time [hour minute second]
-  (h2x/with-database-type-info [:make_time hour minute second] &quot;time&quot;))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- time-trunc [unit expr]
-  (let [hour   [::pg-conversion (extract :hour expr) :integer]
-        minute (if (#{:minute :second} unit)
-                 [::pg-conversion (extract :minute expr) :integer]
-                 [:inline 0])
-        second (if (= unit :second)
-                 [::pg-conversion (extract :second expr) ::double]
-                 [:inline 0.0])]
-    (make-time hour minute second)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private date-trunc
-  [unit :- ::lib.schema.temporal-bucketing/unit.date-time.truncate
-   expr]
-  (condp = (h2x/database-type expr)
-    ;; apparently there is no convenient way to truncate a TIME column in Postgres, you can try to use `date_trunc`
-    ;; but it returns an interval (??) and other insane things. This seems to be slightly less insane.
-    &quot;time&quot;
-    (time-trunc unit expr)
-    &quot;timetz&quot;
-    (h2x/cast &quot;timetz&quot; (time-trunc unit expr))
-    #_else
-    (let [expr' (-&gt;timestamp expr)]
-      (-&gt; [:date_trunc (h2x/literal unit) expr']
-          (h2x/with-database-type-info (h2x/database-type expr'))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- extract-from-timestamp [unit expr]
-  (extract unit (-&gt;timestamp expr)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- extract-integer [unit expr]
-  (h2x/-&gt;integer (extract-from-timestamp unit expr)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/date [:postgres :default]          [_ _ expr] expr)
-(defmethod sql.qp/date [:postgres :second-of-minute] [_ _ expr] (extract-integer :second expr))
-(defmethod sql.qp/date [:postgres :minute]           [_ _ expr] (date-trunc :minute expr))
-(defmethod sql.qp/date [:postgres :minute-of-hour]   [_ _ expr] (extract-integer :minute expr))
-(defmethod sql.qp/date [:postgres :hour]             [_ _ expr] (date-trunc :hour expr))
-(defmethod sql.qp/date [:postgres :hour-of-day]      [_ _ expr] (extract-integer :hour expr))
-(defmethod sql.qp/date [:postgres :day]              [_ _ expr] (h2x/-&gt;date expr))
-(defmethod sql.qp/date [:postgres :day-of-month]     [_ _ expr] (extract-integer :day expr))
-(defmethod sql.qp/date [:postgres :day-of-year]      [_ _ expr] (extract-integer :doy expr))
-(defmethod sql.qp/date [:postgres :month]            [_ _ expr] (date-trunc :month expr))
-(defmethod sql.qp/date [:postgres :month-of-year]    [_ _ expr] (extract-integer :month expr))
-(defmethod sql.qp/date [:postgres :quarter]          [_ _ expr] (date-trunc :quarter expr))
-(defmethod sql.qp/date [:postgres :quarter-of-year]  [_ _ expr] (extract-integer :quarter expr))
-(defmethod sql.qp/date [:postgres :year]             [_ _ expr] (date-trunc :year expr))
-(defmethod sql.qp/date [:postgres :year-of-era]      [_ _ expr] (extract-integer :year expr))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/date [:postgres :week-of-year-iso] [_driver _ expr] (extract-integer :week expr))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/date [:postgres :day-of-week]
-  [driver _unit expr]
-  ;; Postgres extract(dow ...) returns Sunday(0)...Saturday(6)
-  ;;
-  ;; Since that's different than what we normally consider the [[metabase.driver/db-start-of-week]] for Postgres
-  ;; (Monday) we need to pass in a custom offset here
-  (sql.qp/adjust-day-of-week driver
-                             (h2x/+ (extract-integer :dow expr) 1)
-                             (driver.common/start-of-week-offset-for-day :sunday)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/date [:postgres :week]
-  [_ _ expr]
-  (sql.qp/adjust-start-of-week :postgres (partial date-trunc :week) expr))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private quoted? [database-type :- ::lib.schema.common/non-blank-string]
-  (and (str/starts-with? database-type &quot;\)
-       (str/ends-with? database-type &quot;\)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/-&gt;honeysql [:postgres :convert-timezone]
-  [driver [_ arg target-timezone source-timezone]]
-  (let [expr         (sql.qp/-&gt;honeysql driver (cond-&gt; arg
-                                                 (string? arg) u.date/parse))
-        timestamptz? (or (h2x/is-of-type? expr &quot;timestamptz&quot;)
-                         (h2x/is-of-type? expr &quot;timestamp with time zone&quot;))
-        _            (sql.u/validate-convert-timezone-args timestamptz? target-timezone source-timezone)
-        expr         [:timezone target-timezone (if (not timestamptz?)
-                                                  [:timezone source-timezone expr]
-                                                  expr)]]
-    (h2x/with-database-type-info expr &quot;timestamp&quot;)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/-&gt;honeysql [:postgres :value]
-  [driver value]
-  (let [[_ value {base-type :base_type, database-type :database_type}] value]
-    (when (some? value)
-      (condp #(isa? %2 %1) base-type
-        :type/UUID         (when (not= &quot;&quot; value) ; support is-empty/non-empty checks
-                             (UUID/fromString  value))
-        :type/IPAddress    (h2x/cast :inet value)
-        :type/PostgresEnum (if (quoted? database-type)
-                             (h2x/cast database-type value)
-                             (h2x/quoted-cast database-type value))
-        (sql.qp/-&gt;honeysql driver value)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/-&gt;honeysql [:postgres :median]
-  [driver [_ arg]]
-  (sql.qp/-&gt;honeysql driver [:percentile arg 0.5]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/datetime-diff [:postgres :year]
-  [_driver _unit x y]
-  (let [interval [:age (date-trunc :day y) (date-trunc :day x)]]
-    (h2x/-&gt;integer (extract :year interval))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/datetime-diff [:postgres :quarter]
-  [driver _unit x y]
-  (h2x// (sql.qp/datetime-diff driver :month x y) 3))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/datetime-diff [:postgres :month]
-  [_driver _unit x y]
-  (let [interval           [:age (date-trunc :day y) (date-trunc :day x)]
-        year-diff          (extract :year interval)
-        month-of-year-diff (extract :month interval)]
-    (h2x/-&gt;integer (h2x/+ month-of-year-diff (h2x/* year-diff 12)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/datetime-diff [:postgres :week]
-  [driver _unit x y]
-  (h2x// (sql.qp/datetime-diff driver :day x y) 7))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/datetime-diff [:postgres :day]
-  [_driver _unit x y]
-  (let [interval (h2x/- (date-trunc :day y) (date-trunc :day x))]
-    (h2x/-&gt;integer (extract :day interval))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/datetime-diff [:postgres :hour]
-  [driver _unit x y]
-  (h2x// (sql.qp/datetime-diff driver :second x y) 3600))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/datetime-diff [:postgres :minute]
-  [driver _unit x y]
-  (h2x// (sql.qp/datetime-diff driver :second x y) 60))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/datetime-diff [:postgres :second]
-  [_driver _unit x y]
-  (let [seconds (h2x/- (extract-from-timestamp :epoch y) (extract-from-timestamp :epoch x))]
-    (h2x/-&gt;integer [:trunc seconds])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- format-regex-match-first [_fn [identifier pattern]]
-  (let [[identifier-sql &amp; identifier-args] (sql/format-expr identifier {:nested true})
-        [pattern-sql &amp; pattern-args]       (sql/format-expr pattern {:nested true})]
-    (into [(format &quot;substring(%s FROM %s)&quot; identifier-sql pattern-sql)]
-          cat
-          [identifier-args
-           pattern-args])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(sql/register-fn! ::regex-match-first #'format-regex-match-first)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/-&gt;honeysql [:postgres :regex-match-first]
-  [driver [_ arg pattern]]
-  (let [identifier (sql.qp/-&gt;honeysql driver arg)]
-    [::regex-match-first identifier pattern]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/-&gt;honeysql [:postgres Time]
-  [_ time-value]
-  (h2x/-&gt;time time-value))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- format-pg-conversion [_fn [expr psql-type]]
-  (let [[expr-sql &amp; expr-args] (sql/format-expr expr {:nested true})]
-    (into [(format &quot;%s::%s&quot; expr-sql (name psql-type))]
-          expr-args)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(sql/register-fn! ::pg-conversion #'format-pg-conversion)</pre></td></tr><tr><td class="docs"><p>HoneySQL form that adds a Postgres-style <code>::</code> cast e.g. <code>expr::type</code>.</p>
-
-<p>  (pg-conversion :my<em>field ::integer) -> HoneySQL -[Compile]-> "my</em>field"::integer</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- pg-conversion
-  [expr psql-type]
-  [::pg-conversion expr psql-type])</pre></td></tr><tr><td class="docs"><p>Create a Postgres text array literal from a sequence of elements. Used for the <code>::json-query</code> stuff
-below.</p>
-
-<p>  (sql/format-expr [::text-array "A" 1 "B" 2])
-  =>
-  ["array[?, 1, ?, 2]::text[]" "A" "B"]</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- format-text-array
-  [_fn [&amp; elements]]
-  (let [elements (for [element elements]
-                   (if (number? element)
-                     [:inline element]
-                     (name element)))
-        sql-args (map #(sql/format-expr % {:nested true}) elements)
-        sqls     (map first sql-args)
-        args     (mapcat rest sql-args)]
-    (into [(format &quot;array[%s]::text[]&quot; (str/join &quot;, &quot; sqls))]
-          args)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(sql/register-fn! ::text-array #'format-text-array)</pre></td></tr><tr><td class="docs"><p>e.g.</p>
-
-<p>```clj
-[::json-query [::h2x/identifier :field ["boop" "bleh"]] "bigint" ["meh"]]
-=>
-["(boop.bleh#>> array[?]::text[])::bigint" "meh"]
-```</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- format-json-query
-  [_fn [parent-identifier field-type names]]
-  (let [names-text-array                 (into [::text-array] names)
-        [parent-id-sql &amp; parent-id-args] (sql/format-expr parent-identifier {:nested true})
-        [path-sql &amp; path-args]           (sql/format-expr names-text-array {:nested true})]
-    (into [(format &quot;(%s#&gt;&gt; %s)::%s&quot; parent-id-sql path-sql field-type)]
-          cat
-          [parent-id-args path-args])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(sql/register-fn! ::json-query #'format-json-query)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/json-query :postgres
-  [_driver unwrapped-identifier nfc-field]
-  (assert (h2x/identifier? unwrapped-identifier)
-          (format &quot;Invalid identifier: %s&quot; (pr-str unwrapped-identifier)))
-  (let [field-type        (:database-type nfc-field)
-        nfc-path          (:nfc-path nfc-field)
-        parent-identifier (sql.qp.u/nfc-field-&gt;parent-identifier unwrapped-identifier nfc-field)]
-    [::json-query parent-identifier field-type (rest nfc-path)]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/-&gt;honeysql [:postgres :field]
-  [driver [_ id-or-name opts :as clause]]
-  (let [stored-field  (when (integer? id-or-name)
-                        (lib.metadata/field (qp.store/metadata-provider) id-or-name))
-        parent-method (get-method sql.qp/-&gt;honeysql [:sql :field])
-        identifier    (parent-method driver clause)]
-    (cond
-      (= (:database-type stored-field) &quot;money&quot;)
-      (pg-conversion identifier :numeric)
-
-      (lib.field/json-field? stored-field)
-      (if (or (::sql.qp/forced-alias opts)
-              (= (::add/source-table opts) ::add/source))
-        (keyword (::add/source-alias opts))
-        (walk/postwalk #(if (h2x/identifier? %)
-                          (sql.qp/json-query :postgres % stored-field)
-                          %)
-                       identifier))
-
-      :else
-      identifier)))</pre></td></tr><tr><td class="docs"><p>Postgres is not happy with JSON fields which are in group-bys or order-bys
-being described twice instead of using the alias.
-Therefore, force the alias, but only for JSON fields to avoid ambiguity.
-The alias names in JSON fields are unique wrt nfc path</p>
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/apply-top-level-clause
-  [:postgres :breakout]
-  [driver clause honeysql-form {breakout-fields :breakout, _fields-fields :fields :as query}]
-  (let [stored-field-ids (map second breakout-fields)
-        stored-fields    (map #(when (integer? %)
-                                 (lib.metadata/field (qp.store/metadata-provider) %))
-                              stored-field-ids)
-        parent-method    (partial (get-method sql.qp/apply-top-level-clause [:sql :breakout])
-                                  driver clause honeysql-form)
-        qualified        (parent-method query)
-        unqualified      (parent-method (update query
-                                                :breakout
-                                                #(sql.qp/rewrite-fields-to-force-using-column-aliases % {:is-breakout true})))]
-    (if (some lib.field/json-field? stored-fields)
-      (merge qualified
-             (select-keys unqualified #{:group-by}))
-      qualified)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- order-by-is-json-field?
-  [clause]
-  (let [is-aggregation? (= (-&gt; clause (second) (first)) :aggregation)
-        stored-field-id (-&gt; clause (second) (second))
-        stored-field    (when (and (not is-aggregation?) (integer? stored-field-id))
-                          (lib.metadata/field (qp.store/metadata-provider) stored-field-id))]
-    (and
-      (some? stored-field)
-      (lib.field/json-field? stored-field))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/-&gt;honeysql [:postgres :desc]
-  [driver clause]
-  (let [new-clause (if (order-by-is-json-field? clause)
-                     (sql.qp/rewrite-fields-to-force-using-column-aliases clause)
-                     clause)]
-    ((get-method sql.qp/-&gt;honeysql [:sql :desc]) driver new-clause)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/-&gt;honeysql [:postgres :asc]
-  [driver clause]
-  (let [new-clause (if (order-by-is-json-field? clause)
-                     (sql.qp/rewrite-fields-to-force-using-column-aliases clause)
-                     clause)]
-    ((get-method sql.qp/-&gt;honeysql [:sql :asc]) driver new-clause)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod unprepare/unprepare-value [:postgres Date]
-  [_ value]
-  (format &quot;'%s'::timestamp&quot; (u.date/format value)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(prefer-method unprepare/unprepare-value [:sql Time] [:postgres Date])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod unprepare/unprepare-value [:postgres UUID]
-  [_ value]
-  (format &quot;'%s'::uuid&quot; value))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
-|                                         metabase.driver.sql-jdbc impls                                         |
-+----------------------------------------------------------------------------------------------------------------+</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Map of default Postgres column types -> Field base types.
- Add more mappings here as you come across them.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private default-base-types
-  {:array         :type/*
-   :bigint        :type/BigInteger
-   :bigserial     :type/BigInteger
-   :bit           :type/*
-   :bool          :type/Boolean
-   :boolean       :type/Boolean
-   :box           :type/*
-   :bpchar        :type/Text ; &quot;blank-padded char&quot; is the internal name of &quot;character&quot;
-   :bytea         :type/*    ; byte array
-   :cidr          :type/Structured ; IPv4/IPv6 network address
-   :circle        :type/*
-   :citext        :type/Text ; case-insensitive text
-   :char          :type/Text
-   :character     :type/Text
-   :date          :type/Date
-   :decimal       :type/Decimal
-   :float4        :type/Float
-   :float8        :type/Float
-   :geometry      :type/*
-   :inet          :type/IPAddress
-   :int           :type/Integer
-   :int2          :type/Integer
-   :int4          :type/Integer
-   :integer       :type/Integer
-   :int8          :type/BigInteger
-   :interval      :type/*               ; time span
-   :json          :type/JSON
-   :jsonb         :type/JSON
-   :line          :type/*
-   :lseg          :type/*
-   :macaddr       :type/Structured
-   :money         :type/Decimal
-   :numeric       :type/Decimal
-   :path          :type/*
-   :pg_lsn        :type/Integer         ; PG Log Sequence #
-   :point         :type/*
-   :real          :type/Float
-   :serial        :type/Integer
-   :serial2       :type/Integer
-   :serial4       :type/Integer
-   :serial8       :type/BigInteger
-   :smallint      :type/Integer
-   :smallserial   :type/Integer
-   :text          :type/Text
-   :time          :type/Time
-   :timetz        :type/TimeWithLocalTZ
-   :timestamp     :type/DateTime
-   :timestamptz   :type/DateTimeWithLocalTZ
-   :tsquery       :type/*
-   :tsvector      :type/*
-   :txid_snapshot :type/*
-   :uuid          :type/UUID
-   :varbit        :type/*
-   :varchar       :type/Text
-   :xml           :type/Structured
-   (keyword &quot;bit varying&quot;)                :type/*
-   (keyword &quot;character varying&quot;)          :type/Text
-   (keyword &quot;double precision&quot;)           :type/Float
-   (keyword &quot;time with time zone&quot;)        :type/Time
-   (keyword &quot;time without time zone&quot;)     :type/Time
-   ;; TODO postgres also supports `timestamp(p) with time zone` where p is the precision
-   ;; maybe we should switch this to use `sql-jdbc.sync/pattern-based-database-type-&gt;base-type`
-   (keyword &quot;timestamp with time zone&quot;)    :type/DateTimeWithTZ
-   (keyword &quot;timestamp without time zone&quot;) :type/DateTime})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql-jdbc.sync/database-type-&gt;base-type :postgres
-  [_driver column]
-  (if (contains? *enum-types* column)
-    :type/PostgresEnum
-    (default-base-types column)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql-jdbc.sync/column-&gt;semantic-type :postgres
-  [_driver database-type _column-name]
-  ;; this is really, really simple right now.  if its postgres :json type then it's :type/SerializedJSON semantic-type
-  (case database-type
-    &quot;json&quot;  :type/SerializedJSON
-    &quot;jsonb&quot; :type/SerializedJSON
-    &quot;xml&quot;   :type/XML
-    &quot;inet&quot;  :type/IPAddress
-    nil))</pre></td></tr><tr><td class="docs"><p>If a value was uploaded for the SSL key, return whether it's using the PKCS-12 format.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- pkcs-12-key-value?
-  [ssl-key-value]
-  (when ssl-key-value
-    (= (second (re-find secret/uploaded-base-64-prefix-pattern ssl-key-value))
-       &quot;x-pkcs12&quot;)))</pre></td></tr><tr><td class="docs"><p>Builds the params to include in the JDBC connection spec for an SSL connection.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- ssl-params
-  [{:keys [ssl-key-value] :as db-details}]
-  (let [ssl-root-cert   (when (contains? #{&quot;verify-ca&quot; &quot;verify-full&quot;} (:ssl-mode db-details))
-                          (secret/db-details-prop-&gt;secret-map db-details &quot;ssl-root-cert&quot;))
-        ssl-client-key  (when (:ssl-use-client-auth db-details)
-                          (secret/db-details-prop-&gt;secret-map db-details &quot;ssl-key&quot;))
-        ssl-client-cert (when (:ssl-use-client-auth db-details)
-                          (secret/db-details-prop-&gt;secret-map db-details &quot;ssl-client-cert&quot;))
-        ssl-key-pw      (when (:ssl-use-client-auth db-details)
-                          (secret/db-details-prop-&gt;secret-map db-details &quot;ssl-key-password&quot;))
-        all-subprops    (apply concat (map :subprops [ssl-root-cert ssl-client-key ssl-client-cert ssl-key-pw]))
-        has-value?      (comp some? :value)]
-    (cond-&gt; (set/rename-keys db-details {:ssl-mode :sslmode})
-      ;; if somehow there was no ssl-mode set, just make it required (preserves existing behavior)
-      (nil? (:ssl-mode db-details))
-      (assoc :sslmode &quot;require&quot;)
-      (has-value? ssl-root-cert)
-      (assoc :sslrootcert (secret/value-&gt;file! ssl-root-cert :postgres))
-      (has-value? ssl-client-key)
-      (assoc :sslkey (secret/value-&gt;file! ssl-client-key :postgres (when (pkcs-12-key-value? ssl-key-value) &quot;.p12&quot;)))
-      (has-value? ssl-client-cert)
-      (assoc :sslcert (secret/value-&gt;file! ssl-client-cert :postgres))
-      ;; Pass an empty string as password if none is provided; otherwise the driver will prompt for one
-      true
-      (assoc :sslpassword (or (secret/value-&gt;string ssl-key-pw) &quot;&quot;))
-      true
-      (as-&gt; params ;; from outer cond-&gt;
-        (dissoc params :ssl-root-cert :ssl-root-cert-options :ssl-client-key :ssl-client-cert :ssl-key-password
-                       :ssl-use-client-auth)
-        (apply dissoc params all-subprops)))))</pre></td></tr><tr><td class="docs"><p>Params to include in the JDBC connection spec to disable SSL.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private disable-ssl-params
-  {:sslmode &quot;disable&quot;})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql-jdbc.conn/connection-details-&gt;spec :postgres
-  [_ {ssl? :ssl, :as details-map}]
-  (let [props (-&gt; details-map
-                  (update :port (fn [port]
-                                  (if (string? port)
-                                    (Integer/parseInt port)
-                                    port)))
-                  ;; remove :ssl in case it's false; DB will still try (&amp; fail) to connect if the key is there
-                  (dissoc :ssl))
-        props (if ssl?
-                (let [ssl-prms (ssl-params details-map)]
-                  ;; if the user happened to specify any of the SSL options directly, allow those to take
-                  ;; precedence, but only if they match a key from our own
-                  ;; our `ssl-params` function is also removing various internal properties, ex: for secret resolution,
-                  ;; so we can't just merge the entire `props` map back in here because it will bring all those
-                  ;; internal property values back; only merge in the ones the driver might recognize
-                  (merge ssl-prms (select-keys props (keys ssl-prms))))
-                (merge disable-ssl-params props))
-        props (as-&gt; props it
-                (set/rename-keys it {:dbname :db})
-                (mdb/spec :postgres it)
-                (sql-jdbc.common/handle-additional-options it details-map))]
-    props))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql-jdbc.sync/excluded-schemas :postgres [_driver] #{&quot;information_schema&quot; &quot;pg_catalog&quot;})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql-jdbc.execute/set-timezone-sql :postgres
-  [_]
-  &quot;SET SESSION TIMEZONE TO %s;&quot;)</pre></td></tr><tr><td class="docs"><p>for some reason postgres <code>TIMESTAMP WITH TIME ZONE</code> columns still come back as <code>Type/TIMESTAMP</code>, which seems like a
-bug with the JDBC driver?</p>
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql-jdbc.execute/read-column-thunk [:postgres Types/TIMESTAMP]
-  [_ ^ResultSet rs ^ResultSetMetaData rsmeta ^Integer i]
-  (let [^Class klass (if (= (u/lower-case-en (.getColumnTypeName rsmeta i)) &quot;timestamptz&quot;)
-                       OffsetDateTime
-                       LocalDateTime)]
-    (fn []
-      (.getObject rs i klass))))</pre></td></tr><tr><td class="docs"><p>Sometimes Postgres times come back as strings like <code>07:23:18.331+00</code> (no minute in offset) and there's a bug in the
-JDBC driver where it can't parse those correctly. We can do it ourselves in that case.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql-jdbc.execute/read-column-thunk [:postgres Types/TIME]
-  [driver ^ResultSet rs rsmeta ^Integer i]
-  (let [parent-thunk ((get-method sql-jdbc.execute/read-column-thunk [:sql-jdbc Types/TIME]) driver rs rsmeta i)]
-    (fn []
-      (try
-        (parent-thunk)
-        (catch Throwable e
-          (let [s (.getString rs i)]
-            (log/tracef e &quot;Error in Postgres JDBC driver reading TIME value, fetching as string '%s'&quot; s)
-            (u.date/parse s)))))))</pre></td></tr><tr><td class="docs"><p>The postgres JDBC driver cannot properly read MONEY columns — see https://github.com/pgjdbc/pgjdbc/issues/425. Work
-around this by checking whether the column type name is <code>money</code>, and reading it out as a String and parsing to a
-BigDecimal if so; otherwise, proceeding as normal</p>
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql-jdbc.execute/read-column-thunk [:postgres Types/DOUBLE]
-  [_driver ^ResultSet rs ^ResultSetMetaData rsmeta ^Integer i]
-  (if (= (.getColumnTypeName rsmeta i) &quot;money&quot;)
-    (fn []
-      (some-&gt; (.getString rs i) u/parse-currency))
-    (fn []
-      (.getObject rs i))))</pre></td></tr><tr><td class="docs"><p>de-CLOB any CLOB values that come back</p>
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql-jdbc.execute/read-column-thunk :postgres
-  [_ ^ResultSet rs _ ^Integer i]
-  (fn []
-    (let [obj (.getObject rs i)]
-      (if (instance? org.postgresql.util.PGobject obj)
-        (.getValue ^org.postgresql.util.PGobject obj)
-        obj))))</pre></td></tr><tr><td class="docs"><p>Postgres doesn't support OffsetTime</p>
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql-jdbc.execute/set-parameter [:postgres OffsetTime]
-  [driver prepared-statement i t]
-  (let [local-time (t/local-time (t/with-offset-same-instant t (t/zone-offset 0)))]
-    (sql-jdbc.execute/set-parameter driver prepared-statement i local-time)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod driver/upload-type-&gt;database-type :postgres
-  [_driver upload-type]
-  (case upload-type
-    ::upload/varchar-255              [[:varchar 255]]
-    ::upload/text                     [:text]
-    ::upload/int                      [:bigint]
-    ::upload/auto-incrementing-int-pk [:bigserial]
-    ::upload/float                    [:float]
-    ::upload/boolean                  [:boolean]
-    ::upload/date                     [:date]
-    ::upload/datetime                 [:timestamp]
-    ::upload/offset-datetime          [:timestamp-with-time-zone]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod driver/create-auto-pk-with-append-csv? :postgres
-  [driver]
-  (= driver :postgres))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql-jdbc.sync/alter-columns-sql :postgres
-  [driver table-name column-definitions]
-  (first (sql/format {:alter-table  (keyword table-name)
-                      :alter-column (map (fn [[column-name type-and-constraints]]
-                                           (vec (cons column-name (cons :type type-and-constraints))))
-                                         column-definitions)}
-                     :quoted true
-                     :dialect (sql.qp/quote-style driver))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod driver/table-name-length-limit :postgres
-  [_driver]
-  ;; https://www.postgresql.org/docs/current/sql-syntax-lexical.html#SQL-SYNTAX-IDENTIFIERS
-  ;; This could be incorrect if Postgres has been compiled with a value for NAMEDATALEN other than the default (64), but
-  ;; that seems unlikely and there's not an easy way to find out.
-  63)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- format-copy
-  [_clause table]
-  [(str &quot;COPY &quot; (sql/format-entity table))])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(sql/register-clause! ::copy format-copy :insert-into)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- format-from-stdin
-  [_clause delimiter]
-  [(str &quot;FROM STDIN NULL &quot; delimiter)])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(sql/register-clause! ::from-stdin format-from-stdin :from)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- sanitize-value
-  ;; Per https://www.postgresql.org/docs/current/sql-copy.html#id-1.9.3.55.9.2
-  ;; &quot;Backslash characters (\) can be used in the COPY data to quote data characters that might otherwise be taken as
-  ;; row or column delimiters. In particular, the following characters must be preceded by a backslash if they appear
-  ;; as part of a column value: backslash itself, newline, carriage return, and the current delimiter character.&quot;
-  [v]
-  (if (string? v)
-    (str/replace v #&quot;\\|\n|\r|\t&quot; {&quot;\\&quot; &quot;\\\\&quot;
-                                   &quot;\n&quot; &quot;\\n&quot;
-                                   &quot;\r&quot; &quot;\\r&quot;
-                                   &quot;\t&quot; &quot;\\t&quot;})
-    v))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- row-&gt;tsv
+   [metabase.util.i18n :refer [tru]]
+   [metabase.util.malli.schema :as ms]
+   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs"><p>Data shape</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Transform from how cache config is stored to how it's used/exposed in the API</p>
+</td><td class="codes"><pre class="brush: clojure">(defn row-&gt;config
   [row]
-  (-&gt;&gt; row
-       (map sanitize-value)
-       (str/join &quot;\t&quot;)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod driver/insert-into! :postgres
-  [driver db-id table-name column-names values]
-  (jdbc/with-db-transaction [conn (sql-jdbc.conn/db-&gt;pooled-connection-spec db-id)]
-    (let [copy-manager (CopyManager. (.unwrap ^Connection (:connection conn) PgConnection))
-          [sql &amp; _]    (sql/format {::copy       (keyword table-name)
-                                    :columns     (map keyword column-names)
-                                    ::from-stdin &quot;''&quot;}
-                                   :quoted true
-                                   :dialect (sql.qp/quote-style driver))
-          ;; On Postgres with a large file, 100 (3.76m) was significantly faster than 50 (4.03m) and 25 (4.27m). 1,000 was a
-          ;; little faster but not by much (3.63m), and 10,000 threw an error:
-          ;;     PreparedStatement can have at most 65,535 parameters
-          chunks (partition-all (or driver/*insert-chunk-rows* 1000) values)]
-      (doseq [chunk chunks]
-        (let [tsvs (-&gt;&gt; chunk
-                        (map row-&gt;tsv)
-                        (str/join &quot;\n&quot;)
-                        (StringReader.))]
-          (.copyIn copy-manager ^String sql tsvs))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql-jdbc.sync/current-user-table-privileges :postgres
-  [_driver conn-spec &amp; {:as _options}]
-  ;; KNOWN LIMITATION: this won't return privileges for foreign tables, calling has_table_privilege on a foreign table
-  ;; result in a operation not supported error
-  (-&gt;&gt; (jdbc/query
-        conn-spec
-        (str/join
-         &quot;\n&quot;
-         [&quot;with table_privileges as (&quot;
-          &quot; select&quot;
-          &quot;   NULL as role,&quot;
-          &quot;   t.schemaname as schema,&quot;
-          &quot;   t.objectname as table,&quot;
-          &quot;   pg_catalog.has_any_column_privilege(current_user, '\&quot;' || t.schemaname || '\&quot;' || '.' || '\&quot;' || t.objectname || '\&quot;',  'update') as update,&quot;
-          &quot;   pg_catalog.has_any_column_privilege(current_user, '\&quot;' || t.schemaname || '\&quot;' || '.' || '\&quot;' || t.objectname || '\&quot;',  'select') as select,&quot;
-          &quot;   pg_catalog.has_any_column_privilege(current_user, '\&quot;' || t.schemaname || '\&quot;' || '.' || '\&quot;' || t.objectname || '\&quot;',  'insert') as insert,&quot;
-          &quot;   pg_catalog.has_table_privilege(current_user, '\&quot;' || t.schemaname || '\&quot;' || '.' || '\&quot;' || t.objectname || '\&quot;',  'delete') as delete&quot;
-          &quot; from (&quot;
-          &quot;   select schemaname, tablename as objectname from pg_catalog.pg_tables&quot;
-          &quot;   union&quot;
-          &quot;   select schemaname, viewname as objectname from pg_catalog.pg_views&quot;
-          &quot;   union&quot;
-          &quot;   select schemaname, matviewname as objectname from pg_catalog.pg_matviews&quot;
-          &quot; ) t&quot;
-          &quot; where t.schemaname !~ '^pg_'&quot;
-          &quot;   and t.schemaname &lt;&gt; 'information_schema'&quot;
-          &quot;   and pg_catalog.has_schema_privilege(current_user, t.schemaname, 'usage')&quot;
-          &quot;)&quot;
-          &quot;select t.*&quot;
-          &quot;from table_privileges t&quot;]))
-       (filter #(or (:select %) (:update %) (:delete %) (:insert %)))))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------- User Impersonation --------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod driver.sql/set-role-statement :postgres
-  [_ role]
-  (let [special-chars-pattern #&quot;[^a-zA-Z0-9_]&quot;
-        needs-quote           (re-find special-chars-pattern role)]
-    (if needs-quote
-      (format &quot;SET ROLE \&quot;%s\&quot;;&quot; role)
-      (format &quot;SET ROLE %s;&quot; role))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod driver.sql/default-database-role :postgres
-  [_ _]
-  &quot;NONE&quot;)</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+  {:model    (:model row)
+   :model_id (:model_id row)
+   :strategy (assoc (:config row) :type (:strategy row))})</pre></td></tr><tr><td class="docs"><p>Transform cache config from API form into db storage from</p>
+</td><td class="codes"><pre class="brush: clojure">(defn config-&gt;row
+  [{:keys [model model_id strategy]}]
+  {:model    model
+   :model_id model_id
+   :strategy (:type strategy)
+   :config   (dissoc strategy :type)})</pre></td></tr><tr><td class="docs"><p>See <code>metabase-enterprise.caching.strategies/CacheStrategy</code></p>
+</td><td class="codes"><pre class="brush: clojure">(defn- drop-internal-fields
+  [schema]
+  (walk/prewalk
+   (fn [x]
+     (if (and (vector? x) (= (first x) :map))
+       (into [] (remove #(:internal (meta %))) x)
+       x))
+   schema))</pre></td></tr><tr><td class="docs"><p>Schema for a caching strategy</p>
+
+<p>TODO: figure out how to combine <code>defenterprise</code> and <code>defendpoint</code> - right now OpenAPI only "sees" OSS version of
+the schema, so docs for enterprise version won't be correct until we figure out the way to support this</p>
+</td><td class="codes"><pre class="brush: clojure">(defenterprise CacheStrategy
+  metabase-enterprise.caching.strategies
+  []
+  [:and
+   [:map
+    [:type [:enum :nocache :ttl]]]
+   [:multi {:dispatch :type}
+    [:nocache  [:map ;; not closed due to a way it's used in tests for clarity
+                [:type keyword?]]]
+    [:ttl      [:map {:closed true}
+                [:type [:= :ttl]]
+                [:multiplier ms/PositiveInt]
+                [:min_duration_ms ms/IntGreaterThanOrEqualToZero]]]]])</pre></td></tr><tr><td class="docs"><p>Schema for a caching strategy for the API</p>
+</td><td class="codes"><pre class="brush: clojure">(defn CacheStrategyAPI
+  []
+  (drop-internal-fields (CacheStrategy)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private CachingModel [:enum &quot;root&quot; &quot;database&quot; &quot;dashboard&quot; &quot;question&quot;])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- assert-valid-models [model ids premium?]
+  (cond
+    (= model &quot;root&quot;)
+    (when-not (some zero? ids)
+      (throw (ex-info (tru &quot;Root configuration is only valid with model_id = 0&quot;) {:status-code 404
+                                                                                  :model_id    (first ids)})))
+    (not premium?)
+    (throw (premium-features/ee-feature-error (tru &quot;Granular Caching&quot;)))
+    :else
+    (api/check-404 (t2/select-one (case model
+                                    &quot;database&quot;  :model/Database
+                                    &quot;dashboard&quot; :model/Dashboard
+                                    &quot;question&quot;  :model/Card)
+                                  :id [:in ids]))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- audit-caching-change! [id prev new]
+  (events/publish-event!
+   :event/caching-update
+   {:user-id  api/*current-user-id*
+    :model    :model/CacheConfig
+    :model-id id
+    :details  {:model     (or (:model prev) (:model new))
+               :model-id  (or (:model_id prev) (:model_id new))
+               :old-value (dissoc prev :model :model_id)
+               :new-value (dissoc new :model :model_id)}}))</pre></td></tr><tr><td class="docs"><p>/</p>
+</td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
+  &quot;Return cache configuration.&quot;
+  [:as {{:strs [model collection]
+         :or   {model &quot;root&quot;}}
+        :query-params}]
+  {model      (ms/QueryVectorOf CachingModel)
+   ;; note that `nil` in `collection` means all configurations not scoped to any particular collection
+   collection [:maybe ms/PositiveInt]}
+  (validation/check-has-application-permission :setting)
+  (let [items (if (premium-features/enable-cache-granular-controls?)
+                (t2/select :model/CacheConfig
+                           :model [:in model]
+                           {:left-join [:report_card      [:and
+                                                           [:= :model [:inline &quot;question&quot;]]
+                                                           [:= :model_id :report_card.id]
+                                                           [:= :report_card.collection_id collection]]
+                                        :report_dashboard [:and
+                                                           [:= :model [:inline &quot;dashboard&quot;]]
+                                                           [:= :model_id :report_dashboard.id]
+                                                           [:= :report_dashboard.collection_id collection]]]
+                            :where     [:case
+                                        [:= :model [:inline &quot;question&quot;]]  [:!= :report_card.id nil]
+                                        [:= :model [:inline &quot;dashboard&quot;]] [:!= :report_dashboard.id nil]
+                                        :else                             true]})
+                (t2/select :model/CacheConfig :model &quot;root&quot;))]
+    {:data (mapv row-&gt;config items)}))</pre></td></tr><tr><td class="docs"><p>/</p>
+</td><td class="codes"><pre class="brush: clojure">(api/defendpoint PUT 
+  &quot;Store cache configuration.&quot;
+  [:as {{:keys [model model_id strategy] :as config} :body}]
+  {model    CachingModel
+   model_id ms/IntGreaterThanOrEqualToZero
+   strategy (CacheStrategyAPI)}
+  (validation/check-has-application-permission :setting)
+  (assert-valid-models model [model_id] (premium-features/enable-cache-granular-controls?))
+  (t2/with-transaction [_tx]
+    (let [data    (config-&gt;row config)
+          current (t2/select-one :model/CacheConfig :model model :model_id model_id {:for :update})]
+      {:id (u/prog1 (mdb.query/update-or-insert! :model/CacheConfig {:model model :model_id model_id}
+                                                 (constantly data))
+             (audit-caching-change! &lt;&gt; current data))})))</pre></td></tr><tr><td class="docs"><p>/</p>
+</td><td class="codes"><pre class="brush: clojure">(api/defendpoint DELETE 
+  &quot;Delete cache configuration.&quot;
+  [:as {{:keys [model model_id]} :body}]
+  {model    CachingModel
+   model_id (ms/QueryVectorOf ms/IntGreaterThanOrEqualToZero)}
+  (validation/check-has-application-permission :setting)
+  (assert-valid-models model model_id (premium-features/enable-cache-granular-controls?))
+  (when-let [current (seq (t2/select :model/CacheConfig :model model :model_id [:in model_id]))]
+    (t2/delete! :model/CacheConfig :model model :model_id [:in model_id])
+    (doseq [item current]
+      (audit-caching-change! (:id item)
+                             (select-keys item [:strategy :config :model :model_id])
+                             nil)))
+  nil)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api/define-routes)</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
