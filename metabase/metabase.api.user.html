@@ -3007,15 +3007,7 @@ we get a fiddly status and include_deactivated query.</p>
     (some? mw.offset-paging/*offset*)                  (sql.helpers/offset mw.offset-paging/*offset*)))</pre></td></tr><tr><td class="docs"><p>Given a where clause, return a clause that can be used to count.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- filter-clauses-without-paging
   [clauses]
-  (dissoc clauses :order-by :limit :offset))</pre></td></tr><tr><td class="docs"><p>Given a <code>user-id</code> return a list of group-ids of which the user is a group manager.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- group-ids-for-manager
-  [user-id]
-  (t2/select-fn-set
-   :group_id
-   :model/PermissionsGroupMembership
-   {:where [:and [:= :user_id user-id]
-            [:= :is_group_manager true]
-            [:not= :group_id (:id (perms-group/all-users))]]}))</pre></td></tr><tr><td class="docs"><p>/</p>
+  (dissoc clauses :order-by :limit :offset))</pre></td></tr><tr><td class="docs"><p>/</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
   &quot;Fetch a list of `Users` for admins or group managers.
   By default returns only active users for admins and only active users within groups that the group manager is managing for group managers.
@@ -3040,14 +3032,7 @@ we get a fiddly status and include_deactivated query.</p>
      (validation/check-manager-of-group group_id)
      (validation/check-group-manager)))
   (let [include_deactivated (Boolean/parseBoolean include_deactivated)
-        manager-group-ids   (set (group-ids-for-manager api/*current-user-id*))
-        group-id-clause     (cond
-                              ;; We know that the user is either admin or group manager of the given group_id (if it exists)
-                              group_id                [group_id]
-                              ;; Superuser can see all users, so don't filter by group ID
-                              api/*is-superuser?*     nil
-                              ;; otherwise, if the user is a group manager, only show them users in the groups they manage
-                              api/*is-group-manager?* (vec manager-group-ids))
+        group-id-clause     (when group_id [group_id])
         clauses             (user-clauses status query group-id-clause include_deactivated)]
     {:data (cond-&gt; (t2/select
                     (vec (cons User (user-visible-columns)))
@@ -3091,28 +3076,38 @@ Ignore the All-user groups.</p>
    - If user-visibility is :group, include only users in the same group (excluding the all users group).
    - If user-visibility is :none or the user is sandboxed, include only themselves.&quot;
   []
-  (cond
-    (or (= :all (user-visibility)) api/*is-superuser?*)
-    (let [clauses (-&gt; (user-clauses nil nil nil nil)
-                      (sql.helpers/order-by [:%lower.last_name :asc] [:%lower.first_name :asc]))]
-      {:data   (t2/select (vec (cons User (user-visible-columns))) clauses)
-       :total  (t2/count :model/User (filter-clauses-without-paging clauses))
-       :limit  mw.offset-paging/*limit*
-       :offset mw.offset-paging/*offset*})
-    (and (= :group (user-visibility)) (not (premium-features/sandboxed-or-impersonated-user?)))
-    (let [user-ids (same-groups-user-ids api/*current-user-id*)
-          clauses  (cond-&gt; (user-clauses nil nil nil nil)
-                     (seq user-ids) (sql.helpers/where [:in :core_user.id user-ids])
-                     true           (sql.helpers/order-by [:%lower.last_name :asc] [:%lower.first_name :asc]))]
-      {:data   (t2/select (vec (cons User (user-visible-columns))) clauses)
-       :total  (t2/count :model/User (filter-clauses-without-paging clauses))
-       :limit  mw.offset-paging/*limit*
-       :offset mw.offset-paging/*offset*})
-    :else
-    {:data   [(fetch-user :id api/*current-user-id*)]
-     :total  1
-     :limit  mw.offset-paging/*limit*
-     :offset mw.offset-paging/*offset*}))</pre></td></tr><tr><td class="docs"><p>If <code>advanced-permissions</code> is enabled, add to <code>user</code> a permissions map.</p>
+  ;; defining these functions so the branching logic below can be as clear as possible
+  (letfn [(all [] (let [clauses (-&gt; (user-clauses nil nil nil nil)
+                                    (sql.helpers/order-by [:%lower.last_name :asc] [:%lower.first_name :asc]))]
+                    {:data   (t2/select (vec (cons User (user-visible-columns))) clauses)
+                     :total  (t2/count :model/User (filter-clauses-without-paging clauses))
+                     :limit  mw.offset-paging/*limit*
+                     :offset mw.offset-paging/*offset*}))
+          (within-group [] (let [user-ids (same-groups-user-ids api/*current-user-id*)
+                                 clauses  (cond-&gt; (user-clauses nil nil nil nil)
+                                            (seq user-ids) (sql.helpers/where [:in :core_user.id user-ids])
+                                            true           (sql.helpers/order-by [:%lower.last_name :asc] [:%lower.first_name :asc]))]
+                             {:data   (t2/select (vec (cons User (user-visible-columns))) clauses)
+                              :total  (t2/count :model/User (filter-clauses-without-paging clauses))
+                              :limit  mw.offset-paging/*limit*
+                              :offset mw.offset-paging/*offset*}))
+          (just-me [] {:data   [(fetch-user :id api/*current-user-id*)]
+                       :total  1
+                       :limit  mw.offset-paging/*limit*
+                       :offset mw.offset-paging/*offset*})]
+    (cond
+      ;; if they're sandboxed OR if they're a superuser, ignore the setting and just give them nothing or everything,
+      ;; respectively.
+      (premium-features/sandboxed-user?)
+      (just-me)
+      api/*is-superuser?*
+      (all)
+      ;; otherwise give them what the setting says on the tin
+      :else
+      (case (user-visibility)
+        :none (just-me)
+        :group (within-group)
+        :all (all)))))</pre></td></tr><tr><td class="docs"><p>If <code>advanced-permissions</code> is enabled, add to <code>user</code> a permissions map.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- maybe-add-advanced-permissions
   [user]
   (if-let [with-advanced-permissions
