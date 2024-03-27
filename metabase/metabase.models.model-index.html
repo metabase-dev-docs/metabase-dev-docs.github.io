@@ -2903,7 +2903,7 @@ We'll keep this till we replace all the ModelIndexValue symbol in our codebase.<
     (remove-refresh-job model-index)))</pre></td></tr><tr><td class="docs"><p>Maximum number of values we will index. Actually take one more than this to test if there are more than the
 threshold.</p>
 </td><td class="codes"><pre class="brush: clojure">(def max-indexed-values
-  5000)</pre></td></tr><tr><td class="docs"><p>indexing functions</p>
+  25000)</pre></td></tr><tr><td class="docs"><p>indexing functions</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Filter function for valid tuples for indexing: an id and a value.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn valid-tuples?
   [[id v]] (and id v))</pre></td></tr><tr><td class="docs">
@@ -2912,33 +2912,34 @@ threshold.</p>
 Expression refs (`[:expression \&quot;full-name\&quot;]`) are how the _query_ refers to a custom column. But nested queries
 don't, (and shouldn't) care that those are expressions. They are just another field. The field type is always
 `:type/Text` enforced by the endpoint to create model indexes.&quot;
-  [field-ref :- mbql.s/Field]
+  [field-ref :- mbql.s/Field base-type]
   (case (first field-ref)
     :field field-ref
     :expression (let [[_ expression-name] field-ref]
                   ;; api validated that this is a text field when the model-index was created. When selecting the
                   ;; expression we treat it as a field.
-                  [:field expression-name {:base-type :type/Text}])
-    (throw (ex-info (trs &quot;Invalid field ref for indexing: {0}&quot; field-ref)
+                  [:field expression-name {:base-type base-type}])
+    (throw (ex-info (format &quot;Invalid field ref for indexing: %s&quot; field-ref)
                     {:field-ref field-ref
                      :valid-clauses [:field :expression]}))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- fetch-values
   [model-index]
   (let [model     (t2/select-one Card :id (:model_id model-index))
-        value-ref (-&gt; model-index
-                      :value_ref
-                      mbql.normalize/normalize-field-ref
-                      fix-expression-refs)]
-    (try [nil (-&gt;&gt; (qp/process-query
-                    {:database (:database_id model)
-                     :type     :query
-                     :query    {:source-table (format &quot;card__%d&quot; (:id model))
-                                :breakout     [(:pk_ref model-index) value-ref]
-                                :limit        (inc max-indexed-values)}})
-                   :data :rows (filter valid-tuples?))]
-         (catch Exception e
-           (log/warn (trs &quot;Error fetching indexed values for model {0}&quot; (:id model)) e)
-           [(ex-message e) []]))))</pre></td></tr><tr><td class="docs"><p>Find additions and deletions in indexed values. <code>source-values</code> are from the db, <code>indexed-values</code> are what we
+        fix       (fn [field-ref base-type] (-&gt; field-ref mbql.normalize/normalize-field-ref (fix-expression-refs base-type)))
+        ;; :type/Text and :type/Integer are ensured at creation time on the api.
+        value-ref (-&gt; model-index :value_ref (fix :type/Text))
+        pk-ref    (-&gt; model-index :pk_ref (fix :type/Integer))]
+    (try
+      [nil (-&gt;&gt; (qp/process-query
+                 {:database (:database_id model)
+                  :type     :query
+                  :query    {:source-table (format &quot;card__%d&quot; (:id model))
+                             :breakout     [pk-ref value-ref]
+                             :limit        (inc max-indexed-values)}})
+                :data :rows (filter valid-tuples?))]
+      (catch Exception e
+        (log/warn (trs &quot;Error fetching indexed values for model {0}&quot; (:id model)) e)
+        [(ex-message e) []]))))</pre></td></tr><tr><td class="docs"><p>Find additions and deletions in indexed values. <code>source-values</code> are from the db, <code>indexed-values</code> are what we
 currently have indexed.</p>
 
 <p>We have to identity values no longer in the set, values that must be added to the index, and primary keys which now
@@ -2954,38 +2955,43 @@ update if desired.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn add-values!
   [model-index]
   (let [[error-message values-to-index] (fetch-values model-index)
-        current-index-values               (into #{}
-                                                 (map (juxt :model_pk :name))
-                                                 (t2/select ModelIndexValue
-                                                            :model_index_id (:id model-index)))]
+        current-index-values            (into #{}
+                                              (map (juxt :model_pk :name))
+                                              (t2/select ModelIndexValue
+                                                         :model_index_id (:id model-index)))]
     (if-not (str/blank? error-message)
-      (t2/update! ModelIndex (:id model-index) {:state           &quot;error&quot;
-                                                :error           error-message
+      (t2/update! ModelIndex (:id model-index) {:state      &quot;error&quot;
+                                                :error      error-message
                                                 :indexed_at :%now})
       (try
         (t2/with-transaction [_conn]
           (let [{:keys [additions deletions]} (find-changes {:current-index current-index-values
                                                              :source-values values-to-index})]
             (when (seq deletions)
-              (t2/delete! ModelIndexValue
-                          :model_index_id (:id model-index)
-                          :pk_ref [:in (-&gt;&gt; deletions (map first))]))
+              (doseq [deletions-part (partition-all 10000 deletions)]
+                (t2/delete! ModelIndexValue
+                            :model_index_id (:id model-index)
+                            :model_pk [:in (-&gt;&gt; deletions-part (map first))])))
             (when (seq additions)
-              (t2/insert! ModelIndexValue
-                          (map (fn [[id v]]
-                                 {:name           v
-                                  :model_pk       id
-                                  :model_index_id (:id model-index)})
-                               additions))))
+              (doseq [additions-part (partition-all 10000 additions)]
+                (t2/insert! ModelIndexValue
+                            (map (fn [[id v]]
+                                   {:name           v
+                                    :model_pk       id
+                                    :model_index_id (:id model-index)})
+                                 additions-part)))))
           (t2/update! ModelIndex (:id model-index)
                       {:indexed_at :%now
-                       :state           (if (&gt; (count values-to-index) max-indexed-values)
-                                          &quot;overflow&quot;
-                                          &quot;indexed&quot;)}))
+                       :state      (if (&gt; (count values-to-index) max-indexed-values)
+                                     &quot;overflow&quot;
+                                     &quot;indexed&quot;)}))
         (catch Exception e
+          (log/error (format &quot;Error saving model-index values for model-index: %d, model: %d&quot;
+                             (:id model-index) (:model-id model-index))
+                     e)
           (t2/update! ModelIndex (:id model-index)
-                      {:state           &quot;error&quot;
-                       :error           (ex-message e)
+                      {:state      &quot;error&quot;
+                       :error      (ex-message e)
                        :indexed_at :%now}))))))</pre></td></tr><tr><td class="docs"><p>creation</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Default sync schedule for indexed values. Defaults to randomly once a day.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn default-schedule

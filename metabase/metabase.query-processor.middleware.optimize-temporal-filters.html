@@ -2871,7 +2871,9 @@ net.brehaut.ClojureTools = (function (SH) {
   (:require
    [clojure.walk :as walk]
    [metabase.legacy-mbql.util :as mbql.u]
+   [metabase.lib.metadata :as lib.metadata]
    [metabase.lib.util.match :as lib.util.match]
+   [metabase.query-processor.store :as qp.store]
    [metabase.util :as u]
    [metabase.util.date-2 :as u.date]
    [metabase.util.i18n :refer [trs]]
@@ -2879,7 +2881,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.util.malli :as mu]
    [metabase.util.malli.schema :as ms]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private optimizable-units
-  #{:second :minute :hour :day :week :month :quarter :year})</pre></td></tr><tr><td class="docs">
+  #{:second :minute :hour :day :week :month :quarter :year})</pre></td></tr><tr><td class="docs"><p>TODO -- we can use [[metabase.lib/temporal-bucket]] for this once we convert this middleware to MLv2</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- temporal-unit [field]
   (lib.util.match/match-one field [(_ :guard #{:field :expression}) _ (opts :guard :temporal-unit)] (:temporal-unit opts)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- optimizable-field? [field]
@@ -2901,11 +2903,20 @@ the filter clause they're in?</p>
     [:relative-datetime (_ :guard #{0 :current})]
     true
     [(_ :guard #{:absolute-datetime :relative-datetime}) _ (unit :guard optimizable-units)]
-    (= (temporal-unit field) unit)))</pre></td></tr><tr><td class="docs">
+    (= (temporal-unit field) unit)))</pre></td></tr><tr><td class="docs"><p>TODO -- once we convert this middleware to MLv2 we can use [[metabase.lib.metadata.calculation/type-of]]</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- field-or-expression-effective-type [field-or-expression]
+  (lib.util.match/match-one field-or-expression
+    [(_tag :guard #{:field :expression}) _ (opts :guard :effective-type)]
+    (:effective-type opts)
+    [:field (id :guard pos-int?) _opts]
+    (when-let [field (lib.metadata/field (qp.store/metadata-provider) id)]
+      (:effective-type field))
+    [(_tag :guard #{:field :expression}) _ (opts :guard :base-type)]
+    (:base-type opts)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod can-optimize-filter? :default
   [filter-clause]
   (lib.util.match/match-one filter-clause
-    [_
+    [_tag
      (field :guard optimizable-field?)
      (temporal-value :guard optimizable-temporal-value?)]
     (field-and-temporal-value-have-compatible-units? field temporal-value)))</pre></td></tr><tr><td class="docs">
@@ -2927,7 +2938,9 @@ the filter clause they're in?</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- change-temporal-unit-to-default [field]
   (lib.util.match/replace field
     [(_ :guard #{:field :expression}) _ (_ :guard (comp optimizable-units :temporal-unit))]
-    (mbql.u/update-field-options &amp;match assoc :temporal-unit :default)))</pre></td></tr><tr><td class="docs"><p>Get a clause representing the <em>lower</em> bound that should be used when converting a <code>temporal-value-clause</code> (e.g.
+    (mbql.u/update-field-options &amp;match assoc :temporal-unit :default)
+    [:absolute-datetime t _unit]
+    [:absolute-datetime t :default]))</pre></td></tr><tr><td class="docs"><p>Get a clause representing the <em>lower</em> bound that should be used when converting a <code>temporal-value-clause</code> (e.g.
 <code>:absolute-datetime</code> or <code>:relative-datetime</code>) to an optimized range.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti ^:private temporal-value-lower-bound
   {:arglists '([temporal-value-clause temporal-unit])}
@@ -2947,27 +2960,38 @@ the filter clause they're in?</p>
   [:relative-datetime (if (= n :current) 0 n) (or unit temporal-unit)])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod temporal-value-upper-bound :relative-datetime
   [[_ n unit] temporal-unit]
-  [:relative-datetime (inc (if (= n :current) 0 n)) (or unit temporal-unit)])</pre></td></tr><tr><td class="docs"><p>Optimize a filter clause against a temporal-bucketed <code>:field</code> or <code>:expression</code> clause and <code>:absolute-datetime</code> or <code>:relative-datetime</code>
+  [:relative-datetime (inc (if (= n :current) 0 n)) (or unit temporal-unit)])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- date-field-with-day-bucketing? [x]
+  (and (isa? (field-or-expression-effective-type x) :type/Date)
+       (= (temporal-unit x) :day)))</pre></td></tr><tr><td class="docs"><p>Optimize a filter clause against a temporal-bucketed <code>:field</code> or <code>:expression</code> clause and <code>:absolute-datetime</code> or <code>:relative-datetime</code>
 value by converting to an unbucketed range.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti ^:private optimize-filter
   {:arglists '([clause])}
   mbql.u/dispatch-by-clause-name-or-class)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod optimize-filter :=
   [[_tag field temporal-value]]
-  (let [temporal-unit (lib.util.match/match-one field [(_ :guard #{:field :expression}) _ (opts :guard :temporal-unit)] (:temporal-unit opts))]
-    (when (field-and-temporal-value-have-compatible-units? field temporal-value)
-      (let [field' (change-temporal-unit-to-default field)]
-        [:and
-         [:&gt;= field' (temporal-value-lower-bound temporal-value temporal-unit)]
-         [:&lt; field'  (temporal-value-upper-bound temporal-value temporal-unit)]]))))</pre></td></tr><tr><td class="docs">
+  (if (date-field-with-day-bucketing? field)
+    [:= (change-temporal-unit-to-default field) (change-temporal-unit-to-default temporal-value)]
+    (let [temporal-unit (lib.util.match/match-one field
+                          [(_ :guard #{:field :expression}) _ (opts :guard :temporal-unit)]
+                          (:temporal-unit opts))]
+      (when (field-and-temporal-value-have-compatible-units? field temporal-value)
+        (let [field' (change-temporal-unit-to-default field)]
+          [:and
+           [:&gt;= field' (temporal-value-lower-bound temporal-value temporal-unit)]
+           [:&lt; field'  (temporal-value-upper-bound temporal-value temporal-unit)]])))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod optimize-filter :!=
-  [filter-clause]
-  (mbql.u/negate-filter-clause ((get-method optimize-filter :=) filter-clause)))</pre></td></tr><tr><td class="docs">
+  [[_tag field temporal-value :as filter-clause]]
+  (if (date-field-with-day-bucketing? field)
+    [:!= (change-temporal-unit-to-default field) (change-temporal-unit-to-default temporal-value)]
+    (mbql.u/negate-filter-clause ((get-method optimize-filter :=) filter-clause))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- optimize-comparison-filter
-  [optimize-temporal-value-fn [_filter-type field temporal-value] new-filter-type]
-  [new-filter-type
-   (change-temporal-unit-to-default field)
-   (optimize-temporal-value-fn temporal-value (temporal-unit field))])</pre></td></tr><tr><td class="docs">
+  [optimize-temporal-value-fn [tag field temporal-value] new-filter-type]
+  (if (date-field-with-day-bucketing? field)
+    [tag (change-temporal-unit-to-default field) (change-temporal-unit-to-default temporal-value)]
+    [new-filter-type
+     (change-temporal-unit-to-default field)
+     (optimize-temporal-value-fn temporal-value (temporal-unit field))]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod optimize-filter :&lt;
   [filter-clause]
   (optimize-comparison-filter temporal-value-lower-bound filter-clause :&lt;))</pre></td></tr><tr><td class="docs">
@@ -2981,11 +3005,16 @@ value by converting to an unbucketed range.</p>
   [filter-clause]
   (optimize-comparison-filter temporal-value-lower-bound filter-clause :&gt;=))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod optimize-filter :between
-  [[_ field lower-bound upper-bound]]
-  (let [field' (change-temporal-unit-to-default field)]
-    [:and
-     [:&gt;= field' (temporal-value-lower-bound lower-bound (temporal-unit field))]
-     [:&lt;  field' (temporal-value-upper-bound upper-bound (temporal-unit field))]]))</pre></td></tr><tr><td class="docs">
+  [[_tag field lower-bound upper-bound]]
+  (if (date-field-with-day-bucketing? field)
+    [:between
+     (change-temporal-unit-to-default field)
+     (change-temporal-unit-to-default lower-bound)
+     (change-temporal-unit-to-default upper-bound)]
+    (let [field' (change-temporal-unit-to-default field)]
+      [:and
+       [:&gt;= field' (temporal-value-lower-bound lower-bound (temporal-unit field))]
+       [:&lt;  field' (temporal-value-upper-bound upper-bound (temporal-unit field))]])))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- optimize-temporal-filters* [query]
   (lib.util.match/replace query
     (_ :guard (partial mbql.u/is-clause? (set (keys (methods optimize-filter)))))
