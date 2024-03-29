@@ -3103,12 +3103,16 @@ plaintext token is only sent in the password reset email to the user in question
           ;; check that the reset was triggered within the last 48 HOURS, after that the token is considered expired
           (let [token-age (- (System/currentTimeMillis) reset_triggered)]
             (when (&lt; token-age (reset-token-ttl-ms))
-              user)))))))</pre></td></tr><tr><td class="docs"><p>/reset_password</p>
+              user)))))))</pre></td></tr><tr><td class="docs"><p>Throttler for password_reset. There's no good field to mark so use password as a default.</p>
+</td><td class="codes"><pre class="brush: clojure">(def reset-password-throttler
+  (throttle/make-throttler :password :attempts-threshold 10))</pre></td></tr><tr><td class="docs"><p>/reset_password</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint POST 
   &quot;Reset password with a reset token.&quot;
   [:as {{:keys [token password]} :body, :as request}]
   {token    ms/NonBlankString
    password ms/ValidPassword}
+  (let [request-source (req.util/ip-address request)]
+    (throttle-check reset-password-throttler request-source))
   (or (when-let [{user-id :id, :as user} (valid-reset-token-&gt;user token)]
         (let [reset-token (t2/select-one-fn :reset_token :model/User :id user-id)]
           (user/set-password! user-id password)
