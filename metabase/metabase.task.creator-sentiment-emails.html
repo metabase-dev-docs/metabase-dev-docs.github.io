@@ -2882,7 +2882,10 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.public-settings.premium-features :as premium-features]
    [metabase.task :as task]
    [metabase.util.log :as log]
-   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
+   [toucan2.core :as t2])
+  (:import
+   (java.util Locale)
+   (java.time.temporal WeekFields)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Fetch the creators who are eligible for a creator sentiment email. Which are users who, in the past 2 months:
   - Created at least 10 questions total
   - Created at least 2 SQL questions
@@ -2922,33 +2925,42 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defn- fetch-instance-data []
   {:created_at     (snowplow/instance-creation)
    :plan           (fetch-plan-info)
-   :verison        (config/mb-version-info :tag)
+   :version        (config/mb-version-info :tag)
    :num_users      (t2/count :model/User :is_active true, :type &quot;personal&quot;)
    :num_dashboards (t2/count :model/Dashboard :archived false)
+   :num_databases  (t2/count :model/Database :is_audit false)
    :num_questions  (t2/count :model/Card :archived false :type &quot;question&quot;)
-   :num_models     (t2/count :model/Card :archived false :type &quot;model&quot;)})</pre></td></tr><tr><td class="docs"><p>Send an email to the instance admin following up on their experience with Metabase thus far.</p>
+   :num_models     (t2/count :model/Card :archived false :type &quot;model&quot;)})</pre></td></tr><tr><td class="docs"><p>Create a blob of instance/user data to be sent to the creator sentiment survey.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- user-instance-info
+  [instance-data {:keys [created_at num_dashboards num_questions num_models]}]
+  {:instance instance-data
+   :user     {:created_at     created_at
+              :num_dashboards num_dashboards
+              :num_questions  num_questions
+              :num_models     num_models}})</pre></td></tr><tr><td class="docs"><p>Send an email to the instance admin following up on their experience with Metabase thus far.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- send-creator-sentiment-emails!
-  []
+  [current-week]
   ;; we need access to email AND the instance must have surveys enabled.
   (when (and (email/email-configured?)
              (email/surveys-enabled))
-    (let [instance-data (when (public-settings/anon-tracking-enabled)
-                          (fetch-instance-data))
+    (let [instance-data (fetch-instance-data)
           all-creators  (fetch-creators (premium-features/enable-whitelabeling?))
-          month         (- (.getValue (t/month)) 1)
-          this-month    (fn [c] (= month (-&gt; c :email hash (mod 12))))
-          recipients    (filter this-month all-creators)]
+          this-week?    (fn [c] (= current-week (-&gt; c :email hash (mod 52))))
+          recipients    (filter this-week? all-creators)
+          blob          (if (public-settings/anon-tracking-enabled)
+                          (fn [creator]
+                            (user-instance-info instance-data creator))
+                          (constantly nil))]
       (log/infof &quot;Sending surveys to %d creators of a total %d&quot;
                  (count all-creators) (count recipients))
       (doseq [creator recipients]
-        ;; Send the email if the creator's email hash matches the current month
-        (when (= (-&gt; creator :email hash (mod 12)) month)
-          (try
-            (messages/send-creator-sentiment-email! creator instance-data)
-            (catch Throwable e
-              (log/error e &quot;Problem sending creator sentiment email:&quot;))))))))</pre></td></tr><tr><td class="docs"><p>Sends out a monthly survey to a portion of the creators.</p>
+        (try
+          (messages/send-creator-sentiment-email! creator (blob creator))
+          (catch Throwable e
+            (log/error e &quot;Problem sending creator sentiment email:&quot;)))))))</pre></td></tr><tr><td class="docs"><p>Sends out a monthly survey to a portion of the creators.</p>
 </td><td class="codes"><pre class="brush: clojure">(jobs/defjob  CreatorSentimentEmail [_]
-  (send-creator-sentiment-emails!))</pre></td></tr><tr><td class="docs">
+  (let [current-week (.get (t/local-date) (.weekOfWeekBasedYear (WeekFields/of (Locale/getDefault))))]
+    (send-creator-sentiment-emails! current-week)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private creator-sentiment-emails-job-key     &quot;metabase.task.creator-sentiment-emails.job&quot;)
 (def ^:private creator-sentiment-emails-trigger-key &quot;metabase.task.creator-sentiment-emails.trigger&quot;)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod task/init! ::SendCreatorSentimentEmails [_]
@@ -2959,8 +2971,8 @@ net.brehaut.ClojureTools = (function (SH) {
                  (triggers/with-identity (triggers/key creator-sentiment-emails-trigger-key))
                  (triggers/start-now)
                  (triggers/with-schedule
-                   ;; Fire at 2am on the second saturday of the month
-                   (cron/cron-schedule &quot;0 0 2 ? * 7#2&quot;)))]
+                   ;; Fire at 2am every saturday
+                   (cron/cron-schedule &quot;0 0 2 ? * 7&quot;)))]
     (task/schedule-task! job trigger)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
