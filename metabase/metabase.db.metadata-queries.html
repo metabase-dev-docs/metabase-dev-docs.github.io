@@ -2875,14 +2875,14 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.driver.util :as driver.u]
    [metabase.legacy-mbql.schema :as mbql.s]
    [metabase.legacy-mbql.schema.helpers :as helpers]
-   [metabase.models.table :as table]
    [metabase.query-processor :as qp]
    [metabase.query-processor.interface :as qp.i]
    [metabase.util :as u]
    [metabase.util.malli :as mu]
    [metabase.util.malli.schema :as ms]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- qp-query [db-id mbql-query]
+</td><td class="codes"><pre class="brush: clojure">(defn- qp-query
+  [db-id mbql-query]
   {:pre [(integer? db-id)]}
   (-&gt; (binding [qp.i/*disable-qp-logging* true]
         (qp/process-query
@@ -2898,37 +2898,42 @@ net.brehaut.ClojureTools = (function (SH) {
     (condp #(isa? %2 %1) (:base_type field)
       :type/Number   [:&gt; field-form -9223372036854775808]
       :type/Date     [:&gt; field-form &quot;0001-01-01&quot;]
-      :type/DateTime [:&gt; field-form &quot;0001-01-01T00:00:00&quot;])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- query-with-default-partitioned-field-filter
-  [query table-id]
-  (let [;; In bigquery, range or datetime partitioned table can have only one partioned field,
-        ;; Ingestion time partitioned table can use either _PARTITIONDATE or _PARTITIONTIME as
-        ;; partitioned field
-        partition-field (or (t2/select-one :model/Field
-                                           :table_id table-id
-                                           :database_partitioned true
-                                           :active true
-                                           ;; prefer _PARTITIONDATE over _PARTITIONTIME for ingestion time query
-                                           {:order-by [[:name :asc]]})
-                            (throw (ex-info (format &quot;No partitioned field found for table: %d&quot; table-id)
-                                            {:table_id table-id})))
-        filter-form     (partition-field-&gt;filter-form partition-field)]
-    (update query :filter (fn [existing-filter]
-                            (if (some? existing-filter)
-                              [:and existing-filter filter-form]
-                              filter-form)))))</pre></td></tr><tr><td class="docs">
+      :type/DateTime [:&gt; field-form &quot;0001-01-01T00:00:00&quot;])))</pre></td></tr><tr><td class="docs"><p>Add a dummy filter for tables that require filters.
+Look into tables from source tables and all the joins.
+Currently this only apply to partitioned tables on bigquery that requires a partition filter.
+In the future we probably want this to be dispatched by database engine or handled by QP.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn add-required-filters-if-needed
+  [query]
+  (let [table-ids              (-&gt;&gt; (conj (keep :source-table (:joins query)) (:source-table query))
+                                    (filter pos-int?))
+        required-filter-fields (when (seq table-ids)
+                                 (t2/select :model/Field {:select    [:f.*]
+                                                          :from      [[:metabase_field :f]]
+                                                          :left-join [[:metabase_table :t] [:= :t.id :f.table_id]]
+                                                          :where     [:and
+                                                                      [:= :f.active true]
+                                                                      [:= :f.database_partitioned true]
+                                                                      [:= :t.active true]
+                                                                      [:= :t.database_require_filter true]
+                                                                      [:in :t.id table-ids]]}))
+        update-query-filter-fn (fn [existing-filter new-filter]
+                                (if (some? existing-filter)
+                                  [:and existing-filter new-filter]
+                                  new-filter))]
+    (case (count required-filter-fields)
+      0
+      query
+      1
+      (update query :filter update-query-filter-fn (partition-field-&gt;filter-form (first required-filter-fields)))
+      ;; &gt; 1
+      (update query :filter update-query-filter-fn (into [:and] (map partition-field-&gt;filter-form required-filter-fields))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- field-mbql-query
   [table mbql-query]
-  (cond-&gt; mbql-query
-    true
-    (assoc :source-table (:id table))
-    ;; Some table requires a filter to be able to query the data
-    ;; Currently this only applied to Partitioned table in bigquery where the partition field
-    ;; is required as a filter.
-    ;; In the future we probably want this to be dispatched by database engine type
-    (:database_require_filter table)
-    (query-with-default-partitioned-field-filter (:id table))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- field-query [{table-id :table_id} mbql-query]
+  (-&gt; mbql-query
+      (assoc :source-table (:id table))
+      add-required-filters-if-needed))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- field-query
+  [{table-id :table_id} mbql-query]
   {:pre [(integer? table-id)]}
   (let [table (t2/select-one :model/Table :id table-id)]
     (qp-query (:db_id table)
@@ -2960,7 +2965,25 @@ that I marked as List is not showing all values in the List Widget'</li>
    (field-distinct-values field absolute-max-distinct-values-limit))
   ([field max-results :- ms/PositiveInt]
    (field-query field {:breakout [[:field (u/the-id field) nil]]
-                       :limit    (min max-results absolute-max-distinct-values-limit)})))</pre></td></tr><tr><td class="docs"><p>Return the distinct count of <code>field</code>.</p>
+                       :limit    (min max-results absolute-max-distinct-values-limit)})))</pre></td></tr><tr><td class="docs"><p>Generate the MBQL query used to power FieldValues search in [[metabase.api.field/search-values]]. The actual query generated
+differs slightly based on whether the two Fields are the same Field.</p>
+
+<p>Note: the generated MBQL query assume that both <code>field</code> and <code>search-field</code> are from the same table.</p>
+
+<p>I'm not sure whether this field-distinct-values and field-distinct-values belong to this namespace
+maybe it's better to keep this in metabase.models.field or metabase.models.field-values</p>
+</td><td class="codes"><pre class="brush: clojure">(defn search-values-query
+ [field search-field value limit]
+ (field-query field {:filter   (when (some? value)
+                                 [:contains [:field (u/the-id search-field) nil] value {:case-sensitive false}])
+                     ;; if both fields are the same then make sure not to refer to it twice in the `:breakout` clause.
+                     ;; Otherwise this will break certain drivers like BigQuery that don't support duplicate
+                     ;; identifiers/aliases
+                     :breakout (if (= (u/the-id field) (u/the-id search-field))
+                                 [[:field (u/the-id field) nil]]
+                                 [[:field (u/the-id field) nil]
+                                  [:field (u/the-id search-field) nil]])
+                     :limit    limit}))</pre></td></tr><tr><td class="docs"><p>Return the distinct count of <code>field</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn field-distinct-count
   [field &amp; [limit]]
   (-&gt; (field-query field {:aggregation [[:distinct [:field (u/the-id field) nil]]]
@@ -2993,7 +3016,7 @@ enough to just check the base type.</p>
   [table
    fields
    {:keys [truncation-size limit order-by] :or {limit max-sample-rows} :as _opts}]
-  (let [database           (table/database table)
+  (let [database           (t2/select-one :model/Database (:db_id table))
         driver             (driver.u/database-&gt;driver database)
         text-fields        (filter text-field? fields)
         field-&gt;expressions (when (and truncation-size (driver/database-supports? driver :expressions database))
@@ -3012,8 +3035,8 @@ enough to just check the base type.</p>
                           :limit        limit}
                    order-by
                    (assoc :order-by order-by)
-                   (:database_require_filter table)
-                   (query-with-default-partitioned-field-filter (:id table)))
+                   true
+                   add-required-filters-if-needed)
      :middleware {:format-rows?           false
                   :skip-results-metadata? true}}))</pre></td></tr><tr><td class="docs"><p>Run a basic MBQL query to fetch a sample of rows of FIELDS belonging to a TABLE.</p>
 

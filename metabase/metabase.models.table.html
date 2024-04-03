@@ -2874,8 +2874,6 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.driver :as driver]
    [metabase.models.audit-log :as audit-log]
    [metabase.models.data-permissions :as data-perms]
-   [metabase.models.database :refer [Database]]
-   [metabase.models.field :refer [Field]]
    [metabase.models.humanization :as humanization]
    [metabase.models.interface :as mi]
    [metabase.models.permissions-group :as perms-group]
@@ -2916,7 +2914,7 @@ We'll keep this till we replace all the Table symbol in our codebase.</p>
 </td><td class="codes"><pre class="brush: clojure">(t2/define-before-insert :model/Table
   [table]
   (let [defaults {:display_name (humanization/name-&gt;human-readable-name (:name table))
-                  :field_order  (driver/default-field-order (t2/select-one-fn :engine Database :id (:db_id table)))}]
+                  :field_order  (driver/default-field-order (t2/select-one-fn :engine :model/Database :id (:db_id table)))}]
     (merge defaults table)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- set-new-table-permissions!
   [table]
@@ -2969,9 +2967,9 @@ We'll keep this till we replace all the Table symbol in our codebase.</p>
   [table]
   (doall
    (map-indexed (fn [new-position field]
-                  (t2/update! Field (u/the-id field) {:position new-position}))
+                  (t2/update! :model/Field (u/the-id field) {:position new-position}))
                 ;; Can't use `select-field` as that returns a set while we need an ordered list
-                (t2/select [Field :id]
+                (t2/select [:model/Field :id]
                            :table_id  (u/the-id table)
                            {:order-by (case (:field_order table)
                                         :custom       [[:custom_position :asc]]
@@ -2986,7 +2984,7 @@ We'll keep this till we replace all the Table symbol in our codebase.</p>
                                         :alphabetical [[:%lower.name :asc]])}))))</pre></td></tr><tr><td class="docs"><p>Field ordering is valid if all the fields from a given table are present and only from that table.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- valid-field-order?
   [table field-ordering]
-  (= (t2/select-pks-set Field
+  (= (t2/select-pks-set :model/Field
        :table_id (u/the-id table)
        :active   true)
      (set field-ordering)))</pre></td></tr><tr><td class="docs"><p>Set field order to <code>field-order</code>.</p>
@@ -2996,8 +2994,8 @@ We'll keep this till we replace all the Table symbol in our codebase.</p>
   (t2/update! Table (u/the-id table) {:field_order :custom})
   (doall
     (map-indexed (fn [position field-id]
-                   (t2/update! Field field-id {:position        position
-                                               :custom_position position}))
+                   (t2/update! :model/Field field-id {:position        position
+                                                      :custom_position position}))
                  field-order)))</pre></td></tr><tr><td class="docs"><p>--------------------------------------------------- Hydration ----------------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/batched-hydrate [:model/Table :field_values]
@@ -3049,7 +3047,7 @@ We'll keep this till we replace all the Table symbol in our codebase.</p>
   [tables]
   (with-objects :fields
     (fn [table-ids]
-      (t2/select Field
+      (t2/select :model/Field
         :active          true
         :table_id        [:in table-ids]
         :visibility_type [:not= &quot;retired&quot;]
@@ -3063,11 +3061,11 @@ We'll keep this till we replace all the Table symbol in our codebase.</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Return the <code>Database</code> associated with this <code>Table</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn database
   [table]
-  (t2/select-one Database :id (:db_id table)))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------- Serialization -------------------------------------------------</p>
+  (t2/select-one :model/Database :id (:db_id table)))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------- Serialization -------------------------------------------------</p>
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/dependencies &quot;Table&quot; [table]
   [[{:model &quot;Database&quot; :id (:db_id table)}]])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/generate-path &quot;Table&quot; [_ table]
-  (let [db-name (t2/select-one-fn :name 'Database :id (:db_id table))]
+  (let [db-name (t2/select-one-fn :name :model/Database :id (:db_id table))]
     (filterv some? [{:model &quot;Database&quot; :id db-name}
                     (when (:schema table)
                       {:model &quot;Schema&quot; :id (:schema table)})
@@ -3080,16 +3078,16 @@ We'll keep this till we replace all the Table symbol in our codebase.</p>
         schema-name (when (= 3 (count path))
                       (-&gt; path second :id))
         table-name  (-&gt; path last :id)
-        db-id       (t2/select-one-pk Database :name db-name)]
+        db-id       (t2/select-one-pk :model/Database :name db-name)]
     (t2/select-one Table :name table-name :db_id db-id :schema schema-name)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/extract-one &quot;Table&quot;
   [_model-name _opts {:keys [db_id] :as table}]
   (-&gt; (serdes/extract-one-basics &quot;Table&quot; table)
-      (assoc :db_id (t2/select-one-fn :name 'Database :id db_id))))</pre></td></tr><tr><td class="docs">
+      (assoc :db_id (t2/select-one-fn :name :model/Database :id db_id))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/load-xform &quot;Table&quot;
   [{:keys [db_id] :as table}]
   (-&gt; (serdes/load-xform-basics table)
-      (assoc :db_id (t2/select-one-fn :id 'Database :name db_id))))</pre></td></tr><tr><td class="docs">
+      (assoc :db_id (t2/select-one-fn :id :model/Database :name db_id))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/storage-path &quot;Table&quot; [table _ctx]
   (concat (serdes/storage-table-path-prefix (serdes/path table))
           [(:name table)]))</pre></td></tr><tr><td class="docs"><p>-------------------------------------------------- Audit Log Table -------------------------------------------------</p>
