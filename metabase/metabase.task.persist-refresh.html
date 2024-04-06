@@ -2891,7 +2891,6 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.query-processor.timezone :as qp.timezone]
    [metabase.task :as task]
    [metabase.util :as u]
-   [metabase.util.i18n :refer [trs]]
    [metabase.util.log :as log]
    [potemkin.types :as p]
    [toucan2.core :as t2])
@@ -2920,7 +2919,7 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defn- refresh-with-stats! [refresher database stats persisted-info]
   ;; Since this could be long running, double check state just before refreshing
   (when (contains? (persisted-info/refreshable-states) (t2/select-one-fn :state PersistedInfo :id (:id persisted-info)))
-    (log/info (trs &quot;Attempting to refresh persisted model {0}.&quot; (:card_id persisted-info)))
+    (log/infof &quot;Attempting to refresh persisted model %s.&quot; (:card_id persisted-info))
     (let [card (t2/select-one Card :id (:card_id persisted-info))
           definition (persisted-info/metadata-&gt;definition (:result_metadata card)
                                                           (:table_name persisted-info))
@@ -2935,8 +2934,8 @@ net.brehaut.ClojureTools = (function (SH) {
           {:keys [state error]} (try
                                   (refresh! refresher database definition card)
                                   (catch Exception e
-                                    (log/info e (trs &quot;Error refreshing persisting model with card-id {0}&quot;
-                                                     (:card_id persisted-info)))
+                                    (log/infof e &quot;Error refreshing persisting model with card-id %s&quot;
+                                               (:card_id persisted-info))
                                     {:state :error :error (ex-message e)}))]
       (t2/update! PersistedInfo (u/the-id persisted-info)
                   {:active (= state :success),
@@ -2987,14 +2986,14 @@ and :task_details will be the result of <code>f</code>.</p>
                                              (:archived card-info)
                                              (not= (:type card-info) :model))
                                        (let [database (-&gt; persisted-info :database_id db-id-&gt;db)]
-                                         (log/info (trs &quot;Unpersisting model with card-id {0}&quot; (:card_id persisted-info)))
+                                         (log/infof &quot;Unpersisting model with card-id %s&quot; (:card_id persisted-info))
                                          (try
                                            (unpersist! refresher database persisted-info)
                                            (when-not (= &quot;off&quot; current-state)
                                              (t2/delete! PersistedInfo :id (:id persisted-info)))
                                            (update stats :success inc)
                                            (catch Exception e
-                                             (log/info e (trs &quot;Error unpersisting model with card-id {0}&quot; (:card_id persisted-info)))
+                                             (log/infof e &quot;Error unpersisting model with card-id %s&quot; (:card_id persisted-info))
                                              (update stats :error inc))))
                                        (update stats :skipped inc))))
                                  {:success 0, :error 0, :skipped 0}
@@ -3038,7 +3037,7 @@ persisted info records pointing to cards that are no longer models and archived 
 of "persisted".</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- refresh-tables!
   [database-id refresher]
-  (log/info (trs &quot;Starting persisted model refresh task for Database {0}.&quot; database-id))
+  (log/infof &quot;Starting persisted model refresh task for Database %s.&quot; database-id)
   (persisted-info/ready-unpersisted-models! database-id)
   (let [database  (t2/select-one Database :id database-id)
         persisted (refreshable-models database-id)
@@ -3047,8 +3046,8 @@ of "persisted".</p>
                             {:success 0, :error 0, :trigger &quot;Scheduled&quot;}
                             persisted))
         {:keys [error success]} (save-task-history! &quot;persist-refresh&quot; database-id thunk)]
-    (log/info
-      (trs &quot;Finished persisted model refresh task for Database {0} with {1} successes and {2} errors.&quot; database-id success error))))</pre></td></tr><tr><td class="docs"><p>Refresh an individual model based on [[PersistedInfo]].</p>
+    (log/infof &quot;Finished persisted model refresh task for Database %s with %s successes and %s errors.&quot;
+               database-id success error)))</pre></td></tr><tr><td class="docs"><p>Refresh an individual model based on [[PersistedInfo]].</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- refresh-individual!
   [persisted-info-id refresher]
   (let [persisted-info (t2/select-one PersistedInfo :id persisted-info-id)
@@ -3062,17 +3061,16 @@ of "persisted".</p>
                                      database
                                      {:success 0 :error 0, :trigger &quot;Manual&quot;}
                                      persisted-info))
-        (log/info (trs &quot;Finished updated model-id {0} from persisted-info {1}.&quot;
-                       (:card_id persisted-info)
-                       (u/the-id persisted-info))))
-      (log/info (trs &quot;Unable to refresh model with card-id {0}&quot; (:card_id persisted-info))))))</pre></td></tr><tr><td class="docs"><p>Refresh tables. Gets the database id from the job context and calls <code>refresh-tables!'</code>.</p>
+        (log/infof &quot;Finished updated model-id %s from persisted-info %s.&quot;
+                   (:card_id persisted-info) (u/the-id persisted-info)))
+      (log/infof &quot;Unable to refresh model with card-id %s&quot; (:card_id persisted-info)))))</pre></td></tr><tr><td class="docs"><p>Refresh tables. Gets the database id from the job context and calls <code>refresh-tables!'</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- refresh-job-fn!
   [job-context]
   (let [{:strs [type db-id persisted-id] :as _payload} (job-context-&gt;job-type job-context)]
     (case type
       &quot;database&quot;   (refresh-tables!     db-id        dispatching-refresher)
       &quot;individual&quot; (refresh-individual! persisted-id dispatching-refresher)
-      (log/info (trs &quot;Unknown payload type {0}&quot; type)))))</pre></td></tr><tr><td class="docs">
+      (log/infof &quot;Unknown payload type %s&quot; type))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- prune-job-fn!
   [_job-context]
   (prune-all-deletable! dispatching-refresher))</pre></td></tr><tr><td class="docs"><p>Refresh persisted tables job</p>
@@ -3184,7 +3182,7 @@ instance.</p>
     (try (task/add-trigger! tggr)
          (catch ObjectAlreadyExistsException _e
            (log/info
-            (u/format-color 'green &quot;Persistence already present for model %d&quot;
+            (u/format-color :green &quot;Persistence already present for model %d %s&quot;
                             (:card_id persisted-info)
                             (.. ^Trigger tggr getKey getName)))))))</pre></td></tr><tr><td class="docs"><p>other errors?</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Fetch all database-ids that have a refresh job scheduled.</p>

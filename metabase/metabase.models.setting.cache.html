@@ -2874,7 +2874,6 @@ lookup.</p>
    [metabase.db :as mdb]
    [metabase.util :as u]
    [metabase.util.honey-sql-2 :as h2x]
-   [metabase.util.i18n :refer [trs]]
    [metabase.util.log :as log]
    [toucan2.core :as t2])
   (:import
@@ -2924,7 +2923,7 @@ need to cast it between TEXT and TIMESTAMP SQL types as needed.</p>
   &quot;settings-last-updated&quot;)</pre></td></tr><tr><td class="docs"><p>Update the value of <code>settings-last-updated</code> in the DB; if the row does not exist, insert one.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn update-settings-last-updated!
   []
-  (log/debug (trs &quot;Updating value of settings-last-updated in DB...&quot;))
+  (log/debug &quot;Updating value of settings-last-updated in DB...&quot;)
   ;; for MySQL, cast(current_timestamp AS char); for H2 &amp; Postgres, cast(current_timestamp AS text)
   (let [current-timestamp-as-string-honeysql (h2x/cast (if (= (mdb/db-type) :mysql) :char :text)
                                                        [:raw &quot;current_timestamp&quot;])]
@@ -2939,8 +2938,8 @@ need to cast it between TEXT and TIMESTAMP SQL types as needed.</p>
           (t2/insert! (t2/table-name (t2/resolve-model 'Setting)) :key settings-last-updated-key, :value current-timestamp-as-string-honeysql)
           (catch java.sql.SQLException e
             ;; go ahead and log the Exception anyway on the off chance that it *wasn't* just a race condition issue
-            (log/error (trs &quot;Error updating Settings last updated value: {0}&quot;
-                            (with-out-str (jdbc/print-sql-exception-chain e))))))))
+            (log/errorf &quot;Error updating Settings last updated value: %s&quot;
+                        (with-out-str (jdbc/print-sql-exception-chain e)))))))
   ;; Now that we updated the value in the DB, go ahead and update our cached value as well, because we know about the
   ;; changes
   (swap! (cache*) assoc settings-last-updated-key (t2/select-one-fn :value 'Setting :key settings-last-updated-key)))</pre></td></tr><tr><td class="docs"><p>Check whether our Settings cache is out of date. We know the cache is out of date if either of the following
@@ -2954,7 +2953,7 @@ to invalidate our cache.)</li>
 </ul>
 </td><td class="codes"><pre class="brush: clojure">(defn- cache-out-of-date?
   []
-  (log/debug (trs &quot;Checking whether settings cache is out of date (requires DB call)...&quot;))
+  (log/debug &quot;Checking whether settings cache is out of date (requires DB call)...&quot;)
   (let [current-cache (cache)]
     (boolean
       (or
@@ -2971,8 +2970,7 @@ to invalidate our cache.)</li>
             (log/trace &quot;last known Settings update: &quot; (pr-str last-known-update))
             (log/trace &quot;actual last Settings update:&quot; (pr-str &lt;&gt;))
             (when &lt;&gt;
-              (log/info (u/format-color 'red
-                            (trs &quot;Settings have been changed on another instance, and will be reloaded here.&quot;))))))))))</pre></td></tr><tr><td class="docs"><p>How often we should check whether the Settings cache is out of date (which requires a DB call)?</p>
+              (log/info (u/format-color :red &quot;Settings have been changed on another instance, and will be reloaded here.&quot;)))))))))</pre></td></tr><tr><td class="docs"><p>How often we should check whether the Settings cache is out of date (which requires a DB call)?</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private ^:const cache-update-check-interval-ms
   (u/minutes-&gt;ms 1))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defonce ^:private last-update-check (atom 0))</pre></td></tr><tr><td class="docs"><p>Has it has been more than a minute since the last time we checked for updates?</p>
@@ -2982,7 +2980,7 @@ to invalidate our cache.)</li>
      cache-update-check-interval-ms))</pre></td></tr><tr><td class="docs"><p>Populate cache with the latest hotness from the db</p>
 </td><td class="codes"><pre class="brush: clojure">(defn restore-cache!
   []
-  (log/debug (trs &quot;Refreshing Settings cache...&quot;))
+  (log/debug &quot;Refreshing Settings cache...&quot;)
   (reset! (cache*) (t2/select-fn-&gt;fn :key :value 'Setting)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defonce ^:private ^ReentrantLock restore-cache-lock (ReentrantLock.))</pre></td></tr><tr><td class="docs"><p>Check whether we need to repopulate the cache with fresh values from the DB (because the cache is either empty or
 known to be out-of-date), and do so if needed. This is intended to be called every time a Setting value is
