@@ -2887,15 +2887,12 @@ errors themselves.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.sync.analyze.classify
   (:require
    [clojure.data :as data]
+   [metabase.analyze.classifiers.core :as classifiers]
+   [metabase.analyze.classifiers.name :as classifiers.name]
+   [metabase.analyze.fingerprint.schema :as fingerprint.schema]
    [metabase.lib.metadata :as lib.metadata]
    [metabase.models.interface :as mi]
    [metabase.query-processor.store :as qp.store]
-   [metabase.sync.analyze.classifiers.category :as classifiers.category]
-   [metabase.sync.analyze.classifiers.name :as classifiers.name]
-   [metabase.sync.analyze.classifiers.no-preview-display
-    :as classifiers.no-preview-display]
-   [metabase.sync.analyze.classifiers.text-fingerprint
-    :as classifiers.text-fingerprint]
    [metabase.sync.interface :as i]
    [metabase.sync.util :as sync-util]
    [metabase.util :as u]
@@ -2931,40 +2928,17 @@ errors themselves.</p>
     (when values-to-set
       (t2/update! (mi/model original-model) (u/the-id original-model)
                   values-to-set)
-      true)))</pre></td></tr><tr><td class="docs"><p>Various classifier functions available. These should all take two args, a <code>FieldInstance</code> and a possibly <code>nil</code>
-<code>Fingerprint</code>, and return <code>FieldInstance</code> with any inferred property changes, or <code>nil</code> if none could be inferred.
-Order is important!</p>
-
-<p>A classifier may see the original field (before any classifiers were run) in the metadata of the field at
-<code>:sync.classify/original</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private classifiers
-  [#'classifiers.name/infer-and-assoc-semantic-type
-   #'classifiers.category/infer-is-category-or-list
-   #'classifiers.no-preview-display/infer-no-preview-display
-   #'classifiers.text-fingerprint/infer-semantic-type])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn run-classifiers :- i/FieldInstance
-  &quot;Run all the available `classifiers` against `field` and `fingerprint`, and return the resulting `field` with
-  changes decided upon by the classifiers. The original field can be accessed in the metadata at
-  `:sync.classify/original`.&quot;
-  [field       :- i/FieldInstance
-   fingerprint :- [:maybe i/Fingerprint]]
-  (reduce (fn [field classifier]
-            (or (sync-util/with-error-handling (format &quot;Error running classifier on %s&quot;
-                                                       (sync-util/name-for-logging field))
-                  (classifier field fingerprint))
-                field))
-          (vary-meta field assoc :sync.classify/original field)
-          classifiers))</pre></td></tr><tr><td class="docs"><p>Run various classifiers on <code>field</code> and its <code>fingerprint</code>, and save any detected changes.</p>
+      true)))</pre></td></tr><tr><td class="docs"><p>Run various classifiers on <code>field</code> and its <code>fingerprint</code>, and save any detected changes.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private classify!
   ([field :- i/FieldInstance]
    (classify! field (or (:fingerprint field)
                         (when (qp.store/initialized?)
                           (:fingerprint (lib.metadata/field (qp.store/metadata-provider) (u/the-id field))))
                         (t2/select-one-fn :fingerprint :model/Field :id (u/the-id field)))))
-  ([field      :- i/FieldInstance
-    fingerprint :- [:maybe i/Fingerprint]]
+  ([field       :- i/FieldInstance
+    fingerprint :- [:maybe fingerprint.schema/Fingerprint]]
    (sync-util/with-error-handling (format &quot;Error classifying %s&quot; (sync-util/name-for-logging field))
-     (let [updated-field (run-classifiers field fingerprint)]
+     (let [updated-field (classifiers/run-classifiers field fingerprint)]
        (when-not (= field updated-field)
          (save-model-updates! field updated-field))))))</pre></td></tr><tr><td class="docs"><p>+------------------------------------------------------------------------------------------------------------------+
 |                                        CLASSIFYING ALL FIELDS IN A TABLE                                         |

@@ -2899,7 +2899,26 @@ net.brehaut.ClojureTools = (function (SH) {
     (= (:enum schema) [&quot;true&quot; &quot;false&quot; true false])
     (assoc param :schema {:type &quot;boolean&quot;})
     :else
-    param))</pre></td></tr><tr><td class="docs">
+    param))</pre></td></tr><tr><td class="docs"><p>Fix type of request body to make it more understandable to Rapidoc.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- fix-schema ;; TODO: unify this with `fix-type` somehow?
+  [{:keys [required] :as schema}]
+  (let [not-required (atom #{})]
+    (-&gt; schema
+        (update :properties (fn [props]
+                              (into {}
+                                    (for [[k v] props]
+                                      [k
+                                       (cond
+                                         (and (:oneOf v)
+                                              (= (second (:oneOf v)) {:type &quot;null&quot;}))
+                                         (do
+                                           (swap! not-required conj k)
+                                           (assoc (first (:oneOf v)) :description (:description v)))
+                                         (= (:enum v) [&quot;true&quot; &quot;false&quot; true false])
+                                         (-&gt; (dissoc v :enum) (assoc :type &quot;boolean&quot;))
+                                         :else
+                                         v)]))))
+        (assoc :required (vec (remove @not-required required))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- path-&gt;openapi [path]
   (str/replace path #&quot;:([^/]+)&quot; &quot;{$1}&quot;))</pre></td></tr><tr><td class="docs"><p>OpenAPI generation</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Collect routes with schemas with their full paths.</p>
@@ -2917,27 +2936,31 @@ net.brehaut.ClojureTools = (function (SH) {
     (-&gt;&gt; (walk {:prefix &quot;&quot;} root)
          (filter #(-&gt; % :route meta :schema)))))</pre></td></tr><tr><td class="docs"><p>https://spec.openapis.org/oas/latest.html#parameter-object</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- schema-&gt;params
-  [method full-path schema]
+  [full-path args schema]
   (let [{:keys [properties required]} (json-schema-transform schema)
         required                      (set required)
-        in-path?                      (set (map (comp keyword second) (re-seq #&quot;\{([^}]+)\}&quot; full-path)))]
-    (for [[k schema] properties
-          :when      (or (in-path? k) (= method :get))]
+        in-path?                      (set (map (comp keyword second) (re-seq #&quot;\{([^}]+)\}&quot; full-path)))
+        in-query?                     (into #{} (map #(if (symbol? %) (keyword %) %) args))]
+    (for [[k param-schema] properties
+          :when            (or (in-path? k) (in-query? k))]
       (fix-type
        (cond-&gt; {:in          (if (in-path? k) :path :query)
                 :name        k
                 :required    (contains? required k)
-                :schema      (dissoc schema :description)}
-         (:description schema) (assoc :description (:description schema)))))))</pre></td></tr><tr><td class="docs"><p>Generate OpenAPI desc for a single handler</p>
+                :schema      (dissoc param-schema :description)}
+         (:description schema) (assoc :description (:description param-schema)))))))</pre></td></tr><tr><td class="docs"><p>Generate OpenAPI desc for a single handler</p>
 
 <p>https://spec.openapis.org/oas/latest.html#path-item-object</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- defendpoint-&gt;path-item
   [tag full-path handler-var]
   (let [{:keys [method] :as data} (meta handler-var)
-        params                    (schema-&gt;params method full-path (:schema data))
+        params                    (schema-&gt;params full-path (:args data) (:schema data))
         non-body-param?           (set (map :name params))
-        body                      (when (not= method :get)
-                                    (into [:map] (remove #(non-body-param? (first %)) (rest (:schema data)))))
+        body-params               (when (not= method :get)
+                                    (remove #(non-body-param? (first %)) (rest (:schema data))))
+        body-schema               (when (seq body-params)
+                                    (fix-schema
+                                     (json-schema-transform (into [:map] body-params))))
         ctype                     (if (:multipart (meta handler-var))
                                     &quot;multipart/form-data&quot;
                                     &quot;application/json&quot;)]
@@ -2946,8 +2969,8 @@ net.brehaut.ClojureTools = (function (SH) {
                      :description (or (:orig-doc data)
                                       (:doc data))
                      :parameters params}
-              tag  (assoc :tags [tag])
-              body (assoc :requestBody {:content {ctype {:schema (json-schema-transform body)}}}))}))</pre></td></tr><tr><td class="docs"><p>Generate base object for OpenAPI (/paths and /components/schemas)</p>
+              tag         (assoc :tags [tag])
+              body-schema (assoc :requestBody {:content {ctype {:schema body-schema}}}))}))</pre></td></tr><tr><td class="docs"><p>Generate base object for OpenAPI (/paths and /components/schemas)</p>
 
 <p>https://spec.openapis.org/oas/latest.html#openapi-object</p>
 </td><td class="codes"><pre class="brush: clojure">(defn openapi-object

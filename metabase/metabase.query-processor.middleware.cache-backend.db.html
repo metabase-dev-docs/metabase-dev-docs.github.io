@@ -2868,7 +2868,6 @@ net.brehaut.ClojureTools = (function (SH) {
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.query-processor.middleware.cache-backend.db" name="metabase.query-processor.middleware.cache-backend.db"><h1 class="project-name">metabase.query-processor.middleware.cache-backend.db</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.query-processor.middleware.cache-backend.db
   (:require
-   [clojure.math :as math]
    [java-time.api :as t]
    [metabase.db :as mdb]
    [metabase.db.query :as mdb.query]
@@ -2883,11 +2882,10 @@ net.brehaut.ClojureTools = (function (SH) {
   (:import
    (java.sql Connection PreparedStatement ResultSet Types)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- ms-ago [n]
+  (u.date/add (t/offset-date-time) :millisecond (- n)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- seconds-ago [n]
-  (let [[unit n] (if-not (integer? n)
-                   [:millisecond (long (* 1000 n))]
-                   [:second n])]
-    (u.date/add (t/offset-date-time) unit (- n))))</pre></td></tr><tr><td class="docs">
+  (ms-ago (long (* 1000 n))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([])} cached-results-query-sql
   ;; this is memoized for a given application DB so we can deliver cached results EXTRA FAST and not have to spend an
   ;; extra microsecond compiling the same exact query every time. :shrug:
@@ -2923,10 +2921,10 @@ net.brehaut.ClojureTools = (function (SH) {
   ^PreparedStatement [strategy query-hash ^Connection conn]
   (if-not (:avg-execution-ms strategy)
     (log/debugf &quot;Caching strategy %s needs :avg-execution-ms to work&quot; (pr-str strategy))
-    (let [max-age-seconds (math/round (/ (* (:multiplier strategy)
-                                            (:avg-execution-ms strategy))
-                                         1000.0))]
-      (prepare-statement conn query-hash (seconds-ago max-age-seconds)))))</pre></td></tr><tr><td class="docs"><p>Returns prepared statement for a given strategy and query hash - on EE. Returns <code>::oss</code> on OSS.</p>
+    (let [max-age-ms     (* (:multiplier strategy)
+                        (:avg-execution-ms strategy))
+          invalidated-at (t/max (ms-ago max-age-ms) (:invalidated-at strategy))]
+      (prepare-statement conn query-hash invalidated-at))))</pre></td></tr><tr><td class="docs"><p>Returns prepared statement for a given strategy and query hash - on EE. Returns <code>::oss</code> on OSS.</p>
 </td><td class="codes"><pre class="brush: clojure">(defenterprise fetch-cache-stmt
   metabase-enterprise.cache.strategies
   [strategy hash conn]
