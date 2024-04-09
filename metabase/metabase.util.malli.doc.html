@@ -2865,377 +2865,348 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.pulse.markdown" name="metabase.pulse.markdown"><h1 class="project-name">metabase.pulse.markdown</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.pulse.markdown
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.util.malli.doc" name="metabase.util.malli.doc"><h1 class="project-name">metabase.util.malli.doc</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.util.malli.doc
   (:require
-   [clojure.edn :as edn]
    [clojure.java.io :as io]
-   [clojure.string :as str]
-   [clojure.walk :as walk]
-   [metabase.public-settings :as public-settings]
-   [metabase.util :as u])
+   [hiccup.core :as hiccup]
+   [malli.core :as mc]
+   [malli.error :as me]
+   [metabase.pulse.markdown :as markdown]
+   [metabase.util.log :as log])
   (:import
-   (com.vladsch.flexmark.ast AutoLink BlockQuote BulletList BulletListItem Code Emphasis FencedCodeBlock HardLineBreak
-                             Heading HtmlBlock HtmlCommentBlock HtmlEntity HtmlInline HtmlInlineBase HtmlInlineComment
-                             HtmlInnerBlockComment Image ImageRef IndentedCodeBlock Link LinkRef MailLink OrderedList
-                             OrderedListItem Paragraph Reference SoftLineBreak StrongEmphasis Text ThematicBreak)
-   (com.vladsch.flexmark.ext.autolink AutolinkExtension)
-   (com.vladsch.flexmark.html HtmlRenderer LinkResolver LinkResolverFactory)
-   (com.vladsch.flexmark.html.renderer LinkResolverBasicContext LinkStatus)
-   (com.vladsch.flexmark.parser Parser)
-   (com.vladsch.flexmark.util.ast Document Node)
-   (com.vladsch.flexmark.util.data MutableDataSet)
-   (java.net URI)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
-|                                              Markdown parsing                                                  |
-+----------------------------------------------------------------------------------------------------------------+</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>An instance of a Flexmark parser</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private parser
-  (let [options (.. (MutableDataSet.)
-                    (set Parser/EXTENSIONS [(AutolinkExtension/create)]))]
-    (.build (Parser/builder options))))</pre></td></tr><tr><td class="docs"><p>Mappings from Flexmark AST nodes to keyword tags</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private node-to-tag-mapping
-  {Document              :document
-   Paragraph             :paragraph
-   ThematicBreak         :horizontal-line
-   HardLineBreak         :hard-line-break
-   SoftLineBreak         :soft-line-break
-   Heading               :heading
-   StrongEmphasis        :bold
-   Emphasis              :italic
-   OrderedList           :ordered-list
-   BulletList            :unordered-list
-   OrderedListItem       :list-item
-   BulletListItem        :list-item
-   Code                  :code
-   FencedCodeBlock       :codeblock
-   IndentedCodeBlock     :codeblock
-   BlockQuote            :blockquote
-   Link                  :link
-   Reference             :reference
-   LinkRef               :link-ref
-   ImageRef              :image-ref
-   Image                 :image
-   AutoLink              :auto-link
-   MailLink              :mail-link
-   HtmlEntity            :html-entity
-   HtmlBlock             :html-block
-   HtmlInline            :html-inline
-   HtmlCommentBlock      :html-comment-block
-   HtmlInlineBase        :html-inline-base
-   HtmlInlineComment     :html-inline-comment
-   HtmlInnerBlockComment :html-inner-block-comment})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- node-to-tag
-  [node]
-  (node-to-tag-mapping (type node)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defprotocol ^:private ASTNode
-  (to-clojure [this]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- convert-children [node]
-  (map to-clojure (.getChildren ^Node node)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(extend-protocol ASTNode
-  Node
-  (to-clojure [this]
-    {:tag     (node-to-tag this)
-     :attrs   {}
-     :content (convert-children this)})
+   (org.apache.commons.io FileUtils)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmulti ^:private generate-dox-method
+  {:arglists '([schema cache])}
+  (fn [schema _cache]
+    {:pre [(instance? malli.core.Schema schema)]}
+    (mc/-type (mc/-parent schema))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- maybe-parse-markdown [x]
+  (cond-&gt; x
+    (string? x) (markdown/process-markdown :html)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- explicit-dox [schema]
+  {:pre [(instance? malli.core.Schema schema)]}
+  ;; TODO -- parse `:error/message` for Markdown-ness.
+  (or (when-let [x ((some-fn :doc/message :error/message)
+                    (mc/properties schema))]
+        (maybe-parse-markdown x))
+      (when (symbol? (mc/form schema))
+        (when-let [msg (me/error-message {:schema schema, :unknown false})]
+          (when-not (= msg &quot;unknown error&quot;)
+            msg)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- generate-dox
+  ([schema]
+   (generate-dox schema {}))
+  ([schema cache]
+   (let [schema                          (if (instance? malli.core.Schema schema)
+                                           schema
+                                           (mc/schema schema))
+         schema                          (or (some-&gt; (:doc/schema (mc/-properties schema)) mc/schema)
+                                             schema)
+         explicit-dox                    (explicit-dox schema)
+         {generated :this, cache :cache} (generate-dox-method schema cache)
+         _                               (assert (some? generated))
+         _                               (assert (map? cache))
+         dox                             (if explicit-dox
+                                           [:div
+                                            [:div explicit-dox]
+                                            [:div generated]]
+                                           generated)]
+     {:this dox, :cache cache})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod generate-dox-method :default
+  [schema cache]
+  {:this (if (explicit-dox schema)
+           [:div]
+           (or
+            (me/error-message {:schema schema, :unknown false})
+            (do
+              (log/warnf &quot;WARNING: UNKNOWN SCHEMA: %s&quot; (pr-str schema))
+              [:div
+               {:style &quot;border: 2px solid red;&quot;}
+               [:div
+                [:b &quot;UNKNOWN SCHEMA: &quot;]
+                [:tt (mc/-type (mc/-parent schema))]]
+               [:div [:pre (pr-str schema)]]
+               [:div [:pre (mc/properties schema)]]])))
+   :cache cache})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod generate-dox-method :ref
+  [schema cache]
+  (let [[child] (mc/children schema)]
+    (generate-dox child cache)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod generate-dox-method :schema
+  [schema cache]
+  (let [[child] (mc/children schema)]
+    (generate-dox child cache)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- keyword-schema-relative-file-name [k]
+  {:pre [(qualified-keyword? k)]}
+  (format &quot;%s__%s.html&quot;
+          (munge (namespace k))
+          (munge (name k))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- schema-title [schema]
+  (or (some-&gt; (:doc/title (mc/properties schema)) maybe-parse-markdown)
+      (when-not (instance? malli.core.Schema schema)
+        (schema-title (mc/schema schema)))
+      (when (mc/-ref-schema? schema)
+        (schema-title (mc/deref schema)))
+      (when (keyword? schema)
+        [:pre (name schema)])))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- ^:dynamic *keyword-schema-link* [k]
+  [:a
+   {:href (keyword-schema-relative-file-name k)}
+   (schema-title k)])</pre></td></tr><tr><td class="docs"><p>keyword schema</p>
+</td><td class="codes"><pre class="brush: clojure">(defmethod generate-dox-method :malli.core/schema
+  [schema cache]
+  (let [k (mc/-form schema)]
+    (assert (keyword? k))
+    (cond
+      ;; qualified keyword already in the cache
+      (and (qualified-keyword? k)
+           (contains? cache k))
+      {:this  (*keyword-schema-link* k)
+       :cache cache}
 
-  Text
-  (to-clojure [this]
-    (str (.getChars this)))
+      ;; qualified keyword that is not yet in the cache
+      (qualified-keyword? k)
+      (let [cache                (assoc cache k nil) ; so we don't try to generate it recursively
+            {:keys [this cache]} (generate-dox (mc/deref (mc/schema k)) cache)]
+        {:this  (*keyword-schema-link* k)
+         :cache (assoc cache k this)})
 
-  FencedCodeBlock
-  (to-clojure [this]
-    {:tag     (node-to-tag this)
-     :attrs   {}
-     :content (str (.getContentChars this))})
+      :else
+      ((get-method generate-dox-method :default) schema cache))))</pre></td></tr><tr><td class="docs"><p>For things that have n children, like <code>:and</code> or `:or.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- generate-dox-for-schemas
+  [schemas cache]
+  (reduce
+   (fn [{:keys [cache these]} schema]
+     (let [{:keys [this cache]} (generate-dox schema cache)]
+       {:cache  cache
+        :these (conj these this)}))
+   {:cache cache, :these []}
+   schemas))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod generate-dox-method :and
+  [schema cache]
+  (let [{:keys [cache these]} (generate-dox-for-schemas (mc/children schema) cache)]
+    {:this [:div
+            &quot;Must satisfy all of these:&quot;
+            (into [:ul]
+                  (map (fn [child]
+                         [:li child]))
+                  these)]
+     :cache cache}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod generate-dox-method :or
+  [schema cache]
+  (let [{:keys [cache these]} (generate-dox-for-schemas (mc/children schema) cache)]
+    {:this [:div
+            &quot;Must be one of these:&quot;
+            (into [:ul]
+                  (map (fn [child]
+                         [:li child]))
+                  these)]
+     :cache cache}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod generate-dox-method :enum
+  [schema cache]
+  {:this [:div
+          &quot;Must be equal to one of these:&quot;
+          (into [:ul]
+                (map (fn [child]
+                       [:li [:pre (pr-str child)]]))
+                (mc/children schema))]
+   :cache cache})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- generate-table-rows-for-keyed-children [children cache]
+  (reduce
+   (fn [{:keys [cache rows]} [k opts child]]
+     (let [{:keys [cache this]} (generate-dox child cache)
+           row                 [:tr
+                                {:style &quot;border: 1px solid black;&quot;}
+                                [:td
+                                 {:style &quot;border: 1px solid black; background: #cccccc;&quot;}
+                                 [:pre k]
+                                 (when (:optional opts)
+                                   [:i &quot;Optional.&quot;])]
+                                [:td
+                                 {:style &quot;border: 1px solid black;&quot;}
+                                 [:div (maybe-parse-markdown (:doc/message opts))]
+                                 [:div this]]]]
+       {:cache cache, :rows (conj rows row)}))
+   {:cache cache, :rows []}
+   children))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod generate-dox-method :map
+  [schema cache]
+  (if-let [children (not-empty (mc/children schema))]
+    (let [{:keys [rows cache]} (generate-table-rows-for-keyed-children children cache)]
+      {:this [:div
+              &quot;A map with the following keys:&quot;
+              [:table
+               [:thead
+                [:tr [:th &quot;Key&quot;] [:th &quot;Schema&quot;]]]
+               (into [:tbody] rows)]]
+       :cache cache})
+    {:this &quot;A map&quot;
+     :cache cache}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod generate-dox-method :merge
+  [schema cache]
+  (generate-dox (mc/deref schema) cache))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod generate-dox-method :maybe
+  [schema cache]
+  (let [[child]             (mc/children schema)
+        {:keys [this cache]} (generate-dox child cache)]
+    {:this [:div
+            &quot;Either &quot; [:code &quot;nil&quot;] &quot;, or &quot;
+            [:div this]]
+     :cache cache}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod generate-dox-method :sequential
+  [schema cache]
+  (let [[child]             (mc/children schema)
+        {:keys [this cache]} (generate-dox child cache)]
+    {:this [:div
+            [:div &quot;A sequence of:&quot;]
+            [:div this]]
+     :cache cache}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod generate-dox-method :map-of
+  [schema cache]
+  (let [[k-schema v-schema]         (mc/children schema)
+        {k-dox :this, :keys [cache]} (generate-dox k-schema cache)
+        {v-dox :this, :keys [cache]} (generate-dox v-schema cache)]
+    {:this [:div
+            &quot;Must be a map:&quot;
+            [:ul
+             [:li
+              [:div
+               &quot;With keys satisfying:&quot;
+               [:div k-dox]]]
+             [:li
+              [:div
+               &quot;With values satisfying:&quot;
+               [:div v-dox]]]]]
+     :cache cache}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod generate-dox-method :keyword
+  [_schema cache]
+  {:this &quot;Must be a keyword.&quot;
+   :cache cache})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod generate-dox-method :catn
+  [schema cache]
+  (let [{:keys [rows cache]} (generate-table-rows-for-keyed-children (mc/children schema) cache)]
+    {:this [:div
+            &quot;A sequence with the shape&quot;
+            [:table
+             (into [:tbody] rows)]]
+     :cache cache}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod generate-dox-method :cat
+  [schema cache]
+  (let [{:keys [these cache]} (generate-dox-for-schemas (mc/children schema) cache)]
+    {:this  [:div
+             &quot;Sequence with the shape&quot;
+             (into [:ul]
+                   (map (fn [item]
+                          [:li item]))
+                   these)]
+     :cache cache}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod generate-dox-method :?
+  [schema cache]
+  (let [[child]              (mc/children schema)
+        {:keys [this cache]} (generate-dox child cache)]
+    {:this  [:div
+             &quot;Zero or one instances of&quot;
+             [:div this]]
+     :cache cache}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod generate-dox-method :*
+  [schema cache]
+  (let [[child]              (mc/children schema)
+        {:keys [this cache]} (generate-dox child cache)]
+    {:this  [:div
+             &quot;Zero or more instances of&quot;
+             [:div this]]
+     :cache cache}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod generate-dox-method :+
+  [schema cache]
+  (let [[child]              (mc/children schema)
+        {:keys [this cache]} (generate-dox child cache)]
+    {:this  [:div
+             &quot;One or more instances of&quot;
+             [:div this]]
+     :cache cache}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod generate-dox-method :=
+  [schema cache]
+  (let [[child] (mc/children schema)]
+    {:this [:div &quot;Must equal &quot; [:code (pr-str child)]]
+     :cache cache}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod generate-dox-method :any
+  [_schema cache]
+  {:this &quot;anything&quot;
+   :cache cache})</pre></td></tr><tr><td class="docs"><p>we'll assume that all the possible dispatch values are possible, and treat this like an <code>:or</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmethod generate-dox-method :multi
+  [schema cache]
+  (let [{:keys [rows cache]} (generate-table-rows-for-keyed-children (mc/children schema) cache)]
+    {:this  [:div
+             &quot;One of the following types of expressions:&quot;
+             [:table
+              [:thead
+               [:tr [:th &quot;Type&quot;] [:th &quot;Schema&quot;]]]
+              (into [:tbody] rows)]]
+     :cache cache}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod generate-dox-method :boolean
+  [_schema cache]
+  {:this  [:span &quot;must be either &quot; [:code &quot;true&quot;] &quot; or &quot; [:code &quot;false&quot;] &quot;.&quot;]
+   :cache cache})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- html [title content]
+  (hiccup/html
+   [:html
+    [:head]
+    [:body
+     {:style &quot;margin: 0;&quot;}
+     [:h1 title]
+     content]]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- clean-target-dir! [target-dir]
+  (log/infof &quot;CLEAN %s&quot; target-dir)
+  (let [target-dir (io/file target-dir)]
+    ;; delete target directory if it already exists
+    (when (.exists target-dir)
+      (assert (.isDirectory target-dir))
+      (FileUtils/deleteDirectory target-dir))
+    ;; create the target directory
+    (.mkdirs target-dir)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- index-html-body [cache]
+  [:div
+   (into [:ul]
+         (map (fn [keyword-schema]
+                [:li [:div (*keyword-schema-link* keyword-schema)]]))
+         (sort (keys cache)))])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- write-index-html! [target-dir cache]
+  (let [filename (str target-dir &quot;/index.html&quot;)]
+    (log/infof &quot;WRITE %s&quot; filename)
+    (spit filename (html &quot;Index&quot; (index-html-body cache)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- write-doc-pages! [target-dir cache]
+  (doseq [[keyword-schema content] cache
+          :let                     [filename (str target-dir &quot;/&quot; (keyword-schema-relative-file-name keyword-schema))]]
+    (log/infof &quot;WRITE %s&quot; filename)
+    (spit filename (html (schema-title keyword-schema) content))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- generate-documentation! [schema target-dir]
+  (clean-target-dir! target-dir)
+  (let [{:keys [cache]} (generate-dox schema)]
+    (write-index-html! target-dir cache)
+    (write-doc-pages! target-dir cache))
+  (log/info &quot;DONE.&quot;))</pre></td></tr><tr><td class="docs"><p>e.g.</p>
 
-  IndentedCodeBlock
-  (to-clojure [this]
-    {:tag     (node-to-tag this)
-     :attrs   {}
-     :content (str (.getContentChars this))})
+<p>  clj -X metabase.util.malli.doc/generate-legacy-mbql-dox</p>
 
-  Link
-  (to-clojure [this]
-    {:tag     (node-to-tag this)
-     :attrs   {:href (str (.getUrl this))
-               :title (not-empty (str (.getTitle this)))}
-     :content (convert-children this)})
+<p>  clj -X metabase.util.malli.doc/generate-legacy-mbql-dox :target-dir '"target/docs/schemas/legacy-mbql"'</p>
+</td><td class="codes"><pre class="brush: clojure">(defn generate-legacy-mbql-dox
+  [{:keys [target-dir]
+                                 :or   {target-dir &quot;docs/legacy-mbql&quot;}}]
+  (require 'metabase.legacy-mbql.schema)
+  (generate-documentation! :metabase.legacy-mbql.schema/Query
+                           target-dir))</pre></td></tr><tr><td class="docs"><p>e.g.</p>
 
-  Reference
-  (to-clojure [this]
-    {:tag   (node-to-tag this)
-     :attrs {:title (not-empty (str (.getTitle this)))
-             :label (str (.getReference this))
-             :url (str (.getUrl this))}})
+<p>  clj -X metabase.util.malli.doc/generate-pmbql-dox</p>
 
-  LinkRef
-  (to-clojure [this]
-    {:tag     (node-to-tag this)
-     :attrs   {:reference (-&gt; (.getDocument this)
-                              (.get Parser/REFERENCES)
-                              (get (u/lower-case-en (str (.getReference this))))
-                              to-clojure)}
-     :content (convert-children this)})
-
-  ImageRef
-  (to-clojure [this]
-    {:tag     (node-to-tag this)
-     :attrs   {:reference (-&gt; (.getDocument this)
-                              (.get Parser/REFERENCES)
-                              (get (u/lower-case-en (str (.getReference this))))
-                              to-clojure)}
-     :content (convert-children this)})
-
-  Image
-  (to-clojure [this]
-    {:tag   (node-to-tag this)
-     :attrs {:src (str (.getUrl this))
-             :alt (str (.getText this))
-             :title (not-empty (str (.getTitle this)))}})
-
-  AutoLink
-  (to-clojure [this]
-    {:tag   (node-to-tag this)
-     :attrs {:href (str (.getUrl this))}})
-
-  MailLink
-  (to-clojure [this]
-    {:tag   (node-to-tag this)
-     :attrs {:address (str (.getText this))}})
-
-  HtmlEntity
-  (to-clojure [this]
-    {:tag (node-to-tag this)
-     :content (str (.getChars this))})
-
-  HtmlBlock
-  (to-clojure [this]
-    (str (.getChars this)))
-
-  HtmlInline
-  (to-clojure [this]
-    (str (.getChars this)))
-
-  HtmlCommentBlock
-  (to-clojure [this]
-    (str (.getChars this)))
-
-  HtmlInlineComment
-  (to-clojure [this]
-    (str (.getChars this)))
-
-  nil
-  (to-clojure [_this]
-    nil))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
-|                                        Slack markup generation                                                 |
-+----------------------------------------------------------------------------------------------------------------+</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private html-entities
-  (delay (edn/read-string (slurp (io/resource &quot;html-entities.edn&quot;)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private escaped-chars-regex
-  #&quot;\\[\\/*_`'\[\](){}&lt;&gt;#+-.!$@%^&amp;=|\?~]&quot;)</pre></td></tr><tr><td class="docs"><p>Insert zero-width characters before and after certain characters that are escaped in the Markdown
-(or are otherwise parsed as plain text) to prevent them from being parsed as formatting in Slack.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- escape-text
-  [string]
-  (-&gt; string
-      ;; First, remove backslashes from escaped formatting characters since they're not removed during Markdown parsing
-      (str/replace escaped-chars-regex #(str (second %1)))
-      ;; Add a soft hyphen around certain chars to avoid triggering formatting in Slack
-      (str/replace &quot;&amp;&quot; &quot;\u00ad&amp;\u00ad&quot;)
-      (str/replace &quot;&gt;&quot; &quot;\u00ad&gt;\u00ad&quot;)
-      (str/replace &quot;&lt;&quot; &quot;\u00ad&lt;\u00ad&quot;)
-      (str/replace &quot;*&quot; &quot;\u00ad*\u00ad&quot;)
-      (str/replace &quot;_&quot; &quot;\u00ad_\u00ad&quot;)
-      (str/replace &quot;`&quot; &quot;\u00ad`\u00ad&quot;)
-      (str/replace &quot;~&quot; &quot;\u00ad~\u00ad&quot;)))</pre></td></tr><tr><td class="docs"><p>If the provided URI is a relative path, resolve it relative to the site URL so that links work
-correctly in Slack/Email.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- resolve-uri
-  [^String uri]
-  (letfn [(ensure-slash [s] (when s
-                              (cond-&gt; s
-                                (not (str/ends-with? s &quot;/&quot;)) (str &quot;/&quot;))))]
-    (when uri
-      (if-let [^String site-url (ensure-slash (public-settings/site-url))]
-        (.. (URI. site-url) (resolve uri) toString)
-        uri))))</pre></td></tr><tr><td class="docs"><p>Given the value from the :content field of a Markdown AST node, and a keyword representing a tag type, converts all
-instances of the tag in the content to <code>:default</code> tags. This is used to suppress rendering of nested bold and italic
-tags, which Slack doesn't support.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- ^:private strip-tag
-  [content tag]
-  (walk/postwalk
-   (fn [node]
-     (if (and (map? node) (= (:tag node) tag))
-        (assoc node :tag :default)
-        node))
-   content))</pre></td></tr><tr><td class="docs"><p>Takes an AST representing Markdown input, and converts it to a string that will render nicely in Slack.</p>
-
-<p>Some of the differences to Markdown include:
-* All headers are just rendered as bold text.
-* Ordered and unordered lists are printed in plain text.
-* Inline images are rendered as text that links to the image source, e.g. <image.png|[Image: alt-text]>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti ast-&gt;slack
-  :tag)</pre></td></tr><tr><td class="docs"><p>Given the value from the :content field of a Markdown AST node, recursively resolves subnodes into a nested list of
-strings.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ^:private resolved-content
-  [content]
-  (if (string? content)
-    (escape-text content)
-    (map #(if (string? %)
-            (escape-text %)
-            (ast-&gt;slack %))
-         content)))</pre></td></tr><tr><td class="docs"><p>Given the resolved content of a Markdown AST node, converts it into a single flattened string. This is used for
-rendering a couple specific types of nodes, such as list items.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ^:private resolved-content-string
-  [resolved-content]
-  (-&gt; resolved-content
-      flatten
-      str/join))</pre></td></tr><tr><td class="docs"><p>Given the value from the :content field of a Markdown AST node, recursively resolves it and returns a list of
-strings corresponding to individual lines in the result.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ^:private resolved-lines
-  [content]
-  (-&gt; content
-      resolved-content
-      resolved-content-string
-      str/split-lines))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :default
-  [{content :content}]
-  (resolved-content content))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :document
-  [{content :content}]
-  (resolved-content content))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :paragraph
-  [{content :content}]
-  [(resolved-content content) &quot;\n&quot;])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :soft-line-break
-  [_]
-  &quot; &quot;)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :hard-line-break
-  [_]
-  &quot;\n&quot;)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :horizontal-line
-  [_]
-  &quot;\n───────────────────\n&quot;)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :heading
-  [{content :content}]
-  [&quot;*&quot; (resolved-content content) &quot;*\n&quot;])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :bold
-  [{content :content}]
-  [&quot;*&quot; (resolved-content (strip-tag content :bold)) &quot;*&quot;])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :italic
-  [{content :content}]
-  [&quot;_&quot; (resolved-content (strip-tag content :italic)) &quot;_&quot;])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :code
-  [{content :content}]
-  [&quot;`&quot; (resolved-content content) &quot;`&quot;])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :codeblock
-  [{content :content}]
-  [&quot;```\n&quot; (resolved-content content) &quot;```&quot;])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :blockquote
-  [{content :content}]
-  (let [lines (resolved-lines content)]
-    (interpose &quot;\n&quot; (map (fn [line] [&quot;&gt;&quot; line]) lines))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :link
-  [{:keys [content attrs]}]
-  (let [resolved-uri     (resolve-uri (:href attrs))
-        resolved-content (resolved-content content)]
-    (if (contains? #{:image :image-ref} (:tag (first content)))
-      ;; If this is a linked image, add link target on separate line after image placeholder
-      [resolved-content &quot;\n(&quot; resolved-uri &quot;)&quot;]
-      [&quot;&lt;&quot; resolved-uri &quot;|&quot; resolved-content &quot;&gt;&quot;])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :link-ref
-  [{:keys [content attrs]}]
-  (let [resolved-uri     (resolve-uri (-&gt; attrs :reference :attrs :url))
-        resolved-content (resolved-content content)]
-    (if resolved-uri
-      [&quot;&lt;&quot; resolved-uri &quot;|&quot; resolved-content &quot;&gt;&quot;]
-      ;; If this was parsed as a link-ref but has no reference, assume it was just a pair of square brackets and
-      ;; restore them. This is a known discrepency between flexmark-java and Markdown rendering on the frontend.
-      [&quot;[&quot; resolved-content &quot;]&quot;])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :auto-link
-  [{{href :href} :attrs}]
-  [&quot;&lt;&quot; href &quot;&gt;&quot;])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :mail-link
-  [{{address :address} :attrs}]
-  [&quot;&lt;mailto:&quot;  address &quot;|&quot; address &quot;&gt;&quot;])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :list-item
-  [{content :content}]
-  (let [resolved-content (resolved-content content)
-        ;; list items might have nested lists or other elements, which should have their indentation level increased
-        indented-content (-&gt;&gt; (rest resolved-content)
-                              resolved-content-string
-                              str/split-lines
-                              (map #(str &quot;    &quot; %))
-                              (str/join &quot;\n&quot;))]
-    (if-not (str/blank? indented-content)
-      [(first resolved-content) indented-content &quot;\n&quot;]
-      resolved-content)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :unordered-list
-  [{content :content}]
-  (map (fn [list-item] [&quot;• &quot; list-item])
-       (resolved-content content)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :ordered-list
-  [{content :content}]
-  (map-indexed (fn [idx list-item] [(inc idx) &quot;. &quot; list-item])
-               (resolved-content content)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :image
-  [{{:keys [src alt]} :attrs}]
-  ;; Replace images with text that links to source, including alt text if available
-  (if (str/blank? alt)
-    [&quot;&lt;&quot; src &quot;|[Image]&gt;&quot;]
-    [&quot;&lt;&quot; src &quot;|[Image: &quot; alt &quot;]&gt;&quot;]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :image-ref
-  [{:keys [content attrs]}]
-  (let [src (-&gt; attrs :reference :attrs :url)
-        alt (-&gt; content resolved-content resolved-content-string)]
-    (if (str/blank? alt)
-      [&quot;&lt;&quot; src &quot;|[Image]&gt;&quot;]
-      [&quot;&lt;&quot; src &quot;|[Image: &quot; alt &quot;]&gt;&quot;])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :html-entity
-  [{content :content}]
-  (some-&gt;&gt; content
-           (get @html-entities)
-           (:characters)))</pre></td></tr><tr><td class="docs"><p>Returns true if this node was parsed as a link ref, but has no references. This probably means the original text
-was just a pair of square brackets, and not an actual link ref. This is a known discrepency between flexmark-java
-and Markdown rendering on the frontend.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- empty-link-ref?
-  [^Node node]
-  (and (instance? LinkRef node)
-       (-&gt; (.getDocument node)
-           (.get Parser/REFERENCES)
-           empty?)))</pre></td></tr><tr><td class="docs"><p>An instance of a Flexmark HTML renderer</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private renderer
-  (let [options    (.. (MutableDataSet.)
-                       (set HtmlRenderer/ESCAPE_HTML true)
-                       (toImmutable))
-        lr-factory (reify LinkResolverFactory
-                     (^LinkResolver apply [_this ^LinkResolverBasicContext _context]
-                       (reify LinkResolver
-                         (resolveLink [_this node _context link]
-                           (if-let [url (cond
-                                          (instance? MailLink node) (.getUrl link)
-                                          (empty-link-ref? node) nil
-                                          :else (resolve-uri (.getUrl link)))]
-                             (.. link
-                                 (withStatus LinkStatus/VALID)
-                                 (withUrl url))
-                             link)))))]
-    (.build (.linkResolverFactory (HtmlRenderer/builder options) lr-factory))))</pre></td></tr><tr><td class="docs"><p>Converts a markdown string from a virtual card into a form that can be sent to a channel
-(Slack's markup language, or HTML for email).</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti process-markdown
-  (fn [_markdown channel-type] channel-type))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod process-markdown :slack
-  [markdown _channel-type]
-  (-&gt; (.parse ^Parser parser ^String markdown)
-      to-clojure
-      ast-&gt;slack
-      flatten
-      str/join
-      str/trim))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod process-markdown :html
-  [markdown _channel-type]
-  (let [ast (.parse ^Parser parser ^String markdown)]
-    (.render ^HtmlRenderer renderer ^Document ast)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+<p>  clj -X metabase.util.malli.doc/generate-pmbql-dox :target-dir '"target/docs/schemas/pmbql"'</p>
+</td><td class="codes"><pre class="brush: clojure">(defn generate-pmbql-dox
+  [{:keys [target-dir]
+    :or   {target-dir &quot;target/docs/schemas/pmbql&quot;}}]
+  (require 'metabase.lib.schema)
+  (generate-documentation! :metabase.lib.schema/query
+                           target-dir))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

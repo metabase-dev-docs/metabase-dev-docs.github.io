@@ -2881,6 +2881,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.lib.schema.id :as lib.schema.id]
    [metabase.lib.schema.metadata :as lib.schema.metadata]
    [metabase.lib.schema.ref :as lib.schema.ref]
+   [metabase.lib.temporal-bucket :as lib.temporal-bucket]
    [metabase.lib.util :as lib.util]
    [metabase.util.malli :as mu]
    #?@(:clj ([metabase.util.log :as log]))))</pre></td></tr><tr><td class="docs"><p>Determine whether two already-normalized pMBQL maps, clauses, or other sorts of expressions are equal. The basic rule
@@ -3027,6 +3028,18 @@ be the same.</p>
       #_(throw (ambiguous-match-error a-ref columns))
       #?(:cljs (js/console.warn (ambiguous-match-error a-ref columns))
          :clj  (log/warn (ambiguous-match-error a-ref columns)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private disambiguate-matches-find-match-with-same-temporal-bucket :- [:maybe ::lib.schema.metadata/column]
+  &quot;If there are multiple matching columns and `a-ref` has a temporal bucket, check if only one column has that same
+  unit.&quot;
+  [a-ref   :- ::lib.schema.ref/ref
+   columns :- [:sequential {:min 2} ::lib.schema.metadata/column]]
+  (or (when-let [temporal-bucket (lib.temporal-bucket/raw-temporal-bucket a-ref)]
+        (let [matching-columns (filter (fn [col]
+                                         (= (lib.temporal-bucket/raw-temporal-bucket col) temporal-bucket))
+                                       columns)]
+          (when (= (count matching-columns) 1)
+            (first matching-columns))))
+      (disambiguate-matches-dislike-field-refs-to-expressions a-ref columns)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private disambiguate-matches-prefer-explicit :- [:maybe ::lib.schema.metadata/column]
   &quot;Prefers table-default or explicitly joined columns over implicitly joinable ones.&quot;
   [a-ref   :- ::lib.schema.ref/ref
@@ -3034,7 +3047,7 @@ be the same.</p>
   (if-let [no-implicit (not-empty (remove :fk-field-id columns))]
     (if-not (next no-implicit)
       (first no-implicit)
-      (disambiguate-matches-dislike-field-refs-to-expressions a-ref no-implicit))
+      (disambiguate-matches-find-match-with-same-temporal-bucket a-ref no-implicit))
     nil))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private disambiguate-matches-no-alias :- [:maybe ::lib.schema.metadata/column]
   [a-ref   :- ::lib.schema.ref/ref

@@ -2889,9 +2889,13 @@ into filter clauses.)</p>
    [metabase.util.malli :as mu]
    [metabase.util.malli.registry :as mr]))</pre></td></tr><tr><td class="docs"><p>"legacy macro" as used below means EITHER a legacy Metric or a legacy Segment.</p>
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::legacy-macro
-  [:or
-   ::lib.schema.metadata/legacy-metric
-   ::lib.schema.metadata/segment])</pre></td></tr><tr><td class="docs">
+  [:and
+   [:map
+    [:lib/type [:enum :metadata/segment :metadata/legacy-metric]]]
+   [:multi
+    {:dispatch :lib/type}
+    [:metadata/segment       ::lib.schema.metadata/segment]
+    [:metadata/legacy-metric ::lib.schema.metadata/legacy-metric]]])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::macro-type
   [:enum :metric :segment])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn unresolved-legacy-macro-ids :- [:maybe [:set {:min 1} pos-int?]]
@@ -2910,12 +2914,16 @@ into filter clauses.)</p>
     (not-empty (persistent! ids))))</pre></td></tr><tr><td class="docs"><p>a legacy Metric has exactly one aggregation clause, and possibly one or more filter clauses as well.</p>
 
 <p>a legacy Segment has one or more filter clauses.</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Get the definition of a legacy Metric as a pMBQL stage.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- legacy-macro-definition-&gt;pMBQL
-  [definition]
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private legacy-macro-definition-&gt;pMBQL :- ::lib.schema/stage.mbql
+  &quot;Get the definition of a legacy Metric as a pMBQL stage.&quot;
+  [metadata-providerable                            :- ::lib.schema.metadata/metadata-providerable
+   {:keys [definition table-id], :as _legacy-macro} :- ::legacy-macro]
   (log/tracef &quot;Converting legacy MBQL for macro definition from\n%s&quot; (u/pprint-to-str definition))
-  (u/prog1 (-&gt; (lib.convert/-&gt;pMBQL {:type  :query
-                                     :query definition})
+  (u/prog1 (-&gt; (lib.convert/-&gt;pMBQL {:type     :query
+                                     :query    (merge {:source-table table-id}
+                                                      definition)
+                                     :database (u/the-id (lib.metadata/database metadata-providerable))})
                (lib.util/query-stage -1))
     (log/tracef &quot;to pMBQL\n%s&quot; (u/pprint-to-str &lt;&gt;))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private legacy-metric-aggregation :- ::lib.schema.aggregation/aggregation
@@ -2942,11 +2950,11 @@ into filter clauses.)</p>
    metadata-providerable :- ::lib.schema.metadata/metadata-providerable
    legacy-macro-ids      :- [:maybe [:set {:min 1} pos-int?]]]
   (let [metadata-type     (case macro-type
-                            :metric  :metadata/metric
+                            :metric  :metadata/legacy-metric
                             :segment :metadata/segment)]
     (u/prog1 (into {}
                    (map (juxt :id (fn [legacy-macro]
-                                    (update legacy-macro :definition legacy-macro-definition-&gt;pMBQL))))
+                                    (assoc legacy-macro :definition (legacy-macro-definition-&gt;pMBQL metadata-providerable legacy-macro)))))
                    (lib.metadata/bulk-metadata-or-throw metadata-providerable metadata-type legacy-macro-ids))
       ;; make sure all the IDs exist.
       (doseq [id legacy-macro-ids]

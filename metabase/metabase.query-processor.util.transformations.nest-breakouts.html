@@ -2865,377 +2865,102 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.pulse.markdown" name="metabase.pulse.markdown"><h1 class="project-name">metabase.pulse.markdown</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.pulse.markdown
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.query-processor.util.transformations.nest-breakouts" name="metabase.query-processor.util.transformations.nest-breakouts"><h1 class="project-name">metabase.query-processor.util.transformations.nest-breakouts</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.query-processor.util.transformations.nest-breakouts
   (:require
-   [clojure.edn :as edn]
-   [clojure.java.io :as io]
-   [clojure.string :as str]
-   [clojure.walk :as walk]
-   [metabase.public-settings :as public-settings]
-   [metabase.util :as u])
-  (:import
-   (com.vladsch.flexmark.ast AutoLink BlockQuote BulletList BulletListItem Code Emphasis FencedCodeBlock HardLineBreak
-                             Heading HtmlBlock HtmlCommentBlock HtmlEntity HtmlInline HtmlInlineBase HtmlInlineComment
-                             HtmlInnerBlockComment Image ImageRef IndentedCodeBlock Link LinkRef MailLink OrderedList
-                             OrderedListItem Paragraph Reference SoftLineBreak StrongEmphasis Text ThematicBreak)
-   (com.vladsch.flexmark.ext.autolink AutolinkExtension)
-   (com.vladsch.flexmark.html HtmlRenderer LinkResolver LinkResolverFactory)
-   (com.vladsch.flexmark.html.renderer LinkResolverBasicContext LinkStatus)
-   (com.vladsch.flexmark.parser Parser)
-   (com.vladsch.flexmark.util.ast Document Node)
-   (com.vladsch.flexmark.util.data MutableDataSet)
-   (java.net URI)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
-|                                              Markdown parsing                                                  |
-+----------------------------------------------------------------------------------------------------------------+</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>An instance of a Flexmark parser</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private parser
-  (let [options (.. (MutableDataSet.)
-                    (set Parser/EXTENSIONS [(AutolinkExtension/create)]))]
-    (.build (Parser/builder options))))</pre></td></tr><tr><td class="docs"><p>Mappings from Flexmark AST nodes to keyword tags</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private node-to-tag-mapping
-  {Document              :document
-   Paragraph             :paragraph
-   ThematicBreak         :horizontal-line
-   HardLineBreak         :hard-line-break
-   SoftLineBreak         :soft-line-break
-   Heading               :heading
-   StrongEmphasis        :bold
-   Emphasis              :italic
-   OrderedList           :ordered-list
-   BulletList            :unordered-list
-   OrderedListItem       :list-item
-   BulletListItem        :list-item
-   Code                  :code
-   FencedCodeBlock       :codeblock
-   IndentedCodeBlock     :codeblock
-   BlockQuote            :blockquote
-   Link                  :link
-   Reference             :reference
-   LinkRef               :link-ref
-   ImageRef              :image-ref
-   Image                 :image
-   AutoLink              :auto-link
-   MailLink              :mail-link
-   HtmlEntity            :html-entity
-   HtmlBlock             :html-block
-   HtmlInline            :html-inline
-   HtmlCommentBlock      :html-comment-block
-   HtmlInlineBase        :html-inline-base
-   HtmlInlineComment     :html-inline-comment
-   HtmlInnerBlockComment :html-inner-block-comment})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- node-to-tag
-  [node]
-  (node-to-tag-mapping (type node)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defprotocol ^:private ASTNode
-  (to-clojure [this]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- convert-children [node]
-  (map to-clojure (.getChildren ^Node node)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(extend-protocol ASTNode
-  Node
-  (to-clojure [this]
-    {:tag     (node-to-tag this)
-     :attrs   {}
-     :content (convert-children this)})
-
-  Text
-  (to-clojure [this]
-    (str (.getChars this)))
-
-  FencedCodeBlock
-  (to-clojure [this]
-    {:tag     (node-to-tag this)
-     :attrs   {}
-     :content (str (.getContentChars this))})
-
-  IndentedCodeBlock
-  (to-clojure [this]
-    {:tag     (node-to-tag this)
-     :attrs   {}
-     :content (str (.getContentChars this))})
-
-  Link
-  (to-clojure [this]
-    {:tag     (node-to-tag this)
-     :attrs   {:href (str (.getUrl this))
-               :title (not-empty (str (.getTitle this)))}
-     :content (convert-children this)})
-
-  Reference
-  (to-clojure [this]
-    {:tag   (node-to-tag this)
-     :attrs {:title (not-empty (str (.getTitle this)))
-             :label (str (.getReference this))
-             :url (str (.getUrl this))}})
-
-  LinkRef
-  (to-clojure [this]
-    {:tag     (node-to-tag this)
-     :attrs   {:reference (-&gt; (.getDocument this)
-                              (.get Parser/REFERENCES)
-                              (get (u/lower-case-en (str (.getReference this))))
-                              to-clojure)}
-     :content (convert-children this)})
-
-  ImageRef
-  (to-clojure [this]
-    {:tag     (node-to-tag this)
-     :attrs   {:reference (-&gt; (.getDocument this)
-                              (.get Parser/REFERENCES)
-                              (get (u/lower-case-en (str (.getReference this))))
-                              to-clojure)}
-     :content (convert-children this)})
-
-  Image
-  (to-clojure [this]
-    {:tag   (node-to-tag this)
-     :attrs {:src (str (.getUrl this))
-             :alt (str (.getText this))
-             :title (not-empty (str (.getTitle this)))}})
-
-  AutoLink
-  (to-clojure [this]
-    {:tag   (node-to-tag this)
-     :attrs {:href (str (.getUrl this))}})
-
-  MailLink
-  (to-clojure [this]
-    {:tag   (node-to-tag this)
-     :attrs {:address (str (.getText this))}})
-
-  HtmlEntity
-  (to-clojure [this]
-    {:tag (node-to-tag this)
-     :content (str (.getChars this))})
-
-  HtmlBlock
-  (to-clojure [this]
-    (str (.getChars this)))
-
-  HtmlInline
-  (to-clojure [this]
-    (str (.getChars this)))
-
-  HtmlCommentBlock
-  (to-clojure [this]
-    (str (.getChars this)))
-
-  HtmlInlineComment
-  (to-clojure [this]
-    (str (.getChars this)))
-
-  nil
-  (to-clojure [_this]
-    nil))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
-|                                        Slack markup generation                                                 |
-+----------------------------------------------------------------------------------------------------------------+</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private html-entities
-  (delay (edn/read-string (slurp (io/resource &quot;html-entities.edn&quot;)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private escaped-chars-regex
-  #&quot;\\[\\/*_`'\[\](){}&lt;&gt;#+-.!$@%^&amp;=|\?~]&quot;)</pre></td></tr><tr><td class="docs"><p>Insert zero-width characters before and after certain characters that are escaped in the Markdown
-(or are otherwise parsed as plain text) to prevent them from being parsed as formatting in Slack.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- escape-text
-  [string]
-  (-&gt; string
-      ;; First, remove backslashes from escaped formatting characters since they're not removed during Markdown parsing
-      (str/replace escaped-chars-regex #(str (second %1)))
-      ;; Add a soft hyphen around certain chars to avoid triggering formatting in Slack
-      (str/replace &quot;&amp;&quot; &quot;\u00ad&amp;\u00ad&quot;)
-      (str/replace &quot;&gt;&quot; &quot;\u00ad&gt;\u00ad&quot;)
-      (str/replace &quot;&lt;&quot; &quot;\u00ad&lt;\u00ad&quot;)
-      (str/replace &quot;*&quot; &quot;\u00ad*\u00ad&quot;)
-      (str/replace &quot;_&quot; &quot;\u00ad_\u00ad&quot;)
-      (str/replace &quot;`&quot; &quot;\u00ad`\u00ad&quot;)
-      (str/replace &quot;~&quot; &quot;\u00ad~\u00ad&quot;)))</pre></td></tr><tr><td class="docs"><p>If the provided URI is a relative path, resolve it relative to the site URL so that links work
-correctly in Slack/Email.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- resolve-uri
-  [^String uri]
-  (letfn [(ensure-slash [s] (when s
-                              (cond-&gt; s
-                                (not (str/ends-with? s &quot;/&quot;)) (str &quot;/&quot;))))]
-    (when uri
-      (if-let [^String site-url (ensure-slash (public-settings/site-url))]
-        (.. (URI. site-url) (resolve uri) toString)
-        uri))))</pre></td></tr><tr><td class="docs"><p>Given the value from the :content field of a Markdown AST node, and a keyword representing a tag type, converts all
-instances of the tag in the content to <code>:default</code> tags. This is used to suppress rendering of nested bold and italic
-tags, which Slack doesn't support.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- ^:private strip-tag
-  [content tag]
-  (walk/postwalk
-   (fn [node]
-     (if (and (map? node) (= (:tag node) tag))
-        (assoc node :tag :default)
-        node))
-   content))</pre></td></tr><tr><td class="docs"><p>Takes an AST representing Markdown input, and converts it to a string that will render nicely in Slack.</p>
-
-<p>Some of the differences to Markdown include:
-* All headers are just rendered as bold text.
-* Ordered and unordered lists are printed in plain text.
-* Inline images are rendered as text that links to the image source, e.g. <image.png|[Image: alt-text]>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti ast-&gt;slack
-  :tag)</pre></td></tr><tr><td class="docs"><p>Given the value from the :content field of a Markdown AST node, recursively resolves subnodes into a nested list of
-strings.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ^:private resolved-content
-  [content]
-  (if (string? content)
-    (escape-text content)
-    (map #(if (string? %)
-            (escape-text %)
-            (ast-&gt;slack %))
-         content)))</pre></td></tr><tr><td class="docs"><p>Given the resolved content of a Markdown AST node, converts it into a single flattened string. This is used for
-rendering a couple specific types of nodes, such as list items.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ^:private resolved-content-string
-  [resolved-content]
-  (-&gt; resolved-content
-      flatten
-      str/join))</pre></td></tr><tr><td class="docs"><p>Given the value from the :content field of a Markdown AST node, recursively resolves it and returns a list of
-strings corresponding to individual lines in the result.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ^:private resolved-lines
-  [content]
-  (-&gt; content
-      resolved-content
-      resolved-content-string
-      str/split-lines))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :default
-  [{content :content}]
-  (resolved-content content))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :document
-  [{content :content}]
-  (resolved-content content))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :paragraph
-  [{content :content}]
-  [(resolved-content content) &quot;\n&quot;])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :soft-line-break
-  [_]
-  &quot; &quot;)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :hard-line-break
-  [_]
-  &quot;\n&quot;)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :horizontal-line
-  [_]
-  &quot;\n───────────────────\n&quot;)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :heading
-  [{content :content}]
-  [&quot;*&quot; (resolved-content content) &quot;*\n&quot;])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :bold
-  [{content :content}]
-  [&quot;*&quot; (resolved-content (strip-tag content :bold)) &quot;*&quot;])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :italic
-  [{content :content}]
-  [&quot;_&quot; (resolved-content (strip-tag content :italic)) &quot;_&quot;])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :code
-  [{content :content}]
-  [&quot;`&quot; (resolved-content content) &quot;`&quot;])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :codeblock
-  [{content :content}]
-  [&quot;```\n&quot; (resolved-content content) &quot;```&quot;])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :blockquote
-  [{content :content}]
-  (let [lines (resolved-lines content)]
-    (interpose &quot;\n&quot; (map (fn [line] [&quot;&gt;&quot; line]) lines))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :link
-  [{:keys [content attrs]}]
-  (let [resolved-uri     (resolve-uri (:href attrs))
-        resolved-content (resolved-content content)]
-    (if (contains? #{:image :image-ref} (:tag (first content)))
-      ;; If this is a linked image, add link target on separate line after image placeholder
-      [resolved-content &quot;\n(&quot; resolved-uri &quot;)&quot;]
-      [&quot;&lt;&quot; resolved-uri &quot;|&quot; resolved-content &quot;&gt;&quot;])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :link-ref
-  [{:keys [content attrs]}]
-  (let [resolved-uri     (resolve-uri (-&gt; attrs :reference :attrs :url))
-        resolved-content (resolved-content content)]
-    (if resolved-uri
-      [&quot;&lt;&quot; resolved-uri &quot;|&quot; resolved-content &quot;&gt;&quot;]
-      ;; If this was parsed as a link-ref but has no reference, assume it was just a pair of square brackets and
-      ;; restore them. This is a known discrepency between flexmark-java and Markdown rendering on the frontend.
-      [&quot;[&quot; resolved-content &quot;]&quot;])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :auto-link
-  [{{href :href} :attrs}]
-  [&quot;&lt;&quot; href &quot;&gt;&quot;])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :mail-link
-  [{{address :address} :attrs}]
-  [&quot;&lt;mailto:&quot;  address &quot;|&quot; address &quot;&gt;&quot;])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :list-item
-  [{content :content}]
-  (let [resolved-content (resolved-content content)
-        ;; list items might have nested lists or other elements, which should have their indentation level increased
-        indented-content (-&gt;&gt; (rest resolved-content)
-                              resolved-content-string
-                              str/split-lines
-                              (map #(str &quot;    &quot; %))
-                              (str/join &quot;\n&quot;))]
-    (if-not (str/blank? indented-content)
-      [(first resolved-content) indented-content &quot;\n&quot;]
-      resolved-content)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :unordered-list
-  [{content :content}]
-  (map (fn [list-item] [&quot;• &quot; list-item])
-       (resolved-content content)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :ordered-list
-  [{content :content}]
-  (map-indexed (fn [idx list-item] [(inc idx) &quot;. &quot; list-item])
-               (resolved-content content)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :image
-  [{{:keys [src alt]} :attrs}]
-  ;; Replace images with text that links to source, including alt text if available
-  (if (str/blank? alt)
-    [&quot;&lt;&quot; src &quot;|[Image]&gt;&quot;]
-    [&quot;&lt;&quot; src &quot;|[Image: &quot; alt &quot;]&gt;&quot;]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :image-ref
-  [{:keys [content attrs]}]
-  (let [src (-&gt; attrs :reference :attrs :url)
-        alt (-&gt; content resolved-content resolved-content-string)]
-    (if (str/blank? alt)
-      [&quot;&lt;&quot; src &quot;|[Image]&gt;&quot;]
-      [&quot;&lt;&quot; src &quot;|[Image: &quot; alt &quot;]&gt;&quot;])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ast-&gt;slack :html-entity
-  [{content :content}]
-  (some-&gt;&gt; content
-           (get @html-entities)
-           (:characters)))</pre></td></tr><tr><td class="docs"><p>Returns true if this node was parsed as a link ref, but has no references. This probably means the original text
-was just a pair of square brackets, and not an actual link ref. This is a known discrepency between flexmark-java
-and Markdown rendering on the frontend.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- empty-link-ref?
-  [^Node node]
-  (and (instance? LinkRef node)
-       (-&gt; (.getDocument node)
-           (.get Parser/REFERENCES)
-           empty?)))</pre></td></tr><tr><td class="docs"><p>An instance of a Flexmark HTML renderer</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private renderer
-  (let [options    (.. (MutableDataSet.)
-                       (set HtmlRenderer/ESCAPE_HTML true)
-                       (toImmutable))
-        lr-factory (reify LinkResolverFactory
-                     (^LinkResolver apply [_this ^LinkResolverBasicContext _context]
-                       (reify LinkResolver
-                         (resolveLink [_this node _context link]
-                           (if-let [url (cond
-                                          (instance? MailLink node) (.getUrl link)
-                                          (empty-link-ref? node) nil
-                                          :else (resolve-uri (.getUrl link)))]
-                             (.. link
-                                 (withStatus LinkStatus/VALID)
-                                 (withUrl url))
-                             link)))))]
-    (.build (.linkResolverFactory (HtmlRenderer/builder options) lr-factory))))</pre></td></tr><tr><td class="docs"><p>Converts a markdown string from a virtual card into a form that can be sent to a channel
-(Slack's markup language, or HTML for email).</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti process-markdown
-  (fn [_markdown channel-type] channel-type))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod process-markdown :slack
-  [markdown _channel-type]
-  (-&gt; (.parse ^Parser parser ^String markdown)
-      to-clojure
-      ast-&gt;slack
-      flatten
-      str/join
-      str/trim))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod process-markdown :html
-  [markdown _channel-type]
-  (let [ast (.parse ^Parser parser ^String markdown)]
-    (.render ^HtmlRenderer renderer ^Document ast)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+   [flatland.ordered.set :as ordered-set]
+   [medley.core :as m]
+   [metabase.lib.core :as lib]
+   [metabase.lib.equality :as lib.equality]
+   [metabase.lib.schema :as lib.schema]
+   [metabase.lib.schema.metadata :as lib.schema.metadata]
+   [metabase.lib.util :as lib.util]
+   [metabase.lib.util.match :as lib.util.match]
+   [metabase.lib.walk :as lib.walk]
+   [metabase.util.malli :as mu]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- stage-has-cumulative-aggregation? [stage]
+  (lib.util.match/match (:aggregation stage)
+    #{:cum-sum :cum-count}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- stage-has-breakout? [stage]
+  (seq (:breakout stage)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private fields-used-in-breakouts-aggregations-or-expressions :- [:set [:or :mbql.clause/field :mbql.clause/expression]]
+  [stage :- ::lib.schema/stage]
+  ;; use an ordered set so we preserve the order we saw things when we walked the query so the fields we return are
+  ;; determinate. Otherwise tests using this are liable to be flaky because results can change because test metadata has
+  ;; randomly generated IDs
+  (into (ordered-set/ordered-set)
+        (m/distinct-by (fn [[tag opts id-or-name]]
+                         [tag
+                          (select-keys opts [:join-alias :temporal-unit :bucketing])
+                          id-or-name]))
+        (lib.util.match/match (concat (:breakout stage) (:aggregation stage) (:expressions stage))
+          #{:field :expression})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private new-first-stage :- ::lib.schema/stage
+  &quot;Remove breakouts, aggregations, order bys, and limit. Add `:fields` to return the things needed by the second stage.&quot;
+  [stage :- ::lib.schema/stage]
+  (-&gt; stage
+      (dissoc :breakout :aggregation :order-by :limit :lib/stage-metadata)
+      (assoc :fields (mapv
+                      lib.util/fresh-uuids
+                      (fields-used-in-breakouts-aggregations-or-expressions stage)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private update-metadata-from-previous-stage-to-produce-correct-ref-in-current-stage :- ::lib.schema.metadata/column
+  &quot;Force a `[:field {} &lt;name&gt;]` ref.&quot;
+  [col :- ::lib.schema.metadata/column]
+  (-&gt; col
+      (assoc :lib/source              :source/previous-stage
+             :lib/source-column-alias (:lib/desired-column-alias col))
+      (lib/with-temporal-bucket (if (isa? ((some-fn :effective-type :base-type) col) :type/Temporal)
+                                  ;; for temporal columns: set temporal type to `:default` to
+                                  ;; prevent [[metabase.query-processor.middleware.auto-bucket-datetimes]] from
+                                  ;; trying to mess with it.
+                                  :default
+                                  ;; for other columns: remove temporal type, it should be nil anyway but remove it to
+                                  ;; be safe.
+                                  nil))
+      (lib/with-join-alias nil)
+      (lib/with-binning nil)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private update-second-stage-refs :- ::lib.schema/stage
+  [stage            :- ::lib.schema/stage
+   first-stage-cols :- [:sequential ::lib.schema.metadata/column]]
+  (lib.util.match/replace stage
+    #{:field :expression}
+    (let [col (lib.equality/find-matching-column &amp;match first-stage-cols)]
+      (-&gt; col
+          update-metadata-from-previous-stage-to-produce-correct-ref-in-current-stage
+          lib/ref))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private new-second-stage :- ::lib.schema/stage
+  &quot;All references need to be updated to be prior-stage references using the desired alias from the previous stage.
+  Remove expressions, joins, and source(s).&quot;
+  [query       :- ::lib.schema/query
+   path        :- ::lib.walk/stage-path
+   stage       :- ::lib.schema/stage
+   first-stage :- ::lib.schema/stage]
+  (let [query            (assoc-in query path first-stage)
+        first-stage-cols (lib.walk/apply-f-for-stage-at-path lib/returned-columns query path)]
+    (-&gt; stage
+        (dissoc :expressions :joins :source-table :source-card :sources :lib/stage-metadata)
+        (update-second-stage-refs first-stage-cols))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private nest-breakouts-in-stage :- [:maybe [:sequential {:min 2, :max 2} ::lib.schema/stage]]
+  [query :- ::lib.schema/query
+   path  :- ::lib.walk/stage-path
+   stage :- ::lib.schema/stage]
+  (let [first-stage (new-first-stage stage)]
+    [first-stage
+     (new-second-stage query path stage first-stage)]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn nest-breakouts-in-stages-with-cumulative-aggregation :- ::lib.schema/query
+  &quot;Some picky databases like BigQuery don't let you use anything inside `ORDER BY` in `OVER` expressions except for
+  plain column identifiers that also appear in the `GROUP BY` clause... no inline temporal bucketing or things like
+  that.
+  This query transformation takes queries with cumulative aggregations and breakouts in the same stage and then adds a
+  new prior stage that does all of the breakout-column calculations so the original stage can just use raw column
+  identifiers. See #40982 for more info.&quot;
+  [query :- ::lib.schema/query]
+  (lib.walk/walk-stages
+   query
+   (fn [query path stage]
+     (when (and (stage-has-cumulative-aggregation? stage)
+                (stage-has-breakout? stage))
+       (nest-breakouts-in-stage query path stage)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
