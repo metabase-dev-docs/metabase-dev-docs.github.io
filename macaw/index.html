@@ -2886,14 +2886,16 @@ net.brehaut.ClojureTools = (function (SH) {
   [^Statement parsed-query]
   (mw/fold-query parsed-query
                  {:column         (conj-to :columns)
+                  :mutation       (conj-to :mutation-commands)
                   :wildcard       (fn [results _all-columns]
                                     (assoc results :has-wildcard? true))
                   :table          (conj-to :tables)
                   :table-wildcard (conj-to :table-wildcards)}
-                 {:columns      #{}
-                  :has-wildcard? false
-                  :tables       #{}
-                  :table-wildcards  #{}}))</pre></td></tr><tr><td class="docs">
+                 {:columns           #{}
+                  :has-wildcard?     false
+                  :mutation-commands #{}
+                  :tables            #{}
+                  :table-wildcards   #{}}))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- alias-mapping
   [^Table table]
   (when-let [^Alias table-alias (.getAlias table)]
@@ -2908,19 +2910,21 @@ referenced in a table-wildcard (as far as can be determined from the query).</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- remove-aliases
   [aliases table-names]
   (let [alias? (into #{} (keys aliases))]
-    (filter (complement alias?) table-names)))</pre></td></tr><tr><td class="docs"><p>Given a parsed query (i.e., a [subclass of] <code>Statement</code>) return a map with the <code>:tables</code> and <code>:columns</code> found within it.</p>
+    (filter (complement alias?) table-names)))</pre></td></tr><tr><td class="docs"><p>Given a parsed query (i.e., a [subclass of] <code>Statement</code>) return a map with the elements found within it.</p>
 
 <p>(Specifically, it returns their fully-qualified names as strings, where 'fully-qualified' means 'as referred to in
 the query'; this function doesn't do additional inference work to find out a table's schema.)</p>
 </td><td class="codes"><pre class="brush: clojure">(defn query-&gt;components
   [^Statement parsed-query]
   (let [{:keys [columns has-wildcard?
+                mutation-commands
                 tables table-wildcards]} (query-&gt;raw-components parsed-query)
-        aliases                          (into {} (map alias-mapping tables))]
-    {:columns         (into #{} (map #(.getColumnName ^Column %) columns))
-     :has-wildcard?   has-wildcard?
-     :tables          (into #{} (remove-aliases aliases (map #(.getName ^Table %) tables)))
-     :table-wildcards (into #{} (map (partial resolve-table-name aliases) table-wildcards))}))</pre></td></tr><tr><td class="docs"><p>Main entry point: takes a string query and returns a <code>Statement</code> object that can be handled by the other functions.</p>
+        aliases                   (into {} (map alias-mapping tables))]
+    {:columns           (into #{} (map #(.getColumnName ^Column %) columns))
+     :has-wildcard?     has-wildcard?
+     :mutation-commands (into #{} mutation-commands)
+     :tables            (into #{} (remove-aliases aliases (map #(.getName ^Table %) tables)))
+     :table-wildcards   (into #{} (map (partial resolve-table-name aliases) table-wildcards))}))</pre></td></tr><tr><td class="docs"><p>Main entry point: takes a string query and returns a <code>Statement</code> object that can be handled by the other functions.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn parsed-query
   [^String query]
   (CCJSqlParserUtil/parse query))</pre></td></tr><tr><td class="docs"><p>TODO: Make this use metadata we know about.
@@ -3016,6 +3020,7 @@ TODO: might want to live in another ns</p>
 </td><td class="codes"><pre class="brush: clojure">(def -&gt;callback-key
   ;; TODO: Move this to a Malli schema to simplify the indirection
   {:column         AstWalker$CallbackKey/COLUMN
+   :mutation       AstWalker$CallbackKey/MUTATION_COMMAND
    :table          AstWalker$CallbackKey/TABLE
    :table-wildcard AstWalker$CallbackKey/ALL_TABLE_COLUMNS
    :wildcard       AstWalker$CallbackKey/ALL_COLUMNS})</pre></td></tr><tr><td class="docs"><p>Lift a side effecting callback so that it preserves the accumulator.</p>
@@ -3048,22 +3053,23 @@ TODO: might want to live in another ns</p>
 </td><td class="codes"><pre class="brush: clojure">(def components    (comp m/query-&gt;components m/parsed-query))
 (def columns       (comp :columns components))
 (def has-wildcard? (comp :has-wildcard? components))
+(def mutations     (comp :mutation-commands components))
 (def tables        (comp :tables components))
 (def table-wcs     (comp :table-wildcards components))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest query-&gt;tables-test
   (testing &quot;Simple queries&quot;
     (is (= #{&quot;core_user&quot;}
-           (tables &quot;select * from core_user;&quot;)))
+           (tables &quot;SELECT * FROM core_user;&quot;)))
     (is (= #{&quot;core_user&quot;}
-           (tables &quot;select id, email from core_user;&quot;))))
+           (tables &quot;SELECT id, email FROM core_user;&quot;))))
   (testing &quot;With a schema (Postgres)&quot; ;; TODO: only run this against supported DBs
     ;; It strips the schema
     (is (= #{&quot;core_user&quot;}
-           (tables &quot;select * from the_schema_name.core_user;&quot;))))
+           (tables &quot;SELECT * FROM the_schema_name.core_user;&quot;))))
   (testing &quot;Sub-selects&quot;
     (is (= #{&quot;core_user&quot;}
-           (tables &quot;select * from (select distinct email from core_user) q;&quot;)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(deftest issue-14-tables-with-complex-aliases-test
+           (tables &quot;SELECT * FROM (SELECT DISTINCT email FROM core_user) q;&quot;)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(deftest tables-with-complex-aliases-issue-14-test
   (testing &quot;With an alias that is also a table name&quot;
     #_(is (= #{&quot;user&quot; &quot;user2_final&quot;}
            (tables
@@ -3075,43 +3081,104 @@ TODO: might want to live in another ns</p>
 </td><td class="codes"><pre class="brush: clojure">(deftest query-&gt;columns-test
   (testing &quot;Simple queries&quot;
     (is (= #{&quot;foo&quot; &quot;bar&quot; &quot;id&quot; &quot;quux_id&quot;}
-           (columns &quot;select foo, bar from baz inner join quux on quux.id = baz.quux_id&quot;))))
+           (columns &quot;SELECT foo, bar FROM baz INNER JOIN quux ON quux.id = baz.quux_id&quot;))))
   (testing &quot;'group by' columns present&quot;
     (is (= #{&quot;id&quot; &quot;user_id&quot;}
-           (columns &quot;select id from orders group by user_id&quot;)))))</pre></td></tr><tr><td class="docs">
+           (columns &quot;SELECT id FROM orders GROUP BY user_id&quot;)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(deftest mutation-test
+  (is (= #{&quot;alter-sequence&quot;}
+         (mutations &quot;ALTER SEQUENCE serial RESTART WITH 42&quot;)))
+  (is (= #{&quot;alter-session&quot;}
+         (mutations &quot;ALTER SESSION SET foo = 'bar'&quot;)))
+  (is (= #{&quot;alter-system&quot;}
+         (mutations &quot;ALTER SYSTEM RESET ALL&quot;)))
+  (is (= #{&quot;alter-table&quot;}
+         (mutations &quot;ALTER TABLE orders ADD COLUMN email text&quot;)))
+  (is (= #{&quot;alter-view&quot;}
+         (mutations &quot;ALTER VIEW foo AS SELECT bar;&quot;)))
+  (is (= #{&quot;create-function&quot;}           ; Postgres syntax
+         (mutations &quot;CREATE FUNCTION multiply(integer, integer) RETURNS integer AS 'SELECT $1 * $2;' LANGUAGE SQL
+         IMMUTABLE RETURNS NULL ON NULL INPUT;&quot;)))
+  (is (= #{&quot;create-function&quot;}           ; Conventional syntax
+         (mutations &quot;CREATE FUNCTION multiply(a integer, b integer) RETURNS integer LANGUAGE SQL IMMUTABLE RETURNS
+         NULL ON NULL INPUT RETURN a + b;&quot;)))
+  (is (= #{&quot;create-index&quot;}
+         (mutations &quot;CREATE INDEX idx_user_id ON orders(user_id);&quot;)))
+  (is (= #{&quot;create-schema&quot;}
+         (mutations &quot;CREATE SCHEMA perthshire&quot;)))
+  (is (= #{&quot;create-sequence&quot;}
+         (mutations &quot;CREATE SEQUENCE users_seq START WITH 42 INCREMENT BY 17&quot;)))
+  (is (= #{&quot;create-synonym&quot;}
+         (mutations &quot;CREATE SYNONYM folk FOR people&quot;)))
+  (is (= #{&quot;create-table&quot;}
+         (mutations &quot;CREATE TABLE poets (name text, id integer)&quot;)))
+  (is (= #{&quot;create-view&quot;}
+         (mutations &quot;CREATE VIEW folk AS SELECT * FROM people WHERE id &gt; 10&quot;)))
+  (is (= #{&quot;delete&quot;}
+         (mutations &quot;DELETE FROM people&quot;)))
+  (is (= #{&quot;drop&quot;}
+         (mutations &quot;DROP TABLE people&quot;)))
+  (is (= #{&quot;grant&quot;}
+         (mutations &quot;GRANT SELECT, UPDATE, INSERT ON people TO myself&quot;)))
+  (is (= #{&quot;insert&quot;}
+         (mutations &quot;INSERT INTO people(name, source) VALUES ('Robert Fergusson', 'Twitter'), ('Robert Burns',
+         'Facebook')&quot;)))
+  (is (= #{&quot;purge&quot;}
+         (mutations &quot;PURGE TABLE people&quot;)))
+  (is (= #{&quot;rename-table&quot;}
+         (mutations &quot;RENAME TABLE people TO folk&quot;)))
+  (is (= #{&quot;truncate&quot;}
+         (mutations &quot;TRUNCATE TABLE people&quot;)))
+  (is (= #{&quot;update&quot;}
+         (mutations &quot;UPDATE people SET name = 'Robert Fergusson' WHERE id = 23&quot;))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(deftest complicated-mutations-test
+  ;; https://github.com/metabase/macaw/issues/18
+  #_  (is (= #{&quot;delete&quot; &quot;insert&quot;}
+             (mutations &quot;WITH outdated_orders AS (
+                       DELETE FROM orders
+                       WHERE
+                         date &lt;= '2018-01-01'
+                       RETURNING *)
+                     INSERT INTO order_log
+                     SELECT * from outdated_orders;&quot;)))
+    (is (= #{ &quot;insert&quot;}
+         (mutations &quot;WITH outdated_orders AS (
+                       SELECT * from orders)
+                     INSERT INTO order_log
+                     SELECT * from outdated_orders;&quot;))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest alias-inclusion-test
   (testing &quot;Aliases are not included&quot;
     (is (= #{&quot;orders&quot; &quot;foo&quot;}
-           (tables &quot;select id, o.id from orders o join foo on orders.id = foo.order_id&quot;)))))</pre></td></tr><tr><td class="docs">
+           (tables &quot;SELECT id, o.id FROM orders o JOIN foo ON orders.id = foo.order_id&quot;)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest resolve-columns-test
   (let [cols [&quot;name&quot; &quot;id&quot; &quot;email&quot;]]
     (is (= {&quot;core_user&quot;   cols
             &quot;report_card&quot; cols}
            (m/resolve-columns [&quot;core_user&quot; &quot;report_card&quot;] cols)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest select-*-test
-  (is (true? (has-wildcard? &quot;select * from orders&quot;)))
-  (is (true? (has-wildcard? &quot;select id, * from orders join foo on orders.id = foo.order_id&quot;))))</pre></td></tr><tr><td class="docs">
+  (is (true? (has-wildcard? &quot;SELECT * FROM orders&quot;)))
+  (is (true? (has-wildcard? &quot;SELECT id, * FROM orders JOIN foo ON orders.id = foo.order_id&quot;))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest table-wildcard-test-without-aliases
   (is (= #{&quot;orders&quot;}
-         (table-wcs &quot;select orders.* from orders join foo on orders.id = foo.order_id&quot;)))
+         (table-wcs &quot;SELECT orders.* FROM orders JOIN foo ON orders.id = foo.order_id&quot;)))
     (is (= #{&quot;foo&quot;}
-         (table-wcs &quot;select foo.* from orders join foo on orders.id = foo.order_id&quot;))))</pre></td></tr><tr><td class="docs">
+         (table-wcs &quot;SELECT foo.* FROM orders JOIN foo ON orders.id = foo.order_id&quot;))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest table-star-test-with-aliases
   (is (= #{&quot;orders&quot;}
-         (table-wcs &quot;select o.* from orders o join foo on orders.id = foo.order_id&quot;)))
+         (table-wcs &quot;SELECT o.* FROM orders o JOIN foo ON orders.id = foo.order_id&quot;)))
     (is (= #{&quot;foo&quot;}
-         (table-wcs &quot;select f.* from orders o join foo f on orders.id = foo.order_id&quot;))))</pre></td></tr><tr><td class="docs">
+         (table-wcs &quot;SELECT f.* FROM orders o JOIN foo f ON orders.id = foo.order_id&quot;))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn test-replacement [before replacements after]
   (is (= after (m/replace-names before replacements))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest replace-names-test
-  (test-replacement &quot;select a.x, b.y from a, b;&quot;
+  (test-replacement &quot;SELECT a.x, b.y FROM a, b;&quot;
                     {:tables {&quot;a&quot; &quot;aa&quot;}
                      :columns  {&quot;x&quot; &quot;xx&quot;}}
-                    &quot;select aa.xx, b.y from aa, b;&quot;)
+                    &quot;SELECT aa.xx, b.y FROM aa, b;&quot;)
   (test-replacement
-   &quot;select *, boink
-  , yoink as oink
- from /* /* lore */
+   &quot;SELECT *, boink
+  , yoink AS oink
+ FROM /* /* lore */
     core_user,
   bore_user,  /* more */ snore_user ;&quot;
    {:tables  {&quot;core_user&quot;  &quot;floor_muser&quot;
@@ -3121,9 +3188,9 @@ TODO: might want to live in another ns</p>
     :columns {&quot;boink&quot; &quot;sturmunddrang&quot;
               &quot;yoink&quot; &quot;oink&quot;
               &quot;hoi&quot;   &quot;polloi&quot;}}
-   &quot;select *, sturmunddrang
-  , oink as oink
- from /* /* lore */
+   &quot;SELECT *, sturmunddrang
+  , oink AS oink
+ FROM /* /* lore */
     floor_muser,
   user,  /* more */ vigilant_user ;&quot;))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a><div id="floating-toc"><ul><li class="floating-toc-li" id="floating-toc_macaw.core">macaw.core</li><li class="floating-toc-li" id="floating-toc_macaw.rewrite">macaw.rewrite</li><li class="floating-toc-li" id="floating-toc_macaw.walk">macaw.walk</li><li class="floating-toc-li" id="floating-toc_macaw.core-test">macaw.core-test</li></ul></div></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
