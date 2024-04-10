@@ -2865,54 +2865,78 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.query-processor.pivot" name="metabase.query-processor.pivot"><h1 class="project-name">metabase.query-processor.pivot</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Pivot table actions for the query processor</p>
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.query-processor.pivot" name="metabase.query-processor.pivot"><h1 class="project-name">metabase.query-processor.pivot</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Pivot table query processor. Determines a bunch of different subqueries to run, then runs them one by one on the data
+warehouse and concatenates the result rows together, sort of like the way [[clojure.core/lazy-cat]] works. This is
+dumb, right? It's not just me? Why don't we just generate a big ol' UNION query so we can run one single query
+instead of running like 10 separate queries? -- Cam</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.query-processor.pivot
   (:require
-   [metabase.legacy-mbql.normalize :as mbql.normalize]
+   [medley.core :as m]
    [metabase.lib.core :as lib]
    [metabase.lib.equality :as lib.equality]
    [metabase.lib.metadata.jvm :as lib.metadata.jvm]
+   [metabase.lib.schema :as lib.schema]
+   [metabase.lib.schema.common :as lib.schema.common]
    [metabase.lib.schema.id :as lib.schema.id]
+   [metabase.lib.schema.info :as lib.schema.info]
+   [metabase.lib.util :as lib.util]
    [metabase.query-processor :as qp]
    [metabase.query-processor.error-type :as qp.error-type]
    [metabase.query-processor.middleware.permissions :as qp.perms]
    [metabase.query-processor.pipeline :as qp.pipeline]
-   [metabase.query-processor.preprocess :as qp.preprocess]
    [metabase.query-processor.reducible :as qp.reducible]
    [metabase.query-processor.schema :as qp.schema]
    [metabase.query-processor.setup :as qp.setup]
+   [metabase.query-processor.store :as qp.store]
    [metabase.util :as u]
    [metabase.util.i18n :refer [tru]]
    [metabase.util.log :as log]
-   [metabase.util.malli :as mu]))</pre></td></tr><tr><td class="docs">
+   [metabase.util.malli :as mu]
+   [metabase.util.malli.registry :as mr]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Generate a powerset while maintaining the original ordering as much as possible</p>
-</td><td class="codes"><pre class="brush: clojure">(defn powerset
+</td><td class="codes"><pre class="brush: clojure">(defn- powerset
   [xs]
   (for [combo (reverse (range (int (Math/pow 2 (count xs)))))]
     (for [item  (range 0 (count xs))
           :when (not (zero? (bit-and (bit-shift-left 1 item) combo)))]
-      (nth xs item))))</pre></td></tr><tr><td class="docs"><p>Come up with a display name given a combination of breakout <code>indices</code> e.g.</p>
-
-<p>This is basically a bitmask of which breakout indices we're excluding, but reversed. Why? This is how Postgres and
-other DBs determine group numbers. This implements basically what PostgreSQL does for grouping -- look at the
-original set of groups - if that column is part of <em>this</em> group, then set the appropriate bit (entry 1 sets bit 1,
-etc)</p>
-
-<p>  (group-bitmask 3 [1])   ; -> [_ 1 _] -> 101 -> 101 -> 5
-  (group-bitmask 3 [1 2]) ; -> [_ 1 2] -> 100 -> 011 -> 1</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- group-bitmask
-  [num-breakouts indices]
+      (nth xs item))))</pre></td></tr><tr><td class="docs"><p>these defs are just for readability, even tho they're all just ints > 0</p>
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::bitmask       ::lib.schema.common/int-greater-than-or-equal-to-zero)
+(mr/def ::num-breakouts ::lib.schema.common/int-greater-than-or-equal-to-zero)
+(mr/def ::index         ::lib.schema.common/int-greater-than-or-equal-to-zero)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::pivot-rows [:sequential ::index])
+(mr/def ::pivot-cols [:sequential ::index])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private group-bitmask :- ::bitmask
+  &quot;Come up with a display name given a combination of breakout `indexes` e.g.
+  This is basically a bitmask of which breakout indexes we're excluding, but reversed. Why? This is how Postgres and
+  other DBs determine group numbers. This implements basically what PostgreSQL does for grouping -- look at the original
+  set of groups - if that column is part of *this* group, then set the appropriate bit (entry 1 sets bit 1, etc)
+    (group-bitmask 3 [1])   ; -&gt; [_ 1 _] -&gt; 101 -&gt; 101 -&gt; 5
+    (group-bitmask 3 [1 2]) ; -&gt; [_ 1 2] -&gt; 100 -&gt; 011 -&gt; 1&quot;
+  [num-breakouts :- ::num-breakouts
+   indexes       :- [:sequential ::index]]
   (transduce
    (map (partial bit-shift-left 1))
    (completing bit-xor)
    (int (dec (Math/pow 2 num-breakouts)))
-   indices))</pre></td></tr><tr><td class="docs"><p>Return a sequence of all breakout combinations (by index) we should generate queries for.</p>
-
-<p>  (breakout-combinations 3 [1 2] nil) ;; -> [[0 1 2] [] [1 2] [2] [1]]</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- breakout-combinations
-  [num-breakouts pivot-rows pivot-cols]
+   indexes))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::breakout-combination
+  [:sequential ::index])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::breakout-combinations
+  [:and
+   [:sequential ::breakout-combination]
+   [:fn
+    {:error/message &quot;Distinct combinations&quot;}
+    #(or (empty? %)
+         (apply distinct? %))]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private breakout-combinations :- ::breakout-combinations
+  &quot;Return a sequence of all breakout combinations (by index) we should generate queries for.
+    (breakout-combinations 3 [1 2] nil) ;; -&gt; [[0 1 2] [] [1 2] [2] [1]]&quot;
+  [num-breakouts :- ::num-breakouts
+   pivot-rows    :- [:maybe ::pivot-rows]
+   pivot-cols    :- [:maybe ::pivot-cols]]
   ;; validate pivot-rows/pivot-cols
-  (doseq [[k pivots] {:pivot-rows pivot-rows, :pivot-cols pivot-cols}
+  (doseq [[k pivots] [[:pivot-rows pivot-rows]
+                      [:pivot-cols pivot-cols]]
           i          pivots]
     (when (&gt;= i num-breakouts)
       (throw (ex-info (tru &quot;Invalid {0}: specified breakout at index {1}, but we only have {2} breakouts&quot;
@@ -2954,72 +2978,102 @@ etc)</p>
         ;; =&gt; [_ _ _ 3] =&gt; 0111 =&gt; Group #7
         [pivot-cols]
         ;; bottom right corner [_ _ _ _] =&gt; 1111 =&gt; Group #15
-        [[]]))))))</pre></td></tr><tr><td class="docs"><p>Add the grouping field and expression to the query</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- add-grouping-field
-  [query breakout bitmask]
+        [[]]))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private keep-breakouts-at-indexes :- ::lib.schema/query
+  &quot;Keep the breakouts at indexes, reordering them if needed. Remove all other breakouts.&quot;
+  [query                    :- ::lib.schema/query
+   breakout-indexes-to-keep :- [:maybe ::breakout-combination]]
+  (let [all-breakouts (lib/breakouts query)]
+    (reduce
+     (fn [query i]
+       (lib/breakout query (nth all-breakouts i)))
+     (-&gt; (lib/remove-all-breakouts query)
+         (assoc :qp.pivot/breakout-combination breakout-indexes-to-keep))
+     breakout-indexes-to-keep)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private add-pivot-group-breakout :- ::lib.schema/query
+  &quot;Add the grouping field and expression to the query&quot;
+  [query   :- ::lib.schema/query
+   bitmask :- ::bitmask]
   (as-&gt; query query
     ;;TODO: replace this value with a bitmask or something to indicate the source better
-    (update-in query [:query :expressions] assoc &quot;pivot-grouping&quot; [:abs bitmask])
+    (lib/expression query -1 &quot;pivot-grouping&quot; (lib/abs bitmask) {:add-to-fields? false})
     ;; in PostgreSQL and most other databases, all the expressions must be present in the breakouts. Add a pivot
     ;; grouping expression ref to the breakouts
-    (assoc-in query [:query :breakout] (concat breakout [[:expression &quot;pivot-grouping&quot;]]))
+    (lib/breakout query (lib/expression-ref query &quot;pivot-grouping&quot;))
     (do
       (log/tracef &quot;Added pivot-grouping expression to query\n%s&quot; (u/pprint-to-str 'yellow query))
-      query)))</pre></td></tr><tr><td class="docs"><p>Only keep existing aggregations in <code>:order-by</code> clauses from the query.
- Since we're adding our own breakouts (i.e. <code>GROUP BY</code> and <code>ORDER BY</code> clauses)
- to do the pivot table stuff, existing <code>:order-by</code> clauses probably won't work
- -- <code>ORDER BY</code> isn't allowed for fields that don't appear in <code>GROUP BY</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- remove-non-aggregation-order-bys
-  [outer-query]
-  (update
-    outer-query
-    :query
-    (fn [query]
-      (if-let [new-order-by (not-empty (filterv (comp #(= :aggregation %) first second) (:order-by query)))]
-        (assoc query :order-by new-order-by)
-        (dissoc query :order-by)))))</pre></td></tr><tr><td class="docs"><p>Generate the additional queries to perform a generic pivot table</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- generate-queries
-  [{{all-breakouts :breakout} :query, :keys [query], :as outer-query}
-   {:keys [pivot-rows pivot-cols], :as _pivot-options}]
+      query)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private remove-non-aggregation-order-bys :- ::lib.schema/query
+  &quot;Only keep existing aggregations in `:order-by` clauses from the query. Since we're adding our own breakouts (i.e.
+  `GROUP BY` and `ORDER BY` clauses) to do the pivot table stuff, existing `:order-by` clauses probably won't work --
+  `ORDER BY` isn't allowed for fields that don't appear in `GROUP BY`.&quot;
+  [query :- ::lib.schema/query]
+  (reduce
+   (fn [query [_tag _opts expr :as order-by]]
+     ;; keep any order bys on :aggregation references. Remove all other clauses.
+     (cond-&gt; query
+       (not (lib.util/clause-of-type? expr :aggregation))
+       (lib/remove-clause order-by)))
+   query
+   (lib/order-bys query)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private generate-queries :- [:sequential ::lib.schema/query]
+  &quot;Generate the additional queries to perform a generic pivot table&quot;
+  [query                                               :- ::lib.schema/query
+   {:keys [pivot-rows pivot-cols], :as _pivot-options} :- [:map
+                                                           [:pivot-rows {:optional true} [:maybe ::pivot-rows]]
+                                                           [:pivot-cols {:optional true} [:maybe ::pivot-cols]]]]
   (try
-    (for [breakout-indices (u/prog1 (breakout-combinations (count all-breakouts) pivot-rows pivot-cols)
-                             (log/tracef &quot;Using breakout combinations: %s&quot; (pr-str &lt;&gt;)))
-          :let             [group-bitmask (group-bitmask (count all-breakouts) breakout-indices)
-                            new-breakouts (for [i breakout-indices]
-                                            (nth all-breakouts i))]]
-      (-&gt; outer-query
-          remove-non-aggregation-order-bys
-          (add-grouping-field new-breakouts group-bitmask)))
+    (let [all-breakouts (lib/breakouts query)]
+      (for [breakout-indexes (u/prog1 (breakout-combinations (count all-breakouts) pivot-rows pivot-cols)
+                                (log/tracef &quot;Using breakout combinations: %s&quot; (pr-str &lt;&gt;)))
+            :let              [group-bitmask (group-bitmask (count all-breakouts) breakout-indexes)]]
+        (-&gt; query
+            remove-non-aggregation-order-bys
+            (keep-breakouts-at-indexes breakout-indexes)
+            (add-pivot-group-breakout group-bitmask))))
     (catch Throwable e
       (throw (ex-info (tru &quot;Error generating pivot queries&quot;)
                       {:type qp.error-type/qp, :query query}
                       e)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^:dynamic ^{:arglists '([query])} *column-mapping-fn*
-  nil)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^:dynamic *pivot-column-mapping*
-  nil)</pre></td></tr><tr><td class="docs"><p>This function needs to be called for each row so that it can actually shape the row according to the
-[[<em>column-mapping-fn</em>]] above.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- row-mapping-fn
-  [row]
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::column-mapping-fn
+  ;; not 100% on what the return value is supposed to be, need to figure out what exactly [[make-column-mapping-fn]]
+  ;; returns
+  [:=&gt; [:cat ::lib.schema/query] ::pivot-column-mapping])</pre></td></tr><tr><td class="docs"><p>something like [nil 0 1 2] or [0 nil 1 2]</p>
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::pivot-column-mapping
+  [:sequential [:maybe ::index]])</pre></td></tr><tr><td class="docs"><p>this schema is mostly just for documentation purposes</p>
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::row
+  [:sequential :any])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private row-mapping-fn :- [:=&gt; [:cat ::row] ::row]
+  &quot;This function needs to be called for each row so that it can actually shape the row according to the
+  `column-mapping-fn` we build at the beginning.
+  Row mapping function is a function that can reorder the row and add `nil`s for columns that aren't present in a
+  particular subquery, with the signature
+    (f row) =&gt; row'
+  e.g.
+    (f [1 2 3]) =&gt; [2 nil 3 nil 1]&quot;
+  [pivot-column-mapping :- ::pivot-column-mapping]
   ;; the first query doesn't need any special mapping, it already has all the columns
-  (if *pivot-column-mapping*
-    (mapv (fn [mapping]
-            (when mapping
-              (nth row mapping)))
-          *pivot-column-mapping*)
-    row))</pre></td></tr><tr><td class="docs"><p>Reduce the results of a single <code>query</code> using <code>rf</code> and initial value <code>init</code>.</p>
+  (if pivot-column-mapping
+    (apply juxt (for [mapping pivot-column-mapping]
+                  (if mapping
+                    #(nth % mapping)
+                    (constantly nil))))
+    identity))</pre></td></tr><tr><td class="docs"><p>Reduce the results of a single <code>query</code> using <code>rf</code> and initial value <code>init</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private process-query-append-results
-  [query :- ::qp.schema/query
-   rf    :- ifn?
-   init  :- :any
-   info  :- [:maybe :map]]
+  [query                :- ::lib.schema/query
+   rf                   :- ::qp.schema/rf
+   init                 :- :any
+   info                 :- [:maybe ::lib.schema.info/info]
+   pivot-column-mapping :- ::pivot-column-mapping]
   (if (qp.pipeline/canceled?)
     (ensure-reduced init)
-    (let [rff (fn [_metadata]
-                (fn
-                  ([]        init)
-                  ([acc]     acc)
-                  ([acc row] (rf acc (row-mapping-fn row)))))]
+    (let [xform (map (row-mapping-fn pivot-column-mapping))
+          rff   (fn [_metadata]
+                  (let [rf (fn rf*
+                             ([]        init)
+                             ([acc]     acc)
+                             ([acc row] (rf acc row)))]
+                    (xform rf)))]
       (try
         (let [query (cond-&gt; query
                       (seq info) (qp/userland-query info))]
@@ -3029,13 +3083,14 @@ etc)</p>
           (throw e))))))</pre></td></tr><tr><td class="docs"><p>Reduce the results of a sequence of <code>queries</code> using <code>rf</code> and initial value <code>init</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private process-queries-append-results
   [init
-   queries :- [:sequential ::qp.schema/query]
-   rf      :- ifn?
-   info    :- [:maybe :map]]
+   queries           :- [:sequential ::lib.schema/query]
+   rf                :- ::qp.schema/rf
+   info              :- [:maybe ::lib.schema.info/info]
+   column-mapping-fn :- ::column-mapping-fn]
   (reduce
    (fn [acc query]
-     (binding [*pivot-column-mapping* (*column-mapping-fn* query)]
-       (process-query-append-results query rf acc info)))
+     (let [pivot-column-mapping (column-mapping-fn query)]
+       (process-query-append-results query rf acc info pivot-column-mapping)))
    init
    queries))</pre></td></tr><tr><td class="docs"><p><code>vrf</code> in the next few functions is a volatile used to capture the original reducing function before composed with
 limit and other middleware</p>
@@ -3050,15 +3105,16 @@ limit and other middleware</p>
       (vreset! vrf &lt;&gt;))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private append-queries-execute-fn :- fn?
   &quot;Build the version of [[qp.pipeline/*execute*]] used at the top level for running pivot queries.&quot;
-  [more-queries :- [:sequential ::qp.schema/query]]
+  [more-queries :- [:sequential ::lib.schema/query]]
   (when (seq more-queries)
     (fn multiple-execute [driver query respond]
       (respond {::driver driver} query))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private append-queries-reduce-fn :- fn?
   &quot;Build the version of [[qp.pipeline/*reduce*]] used at the top level for running pivot queries.&quot;
-  [info         :- [:maybe :map]
-   more-queries :- [:sequential ::qp.schema/query]
-   vrf          :- [:fn {:error/message &quot;volatile&quot;} volatile?]]
+  [info              :- [:maybe ::lib.schema.info/info]
+   more-queries      :- [:sequential ::lib.schema/query]
+   vrf               :- [:fn {:error/message &quot;volatile&quot;} volatile?]
+   column-mapping-fn :- ::column-mapping-fn]
   (when (seq more-queries)
     ;; execute holds open a connection from [[execute-reducible-query]] so we need to manage connections
     ;; in the reducing part reduce fn. The default run fn is what orchestrates this together and we just
@@ -3085,20 +3141,23 @@ limit and other middleware</p>
                                                        (let [rf (rff metadata)]
                                                          (transduce identity rf reducible-rows)))]
                         (-&gt; (qp.pipeline/*execute* driver query respond)
-                            (process-queries-append-results more-queries @vrf info)))]
+                            (process-queries-append-results more-queries @vrf info column-mapping-fn)))]
           ;; completion arity can't be threaded because the value is derefed too early
           (qp.pipeline/*result* (@vrf acc)))))))</pre></td></tr><tr><td class="docs"><p>RFF and QP pipeline functions to use when executing pivot queries.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private append-queries-rff-and-fns
-  [info         :- [:maybe :map]
-   rff          :- ::qp.schema/rff
-   more-queries :- [:sequential ::qp.schema/query]]
+  [info              :- [:maybe ::lib.schema.info/info]
+   rff               :- ::qp.schema/rff
+   more-queries      :- [:sequential ::lib.schema/query]
+   column-mapping-fn :- ::column-mapping-fn]
   (let [vrf (volatile! nil)]
     {:rff      (append-queries-rff rff vrf)
      :execute  (append-queries-execute-fn more-queries)
-     :reduce   (append-queries-reduce-fn info more-queries vrf)}))</pre></td></tr><tr><td class="docs"><p>Allows the query processor to handle multiple queries, stitched together to appear as one</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- process-multiple-queries
-  [[{:keys [info], :as first-query} &amp; more-queries] rff]
-  (let [{:keys [rff execute reduce]} (append-queries-rff-and-fns info rff more-queries)
+     :reduce   (append-queries-reduce-fn info more-queries vrf column-mapping-fn)}))</pre></td></tr><tr><td class="docs"><p>Allows the query processor to handle multiple queries, stitched together to appear as one</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private process-multiple-queries
+  [[{:keys [info], :as first-query} &amp; more-queries] :- [:sequential ::lib.schema/query]
+   rff                                              :- ::qp.schema/rff
+   column-mapping-fn                                :- ::column-mapping-fn]
+  (let [{:keys [rff execute reduce]} (append-queries-rff-and-fns info rff more-queries column-mapping-fn)
         first-query                  (cond-&gt; first-query
                                        (seq info) qp/userland-query-with-default-constraints)]
     (binding [qp.pipeline/*execute* (or execute qp.pipeline/*execute*)
@@ -3139,33 +3198,86 @@ limit and other middleware</p>
         pivot-cols (when column-split-columns
                      (into [] (keep index-in-breakouts) column-split-columns))]
     {:pivot-rows pivot-rows
-     :pivot-cols pivot-cols}))</pre></td></tr><tr><td class="docs"><p>Run the pivot query. You are expected to wrap this call in [[metabase.query-processor.streaming/streaming-response]]
+     :pivot-cols pivot-cols}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private column-mapping-for-subquery :- ::pivot-column-mapping
+  [num-canonical-cols            :- ::lib.schema.common/int-greater-than-or-equal-to-zero
+   num-canonical-breakouts       :- ::num-breakouts
+   subquery-breakout-combination :- ::breakout-combination]
+  ;; all pivot queries consist of *breakout columns* + *other columns*. Breakout columns are always first, and the only
+  ;; thing that can change between subqueries. The other columns will always be the same, and in the same order.
+  (let [;; one of the breakouts will always be for the pivot group breakout added by [[add-pivot-group-breakout]],
+        ;; always added last, but this is not included in the breakout combination, so add it in so we make sure it's
+        ;; mapped properly
+        subquery-breakout-combination
+        (conj subquery-breakout-combination (dec num-canonical-breakouts))
+        ;; First, let's build a map of the canonical column index to the index in the current subquery. To build the
+        ;; map, we build it in two parts:
+        canonical-index-&gt;subquery-index
+        (merge
+         ;; 1. breakouts remapping, based on the `:qp.pivot/breakout-combination`
+         (into {}
+               (map (fn [[subquery-index canonical-index]]
+                      [canonical-index subquery-index]))
+               (m/indexed subquery-breakout-combination))
+         ;; 2. other columns remapping, which just takes the other columns offset in the subquery and moves that column
+         ;;    so it matches up with the position it is in the canonical query.
+         (let [canonical-other-columns-offset num-canonical-breakouts
+               subquery-other-columns-offset  (count subquery-breakout-combination)
+               num-other-columns              (- num-canonical-cols num-canonical-breakouts)]
+           (into {}
+                 (map (fn [i]
+                        [(+ canonical-other-columns-offset i) (+ subquery-other-columns-offset i)]))
+                 (range num-other-columns))))]
+    ;; e.g.
+    ;;
+    ;;    ;; column 1 in the subquery results corresponds to 2 in the canonical results, 3 corresponds to 0
+    ;;    {1 2, 3 0}
+    ;;
+    ;; next, let's use that map to make a vector of like
+    ;;
+    ;;    [nil 2 nil 0]
+    ;;
+    ;; e.g.
+    ;;
+    ;; * canonical column 0 has no corresponding column in the subquery
+    ;; * canonical column 2 corresponds to subquery column 1
+    (mapv (fn [i]
+            (get canonical-index-&gt;subquery-index i))
+          (range num-canonical-cols))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private make-column-mapping-fn :- ::column-mapping-fn
+  &quot;This returns a function with the signature
+    (f query) =&gt; column-remapping
+  Where `column-remapping` looks something like
+    {0 2, 1 3, 2 4}
+  `column-remapping` is a map of
+    column number in subquery results =&gt; column number in the UNION-style overall pivot results
+  Some pivot subqueries exclude certain breakouts, so we need to fill in those missing columns with `nil` in the overall
+  results -- &quot;
+  [query :- ::lib.schema/query]
+  (let [canonical-query         (add-pivot-group-breakout query 0) ; a query that returns ALL the result columns.
+        canonical-cols          (lib/returned-columns canonical-query)
+        num-canonical-cols      (count canonical-cols)
+        num-canonical-breakouts (count (filter #(= (:lib/source %) :source/breakouts)
+                                               canonical-cols))]
+    (fn column-mapping-fn* [subquery]
+      (column-mapping-for-subquery num-canonical-cols num-canonical-breakouts (:qp.pivot/breakout-combination subquery)))))</pre></td></tr><tr><td class="docs"><p>Run the pivot query. You are expected to wrap this call in [[metabase.query-processor.streaming/streaming-response]]
 yourself.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn run-pivot-query
   ([query]
    (run-pivot-query query nil))
   ([query :- ::qp.schema/query
     rff   :- [:maybe ::qp.schema/rff]]
+   (log/debugf &quot;Running pivot query:\n%s&quot; (u/pprint-to-str query))
    (binding [qp.perms/*card-id* (get-in query [:info :card-id])]
      (qp.setup/with-qp-setup [query query]
-       (let [rff                     (or rff qp.reducible/default-rff)
-             query                   (mbql.normalize/normalize query)
-             pivot-options           (or
-                                      (not-empty (select-keys query [:pivot-rows :pivot-cols]))
-                                      (pivot-options query (get-in query [:info :visualization-settings])))
-             main-breakout           (:breakout (:query query))
-             col-determination-query (add-grouping-field query main-breakout 0)
-             all-expected-cols       (qp.preprocess/query-&gt;expected-cols col-determination-query)
-             all-queries             (generate-queries query pivot-options)]
-         (binding [;; this function needs to be executed at the start of every new query to
-                   ;; determine the mapping for maintaining query shape
-                   *column-mapping-fn* (fn [query]
-                                         (let [query-cols (map-indexed vector (qp.preprocess/query-&gt;expected-cols query))]
-                                           (mapv (fn [item]
-                                                   (some #(when (= (:name item) (:name (second %)))
-                                                            (first %)) query-cols))
-                                                 all-expected-cols)))]
-           (process-multiple-queries all-queries rff)))))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+       (let [rff               (or rff qp.reducible/default-rff)
+             query             (lib/query (qp.store/metadata-provider) query)
+             pivot-options     (or
+                                (not-empty (select-keys query [:pivot-rows :pivot-cols]))
+                                (pivot-options query (get-in query [:info :visualization-settings])))
+             all-queries       (generate-queries query pivot-options)
+             column-mapping-fn (make-column-mapping-fn query)]
+         (process-multiple-queries all-queries rff column-mapping-fn))))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

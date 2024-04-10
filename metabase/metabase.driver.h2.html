@@ -3111,6 +3111,15 @@ javascript and ruby that we want to suppress.</p>
   (check-native-query-not-using-default-user query)
   (check-action-commands-allowed query)
   ((get-method driver/execute-write-query! :sql-jdbc) driver query))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- dateadd [unit amount expr]
+  (let [expr (h2x/cast-unless-type-in &quot;datetime&quot; #{&quot;datetime&quot; &quot;timestamp&quot; &quot;timestamp with time zone&quot;} expr)]
+    (-&gt; [:dateadd
+         (h2x/literal unit)
+         (if (number? amount)
+           (sql.qp/inline-num (long amount))
+           (h2x/cast :long amount))
+         expr]
+        (h2x/with-database-type-info (h2x/database-type expr)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/add-interval-honeysql-form :h2
   [driver hsql-form amount unit]
   (cond
@@ -3124,12 +3133,7 @@ javascript and ruby that we want to suppress.</p>
     (recur driver hsql-form (* amount 1000.0) :millisecond)
 
     :else
-    [:dateadd
-     (h2x/literal unit)
-     (h2x/cast :long (if (number? amount)
-                       (sql.qp/inline-num amount)
-                       amount))
-     (h2x/cast :datetime hsql-form)]))</pre></td></tr><tr><td class="docs">
+    (dateadd unit amount hsql-form)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod driver/humanize-connection-error-message :h2
   [_ message]
   (condp re-matches message
@@ -3152,8 +3156,8 @@ javascript and ruby that we want to suppress.</p>
 +----------------------------------------------------------------------------------------------------------------+</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/current-datetime-honeysql-form :h2
-  [_]
-  (h2x/with-database-type-info :%now :TIMESTAMP))</pre></td></tr><tr><td class="docs">
+  [_driver]
+  (h2x/with-database-type-info :%now &quot;timestamp&quot;))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- add-to-1970 [expr unit-str]
   [:timestampadd
    (h2x/literal unit-str)
@@ -3171,10 +3175,15 @@ javascript and ruby that we want to suppress.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/cast-temporal-byte [:h2 :Coercion/YYYYMMDDHHMMSSBytes-&gt;Temporal]
   [driver _coercion-strategy expr]
   (sql.qp/cast-temporal-string driver :Coercion/YYYYMMDDHHMMSSString-&gt;Temporal
-                               [:utf8tostring expr]))</pre></td></tr><tr><td class="docs"><p>H2 v2 added date_trunc and extract, so we can borrow the Postgres implementation</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- date-trunc [unit expr] [:date_trunc (h2x/literal unit) expr])
-(defn- extract [unit expr] [::h2x/extract unit expr])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private extract-integer (comp h2x/-&gt;integer extract))</pre></td></tr><tr><td class="docs">
+                               [:utf8tostring expr]))</pre></td></tr><tr><td class="docs"><p>H2 v2 added date_trunc and extract</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- date-trunc [unit expr]
+  (-&gt; [:date_trunc (h2x/literal unit) expr]
+      ;; date_trunc returns an arg of the same type as `expr`.
+      (h2x/with-database-type-info (h2x/database-type expr))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- extract [unit expr] [::h2x/extract unit expr])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- extract-integer [unit expr]
+  (-&gt; (extract unit expr)
+      (h2x/with-database-type-info &quot;integer&quot;)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/date [:h2 :default]          [_ _ expr] expr)
 (defmethod sql.qp/date [:h2 :second-of-minute] [_ _ expr] (extract-integer :second expr))
 (defmethod sql.qp/date [:h2 :minute]           [_ _ expr] (date-trunc :minute expr))

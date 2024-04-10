@@ -3037,16 +3037,28 @@ column.</p>
     (mbql.u/is-clause? mbql.s/numeric-functions expression)
     {:base_type :type/Float}
     :else
-    {:base_type :type/*}))</pre></td></tr><tr><td class="docs">
+    {:base_type :type/*}))</pre></td></tr><tr><td class="docs"><p>Apparently the FE viz code breaks for pivot queries if <code>field_ref</code> comes back with extra 'non-traditional' MLv2
+info (<code>:base-type</code> or <code>:effective-type</code> in <code>:expression</code>), so we better just strip this info out to be sure. If you
+don't believe me remove this and run <code>e2e/test/scenarios/visualizations-tabular/pivot_tables.cy.spec.js</code> and you
+will see.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- fe-friendly-expression-ref
+  [a-ref]
+  (let [a-ref (mbql.u/remove-namespaced-options a-ref)]
+    (lib.util.match/replace a-ref
+      [:expression expression-name (opts :guard (some-fn :base-type :effective-type))]
+      (let [fe-friendly-opts (dissoc opts :base-type :effective-type)]
+        (if (seq fe-friendly-opts)
+          [:expression expression-name fe-friendly-opts]
+          [:expression expression-name])))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- col-info-for-expression
-  [inner-query [_ expression-name :as clause]]
+  [inner-query [_expression expression-name :as clause]]
   (merge
    (infer-expression-type (mbql.u/expression-with-name inner-query expression-name))
    {:name            expression-name
     :display_name    expression-name
     ;; provided so the FE can add easily add sorts and the like when someone clicks a column header
     :expression_name expression-name
-    :field_ref       clause}))</pre></td></tr><tr><td class="docs">
+    :field_ref       (fe-friendly-expression-ref clause)}))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private col-info-for-field-clause*
   [{:keys [source-metadata], :as inner-query} [_ id-or-name opts :as clause] :- mbql.s/field]
   (let [stage-is-from-source-card? (:qp/stage-had-source-card inner-query)
