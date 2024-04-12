@@ -2877,7 +2877,7 @@ DB setup steps on arbitrary databases -- useful for functionality like the <code
    [honey.sql :as sql]
    [metabase.config :as config]
    [metabase.db.connection :as mdb.connection]
-   [metabase.db.custom-migrations]
+   [metabase.db.custom-migrations :as custom-migrations]
    [metabase.db.jdbc-protocols :as mdb.jdbc-protocols]
    [metabase.db.liquibase :as liquibase]
    [metabase.plugins.classloader :as classloader]
@@ -2896,7 +2896,7 @@ DB setup steps on arbitrary databases -- useful for functionality like the <code
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(comment
   ;; load our custom migrations
-  metabase.db.custom-migrations/keep-me
+  custom-migrations/keep-me
   ;; needed so the `:h2` dialect gets registered with Honey SQL
   metabase.util.honey-sql-2/keep-me)</pre></td></tr><tr><td class="docs"><p>If we are not doing auto migrations then print out migration SQL for user to run manually. Then throw an exception to
 short circuit the setup process and make it clear we can't proceed.</p>
@@ -3001,23 +3001,23 @@ connecting.</p>
                   {})))))))</pre></td></tr><tr><td class="docs"><p>Run through our DB migration process and make sure DB is fully prepared</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private run-schema-migrations!
   [data-source   :- (ms/InstanceOfClass javax.sql.DataSource)
-   auto-migrate? :- [:maybe :boolean]]
+   auto-migrate? :- :boolean]
   (log/info &quot;Running Database Migrations...&quot;)
   (migrate! data-source (if auto-migrate? :up :print))
   (log/info &quot;Database Migrations Current ...&quot; (u/emoji &quot;✅&quot;)))</pre></td></tr><tr><td class="docs"><p>Connects to db and runs migrations. Don't use this directly, unless you know what you're doing;
 use [[metabase.db/setup-db!]] instead, which can be called more than once without issue and is thread-safe.</p>
 
 <p>TODO -- consider renaming to something like <code>verify-connection-and-migrate!</code></p>
-
-<p>TODO -- consider whether this should be done automatically the first time someone calls <code>getConnection</code></p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn setup-db!
-  [db-type       :- :keyword
-   data-source   :- (ms/InstanceOfClass javax.sql.DataSource)
-   auto-migrate? :- [:maybe :boolean]]
+  [db-type                :- :keyword
+   data-source            :- (ms/InstanceOfClass javax.sql.DataSource)
+   auto-migrate?          :- :boolean
+   create-sample-content? :- :boolean]
   (u/profile (trs &quot;Database setup&quot;)
     (u/with-us-locale
-      (binding [mdb.connection/*application-db* (mdb.connection/application-db db-type data-source :create-pool? false) ; should already be a pool
-                config/*disable-setting-cache*  true]
+      (binding [mdb.connection/*application-db*           (mdb.connection/application-db db-type data-source :create-pool? false) ; should already be a pool
+                config/*disable-setting-cache*            true
+                custom-migrations/*create-sample-content* create-sample-content?]
          (verify-db-connection db-type data-source)
          (error-if-downgrade-required! data-source)
          (run-schema-migrations! data-source auto-migrate?))))

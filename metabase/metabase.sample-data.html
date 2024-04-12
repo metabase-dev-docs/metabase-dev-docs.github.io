@@ -2922,22 +2922,25 @@ to exist and be writable.</p>
          (log/warn (str &quot;Sample database could not be extracted to the plugins directory,&quot;
                         &quot;which may result in slow startup times. &quot;
                         &quot;Please set MB_PLUGINS_DIR to a writable directory and restart Metabase.&quot;))
-         (jar-db-details resource)))}))</pre></td></tr><tr><td class="docs"><p>Add the sample database as a Metabase DB if it doesn't already exist.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn add-sample-database!
+         (jar-db-details resource)))}))</pre></td></tr><tr><td class="docs"><p>Adds the sample database as a Metabase DB if it doesn't already exist. If it does exist in the app DB,
+we update its details.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn extract-and-sync-sample-database!
   []
-  (when-not (t2/exists? Database :is_sample true)
-    (try
-      (log/info &quot;Loading sample database&quot;)
-      (let [details (try-to-extract-sample-database!)]
-        (log/debug &quot;Syncing Sample Database...&quot;)
-        (sync/sync-database! (first (t2/insert-returning-instances! Database
-                                                                    :name      sample-database-name
-                                                                    :details   details
-                                                                    :engine    :h2
-                                                                    :is_sample true))))
-      (log/debug &quot;Finished adding Sample Database.&quot;)
-      (catch Throwable e
-        (log/error e &quot;Failed to load sample database&quot;)))))</pre></td></tr><tr><td class="docs"><p>Update the path to the sample database DB if it exists in case the JAR has moved.</p>
+  (try
+    (log/info &quot;Loading sample database&quot;)
+    (let [details (try-to-extract-sample-database!)
+          db (if (t2/exists? Database :is_sample true)
+               (t2/select-one Database (first (t2/update-returning-pks! Database :is_sample true {:details details})))
+               (first (t2/insert-returning-instances! Database
+                                                      :name      sample-database-name
+                                                      :details   details
+                                                      :engine    :h2
+                                                      :is_sample true)))]
+      (log/debug &quot;Syncing Sample Database...&quot;)
+      (sync/sync-database! db))
+    (log/debug &quot;Finished adding Sample Database.&quot;)
+    (catch Throwable e
+      (log/error e &quot;Failed to load sample database&quot;))))</pre></td></tr><tr><td class="docs"><p>Update the path to the sample database DB if it exists in case the JAR has moved.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn update-sample-database-if-needed!
   ([]
    (update-sample-database-if-needed! (t2/select-one Database :is_sample true)))
