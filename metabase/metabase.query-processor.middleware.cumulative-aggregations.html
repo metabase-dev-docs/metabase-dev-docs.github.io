@@ -2865,7 +2865,21 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.query-processor.middleware.cumulative-aggregations" name="metabase.query-processor.middleware.cumulative-aggregations"><h1 class="project-name">metabase.query-processor.middleware.cumulative-aggregations</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Middlware for handling cumulative count and cumulative sum aggregations.</p>
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.query-processor.middleware.cumulative-aggregations" name="metabase.query-processor.middleware.cumulative-aggregations"><h1 class="project-name">metabase.query-processor.middleware.cumulative-aggregations</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Middlware for handling cumulative count and cumulative sum aggregations in Clojure-land. In 0.50.0+, this middleware
+is only used for drivers that do not have native implementations of <code>:window-functions</code>; see the driver changelog
+for 0.50.0 for more information.</p>
+
+<p>For queries with more than one breakout, we reset the totals every time breakouts other than the last one change, e.g.</p>
+
+<p>  ;; city date       count cumulative_count
+  LBC     2024-01-01 10    10
+  LBC     2024-01-02 2     12
+  LBC     2024-01-02 4     16
+  SF      2024-01-01 3     3
+  SF      2024-01-01 1     4
+  SF      2024-01-02 2     6</p>
+
+<p>Rather than doing a cumulative sum across the entire set of query results -- see #2862 for more information.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.query-processor.middleware.cumulative-aggregations
   (:require
    [metabase.driver :as driver]
@@ -2875,7 +2889,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.query-processor.store :as qp.store]
    [metabase.util.malli :as mu]))</pre></td></tr><tr><td class="docs"><p>Pre-processing</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Given two sequential collections, return indecies that are different between the two.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- diff-indices
+</td><td class="codes"><pre class="brush: clojure">(defn- diff-indexes
   [coll-1 coll-2]
   (into #{}
         (keep-indexed (fn [i transformed?]
@@ -2890,7 +2904,7 @@ net.brehaut.ClojureTools = (function (SH) {
     [:cum-count]       [:count]
     [:cum-count field] [:count field]
     [:cum-sum field]   [:sum field]))</pre></td></tr><tr><td class="docs"><p>Pre-processing middleware. Rewrite <code>:cum-count</code> and <code>:cum-sum</code> aggregations as <code>:count</code> and <code>:sum</code> respectively. Add
-information about the indecies of the replaced aggregations under the <code>::replaced-indices</code> key.</p>
+information about the indecies of the replaced aggregations under the <code>::replaced-indexes</code> key.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn rewrite-cumulative-aggregations
   [{{breakouts :breakout, aggregations :aggregation} :query, :as query}]
   (cond
@@ -2904,39 +2918,47 @@ information about the indecies of the replaced aggregations under the <code>::re
     (let [query'            (replace-cumulative-ags query)
           ;; figure out which indexes are being changed in the results. Since breakouts always get included in
           ;; results first we need to offset the indexes to change by the number of breakouts
-          replaced-indices (set (for [i (diff-indices (-&gt; query  :query :aggregation)
+          replaced-indexes (set (for [i (diff-indexes (-&gt; query  :query :aggregation)
                                                       (-&gt; query' :query :aggregation))]
                                   (+ (count breakouts) i)))]
       (cond-&gt; query'
-        (seq replaced-indices) (assoc ::replaced-indices replaced-indices)))))</pre></td></tr><tr><td class="docs"><p>Post-processing</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Update values in <code>row</code> by adding values from <code>last-row</code> for a set of specified indexes.</p>
+        (seq replaced-indexes) (assoc ::replaced-indexes replaced-indexes)))))</pre></td></tr><tr><td class="docs"><p>Post-processing</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- partition-values [num-breakouts row]
+  (when (&gt; num-breakouts 1)
+    (take (dec num-breakouts) row)))</pre></td></tr><tr><td class="docs"><p>Update values in <code>row</code> by adding values from <code>last-row</code> for a set of specified indexes.</p>
 
-<p>  (add-values-from-last-row #{0} [100 200] [50 60]) ; -> [150 60]</p>
+<p>  ((add-values-from-last-row-fn 0) #{0} [100 200] [50 60]) ; -> [150 60]</p>
+
+<p>We need to reset the totals every time breakouts other than the last change values --
+see [[metabase.query-processor.middleware.cumulative-aggregations]] docstring for more info.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- add-values-from-last-row
-  [[index &amp; more] last-row row]
-  (cond
-   (not index)
-   row
-   (not last-row)
-   row
-   :else
-   (recur more last-row (update (vec row) index (partial (fnil + 0 0) (nth last-row index))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- cumulative-ags-xform [replaced-indices rf]
+  [num-breakouts indexes-to-sum last-row row]
+  (if (or (not last-row)
+          (not= (partition-values num-breakouts last-row)
+                (partition-values num-breakouts row)))
+    row
+    (reduce (fn [row index]
+              (update row index (partial (fnil + 0 0) (nth last-row index))))
+            (vec row)
+            indexes-to-sum)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- cumulative-ags-xform [num-breakouts replaced-indexes rf]
   {:pre [(fn? rf)]}
   (let [last-row (volatile! nil)]
     (fn
       ([] (rf))
       ([result] (rf result))
       ([result row]
-       (let [row' (add-values-from-last-row replaced-indices @last-row row)]
+       (let [row' (add-values-from-last-row num-breakouts replaced-indexes @last-row row)]
          (vreset! last-row row')
          (rf result row'))))))</pre></td></tr><tr><td class="docs"><p>Post-processing middleware. Sum the cumulative count aggregations that were rewritten
 by [[rewrite-cumulative-aggregations]] in Clojure-land.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn sum-cumulative-aggregation-columns
-  [{::keys [replaced-indices]} rff]
-  (if (seq replaced-indices)
+  [{::keys [replaced-indexes] inner-query :query, :as _query} rff]
+  (if (seq replaced-indexes)
     (fn sum-cumulative-aggregation-columns-rff* [metadata]
-      (cumulative-ags-xform replaced-indices (rff metadata)))
+      (let [num-breakouts (count (:breakout inner-query))]
+        (cumulative-ags-xform num-breakouts replaced-indexes (rff metadata))))
     rff))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
