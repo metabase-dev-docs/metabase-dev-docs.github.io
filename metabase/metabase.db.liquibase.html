@@ -2895,7 +2895,10 @@ net.brehaut.ClojureTools = (function (SH) {
    (liquibase.exception LockException)
    (liquibase.lockservice LockService LockServiceFactory)
    (liquibase.resource ClassLoaderResourceAccessor)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>The set of Liquibase instances which potentially have taken locks by this process.</p>
+</td><td class="codes"><pre class="brush: clojure">(defonce 
+         potentially-locked-instances
+         (atom #{}))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(comment
   ;; load our custom migrations
   metabase.db.custom-migrations/keep-me)</pre></td></tr><tr><td class="docs"><p>register our custom MySQL SQL generators</p>
@@ -3027,15 +3030,15 @@ intended to be used when a failure has occurred and bubbling up this exception w
     (try
       (force-release-locks! liquibase)
       (catch Exception e
-        (log/error e &quot;Unable to release the Liquibase lock after a migration failure&quot;)))))</pre></td></tr><tr><td class="docs">
+        (log/error e &quot;Unable to release the Liquibase lock&quot;)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- lock-service ^LockService [^Liquibase liquibase]
   (.getLockService (LockServiceFactory/getInstance) (.getDatabase liquibase)))</pre></td></tr><tr><td class="docs"><p>Check and make sure the database isn't locked. If it is, sleep for 2 seconds and then retry several times. There's a
 chance the lock will end up clearing up so we can run migrations normally.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- wait-for-migration-lock
-  [^Liquibase liquibase]
+  [^LockService lock-service]
   (let [retry-counter (volatile! 0)]
     (u/auto-retry 5
-      (when-not (.acquireLock (lock-service liquibase))
+      (when-not (.acquireLock lock-service)
         (Thread/sleep 2000)
         (vswap! retry-counter inc)
         (throw
@@ -3051,13 +3054,59 @@ chance the lock will end up clearing up so we can run migrations normally.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn holding-lock?
   [liquibase]
   (.hasChangeLogLock (lock-service liquibase)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- wait-until [done? ^long sleep-ms timeout-ms]
+  (let [deadline (+ (System/nanoTime) (* 1e6 timeout-ms))]
+    (loop []
+      (if (done?)
+        :done
+        (if (&gt;= (System/nanoTime) deadline)
+          :timed-out
+          (do (Thread/sleep sleep-ms)
+              (recur)))))))</pre></td></tr><tr><td class="docs"><p>Scan through a global set of potentially locking Liquibase objects, to retrieve the corresponding Lock Service
+instances, and filter by their <code>hasChangeLock</code> flag. Returns the list of locking instances in the current process.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- locked-instances
+  []
+  (filter holding-lock? @potentially-locked-instances))</pre></td></tr><tr><td class="docs"><p>Wait up to a maximum of <code>timeout-seconds</code> for the given Liquibase instance to release the migration lock.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn wait-for-all-locks
+  [sleep-ms timeout-ms]
+  (log/warn (locked-instances))
+  (let [done? #(empty? (locked-instances))]
+    (if (done?)
+      :none
+      (do (log/infof &quot;Waiting for migration lock(s) to be released (max %.1f secs)&quot; (/ timeout-ms 1000))
+          (wait-until done? sleep-ms timeout-ms)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- liquibase-&gt;url [^Liquibase liquibase]
+  (let [conn (.. liquibase getDatabase getConnection)]
+    ;; Need to this cast to get access to the metadata. We currently only use JDBC app databases.
+    (.getURL (.getMetaData ^JdbcConnection conn))))</pre></td></tr><tr><td class="docs"><p>Release any locks held by this process corresponding to the same database.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn release-concurrent-locks!
+  [conn-or-data-source]
+  ;; Check whether there are Liquibase locks held by the current process - we don't want to release the database locks
+  ;; if they are held by another server, for example if this host is part of an &quot;old&quot; fleet shutting down while new
+  ;; servers starting up, of which one is performing the database upgrade to later Metabase version.
+  ;;
+  (when-let [instances (not-empty (locked-instances))]
+    ;; We cannot use the existing instances to clear the locks, as their connections are blocking on their current
+    ;; long-running transaction. Since we cannot &quot;clone&quot; a connection (they have &quot;forgotten&quot; their password), so we
+    ;; will create a new Liquibase instance using a fresh database connection.
+    (with-liquibase [liquibase conn-or-data-source]
+      ;; We rely on the way that Liquibase normalizes the connection URL to check whether the blocking and fresh
+      ;; Liquibase instances are pointing to the same database.
+      (let [url (liquibase-&gt;url liquibase)]
+        (doseq [instance instances]
+          (when (= url (liquibase-&gt;url instance))
+            ;; We assume that the lock is being held for the purpose of migrations, since the other cases where we take
+            ;; locks are very fast, and in practice this method is only called after we have waited for a while to see
+            ;; if the lock was released on its own.
+            (log/warn &quot;Releasing liquibase lock before migrations finished&quot;)
+            (release-lock-if-needed! liquibase)))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private ^:dynamic *lock-depth* 0)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- assert-locked [liquibase]
   (when-not (holding-lock? liquibase)
     (throw (ex-info &quot;This operation requires a hold on the liquibase migration lock.&quot;
                     {:lock-exists? (migration-lock-exists? liquibase)
                      ;; It's possible that the lock was accidentally released by an operation, or force released by
-                     ;; another process, so its useful for debugging to know whether we were still within a locked
+                     ;; another process, so it's useful for debugging to know whether we were still within a locked
                      ;; scope.
                      :lock-depth *lock-depth*}))))</pre></td></tr><tr><td class="docs"><p>Run function <code>f</code> in a scope on the Liquibase instance <code>liquibase</code>.
  Liquibase scopes are used to hold configuration and parameters (akin to binding dynamic variables in
@@ -3073,18 +3122,23 @@ chance the lock will end up clearing up so we can run migrations normally.</p>
     (when-not config/is-prod?
       (throw (LockException. &quot;Attempted to take a Liquibase lock, but we already are holding it.&quot;))))
   (let [database      (.getDatabase liquibase)
+        lock-service  (lock-service liquibase)
         scope-objects {(.name Scope$Attr/database)         database
                        (.name Scope$Attr/resourceAccessor) (.getResourceAccessor liquibase)}]
     (Scope/child ^Map scope-objects
                  (reify Scope$ScopedRunner
                    (run [_]
-                     (wait-for-migration-lock liquibase)
+                     (swap! potentially-locked-instances conj liquibase)
+                     (wait-for-migration-lock lock-service)
                      (try
                        (binding [*lock-depth* (inc *lock-depth*)]
                          (f))
                        (finally
                          (when (zero? *lock-depth*)
-                           (.releaseLock (lock-service liquibase))))))))))</pre></td></tr><tr><td class="docs"><p>Run <code>body</code> in a scope on the Liquibase instance <code>liquibase</code>.
+                           (.releaseLock lock-service)
+                           ;; There is theoretically a chance that another thread will open a new locked scope between
+                           ;; these two statements, but in practice we do not expect concurrent usage within a process.
+                           (swap! potentially-locked-instances disj liquibase)))))))))</pre></td></tr><tr><td class="docs"><p>Run <code>body</code> in a scope on the Liquibase instance <code>liquibase</code>.
  Liquibase scopes are used to hold configuration and parameters (akin to binding dynamic variables in
  Clojure). This function initializes the database and the resource accessor which are often required.
  The underlying locks are re-entrant, so it is safe to nest these blocks.</p>

@@ -2868,6 +2868,7 @@ net.brehaut.ClojureTools = (function (SH) {
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.models.database" name="metabase.models.database"><h1 class="project-name">metabase.models.database</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.models.database
   (:require
+   [clojure.core.match :refer [match]]
    [medley.core :as m]
    [metabase.api.common :as api]
    [metabase.config :as config]
@@ -2887,6 +2888,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.public-settings.premium-features
     :as premium-features
     :refer [defenterprise]]
+   [metabase.sync.schedules :as sync.schedules]
    [metabase.util :as u]
    [metabase.util.i18n :refer [deferred-tru trs]]
    [metabase.util.log :as log]
@@ -2933,8 +2935,28 @@ We'll keep this till we replace all Database symbols in our codebase.</p>
    (mi/can-write? :model/Database (u/the-id instance)))
   ([_model pk]
    (and (not= pk config/audit-db-id)
-        (current-user-can-write-db? pk))))</pre></td></tr><tr><td class="docs"><p>(Re)schedule sync operation tasks for <code>database</code>. (Existing scheduled tasks will be deleted first.)</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- schedule-tasks!
+        (current-user-can-write-db? pk))))</pre></td></tr><tr><td class="docs"><p>Infer database schedule settings based on its options.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- infer-db-schedules
+  [{:keys [details is_full_sync is_on_demand cache_field_values_schedule metadata_sync_schedule] :as database}]
+  (match [(boolean (:let-user-control-scheduling details)) is_full_sync is_on_demand]
+    [false _ _]
+    (merge
+     database
+     (sync.schedules/schedule-map-&gt;cron-strings
+      (sync.schedules/default-randomized-schedule)))
+    ;; &quot;Regularly on a schedule&quot;
+    ;; -&gt; sync both steps, schedule should be provided
+    [true true false]
+    (do
+     (assert (every? some? [cache_field_values_schedule metadata_sync_schedule]))
+     database)
+    ;; &quot;Only when adding a new filter&quot; or &quot;Never, I'll do it myself&quot;
+    ;; -&gt; Sync metadata only
+    [true false _]
+    ;; schedules should only contains metadata_sync, but FE might sending both
+    ;; so we just manually nullify it here
+    (assoc database :cache_field_values_schedule nil)))</pre></td></tr><tr><td class="docs"><p>(Re)schedule sync operation tasks for <code>database</code>. (Existing scheduled tasks will be deleted first.)</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- check-and-schedule-tasks-for-db!
   [database]
   (try
     ;; this is done this way to avoid circular dependencies
@@ -2981,7 +3003,7 @@ implement behavior when an object is deleted can do it without having to put cod
   (u/prog1 database
     (set-new-database-permissions! database)
     ;; schedule the Database sync &amp; analyze tasks
-    (schedule-tasks! (t2.realize/realize database))))</pre></td></tr><tr><td class="docs"><p>Track whether we're calling [[driver/normalize-db-details]] already to prevent infinite
+    (check-and-schedule-tasks-for-db! (t2.realize/realize database))))</pre></td></tr><tr><td class="docs"><p>Track whether we're calling [[driver/normalize-db-details]] already to prevent infinite
 recursion. [[driver/normalize-db-details]] is actually done for side effects!</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private ^:dynamic *normalizing-details*
   false)</pre></td></tr><tr><td class="docs">
@@ -3056,26 +3078,19 @@ each iteration step, if there is a -value suffixed property set in the details t
             (assoc id-kw id)
             (secret/expand-inferred-secret-values conn-prop-nm conn-prop secret*))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- handle-secrets-changes [{:keys [details] :as database}]
-  (if (map? details)
-    (let [updated-details (secret/reduce-over-details-secret-values
-                            (driver.u/database-&gt;driver database)
-                            details
-                            (partial handle-db-details-secret-prop! database))]
-      (assoc database :details updated-details))
-    database))</pre></td></tr><tr><td class="docs">
+  (let [updated-details (secret/reduce-over-details-secret-values
+                         (driver.u/database-&gt;driver database)
+                         details
+                         (partial handle-db-details-secret-prop! database))]
+    (assoc database :details updated-details)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(t2/define-before-update :model/Database
   [database]
-  (let [database                  (mi/pre-update-changes database)
-        {new-metadata-schedule    :metadata_sync_schedule,
-         new-fieldvalues-schedule :cache_field_values_schedule,
-         new-engine               :engine
-         new-settings             :settings} database
+  (let [changes                              (t2/changes database)
+        {new-engine               :engine
+         new-settings             :settings} changes
         {is-sample?               :is_sample
-         old-metadata-schedule    :metadata_sync_schedule
-         old-fieldvalues-schedule :cache_field_values_schedule
          existing-settings        :settings
-         existing-engine          :engine
-         existing-name            :name} (t2/original database)
+         existing-engine          :engine}   (t2/original database)
         new-engine                       (some-&gt; new-engine keyword)]
     (if (and is-sample?
              new-engine
@@ -3084,32 +3099,21 @@ each iteration step, if there is a -value suffixed property set in the details t
                       {:status-code     400
                        :existing-engine existing-engine
                        :new-engine      new-engine}))
-      (u/prog1 (-&gt; database
-                   ;; If the engine doesn't support nested field columns, `json_unfolding` must be nil
-                   (cond-&gt; (and (some? (:details database))
-                                (not (driver/database-supports? (or new-engine existing-engine) :nested-field-columns database)))
-                     (update :details dissoc :json_unfolding))
-                   handle-secrets-changes)
-        ;; TODO - this logic would make more sense in post-update if such a method existed
-        ;; if the sync operation schedules have changed, we need to reschedule this DB
-        (when (or new-metadata-schedule new-fieldvalues-schedule)
-          ;; if one of the schedules wasn't passed continue using the old one
-          (let [new-metadata-schedule    (or new-metadata-schedule old-metadata-schedule)
-                new-fieldvalues-schedule (or new-fieldvalues-schedule old-fieldvalues-schedule)]
-            (when (not= [new-metadata-schedule new-fieldvalues-schedule]
-                        [old-metadata-schedule old-fieldvalues-schedule])
-              (log/info
-               (format &quot;%s Database '%s' sync/analyze schedules have changed!&quot; existing-engine existing-name)
-               &quot;\n&quot;
-               (format &quot;Sync metadata was: '%s' is now: '%s'&quot; old-metadata-schedule new-metadata-schedule)
-               &quot;\n&quot;
-               (format &quot;Cache FieldValues was: '%s', is now: '%s'&quot; old-fieldvalues-schedule new-fieldvalues-schedule))
-              ;; reschedule the database. Make sure we're passing back the old schedule if one of the two wasn't
-              ;; supplied
-              (schedule-tasks!
-               (assoc database
-                      :metadata_sync_schedule      new-metadata-schedule
-                      :cache_field_values_schedule new-fieldvalues-schedule)))))
+      (u/prog1 (cond-&gt; database
+                 ;; If the engine doesn't support nested field columns, `json_unfolding` must be nil
+                 (and (some? (:details changes))
+                      (not (driver/database-supports? (or new-engine existing-engine) :nested-field-columns database)))
+                 (update :details dissoc :json_unfolding)
+
+                 (or
+                  ;if there is any changes in user control setting
+                  (some? (get-in changes [:details :let-user-control-scheduling]))
+                  ;; if there is a changes in schedules, make sure it respects the settings
+                  (some some? [(:cache_field_values_schedule changes) (:metadata_sync_schedule changes)]))
+                 infer-db-schedules
+
+                 (some? (:details changes))
+                 handle-secrets-changes)
         ;; This maintains a constraint that if a driver doesn't support actions, it can never be enabled
         ;; If we drop support for actions for a driver, we'd need to add a migration to disable actions for all databases
         (when (and (:database-enable-actions (or new-settings existing-settings))
@@ -3118,13 +3122,19 @@ each iteration step, if there is a -value suffixed property set in the details t
                           {:status-code     400
                            :existing-engine existing-engine
                            :new-engine      new-engine})))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(t2/define-after-update :model/Database
+  [database]
+  (check-and-schedule-tasks-for-db! (t2.realize/realize database)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(t2/define-before-insert :model/Database
   [{:keys [details initial_sync_status], :as database}]
-  (-&gt; database
+  (-&gt; (merge {:is_full_sync true
+              :is_on_demand false}
+             database)
       (cond-&gt;
         (not details)             (assoc :details {})
         (not initial_sync_status) (assoc :initial_sync_status &quot;incomplete&quot;))
-      handle-secrets-changes))</pre></td></tr><tr><td class="docs">
+      handle-secrets-changes
+      infer-db-schedules))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/hash-fields :model/Database
   [_database]
   [:name :engine])</pre></td></tr><tr><td class="docs">
@@ -3206,8 +3216,8 @@ driver can't be clearly determined, this simply returns the default set (driver.
                          ;; you need to define it :)
                          false)))
                    settings)
-                   (when (not= &lt;&gt; settings)
-                     (log/debug &quot;Redacting non-user-readable database settings during json encoding.&quot;)))))))
+                  (when (not= &lt;&gt; settings)
+                    (log/debug &quot;Redacting non-user-readable database settings during json encoding.&quot;)))))))
    json-generator))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------ Serialization ----------------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/extract-one &quot;Database&quot;
