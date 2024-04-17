@@ -2878,6 +2878,12 @@ net.brehaut.ClojureTools = (function (SH) {
 <ul>
 <li>Add an expression that extracts the specified value from this column.</li>
 </ul>
+
+<p>Extra constraints:</p>
+
+<ul>
+<li>Database must support <code>:regex</code> feature for the URL and Email extractions to work.</li>
+</ul>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.lib.drill-thru.column-extract
   (:require
    [medley.core :as m]
@@ -2885,6 +2891,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.lib.drill-thru.common :as lib.drill-thru.common]
    [metabase.lib.expression :as lib.expression]
    [metabase.lib.filter :as lib.filter]
+   [metabase.lib.metadata :as lib.metadata]
    [metabase.lib.metadata.calculation :as lib.metadata.calculation]
    [metabase.lib.schema :as lib.schema]
    [metabase.lib.schema.drill-thru :as lib.schema.drill-thru]
@@ -2946,10 +2953,15 @@ net.brehaut.ClojureTools = (function (SH) {
   ;; 10. And its dot, which is outside the capture.
   ;;12         34        5  6       7                8       9      10
   #&quot;^(?:www\.)?((?!www\.)(?![^\.]+\.(?:[^\.]{1,3}\.)?[^\.]+$)[^\.]+)\.&quot;)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- column-extract-drill-for-column [column]
+</td><td class="codes"><pre class="brush: clojure">(defn- regex-available? [metadata-providerable]
+  ((:features (lib.metadata/database metadata-providerable)) :regex))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- column-extract-drill-for-column [query column]
   (cond
     (lib.types.isa/temporal? column) {:display-name (i18n/tru &quot;Extract day, month…&quot;)
                                       :extractions  (column-extract-temporal-units column)}
+    ;; The URL and email extractions are powered by regular expressions, and not every database supports those.
+    ;; If the target database doesn't support :regex feature, return nil.
+    (not (regex-available? query))   nil
     (lib.types.isa/email? column)    {:display-name (i18n/tru &quot;Extract domain&quot;)
                                       :extractions  [{:key          :email-domain
                                                       :display-name (i18n/tru &quot;Domain&quot;)}]}
@@ -2965,7 +2977,7 @@ net.brehaut.ClojureTools = (function (SH) {
    stage-number                :- :int
    {:keys [column column-ref value]} :- ::lib.schema.drill-thru/context]
   (when (and column (nil? value))
-    (when-let [drill (column-extract-drill-for-column column)]
+    (when-let [drill (column-extract-drill-for-column query column)]
       (merge drill
              {:lib/type :metabase.lib.drill-thru/drill-thru
               :type     :drill-thru/column-extract}
