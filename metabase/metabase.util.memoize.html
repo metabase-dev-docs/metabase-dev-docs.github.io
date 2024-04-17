@@ -2865,119 +2865,17 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.util.memoize" name="metabase.util.memoize"><h1 class="project-name">metabase.util.memoize</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Copied from clojure.core.memoize.</p>
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.util.memoize" name="metabase.util.memoize"><h1 class="project-name">metabase.util.memoize</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.util.memoize
-  (:require [cljs.cache :as cache]))</pre></td></tr><tr><td class="docs"><p>Similar to clojure.lang.Delay, but will not memoize an exception and will
-instead retry.
-  fun - the function, never nil
-  available? - indicates a memoized value is available, volatile for visibility
-  value - the value (if available) - volatile for visibility</p>
-</td><td class="codes"><pre class="brush: clojure">(deftype RetryingDelay [fun ^:volatile-mutable available? ^:volatile-mutable value]
-  IDeref
-  (-deref [_]
-    ;; first check (safe with volatile flag)
-    (if available?
-      value
-      ;; fun may throw - will retry on next deref
-      (let [v (fun)]
-        (set! value v)
-        (set! available? true)
-        v)))
-  IPending
-  (-realized? [_]
-    available?))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- d-lay [fun]
-  (-&gt;RetryingDelay fun false nil))</pre></td></tr><tr><td class="docs"><p>If a value is not already derefable, wrap it up.</p>
-
-<p>This is used to help rebuild seed/base maps passed in to the various
-caches so that they conform to core.memoize's world view.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- make-derefable
-  [v]
-  (if (instance? IDeref v)
-    v
-    (reify IDeref
-      (-deref [_] v))))</pre></td></tr><tr><td class="docs"><p>Given a seed/base map, ensure all the values in it are derefable.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- derefable-seed
-  [seed]
-  (update-vals seed make-derefable))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(deftype PluggableMemoization [f cache]
-  cache/CacheProtocol
-  (has? [_ item]
-    (cache/has? cache item))
-  (hit  [_ item]
-    (PluggableMemoization. f (cache/hit cache item)))
-  (miss [_ item result]
-    (PluggableMemoization. f (cache/miss cache item result)))
-  (evict [_ key]
-    (PluggableMemoization. f (cache/evict cache key)))
-  (lookup [_ item]
-    (cache/lookup cache item nil))
-  (lookup [_ item not-found]
-    (cache/lookup cache item (delay not-found)))
-  (seed [_ base]
-    (PluggableMemoization.
-     f (cache/seed cache (derefable-seed base))))
-  Object
-  (toString [_] (str cache)))</pre></td></tr><tr><td class="docs"><p>Returns a function's argument transformer.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^{:private true
-       :doc }
-  args-fn #(or (::args-fn (meta %)) identity))</pre></td></tr><tr><td class="docs"><p>The basic hit/miss logic for the cache system based on <code>cache/through</code>.
-Clojure delays are used to hold the cache value.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- through*
-  [cache f args item]
-  (cache/through
-   (fn [f _] (d-lay #(f args)))
-   #(apply f %)
-   cache
-   item))</pre></td></tr><tr><td class="docs"><p>Given a function, an atom containing a (pluggable memoization cache), and
-and cache key function, return a new function that behaves like the original
-function except it is cached, based on its arguments.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- cached-function
-  [f cache-atom ckey-fn]
-  (fn [&amp; args]
-    (let [ckey (or (ckey-fn args) [])
-          cs   (swap! cache-atom through* f args ckey)
-          val  (cache/lookup cs ckey ::not-found)]
-       ;; If `lookup` returns `(delay ::not-found)`, it's likely that
-       ;; we ran into a timing issue where eviction and access
-       ;; are happening at about the same time. Therefore, we retry
-       ;; the `swap!` (potentially several times).
-       ;;
-       ;; metabase.util.memoize currently wraps all of its values in a `delay`.
-      (when val
-        (loop [n 0 v @val]
-          (if (= ::not-found v)
-            (when-let [v' (cache/lookup
-                           (swap! cache-atom through* f args ckey)
-                           ckey ::not-found)]
-              (when (&lt; n 10)
-                (recur (inc n) @v')))
-            v))))))</pre></td></tr><tr><td class="docs"><p>Build a pluggable memoized version of a function. Given a function and a
-(pluggable memoized) cache, and an optional seed (hash map of arguments to
-return values), return a cached version of that function.</p>
-
-<p>If you want to build your own cached function, perhaps with combined caches
-or customized caches, this is the preferred way to do so now.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn memoizer
-  ([f cache]
-   (let [cache   (atom (PluggableMemoization. f cache))
-         ckey-fn (args-fn f)]
-     (cached-function f cache ckey-fn)))
-  ([f cache seed]
-   (let [cache   (atom (cache/seed (PluggableMemoization. f cache)
-                                   (derefable-seed seed)))
-         ckey-fn (args-fn f)]
-     (cached-function f cache ckey-fn))))</pre></td></tr><tr><td class="docs"><p>Works the same as the basic memoization function (i.e.
- <code>core.memoize</code> except when a given threshold is breached.
- When the threshold is passed, the cache will expel the
- <strong>L</strong>east <strong>R</strong>ecently <strong>U</strong>sed element in favor of the new.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn lru
-  ([f] (lru f {} :lru/threshold 32))
-  ([f base] (lru f base :lru/threshold 32))
-  ([f tkey threshold] (lru f {} tkey threshold))
-  ([f base key threshold]
-   (assert (= key :lru/threshold) (str &quot;wrong parameter key &quot; key))
-   (memoizer f (cache/lru-cache-factory {} :threshold threshold) base)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+  (:require
+   [clojure.core.memoize :as memoize]
+   [metabase.shared.util.namespaces :as shared.ns]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(comment
+  memoize/keep-me)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(shared.ns/import-fns
+ [memoize
+  lru
+  memoizer])</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
