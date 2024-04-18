@@ -3788,14 +3788,16 @@ For some reasons during data-migration [[metabase.models.setting/get]] return th
 </td><td class="codes"><pre class="brush: clojure">(define-reversible-migration CardRevisionAddType
   (case (mdb.connection/db-type)
     :postgres
+    ;; postgres doesn't allow `\u0000` in text when converting to jsonb, so we need to remove them before we can
+    ;; parse the json. We use negative look behind to avoid matching `\\u0000` (metabase#40835)
     (t2/query [&quot;UPDATE revision
-               SET object = jsonb_set(
-                  object::jsonb, '{type}',
+               SET object = replace(jsonb_set(
+                  (regexp_replace(object, '(?&lt;!\\\\)\\\\u0000', '286b707c-e895-4cd3-acfc-569147f54371', 'g'))::jsonb, '{type}',
                   to_jsonb(CASE
-                              WHEN (object::jsonb-&gt;&gt;'dataset')::boolean THEN 'model'
+                              WHEN ((regexp_replace(object, '(?&lt;!\\\\)\\\\u0000', '286b707c-e895-4cd3-acfc-569147f54371', 'g'))::jsonb-&gt;&gt;'dataset')::boolean THEN 'model'
                               ELSE 'question'
-                           END)::jsonb, true)
-               WHERE model = 'Card' AND (object::jsonb-&gt;&gt;'dataset') IS NOT NULL;&quot;])
+                           END)::jsonb, true)::text, '286b707c-e895-4cd3-acfc-569147f54371', '\\u0000')
+               WHERE model = 'Card' AND ((regexp_replace(object, '(?&lt;!\\\\)\\\\u0000', '286b707c-e895-4cd3-acfc-569147f54371', 'g'))::jsonb-&gt;&gt;'dataset') IS NOT NULL;&quot;])
     :mysql
     (t2/query [&quot;UPDATE revision
                SET object = JSON_SET(

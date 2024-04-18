@@ -2869,9 +2869,7 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(ns metabase-enterprise.cache.strategies
   (:require
    [java-time.api :as t]
-   [medley.core :as m]
-   [metabase.api.cache :as api.cache]
-   [metabase.public-settings :as public-settings]
+   [metabase.models.cache-config :as cache-config]
    [metabase.public-settings.premium-features :refer [defenterprise defenterprise-schema]]
    [metabase.query-processor.middleware.cache-backend.db :as backend.db]
    [metabase.util.cron :as u.cron]
@@ -2892,60 +2890,49 @@ net.brehaut.ClojureTools = (function (SH) {
     [:ttl      [:map {:closed true}
                 [:type [:= :ttl]]
                 [:multiplier ms/PositiveInt]
-                [:min_duration_ms ms/IntGreaterThanOrEqualToZero]]]
+                [:min_duration_ms ms/IntGreaterThanOrEqualToZero]
+                ^:internal
+                [:invalidated-at {:optional true} some?]]]
     [:duration [:map {:closed true}
                 [:type [:= :duration]]
                 [:duration ms/PositiveInt]
-                [:unit [:enum &quot;hours&quot; &quot;minutes&quot; &quot;seconds&quot; &quot;days&quot;]]]]
+                [:unit [:enum &quot;hours&quot; &quot;minutes&quot; &quot;seconds&quot; &quot;days&quot;]]
+                ^:internal
+                [:invalidated-at {:optional true} some?]]]
     [:schedule [:map {:closed true}
                 [:type [:= :schedule]]
                 [:schedule u.cron/CronScheduleString]
                 ^:internal
-                [:invalidated-at [:maybe some?]]]]
+                [:invalidated-at {:optional true} some?]]]
     [:query    [:map {:closed true}
                 [:type [:= :query]]
                 [:field_id int?]
                 [:aggregation [:enum &quot;max&quot; &quot;count&quot;]]
                 [:schedule u.cron/CronScheduleString]
                 ^:internal
-                [:invalidated-at [:maybe some?]]]]]])</pre></td></tr><tr><td class="docs"><p>Querying DB</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Returns the granular cache duration (in hours) for a card. On EE, this first checking whether there is a stored value
- for the card, dashboard, or database (in that order of decreasing preference). Returns nil on OSS.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- granular-duration-hours
-  [card dashboard-id]
-  (or (:cache_ttl card)
-      (when dashboard-id
-        (t2/select-one-fn :cache_ttl [:model/Dashboard :cache_ttl] :id dashboard-id))
-      (t2/select-one-fn :cache_ttl [:model/Database :cache_ttl] :id (:database_id card))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defenterprise-schema granular-cache-strategy :- [:maybe (CacheStrategy)]
+                [:invalidated-at {:optional true} some?]]]]])</pre></td></tr><tr><td class="docs"><p>Querying DB</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defenterprise-schema cache-strategy :- [:maybe (CacheStrategy)]
   &quot;Returns the granular cache strategy for a card.&quot;
   :feature :cache-granular-controls
   [card dashboard-id]
-  (when (public-settings/enable-query-caching)
-    (let [qs   (for [[i model model-id] [[1 &quot;question&quot;   (:id card)]
-                                         [2 &quot;dashboard&quot;  dashboard-id]
-                                         [3 &quot;database&quot;   (:database_id card)]
-                                         [4 &quot;root&quot;       0]]
-                     :when              model-id]
-                 {:from   [:cache_config]
-                  :select [:id
-                           [[:inline i] :ordering]]
-                  :where  [:and
-                           [:= :model model]
-                           [:= :model_id model-id]]})
-          q    {:from     [[{:union-all qs} :unused_alias]]
-                :select   [:id]
-                :order-by :ordering
-                :limit    1}
-          item (t2/select-one :model/CacheConfig :id q)]
-      (if item
-        (-&gt; (:strategy (api.cache/row-&gt;config item))
-            (m/assoc-some :invalidated-at (t/max (:invalidated_at item)
-                                                 (:cache_invalidated_at card))))
-        (when-let [ttl (granular-duration-hours card dashboard-id)]
-          {:type     :duration
-           :duration ttl
-           :unit     &quot;hours&quot;})))))</pre></td></tr><tr><td class="docs"><p>Strategy execution</p>
+  (let [qs   (for [[i model model-id] [[1 &quot;question&quot;   (:id card)]
+                                       [2 &quot;dashboard&quot;  dashboard-id]
+                                       [3 &quot;database&quot;   (:database_id card)]
+                                       [4 &quot;root&quot;       0]]
+                   :when              model-id]
+               {:from   [:cache_config]
+                :select [:id
+                         [[:inline i] :ordering]]
+                :where  [:and
+                         [:= :model [:inline model]]
+                         [:= :model_id model-id]]})
+        q    {:from     [[{:union-all qs} :unused_alias]]
+              :select   [:id]
+              :order-by :ordering
+              :limit    [:inline 1]}
+        item (t2/select-one :model/CacheConfig :id q)]
+    (cache-config/card-strategy item card)))</pre></td></tr><tr><td class="docs"><p>Strategy execution</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Generate prepared statement for a db cache backend for a given strategy</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti ^:private fetch-cache-stmt-ee*
   (fn [strategy _hash _conn] (:type strategy)))</pre></td></tr><tr><td class="docs">
