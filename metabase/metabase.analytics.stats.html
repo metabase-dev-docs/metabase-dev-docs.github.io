@@ -3014,7 +3014,8 @@ TODO characterize by # w/ sql access, # of users, no self-serve data access</p>
 TODO characterize by # executions and avg latency</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- question-metrics
   []
-  (let [cards (t2/select [Card :query_type :public_uuid :enable_embedding :embedding_params :dataset_query])]
+  (let [cards (t2/select [Card :query_type :public_uuid :enable_embedding :embedding_params :dataset_query]
+                         :creator_id [:not= config/internal-mb-user-id])]
     {:questions (merge-count-maps (for [card cards]
                                     (let [native? (= (keyword (:query_type card)) :native)]
                                       {:total       1
@@ -3036,8 +3037,11 @@ TODO characterize by # executions and avg latency</p>
 TODO characterize by # of revisions, and created by an admin</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- dashboard-metrics
   []
-  (let [dashboards (t2/select [Dashboard :creator_id :public_uuid :parameters :enable_embedding :embedding_params])
-        dashcards  (t2/select [DashboardCard :card_id :dashboard_id])]
+  (let [dashboards (t2/select [Dashboard :creator_id :public_uuid :parameters :enable_embedding :embedding_params] :creator_id [:not= config/internal-mb-user-id])
+        dashcards  (t2/query {:select :dc.*
+                              :from [[(t2/table-name DashboardCard) :dc]]
+                              :join [[(t2/table-name Dashboard) :d] [:= :d.id :dc.dashboard_id]]
+                              :where [:not [:= :d.creator_id config/internal-mb-user-id]]})]
     {:dashboards         (count dashboards)
      :with_params        (count (filter (comp seq :parameters) dashboards))
      :num_dashs_per_user (medium-histogram dashboards :creator_id)
@@ -3122,8 +3126,8 @@ TODO: characterize by non-user account emails, # emails</p>
      :num_cards_per_alerts (medium-histogram (vals (db-frequencies PulseCard :pulse_id   alert-conditions)))}))</pre></td></tr><tr><td class="docs"><p>Get metrics on Collection usage.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- collection-metrics
   []
-  (let [collections (t2/select Collection)
-        cards       (t2/select [Card :collection_id])]
+  (let [collections (t2/select Collection :type [:not= &quot;instance-analytics&quot;] :is_sample false)
+        cards       (t2/select [Card :collection_id] :creator_id [:not= config/internal-mb-user-id])]
     {:collections              (count collections)
      :cards_in_collections     (count (filter :collection_id cards))
      :cards_not_in_collections (count (remove :collection_id cards))
