@@ -2902,42 +2902,19 @@ net.brehaut.ClojureTools = (function (SH) {
   (log/debugf &quot;Deleting unneeded GTAPs for Group %d for Table %d. Graph changes: %s&quot;
              group-id table-id (pr-str changes))
   (cond
-    (= changes :none)
-    (do
-      (log/debugf &quot;Group %d no longer has any permissions for Table %d, deleting GTAP for this Table if one exists&quot;
-                 group-id table-id)
-      (delete-gtaps-with-condition! group-id [:= :table.id table-id]))
-    (= changes :all)
+    (= changes :unrestricted)
     (do
       (log/debugf &quot;Group %d now has full data perms for Table %d, deleting GTAP for this Table if one exists&quot;
                  group-id table-id)
       (delete-gtaps-with-condition! group-id [:= :table.id table-id]))
-    :else
-    (let [new-query-perms (get changes :query :none)]
-      (case new-query-perms
-        :none
-        (do
-          (log/debugf &quot;Group %d no longer has any query perms for Table %d; deleting GTAP for this Table if one exists&quot;
-                     group-id table-id)
-          (delete-gtaps-with-condition! group-id [:= :table.id table-id]))
-        :all
-        (do
-          (log/debugf &quot;Group %d now has full non-sandboxed query perms for Table %d; deleting GTAP for this Table if one exists&quot;
-                     group-id table-id)
-          (delete-gtaps-with-condition! group-id [:= :table.id table-id]))
-        :segmented
-        (log/debugf &quot;Group %d now has full segmented query perms for Table %d. Do not need to delete GTAPs.&quot;
-                   group-id table-id)))))</pre></td></tr><tr><td class="docs">
+    (= changes :sandboxed)
+    (log/debugf &quot;Group %d now has full sandboxed query perms for Table %d. Do not need to delete GTAPs.&quot;
+               group-id table-id)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- delete-gtaps-for-group-schema! [{:keys [group-id database-id schema-name], :as context} changes]
   (log/debugf &quot;Deleting unneeded GTAPs for Group %d for Database %d, schema %s. Graph changes: %s&quot;
              group-id database-id (pr-str schema-name) (pr-str changes))
   (cond
-    (= changes :none)
-    (do
-      (log/debugf &quot;Group %d no longer has any permissions for Database %d schema %s, deleting all GTAPs for this schema&quot;
-                  group-id database-id (pr-str schema-name))
-      (delete-gtaps-with-condition! group-id [:and [:= :table.db_id database-id] [:= :table.schema schema-name]]))
-    (= changes :all)
+    (= changes :unrestricted)
     (do
       (log/debugf &quot;Group %d changes has full data perms for Database %d schema %s, deleting all GTAPs for this schema&quot;
                   group-id database-id (pr-str schema-name))
@@ -2948,14 +2925,14 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defn- delete-gtaps-for-group-database! [{:keys [group-id database-id], :as context} changes]
   (log/debugf &quot;Deleting unneeded GTAPs for Group %d for Database %d. Graph changes: %s&quot;
               group-id database-id (pr-str changes))
-  (if (#{:none :all :block :impersonated} changes)
+  (if (#{:unrestricted :legacy-no-self-service :blocked :impersonated} changes)
     (do
       (log/debugf &quot;Group %d %s for Database %d, deleting all GTAPs for this DB&quot;
                   group-id
                   (case changes
-                    :none  &quot;no longer has any perms&quot;
-                    :all   &quot;now has full data perms&quot;
-                    :block &quot;is now BLOCKED from all non-data-perms access&quot;
+                    :unrestricted &quot;now has full data perms&quot;
+                    :legacy-no-self-service &quot;now has full data perms&quot;
+                    :blocked      &quot;is now BLOCKED from all non-data-perms access&quot;
                     :impersonated &quot;is now using connection impersonation&quot;)
                   database-id)
       (delete-gtaps-with-condition! group-id [:= :table.db_id database-id]))
@@ -2966,7 +2943,7 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defn- delete-gtaps-for-group! [{:keys [group-id]} changes]
   (log/debugf &quot;Deleting unneeded GTAPs for Group %d. Graph changes: %s&quot; group-id (pr-str changes))
   (doseq [database-id (set (keys changes))]
-    (when-let [data-perm-changes (get-in changes [database-id :data :schemas])]
+    (when-let [data-perm-changes (get-in changes [database-id :view-data])]
       (delete-gtaps-for-group-database!
        {:group-id group-id, :database-id database-id}
        data-perm-changes))))</pre></td></tr><tr><td class="docs"><p>For use only inside <code>metabase.models.permissions</code>; don't call this elsewhere. Delete GTAPs (sandboxes) that are no

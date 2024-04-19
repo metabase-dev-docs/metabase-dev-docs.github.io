@@ -3094,9 +3094,37 @@ required permissions, allowing the user to run their sandboxed query.</p>
     (qp.store/cached card-id
                      (query-perms/required-perms (:dataset-query (lib.metadata.protocols/card (qp.store/metadata-provider) card-id))
                                                  :throw-exceptions? true))
-    {:perms/data-access (zipmap (sandbox-&gt;table-ids sandbox) (repeat :unrestricted))}))</pre></td></tr><tr><td class="docs">
+    {:perms/view-data :unrestricted
+     :perms/create-queries (zipmap (sandbox-&gt;table-ids sandbox) (repeat :query-builder))}))</pre></td></tr><tr><td class="docs"><p>The shape of permissions maps is a little odd, and using <code>m/deep-merge</code> doesn't give us exactly what we want.
+In particular, if we need query-builder-and-native at the <em>database</em> level, but :query-builder at the <em>table</em> level,
+the permissions maps will look like:</p>
+
+<ul>
+<li><code>{:perms/create-queries :query-builder-and-native}</code></li>
+<li><code>{:perms/create-queries {1 :query-builder}}</code></li>
+</ul>
+
+<p>Currently, we never require a <em>lower</em> level permission at the database level, so it's ok to just say that the
+db-level permissions always win. If we ever wanted to merge something like `{:perms/create-queries
+{1 :query-builder-and-native}}<code>with</code>{:perms/create-queries :query-builder}`, this would break down and we'd
+probably want to modify the shape of the permissions-maps themselves.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- merge-perms
+  ([perms-a] perms-a)
+  ([perms-a perms-b]
+   (reduce (fn [merged [k v]]
+             (update merged k (fn [old-v]
+                                (cond
+                                  (keyword? old-v) old-v
+                                  (keyword? v) v
+                                  (and (map? old-v) (map? v))
+                                  (merge old-v v)
+                                  :else v))))
+           (or perms-a {})
+           (seq perms-b)))
+  ([perms-a perms-b &amp; more]
+   (reduce merge-perms perms-a (cons perms-b more))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- sandboxes-&gt;required-perms [sandboxes]
-  (apply m/deep-merge (map sandbox-&gt;required-perms sandboxes)))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
+  (apply merge-perms (map sandbox-&gt;required-perms sandboxes)))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
 |                                                   Middleware                                                   |
 +----------------------------------------------------------------------------------------------------------------+</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>------------------------------------------ apply-row-level-permissions -------------------------------------------</p>
