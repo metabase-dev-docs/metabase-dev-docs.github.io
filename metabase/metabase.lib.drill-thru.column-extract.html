@@ -2910,49 +2910,6 @@ net.brehaut.ClojureTools = (function (SH) {
                               date-units))]
            {:key          unit
             :display-name (lib.temporal-bucket/describe-temporal-unit unit)}))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private url-&gt;host-regex
-  ;;    protocol       host    etc.
-  #&quot;^(?:[^:/?#]*:?//)?([^/?#]*).*$&quot;)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private host-&gt;domain-regex
-  ;; Deliberately no ^ at the start; there might be several subdomains before this spot.
-  ;; By &quot;short tail&quot; below, I mean a pseudo-TLD nested under a proper TLD. For example, mycompany.co.uk.
-  ;; This can accidentally capture a short domain name, eg. &quot;subdomain.aol.com&quot; -&gt; &quot;subdomain&quot;, oops.
-  ;; But there's a load of these, not a short list we can include here, so it's either preprocess the (huge) master list
-  ;; from Mozilla or accept that this regex is a bit best-effort.
-  ;; Skip www  domain   maybe short tail  TLD
-  #&quot;(?:www\.)?([^\.]+)\.(?:[^\.]{1,3}\.)?[^\.]+$&quot;)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private email-&gt;domain-regex
-  ;; See [[host-&gt;domain-regex]] on the challenges of parsing domains with regexes.
-  ;; Referencing the indexes below:
-  ;; 1. Positive lookbehind: Starting after @ or .
-  ;; 2. Negative lookahead: Don't capture www as the domain
-  ;; 3. One domain segment
-  ;; 4. Positive lookahead:
-  ;;      Either:
-  ;; 5.     Short final segment (eg. .co.uk)
-  ;; 6.     Top-level domain
-  ;; 7.     Anchor to end
-  ;;      Or:
-  ;; 8.     Top-level domain
-  ;; 9.     Anchor to end
-  ;;1         2        3      (4   5            6      7|  8      9)
-  #&quot;(?&lt;=[@\.])(?!www\.)[^@\.]+(?=\.[^@\.]{1,3}\.[^@\.]+$|\.[^@\.]+$)&quot;)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private host-&gt;subdomain-regex
-  ;; This grabs the first segment that isn't &quot;www&quot;, AND excludes the main domain name.
-  ;; See [[host-&gt;domain-regex]] for more details about how those are matched.
-  ;; Referencing the indexes below:
-  ;; 1.  Only at the start of the input
-  ;; 2.  Consume &quot;www.&quot; if present
-  ;; 3.  Start capturing the subdomain we want
-  ;; 4.  Negative lookahead: That subdomain can't be &quot;www&quot;; we don't want to backtrack and find &quot;www&quot;.
-  ;; 5.  Negative lookahead to make sure this isn't the proper domain:
-  ;; 6.      Main domain name
-  ;; 7.      Optional short tail (eg. co.uk)
-  ;; 8.      Top-level domain, ending the input
-  ;; 9.  Matching the actual subdomain
-  ;; 10. And its dot, which is outside the capture.
-  ;;12         34        5  6       7                8       9      10
-  #&quot;^(?:www\.)?((?!www\.)(?![^\.]+\.(?:[^\.]{1,3}\.)?[^\.]+$)[^\.]+)\.&quot;)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- regex-available? [metadata-providerable]
   ((:features (lib.metadata/database metadata-providerable)) :regex))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- column-extract-drill-for-column [query column]
@@ -2963,13 +2920,17 @@ net.brehaut.ClojureTools = (function (SH) {
     ;; If the target database doesn't support :regex feature, return nil.
     (not (regex-available? query))   nil
     (lib.types.isa/email? column)    {:display-name (i18n/tru &quot;Extract domain&quot;)
-                                      :extractions  [{:key          :email-domain
-                                                      :display-name (i18n/tru &quot;Domain&quot;)}]}
+                                      :extractions  [{:key          :domain
+                                                      :display-name (i18n/tru &quot;Domain&quot;)}
+                                                     {:key          :host
+                                                      :display-name (i18n/tru &quot;Host&quot;)}]}
     (lib.types.isa/URL? column)      {:display-name (i18n/tru &quot;Extract domain, subdomain…&quot;)
                                       :extractions  [{:key          :domain
                                                       :display-name (i18n/tru &quot;Domain&quot;)}
                                                      {:key          :subdomain
-                                                      :display-name (i18n/tru &quot;Subdomain&quot;)}]}))</pre></td></tr><tr><td class="docs">
+                                                      :display-name (i18n/tru &quot;Subdomain&quot;)}
+                                                     {:key          :host
+                                                      :display-name (i18n/tru &quot;Host&quot;)}]}))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn column-extract-drill :- [:maybe ::lib.schema.drill-thru/drill-thru.column-extract]
   &quot;Column clicks on temporal columns only.
   Might add a stage, like `:drill-thru/column-filter` does, if the current stage has aggregations.&quot;
@@ -3001,15 +2962,10 @@ net.brehaut.ClojureTools = (function (SH) {
     :month-of-year   (case-expression #(lib.expression/get-month column) tag 12)
     :quarter-of-year (case-expression #(lib.expression/get-quarter column) tag 4)
     :year            (lib.expression/get-year column)
-    ;; URLs
-    :domain          (-&gt; column
-                         (lib.expression/regex-match-first url-&gt;host-regex)
-                         (lib.expression/regex-match-first host-&gt;domain-regex))
-    :subdomain       (-&gt; column
-                         (lib.expression/regex-match-first url-&gt;host-regex)
-                         (lib.expression/regex-match-first host-&gt;subdomain-regex))
-    ;; Emails
-    :email-domain    (lib.expression/regex-match-first column email-&gt;domain-regex)))</pre></td></tr><tr><td class="docs">
+    ;; URLs and emails
+    :domain          (lib.expression/domain column)
+    :subdomain       (lib.expression/subdomain column)
+    :host            (lib.expression/host column)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod lib.drill-thru.common/drill-thru-method :drill-thru/column-extract
   [_query _stage-number {:keys [query stage-number column extractions]} &amp; [tag]]
   (let [tag                    (keyword tag)

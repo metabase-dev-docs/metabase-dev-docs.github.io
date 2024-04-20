@@ -2894,7 +2894,8 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.util.log :as log]
    [methodical.core :as methodical]
    [toucan2.core :as t2]
-   [toucan2.realize :as t2.realize]))</pre></td></tr><tr><td class="docs"><p>----------------------------------------------- Entity &amp; Lifecycle -----------------------------------------------</p>
+   [toucan2.realize :as t2.realize]
+   [toucan2.tools.with-temp :as t2.with-temp]))</pre></td></tr><tr><td class="docs"><p>----------------------------------------------- Entity &amp; Lifecycle -----------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Used to be the toucan1 model name defined using [[toucan.models/defmodel]], not it's a reference to the toucan2 model name.
 We'll keep this till we replace all Database symbols in our codebase.</p>
 </td><td class="codes"><pre class="brush: clojure">(def Database
@@ -2912,7 +2913,15 @@ We'll keep this till we replace all Database symbols in our codebase.</p>
 (methodical/defmethod t2/model-for-automagic-hydration [:default :db]       [_model _k] :model/Database)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(doto :model/Database
   (derive :metabase/model)
-  (derive :hook/timestamped?))</pre></td></tr><tr><td class="docs"><p>Audit Database should only be fetched if audit app is enabled.</p>
+  (derive :hook/timestamped?))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2.with-temp/do-with-temp* :before :model/Database
+  [_model _explicit-attributes f]
+  (fn [temp-object]
+    ;; Grant All Users full perms on the temp-object so that tests don't have to manually set permissions
+    (data-perms/set-database-permission! (perms-group/all-users) temp-object :perms/view-data :unrestricted)
+    (data-perms/set-database-permission! (perms-group/all-users) temp-object :perms/create-queries :query-builder-and-native)
+    (data-perms/set-database-permission! (perms-group/all-users) temp-object :perms/download-results :one-million-rows)
+    (f temp-object)))</pre></td></tr><tr><td class="docs"><p>Audit Database should only be fetched if audit app is enabled.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- should-read-audit-db?
   [database-id]
   (and (not (premium-features/enable-audit-app?)) (= database-id config/audit-db-id)))</pre></td></tr><tr><td class="docs">
@@ -2988,18 +2997,11 @@ implement behavior when an object is deleted can do it without having to put cod
         (doseq [group non-admin-groups]
           (data-perms/set-database-permission! group database :perms/view-data :unrestricted)
           (data-perms/set-database-permission! group database :perms/create-queries :no)
-          (data-perms/set-database-permission! group database :perms/download-results :one-million-rows))
-        (do
-          (data-perms/set-database-permission! all-users-group database :perms/view-data :unrestricted)
-          (data-perms/set-database-permission! all-users-group database :perms/create-queries :query-builder-and-native)
-          (data-perms/set-database-permission! all-users-group database :perms/download-results :one-million-rows)
-          (doseq [group non-magic-groups]
-            (data-perms/set-database-permission! group database :perms/view-data :unrestricted)
-            (data-perms/set-database-permission! group database :perms/create-queries :no)
-            (data-perms/set-database-permission! group database :perms/download-results :no))))
-      (doseq [group non-admin-groups]
-        (data-perms/set-database-permission! group database :perms/manage-table-metadata :no)
-        (data-perms/set-database-permission! group database :perms/manage-database :no)))))</pre></td></tr><tr><td class="docs">
+          (data-perms/set-database-permission! group database :perms/download-results :one-million-rows)
+          (data-perms/set-database-permission! group database :perms/manage-table-metadata :no)
+          (data-perms/set-database-permission! group database :perms/manage-database :no))
+        (doseq [group non-admin-groups]
+          (data-perms/set-new-database-permissions! group database))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(t2/define-after-insert :model/Database
   [database]
   (u/prog1 database
