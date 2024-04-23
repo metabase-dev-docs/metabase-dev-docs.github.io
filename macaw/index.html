@@ -2879,20 +2879,22 @@ net.brehaut.ClojureTools = (function (SH) {
    (net.sf.jsqlparser.statement.select AllTableColumns)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- conj-to
-  [key-name]
-  (fn item-conjer [results item]
-    (update results key-name conj item)))</pre></td></tr><tr><td class="docs">
+  ([key-name]
+   (conj-to key-name identity))
+  ([key-name xf]
+   (fn item-conjer [results component context]
+     (update results key-name conj {:component (xf component)
+                                    :context   (vec context)}))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- query-&gt;raw-components
   [^Statement parsed-query]
   (mw/fold-query parsed-query
                  {:column         (conj-to :columns)
                   :mutation       (conj-to :mutation-commands)
-                  :wildcard       (fn [results _all-columns]
-                                    (assoc results :has-wildcard? true))
+                  :wildcard       (conj-to :has-wildcard? (constantly true))
                   :table          (conj-to :tables)
                   :table-wildcard (conj-to :table-wildcards)}
                  {:columns           #{}
-                  :has-wildcard?     false
+                  :has-wildcard?     #{}
                   :mutation-commands #{}
                   :tables            #{}
                   :table-wildcards   #{}}))</pre></td></tr><tr><td class="docs">
@@ -2907,10 +2909,9 @@ referenced in a table-wildcard (as far as can be determined from the query).</p>
   (let [table-name (-&gt; atc .getTable .getName)]
     (or (alias-&gt;name table-name)
         table-name)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- remove-aliases
-  [aliases table-names]
-  (let [alias? (into #{} (keys aliases))]
-    (filter (complement alias?) table-names)))</pre></td></tr><tr><td class="docs"><p>Given a parsed query (i.e., a [subclass of] <code>Statement</code>) return a map with the elements found within it.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- update-components
+  [f components]
+  (map #(update % :component f) components))</pre></td></tr><tr><td class="docs"><p>Given a parsed query (i.e., a [subclass of] <code>Statement</code>) return a map with the elements found within it.</p>
 
 <p>(Specifically, it returns their fully-qualified names as strings, where 'fully-qualified' means 'as referred to in
 the query'; this function doesn't do additional inference work to find out a table's schema.)</p>
@@ -2919,12 +2920,12 @@ the query'; this function doesn't do additional inference work to find out a tab
   (let [{:keys [columns has-wildcard?
                 mutation-commands
                 tables table-wildcards]} (query-&gt;raw-components parsed-query)
-        aliases                   (into {} (map alias-mapping tables))]
-    {:columns           (into #{} (map #(.getColumnName ^Column %) columns))
-     :has-wildcard?     has-wildcard?
+        aliases                   (into {} (map (comp alias-mapping :component) tables))]
+    {:columns           (into #{} (update-components #(.getColumnName ^Column %) columns))
+     :has-wildcard?     (into #{} has-wildcard?)
      :mutation-commands (into #{} mutation-commands)
-     :tables            (into #{} (remove-aliases aliases (map #(.getName ^Table %) tables)))
-     :table-wildcards   (into #{} (map (partial resolve-table-name aliases) table-wildcards))}))</pre></td></tr><tr><td class="docs"><p>Main entry point: takes a string query and returns a <code>Statement</code> object that can be handled by the other functions.</p>
+     :tables            (into #{} (update-components #(.getName ^Table %) tables))
+     :table-wildcards   (into #{} (update-components (partial resolve-table-name aliases) table-wildcards))}))</pre></td></tr><tr><td class="docs"><p>Main entry point: takes a string query and returns a <code>Statement</code> object that can be handled by the other functions.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn parsed-query
   [^String query]
   (CCJSqlParserUtil/parse query))</pre></td></tr><tr><td class="docs"><p>TODO: Make this use metadata we know about.
@@ -2991,7 +2992,7 @@ TODO: might want to live in another ns</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- update-query
   [updated-ast sql]
   (let [replace-name (fn [-&gt;s]
-                       (fn [acc ^ASTNodeAccess visitable]
+                       (fn [acc ^ASTNodeAccess visitable _ctx]
                          (let [node (.getASTNode visitable)]
                            ;; not sure why sometimes we get a phantom visitable without an underlying node
                            (if (nil? node)
@@ -3003,15 +3004,19 @@ TODO: might want to live in another ns</p>
       updated-ast
       {:table  (replace-name #(.getFullyQualifiedName ^Table %))
        :column (replace-name #(.getFullyQualifiedName ^Column %))}
-      []))))</pre></td></tr><tr><td class="docs"><p>Given a SQL query and its corresponding (untransformed) AST, apply the given table and column renames.</p>
+      []))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- rename-table
+  [table-renames ^Table table _ctx]
+  (when-let [name' (get table-renames (.getName table))]
+    (.setName table name')))</pre></td></tr><tr><td class="docs"><p>Given a SQL query and its corresponding (untransformed) AST, apply the given table and column renames.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn replace-names
   [sql parsed-ast {table-renames :tables, column-renames :columns}]
   (-&gt; parsed-ast
       (mw/walk-query
-       {:table  (fn [^Table table] (when-let [name' (get table-renames (.getName table))]
-                                     (.setName table name')))
-        :column (fn [^Column column] (when-let [name' (get column-renames (.getColumnName column))]
-                                       (.setColumnName column name')))})
+       {:table            (partial rename-table table-renames)
+        :column-qualifier (partial rename-table table-renames)
+        :column           (fn [^Column column _ctx] (when-let [name' (get column-renames (.getColumnName column))]
+                                                      (.setColumnName column name')))})
       (update-query sql)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.walk" name="macaw.walk"><h1 class="project-name">macaw.walk</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns macaw.walk
   (:import
@@ -3019,25 +3024,28 @@ TODO: might want to live in another ns</p>
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>keyword->key map for the AST-folding callbacks.</p>
 </td><td class="codes"><pre class="brush: clojure">(def -&gt;callback-key
   ;; TODO: Move this to a Malli schema to simplify the indirection
-  {:column         AstWalker$CallbackKey/COLUMN
-   :mutation       AstWalker$CallbackKey/MUTATION_COMMAND
-   :table          AstWalker$CallbackKey/TABLE
-   :table-wildcard AstWalker$CallbackKey/ALL_TABLE_COLUMNS
-   :wildcard       AstWalker$CallbackKey/ALL_COLUMNS})</pre></td></tr><tr><td class="docs"><p>Lift a side effecting callback so that it preserves the accumulator.</p>
+  {:column           AstWalker$CallbackKey/COLUMN
+   :column-qualifier AstWalker$CallbackKey/COLUMN_QUALIFIER
+   :mutation         AstWalker$CallbackKey/MUTATION_COMMAND
+   :table            AstWalker$CallbackKey/TABLE
+   :table-wildcard   AstWalker$CallbackKey/ALL_TABLE_COLUMNS
+   :wildcard         AstWalker$CallbackKey/ALL_COLUMNS})</pre></td></tr><tr><td class="docs"><p>Lift a side effecting callback so that it preserves the accumulator.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- preserve
   [f]
-  (fn [acc v]
-    (f v)
+  (fn [acc &amp; args]
+    (apply f args)
     acc))</pre></td></tr><tr><td class="docs"><p>work around ast walker repeatedly visiting the same expressions (bug ?!)</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- deduplicate-visits [f]
   (let [seen (volatile! #{})]
-    (fn [acc visitable]
+    (fn [&amp; [acc visitable &amp; _ :as args]]
       (if (contains? @seen visitable)
         acc
         (do (vswap! seen conj visitable)
-            (f acc visitable))))))</pre></td></tr><tr><td class="docs">
+            (apply f args))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- update-keys-vals [m key-f val-f]
-  (into {} (map (fn [[k v]] [(key-f k) (val-f v)])) m))</pre></td></tr><tr><td class="docs"><p>Walk over the query's AST, using the callbacks for their side-effects, for example to mutate the AST itself.</p>
+  (into {} (map (fn [[k v]]
+                  [(key-f k) (val-f v)]))
+        m))</pre></td></tr><tr><td class="docs"><p>Walk over the query's AST, using the callbacks for their side-effects, for example to mutate the AST itself.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn walk-query
   [parsed-query callbacks]
   (let [callbacks (update-keys-vals callbacks -&gt;callback-key (comp deduplicate-visits preserve))]
@@ -3049,13 +3057,26 @@ TODO: might want to live in another ns</p>
 </td><td class="codes"><pre class="brush: clojure">(ns ^:parallel macaw.core-test
   (:require
    [clojure.test :refer [deftest testing is]]
-   [macaw.core :as m]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def components    (comp m/query-&gt;components m/parsed-query))
-(def columns       (comp :columns components))
-(def has-wildcard? (comp :has-wildcard? components))
-(def mutations     (comp :mutation-commands components))
-(def tables        (comp :tables components))
-(def table-wcs     (comp :table-wildcards components))</pre></td></tr><tr><td class="docs">
+   [macaw.core :as m]
+   [macaw.walk :as mw])
+  (:import
+   (net.sf.jsqlparser.schema Table)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- and*
+  [x y]
+  (and x y))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def components     (comp m/query-&gt;components m/parsed-query))
+(def raw-components (comp (partial into #{}) (partial map :component)))
+(def columns        (comp raw-components :columns components))
+(def has-wildcard?  (comp (partial reduce and*) raw-components :has-wildcard? components))
+(def mutations      (comp raw-components :mutation-commands components))
+(def tables         (comp raw-components :tables components))
+(def table-wcs      (comp raw-components :table-wildcards components))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn column-qualifiers
+  [query]
+  (mw/fold-query (m/parsed-query query)
+                 {:column-qualifier (fn [acc tbl _ctx] (conj acc (.getName ^Table tbl)))}
+                 #{}))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest query-&gt;tables-test
   (testing &quot;Simple queries&quot;
     (is (= #{&quot;core_user&quot;}
@@ -3071,13 +3092,23 @@ TODO: might want to live in another ns</p>
            (tables &quot;SELECT * FROM (SELECT DISTINCT email FROM core_user) q;&quot;)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest tables-with-complex-aliases-issue-14-test
   (testing &quot;With an alias that is also a table name&quot;
-    #_(is (= #{&quot;user&quot; &quot;user2_final&quot;}
+    (is (= #{&quot;user&quot; &quot;user2_final&quot;}
            (tables
             &quot;SELECT legacy_user.id AS old_id,
                     user.id AS new_id
              FROM user AS legacy_user
              OUTER JOIN user2_final AS user
              ON legacy_user.email = user2_final.email;&quot;)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(deftest column-qualifier-test
+  (testing &quot;column-qualifiers works with tables and aliases&quot;
+    (is (= #{&quot;user&quot; &quot;legacy_user&quot;}
+           (column-qualifiers &quot;SELECT
+                                 user.id AS user_id,
+                                 legacy_user.id AS old_id
+                               FROM user
+                               OUTER JOIN user as legacy_user
+                               ON user.email = user.electronic_mail_address
+                               JOIN unrelated_table on foo = user.unrelated_id;&quot;)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest query-&gt;columns-test
   (testing &quot;Simple queries&quot;
     (is (= #{&quot;foo&quot; &quot;bar&quot; &quot;id&quot; &quot;quux_id&quot;}
@@ -3168,6 +3199,44 @@ TODO: might want to live in another ns</p>
          (table-wcs &quot;SELECT o.* FROM orders o JOIN foo ON orders.id = foo.order_id&quot;)))
     (is (= #{&quot;foo&quot;}
          (table-wcs &quot;SELECT f.* FROM orders o JOIN foo f ON orders.id = foo.order_id&quot;))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(deftest context-test
+  (testing &quot;Sub-select with outer wildcard&quot;
+    (is (= {:columns
+            #{{:component &quot;total&quot;, :context [&quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}
+              {:component &quot;id&quot;,    :context [&quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}
+              {:component &quot;total&quot;, :context [&quot;WHERE&quot; &quot;JOIN&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
+            :has-wildcard?     #{{:component true, :context [&quot;SELECT&quot;]}},
+            :mutation-commands #{},
+            :tables            #{{:component &quot;orders&quot;, :context [&quot;FROM&quot; &quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
+            :table-wildcards   #{}}
+           (components &quot;SELECT * FROM (SELECT id, total FROM orders) WHERE total &gt; 10&quot;))))
+  (testing &quot;Sub-select with inner wildcard&quot;
+    (is (= {:columns
+            #{{:component &quot;id&quot;,    :context [&quot;SELECT&quot;]}
+              {:component &quot;total&quot;, :context [&quot;SELECT&quot;]}
+              {:component &quot;total&quot;, :context [&quot;WHERE&quot; &quot;JOIN&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
+            :has-wildcard?     #{{:component true, :context [&quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
+            :mutation-commands #{},
+            :tables            #{{:component &quot;orders&quot;, :context [&quot;FROM&quot; &quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
+            :table-wildcards   #{}}
+           (components &quot;SELECT id, total FROM (SELECT * FROM orders) WHERE total &gt; 10&quot;))))
+  (testing &quot;Sub-select with dual wildcards&quot;
+    (is (= {:columns           #{{:component &quot;total&quot;, :context [&quot;WHERE&quot; &quot;JOIN&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
+            :has-wildcard?
+            #{{:component true, :context [&quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}
+              {:component true, :context [&quot;SELECT&quot;]}},
+            :mutation-commands #{},
+            :tables            #{{:component &quot;orders&quot;, :context [&quot;FROM&quot; &quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
+            :table-wildcards   #{}}
+           (components &quot;SELECT * FROM (SELECT * FROM orders) WHERE total &gt; 10&quot;))))
+  (testing &quot;Join; table wildcard&quot;
+    (is (= {:columns           #{{:component &quot;order_id&quot;, :context [&quot;JOIN&quot; &quot;SELECT&quot;]}
+                                 {:component &quot;id&quot;, :context [&quot;JOIN&quot; &quot;SELECT&quot;]}},
+            :has-wildcard?     #{},
+            :mutation-commands #{},
+            :tables            #{{:component &quot;foo&quot;, :context [&quot;FROM&quot; &quot;JOIN&quot; &quot;SELECT&quot;]} {:component &quot;orders&quot;, :context [&quot;FROM&quot; &quot;SELECT&quot;]}},
+            :table-wildcards   #{{:component &quot;orders&quot;, :context [&quot;SELECT&quot;]}}}
+         (components &quot;SELECT o.* FROM orders o JOIN foo ON orders.id = foo.order_id&quot;)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn test-replacement [before replacements after]
   (is (= after (m/replace-names before replacements))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest replace-names-test

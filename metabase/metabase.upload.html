@@ -2890,6 +2890,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.models.data-permissions :as data-perms]
    [metabase.models.humanization :as humanization]
    [metabase.models.interface :as mi]
+   [metabase.models.persisted-info :as persisted-info]
    [metabase.models.table :as table]
    [metabase.public-settings :as public-settings]
    [metabase.public-settings.premium-features :as premium-features]
@@ -3304,6 +3305,33 @@ Returns the newly created model. May throw validation, permimissions, or DB erro
     (apply driver/alter-columns! driver (:id database) (table-identifier table)
            (field-&gt;db-type driver field-&gt;new-type)
            args)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- mbql? [model]
+  (= &quot;query&quot; (name (:query_type model &quot;query&quot;))))</pre></td></tr><tr><td class="docs"><p>Returns true if <code>query</code> has no explicit joins in it, otherwise false.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- no-joins?
+  [query]
+  ;; TODO while it's unlikely (at the time of writing this) that uploaded tables have FKs, we should probably check
+  ;;      for implicit joins as well.
+  (-&gt;&gt; (range (lib/stage-count query))
+       (not-any? (fn [stage-idx]
+                   (lib/joins query stage-idx)))))</pre></td></tr><tr><td class="docs"><p>For models that depend on only one table, return its id, otherwise return nil. Doesn't support native queries.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- only-table-id
+  [model]
+  ; dataset_query can be empty in tests
+  (when-let [query (some-&gt; model :dataset_query lib/-&gt;pMBQL not-empty)]
+    (when (and (mbql? model) (no-joins? query))
+      (lib/source-table-id query))))</pre></td></tr><tr><td class="docs"><p>Invalidate the model caches for all cards whose <code>:based_on_upload</code> value resolves to the given table.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- invalidate-cached-models!
+  [table]
+  ;; NOTE: It is important that this logic is kept in sync with `model-hydrate-based-on-upload`
+  (when-let [model-ids (-&gt;&gt; (t2/select [:model/Card :id :dataset_query]
+                                       :table_id (:id table)
+                                       :type     :model
+                                       :archived false)
+                            (filter (comp #{(:id table)} only-table-id))
+                            (map :id)
+                            seq)]
+    ;; Ideally we would do all the filtering in the query, but this would not allow us to leverage mlv2.
+    (persisted-info/invalidate! {:card_id [:in model-ids]})))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- update-with-csv! [database table file &amp; {:keys [replace-rows?]}]
   (try
     (let [parse (infer-parser file)]
@@ -3355,6 +3383,7 @@ Returns the newly created model. May throw validation, permimissions, or DB erro
           (when create-auto-pk?
             (let [auto-pk-field (table-id-&gt;auto-pk-column (:id table))]
               (t2/update! :model/Field (:id auto-pk-field) {:display_name (:name auto-pk-field)})))
+          (invalidate-cached-models! table)
           (events/publish-event! :event/upload-append
                                  {:user-id  (:id @api/*current-user*)
                                   :model-id (:id table)
@@ -3454,13 +3483,7 @@ before auto-pk columns were introduced by metabase#36249, if it does not already
   (set (when (seq table-ids)
          (-&gt;&gt; (t2/hydrate (t2/select :model/Table :id [:in table-ids]) :db)
               (filter #(can-upload-to-table? (:db %) %))
-              (map :id)))))</pre></td></tr><tr><td class="docs"><p>Returns true if <code>query</code> has no joins in it, otherwise false.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- no-joins?
-  [query]
-  (let [all-joins (mapcat (fn [stage]
-                            (lib/joins query stage))
-                          (range (lib/stage-count query)))]
-    (empty? all-joins)))</pre></td></tr><tr><td class="docs"><p>Batch hydrates <code>:based_on_upload</code> for each item of <code>models</code>. Assumes each item of <code>model</code> represents a model.</p>
+              (map :id)))))</pre></td></tr><tr><td class="docs"><p>Batch hydrates <code>:based_on_upload</code> for each item of <code>models</code>. Assumes each item of <code>model</code> represents a model.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn model-hydrate-based-on-upload
   [models :- [:sequential [:map
                            ;; query_type and dataset_query can be null in tests, so we make them nullable here.
@@ -3477,15 +3500,12 @@ before auto-pk columns were introduced by metabase#36249, if it does not already
                                    (remove #(false? (:is_upload %)))
                                    (keep :table_id)
                                    set)
-        mbql?                 (fn [model] (= &quot;query&quot; (name (:query_type model &quot;query&quot;))))
         has-uploadable-table? (comp (uploadable-table-ids table-ids) :table_id)]
     (for [model models]
-      (m/assoc-some
-       model
-       :based_on_upload
-       (when-let [query (some-&gt; model :dataset_query lib/-&gt;pMBQL not-empty)] ; dataset_query can be empty in tests
-         (when (and (mbql? model) (has-uploadable-table? model) (no-joins? query))
-           (lib/source-table-id query)))))))</pre></td></tr><tr><td class="docs">
+      ;; NOTE: It is important that this logic is kept in sync with `invalidate-cached-models!`
+      ;; If not, it will mean that the user could modify the table via a given model's page without seeing it update.
+      (m/assoc-some model :based_on_upload (when (has-uploadable-table? model)
+                                             (only-table-id model))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mi/define-batched-hydration-method based-on-upload
   :based_on_upload
   &quot;Add based_on_upload=&lt;table-id&gt; to a card if:
