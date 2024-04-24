@@ -2866,10 +2866,11 @@ net.brehaut.ClojureTools = (function (SH) {
   };
 })(SyntaxHighlighter);
 </script><title>Macaw -- Marginalia</title></head><body><table><tr><td class="docs"><div class="header"><h1 class="project-name">Macaw</h1><h2 class="project-version">0.0.1-SNAPSHOT</h2><br /><p>A Clojure wrapper for JSqlParser 🦜</p>
-</div></td><td class="codes" style="text-align: center; vertical-align: middle;color: #666;padding-right:20px"><br /><br /><br />(this space intentionally left almost blank)</td></tr><tr><td class="docs"><div class="toc"><a name="toc"><h3>namespaces</h3></a><ul><li><a href="#macaw.core">macaw.core</a></li><li><a href="#macaw.rewrite">macaw.rewrite</a></li><li><a href="#macaw.walk">macaw.walk</a></li><li><a href="#macaw.core-test">macaw.core-test</a></li></ul></div></td><td class="codes">&nbsp;</td></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.core" name="macaw.core"><h1 class="project-name">macaw.core</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</div></td><td class="codes" style="text-align: center; vertical-align: middle;color: #666;padding-right:20px"><br /><br /><br />(this space intentionally left almost blank)</td></tr><tr><td class="docs"><div class="toc"><a name="toc"><h3>namespaces</h3></a><ul><li><a href="#macaw.core">macaw.core</a></li><li><a href="#macaw.rewrite">macaw.rewrite</a></li><li><a href="#macaw.util">macaw.util</a></li><li><a href="#macaw.walk">macaw.walk</a></li><li><a href="#macaw.core-test">macaw.core-test</a></li></ul></div></td><td class="codes">&nbsp;</td></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.core" name="macaw.core"><h1 class="project-name">macaw.core</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns macaw.core
   (:require
    [macaw.rewrite :as rewrite]
+   [macaw.util :as u]
    [macaw.walk :as mw])
   (:import
    (net.sf.jsqlparser.expression Alias)
@@ -2898,17 +2899,29 @@ net.brehaut.ClojureTools = (function (SH) {
                   :mutation-commands #{}
                   :tables            #{}
                   :table-wildcards   #{}}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- make-table [^Table t]
+  (merge
+    {:table (.getName t)}
+    (when-let [s (.getSchemaName t)]
+      {:schema s})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- make-column [alias-map table-map ^Column c]
+  (merge
+    {:column (.getColumnName c)}
+    (when-let [t (.getTable c)]
+      (or
+        (get alias-map (.getName t))
+        (:component (get table-map (.getName t)))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- alias-mapping
   [^Table table]
   (when-let [^Alias table-alias (.getAlias table)]
-    [(.getName table-alias) (.getName table)]))</pre></td></tr><tr><td class="docs"><p>JSQLParser can't tell whether the <code>f</code> in <code>select f.*</code> refers to a real table or an alias. Therefore, we have to
+    [(.getName table-alias) (make-table table)]))</pre></td></tr><tr><td class="docs"><p>JSQLParser can't tell whether the <code>f</code> in <code>select f.*</code> refers to a real table or an alias. Therefore, we have to
 disambiguate them based on our own map of aliases->table names. So this function will return the real name of the table
 referenced in a table-wildcard (as far as can be determined from the query).</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- resolve-table-name
-  [alias-&gt;name ^AllTableColumns atc]
+  [alias-&gt;table name-&gt;table ^AllTableColumns atc]
   (let [table-name (-&gt; atc .getTable .getName)]
-    (or (alias-&gt;name table-name)
-        table-name)))</pre></td></tr><tr><td class="docs">
+    (or (alias-&gt;table table-name)
+        (name-&gt;table table-name))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- update-components
   [f components]
   (map #(update % :component f) components))</pre></td></tr><tr><td class="docs"><p>Given a parsed query (i.e., a [subclass of] <code>Statement</code>) return a map with the elements found within it.</p>
@@ -2920,12 +2933,15 @@ the query'; this function doesn't do additional inference work to find out a tab
   (let [{:keys [columns has-wildcard?
                 mutation-commands
                 tables table-wildcards]} (query-&gt;raw-components parsed-query)
-        aliases                   (into {} (map (comp alias-mapping :component) tables))]
-    {:columns           (into #{} (update-components #(.getColumnName ^Column %) columns))
+        alias-map                        (into {} (map #(-&gt; % :component alias-mapping) tables))
+        table-map                        (-&gt;&gt; (update-components make-table tables)
+                                                 (u/group-with #(-&gt; % :component :table)
+                                                   (fn [a b] (if (:schema a) a b))))]
+    {:columns           (into #{} (update-components (partial make-column alias-map table-map) columns))
      :has-wildcard?     (into #{} has-wildcard?)
      :mutation-commands (into #{} mutation-commands)
-     :tables            (into #{} (update-components #(.getName ^Table %) tables))
-     :table-wildcards   (into #{} (update-components (partial resolve-table-name aliases) table-wildcards))}))</pre></td></tr><tr><td class="docs"><p>Main entry point: takes a string query and returns a <code>Statement</code> object that can be handled by the other functions.</p>
+     :tables            (into #{} (vals table-map))
+     :table-wildcards   (into #{} (update-components (partial resolve-table-name alias-map table-map) table-wildcards))}))</pre></td></tr><tr><td class="docs"><p>Main entry point: takes a string query and returns a <code>Statement</code> object that can be handled by the other functions.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn parsed-query
   [^String query]
   (CCJSqlParserUtil/parse query))</pre></td></tr><tr><td class="docs"><p>TODO: Make this use metadata we know about.
@@ -3017,7 +3033,19 @@ TODO: might want to live in another ns</p>
         :column-qualifier (partial rename-table table-renames)
         :column           (fn [^Column column _ctx] (when-let [name' (get column-renames (.getColumnName column))]
                                                       (.setColumnName column name')))})
-      (update-query sql)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.walk" name="macaw.walk"><h1 class="project-name">macaw.walk</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+      (update-query sql)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.util" name="macaw.util"><h1 class="project-name">macaw.util</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns macaw.util)</pre></td></tr><tr><td class="docs"><p>Generalized <code>group-by</code>, where you can supply your own reducing function (instead of usual <code>conj</code>).</p>
+
+<p>https://ask.clojure.org/index.php/12319/can-group-by-be-generalized</p>
+</td><td class="codes"><pre class="brush: clojure">(defn group-with
+  [kf rf coll]
+  (persistent!
+    (reduce
+      (fn [ret x]
+        (let [k (kf x)]
+          (assoc! ret k (rf (get ret k) x))))
+      (transient {})
+      coll)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.walk" name="macaw.walk"><h1 class="project-name">macaw.walk</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns macaw.walk
   (:import
    (com.metabase.macaw AstWalker AstWalker$CallbackKey)))</pre></td></tr><tr><td class="docs">
@@ -3079,20 +3107,20 @@ TODO: might want to live in another ns</p>
                  #{}))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest query-&gt;tables-test
   (testing &quot;Simple queries&quot;
-    (is (= #{&quot;core_user&quot;}
+    (is (= #{{:table &quot;core_user&quot;}}
            (tables &quot;SELECT * FROM core_user;&quot;)))
-    (is (= #{&quot;core_user&quot;}
+    (is (= #{{:table &quot;core_user&quot;}}
            (tables &quot;SELECT id, email FROM core_user;&quot;))))
   (testing &quot;With a schema (Postgres)&quot; ;; TODO: only run this against supported DBs
-    ;; It strips the schema
-    (is (= #{&quot;core_user&quot;}
+    (is (= #{{:table &quot;core_user&quot; :schema &quot;the_schema_name&quot;}}
            (tables &quot;SELECT * FROM the_schema_name.core_user;&quot;))))
   (testing &quot;Sub-selects&quot;
-    (is (= #{&quot;core_user&quot;}
+    (is (= #{{:table &quot;core_user&quot;}}
            (tables &quot;SELECT * FROM (SELECT DISTINCT email FROM core_user) q;&quot;)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest tables-with-complex-aliases-issue-14-test
   (testing &quot;With an alias that is also a table name&quot;
-    (is (= #{&quot;user&quot; &quot;user2_final&quot;}
+    (is (= #{{:table &quot;user&quot;}
+             {:table &quot;user2_final&quot;}}
            (tables
             &quot;SELECT legacy_user.id AS old_id,
                     user.id AS new_id
@@ -3111,11 +3139,18 @@ TODO: might want to live in another ns</p>
                                JOIN unrelated_table on foo = user.unrelated_id;&quot;)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest query-&gt;columns-test
   (testing &quot;Simple queries&quot;
-    (is (= #{&quot;foo&quot; &quot;bar&quot; &quot;id&quot; &quot;quux_id&quot;}
+    (is (= #{{:column &quot;foo&quot;}
+             {:column &quot;bar&quot;}
+             {:column &quot;id&quot; :table &quot;quux&quot;}
+             {:column &quot;quux_id&quot; :table &quot;baz&quot;}}
            (columns &quot;SELECT foo, bar FROM baz INNER JOIN quux ON quux.id = baz.quux_id&quot;))))
   (testing &quot;'group by' columns present&quot;
-    (is (= #{&quot;id&quot; &quot;user_id&quot;}
-           (columns &quot;SELECT id FROM orders GROUP BY user_id&quot;)))))</pre></td></tr><tr><td class="docs">
+    (is (= #{{:column &quot;id&quot;}
+             {:column &quot;user_id&quot;}}
+           (columns &quot;SELECT id FROM orders GROUP BY user_id&quot;))))
+  (testing &quot;table alias present&quot;
+    (is (= #{{:column &quot;id&quot; :table &quot;orders&quot; :schema &quot;public&quot;}}
+           (columns &quot;SELECT o.id FROM public.orders o&quot;)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest mutation-test
   (is (= #{&quot;alter-sequence&quot;}
          (mutations &quot;ALTER SEQUENCE serial RESTART WITH 42&quot;)))
@@ -3179,7 +3214,7 @@ TODO: might want to live in another ns</p>
                      SELECT * from outdated_orders;&quot;))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest alias-inclusion-test
   (testing &quot;Aliases are not included&quot;
-    (is (= #{&quot;orders&quot; &quot;foo&quot;}
+    (is (= #{{:table &quot;orders&quot;} {:table &quot;foo&quot;}}
            (tables &quot;SELECT id, o.id FROM orders o JOIN foo ON orders.id = foo.order_id&quot;)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest resolve-columns-test
   (let [cols [&quot;name&quot; &quot;id&quot; &quot;email&quot;]]
@@ -3190,52 +3225,53 @@ TODO: might want to live in another ns</p>
   (is (true? (has-wildcard? &quot;SELECT * FROM orders&quot;)))
   (is (true? (has-wildcard? &quot;SELECT id, * FROM orders JOIN foo ON orders.id = foo.order_id&quot;))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest table-wildcard-test-without-aliases
-  (is (= #{&quot;orders&quot;}
+  (is (= #{{:component {:table &quot;orders&quot;} :context [&quot;FROM&quot; &quot;SELECT&quot;]}}
          (table-wcs &quot;SELECT orders.* FROM orders JOIN foo ON orders.id = foo.order_id&quot;)))
-    (is (= #{&quot;foo&quot;}
-         (table-wcs &quot;SELECT foo.* FROM orders JOIN foo ON orders.id = foo.order_id&quot;))))</pre></td></tr><tr><td class="docs">
+  (is (= #{{:component {:table &quot;foo&quot; :schema &quot;public&quot;} :context [&quot;FROM&quot; &quot;JOIN&quot; &quot;SELECT&quot;]}}
+         (table-wcs &quot;SELECT foo.* FROM orders JOIN public.foo f ON orders.id = foo.order_id&quot;))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest table-star-test-with-aliases
-  (is (= #{&quot;orders&quot;}
+  (is (= #{{:table &quot;orders&quot;}}
          (table-wcs &quot;SELECT o.* FROM orders o JOIN foo ON orders.id = foo.order_id&quot;)))
-    (is (= #{&quot;foo&quot;}
+  (is (= #{{:table &quot;foo&quot;}}
          (table-wcs &quot;SELECT f.* FROM orders o JOIN foo f ON orders.id = foo.order_id&quot;))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest context-test
   (testing &quot;Sub-select with outer wildcard&quot;
     (is (= {:columns
-            #{{:component &quot;total&quot;, :context [&quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}
-              {:component &quot;id&quot;,    :context [&quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}
-              {:component &quot;total&quot;, :context [&quot;WHERE&quot; &quot;JOIN&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
+            #{{:component {:column &quot;total&quot;}, :context [&quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}
+              {:component {:column &quot;id&quot;},    :context [&quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}
+              {:component {:column &quot;total&quot;}, :context [&quot;WHERE&quot; &quot;JOIN&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
             :has-wildcard?     #{{:component true, :context [&quot;SELECT&quot;]}},
             :mutation-commands #{},
-            :tables            #{{:component &quot;orders&quot;, :context [&quot;FROM&quot; &quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
+            :tables            #{{:component {:table &quot;orders&quot;}, :context [&quot;FROM&quot; &quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
             :table-wildcards   #{}}
            (components &quot;SELECT * FROM (SELECT id, total FROM orders) WHERE total &gt; 10&quot;))))
   (testing &quot;Sub-select with inner wildcard&quot;
     (is (= {:columns
-            #{{:component &quot;id&quot;,    :context [&quot;SELECT&quot;]}
-              {:component &quot;total&quot;, :context [&quot;SELECT&quot;]}
-              {:component &quot;total&quot;, :context [&quot;WHERE&quot; &quot;JOIN&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
+            #{{:component {:column &quot;id&quot;},    :context [&quot;SELECT&quot;]}
+              {:component {:column &quot;total&quot;}, :context [&quot;SELECT&quot;]}
+              {:component {:column &quot;total&quot;}, :context [&quot;WHERE&quot; &quot;JOIN&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
             :has-wildcard?     #{{:component true, :context [&quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
             :mutation-commands #{},
-            :tables            #{{:component &quot;orders&quot;, :context [&quot;FROM&quot; &quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
+            :tables            #{{:component {:table &quot;orders&quot;}, :context [&quot;FROM&quot; &quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
             :table-wildcards   #{}}
            (components &quot;SELECT id, total FROM (SELECT * FROM orders) WHERE total &gt; 10&quot;))))
   (testing &quot;Sub-select with dual wildcards&quot;
-    (is (= {:columns           #{{:component &quot;total&quot;, :context [&quot;WHERE&quot; &quot;JOIN&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
+    (is (= {:columns           #{{:component {:column &quot;total&quot;}, :context [&quot;WHERE&quot; &quot;JOIN&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
             :has-wildcard?
             #{{:component true, :context [&quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}
               {:component true, :context [&quot;SELECT&quot;]}},
             :mutation-commands #{},
-            :tables            #{{:component &quot;orders&quot;, :context [&quot;FROM&quot; &quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
+            :tables            #{{:component {:table &quot;orders&quot;}, :context [&quot;FROM&quot; &quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
             :table-wildcards   #{}}
            (components &quot;SELECT * FROM (SELECT * FROM orders) WHERE total &gt; 10&quot;))))
   (testing &quot;Join; table wildcard&quot;
-    (is (= {:columns           #{{:component &quot;order_id&quot;, :context [&quot;JOIN&quot; &quot;SELECT&quot;]}
-                                 {:component &quot;id&quot;, :context [&quot;JOIN&quot; &quot;SELECT&quot;]}},
+    (is (= {:columns           #{{:component {:column &quot;order_id&quot; :table &quot;foo&quot;}, :context [&quot;JOIN&quot; &quot;SELECT&quot;]}
+                                 {:component {:column &quot;id&quot; :table &quot;orders&quot;}, :context [&quot;JOIN&quot; &quot;SELECT&quot;]}},
             :has-wildcard?     #{},
             :mutation-commands #{},
-            :tables            #{{:component &quot;foo&quot;, :context [&quot;FROM&quot; &quot;JOIN&quot; &quot;SELECT&quot;]} {:component &quot;orders&quot;, :context [&quot;FROM&quot; &quot;SELECT&quot;]}},
-            :table-wildcards   #{{:component &quot;orders&quot;, :context [&quot;SELECT&quot;]}}}
+            :tables            #{{:component {:table &quot;foo&quot;}, :context [&quot;FROM&quot; &quot;JOIN&quot; &quot;SELECT&quot;]}
+                                 {:component {:table &quot;orders&quot;}, :context [&quot;FROM&quot; &quot;SELECT&quot;]}},
+            :table-wildcards   #{{:component {:table &quot;orders&quot;}, :context [&quot;SELECT&quot;]}}}
          (components &quot;SELECT o.* FROM orders o JOIN foo ON orders.id = foo.order_id&quot;)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn test-replacement [before replacements after]
   (is (= after (m/replace-names before replacements))))</pre></td></tr><tr><td class="docs">
@@ -3261,7 +3297,7 @@ TODO: might want to live in another ns</p>
   , oink AS oink
  FROM /* /* lore */
     floor_muser,
-  user,  /* more */ vigilant_user ;&quot;))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a><div id="floating-toc"><ul><li class="floating-toc-li" id="floating-toc_macaw.core">macaw.core</li><li class="floating-toc-li" id="floating-toc_macaw.rewrite">macaw.rewrite</li><li class="floating-toc-li" id="floating-toc_macaw.walk">macaw.walk</li><li class="floating-toc-li" id="floating-toc_macaw.core-test">macaw.core-test</li></ul></div></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+  user,  /* more */ vigilant_user ;&quot;))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a><div id="floating-toc"><ul><li class="floating-toc-li" id="floating-toc_macaw.core">macaw.core</li><li class="floating-toc-li" id="floating-toc_macaw.rewrite">macaw.rewrite</li><li class="floating-toc-li" id="floating-toc_macaw.util">macaw.util</li><li class="floating-toc-li" id="floating-toc_macaw.walk">macaw.walk</li><li class="floating-toc-li" id="floating-toc_macaw.core-test">macaw.core-test</li></ul></div></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
