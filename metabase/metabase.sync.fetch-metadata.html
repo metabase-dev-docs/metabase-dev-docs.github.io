@@ -2870,6 +2870,7 @@ tables, schemas, and fields, and their types. For example, with SQL databases, t
 DatabaseMetaData to get this information.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.sync.fetch-metadata
   (:require
+   [clojure.set :as set]
    [metabase.driver :as driver]
    [metabase.driver.sql-jdbc.sync :as sql-jdbc.sync]
    [metabase.driver.util :as driver.u]
@@ -2877,7 +2878,8 @@ DatabaseMetaData to get this information.</p>
    [metabase.sync.util :as sync-util]
    [metabase.util.log :as log]
    [metabase.util.malli :as mu]
-   [metabase.util.malli.fn :as mu.fn]))</pre></td></tr><tr><td class="docs"><p>Logs an error message if an exception is thrown while executing the body.</p>
+   [metabase.util.malli.fn :as mu.fn]
+   [toucan2.realize :as t2.realize]))</pre></td></tr><tr><td class="docs"><p>Logs an error message if an exception is thrown while executing the body.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmacro log-if-error
   {:style/indent 1}
   [function-name &amp; body]
@@ -2890,24 +2892,53 @@ DatabaseMetaData to get this information.</p>
   &quot;Get basic Metadata about a `database` and its Tables. Doesn't include information about the Fields.&quot;
   [database :- i/DatabaseInstance]
   (log-if-error &quot;db-metadata&quot;
-    (driver/describe-database (driver.u/database-&gt;driver database) database)))</pre></td></tr><tr><td class="docs"><p>Effectively a wrapper for [[metabase.driver/describe-fields]] that also validates the output against the schema.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn fields-metadata
-  [database :- i/DatabaseInstance &amp; {:as args}]
-  (log-if-error &quot;fields-metadata&quot;
-    (cond-&gt;&gt; (driver/describe-fields (driver.u/database-&gt;driver database) database args)
-      ;; This is a workaround for the fact that [[mu/defn]] can't check reducible collections yet
-      (mu.fn/instrument-ns? *ns*)
-      (eduction (map #(mu.fn/validate-output {} i/FieldMetadataEntry %))))))</pre></td></tr><tr><td class="docs">
+    (driver/describe-database (driver.u/database-&gt;driver database) database)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn table-fields-metadata :- [:set i/TableMetadataField]
-  &quot;Get more detailed information about a `table` belonging to `database`. Includes information about the Fields.&quot;
+  &quot;Fetch metadata about Fields belonging to a given `table` directly from an external database by calling its driver's
+  implementation of [[driver/describe-table]], or [[driver/describe-fields]] if implemented. Also includes nested field
+  column metadata.&quot;
   [database :- i/DatabaseInstance
    table    :- i/TableInstance]
   (log-if-error &quot;table-fields-metadata&quot;
-    (if (driver/database-supports? (driver.u/database-&gt;driver database) :describe-fields database)
-      (set (fields-metadata database :table-names [(:name table)] :schema-names [(:schema table)]))
-      (:fields (driver/describe-table (driver.u/database-&gt;driver database) database table)))))</pre></td></tr><tr><td class="docs"><p>Replaces [[metabase.driver/describe-fks]] for drivers that haven't implemented it. Uses [[driver/describe-table-fks]]
+    (let [driver (driver.u/database-&gt;driver database)
+          result (if (driver/database-supports? driver :describe-fields database)
+                   (set (driver/describe-fields driver
+                                                database
+                                                :table-names [(:name table)]
+                                                :schema-names [(:schema table)]))
+                   (:fields (driver/describe-table driver database table)))]
+      (cond-&gt; result
+        (driver/database-supports? driver :nested-field-columns database)
+        ;; TODO: decouple nested field columns sync from field sync. This will allow
+        ;; describe-fields to be used for field sync for databases with nested field columns
+        ;; Also this should be a driver method, not a sql-jdbc.sync method
+        (set/union (sql-jdbc.sync/describe-nested-field-columns driver database table))))))</pre></td></tr><tr><td class="docs"><p>Replaces [[metabase.driver/describe-fields]] for drivers that haven't implemented it. Uses [[driver/describe-table]]
+instead. Also includes nested field column metadata.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- describe-fields-using-describe-table
+  [_driver database &amp; {:keys [schema-names table-names]}]
+  (let [tables (sync-util/db-&gt;reducible-sync-tables database :schema-names schema-names :table-names table-names)]
+    (eduction
+     (mapcat (fn [table]
+               (for [x (table-fields-metadata database (t2.realize/realize table))]
+                 (assoc x :table-schema (:schema table) :table-name (:name table)))))
+     tables)))</pre></td></tr><tr><td class="docs"><p>Effectively a wrapper for [[metabase.driver/describe-fields]] that also validates the output against the schema.
+If the driver doesn't support [[metabase.driver/describe-fields]] it uses [[driver/describe-table]] instead.
+This will be deprecated in </p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn fields-metadata
+  [database :- i/DatabaseInstance &amp; {:as args}]
+  (log-if-error &quot;fields-metadata&quot;
+    (let [driver             (driver.u/database-&gt;driver database)
+          describe-fields-fn (if (driver/database-supports? driver :describe-fields database)
+                               driver/describe-fields
+                               ;; In a future version we may remove [[driver/describe-table]]
+                               ;; and we'll just use [[driver/describe-fields]] here
+                               describe-fields-using-describe-table)]
+      (cond-&gt;&gt; (describe-fields-fn driver database args)
+        ;; This is a workaround for the fact that [[mu/defn]] can't check reducible collections yet
+        (mu.fn/instrument-ns? *ns*)
+        (eduction (map #(mu.fn/validate-output {} i/FieldMetadataEntry %)))))))</pre></td></tr><tr><td class="docs"><p>Replaces [[metabase.driver/describe-fks]] for drivers that haven't implemented it. Uses [[driver/describe-table-fks]]
 which is deprecated.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn backwards-compatible-describe-fks
+</td><td class="codes"><pre class="brush: clojure">(defn- describe-fks-using-describe-table-fks
   [driver database &amp; {:keys [schema-names table-names]}]
   (let [tables (sync-util/db-&gt;reducible-sync-tables database :schema-names schema-names :table-names table-names)]
     (eduction
@@ -2932,19 +2963,11 @@ This will be deprecated in </p>
                                 driver/describe-fks
                                 ;; In version 52 we'll remove [[driver/describe-table-fks]]
                                 ;; and we'll just use [[driver/describe-fks]] here
-                                backwards-compatible-describe-fks)]
-          (cond-&gt;&gt; (describe-fks-fn (driver.u/database-&gt;driver database) database args)
+                                describe-fks-using-describe-table-fks)]
+          (cond-&gt;&gt; (describe-fks-fn driver database args)
             ;; This is a workaround for the fact that [[mu/defn]] can't check reducible collections yet
             (mu.fn/instrument-ns? *ns*)
             (eduction (map #(mu.fn/validate-output {} i/FKMetadataEntry %)))))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn nfc-metadata :- [:maybe [:set i/TableMetadataField]]
-  &quot;Get information about the nested field column fields within `table`.&quot;
-  [database :- i/DatabaseInstance
-   table    :- i/TableInstance]
-  (log-if-error &quot;nfc-metadata&quot;
-    (let [driver (driver.u/database-&gt;driver database)]
-      (when (driver/database-supports? driver :nested-field-columns database)
-        (sql-jdbc.sync/describe-nested-field-columns driver database table)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn index-metadata :- [:maybe i/TableIndexMetadata]
   &quot;Get information about the indexes belonging to `table`.&quot;
   [database :- i/DatabaseInstance

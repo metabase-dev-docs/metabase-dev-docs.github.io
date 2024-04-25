@@ -2953,27 +2953,7 @@ net.brehaut.ClojureTools = (function (SH) {
                               (sync-util/field-name-for-logging :name (:fk-column-name metadata))
                               (sync-util/table-name-for-logging :name (:fk-table-name metadata)
                                                                 :schema (:fk-table-schema metadata))
-                              (sync-util/field-name-for-logging :name (:pk-column-name metadata)))))))</pre></td></tr><tr><td class="docs"><p>Sync the foreign keys for a <code>database</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn sync-fks-for-db!
-  [database :- i/DatabaseInstance]
-  (sync-util/with-error-handling (format &quot;Error syncing FKs for %s&quot; (sync-util/name-for-logging database))
-    (let [driver       (driver.u/database-&gt;driver database)
-          schema-names (when (driver/database-supports? driver :schemas database)
-                         (sync-util/db-&gt;sync-schemas database))
-          fk-metadata  (fetch-metadata/fk-metadata database :schema-names schema-names)]
-      (transduce (map (fn [x]
-                        (let [[updated failed] (try [(mark-fk! database x) 0]
-                                                    (catch Exception e
-                                                      (log/error e)
-                                                      [0 1]))]
-                          {:total-fks    1
-                           :updated-fks  updated
-                           :total-failed failed})))
-                 (partial merge-with +)
-                 {:total-fks    0
-                  :updated-fks  0
-                  :total-failed 0}
-                 fk-metadata))))</pre></td></tr><tr><td class="docs"><p>Sync the foreign keys for a specific <code>table</code>.</p>
+                              (sync-util/field-name-for-logging :name (:pk-column-name metadata)))))))</pre></td></tr><tr><td class="docs"><p>Sync the foreign keys for a specific <code>table</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn sync-fks-for-table!
   ([table :- i/TableInstance]
    (sync-fks-for-table! (table/database table) table))
@@ -2982,17 +2962,34 @@ net.brehaut.ClojureTools = (function (SH) {
    (sync-util/with-error-handling (format &quot;Error syncing FKs for %s&quot; (sync-util/name-for-logging table))
      (let [schema-names (when (driver/database-supports? (driver.u/database-&gt;driver database) :schemas database)
                           [(:schema table)])
-           fk-metadata (into [] (fetch-metadata/fk-metadata database :schema-names schema-names :table-names [(:name table)]))]
+           fk-metadata  (into [] (fetch-metadata/fk-metadata database :schema-names schema-names :table-names [(:name table)]))]
        {:total-fks   (count fk-metadata)
         :updated-fks (sync-util/sum-numbers #(mark-fk! database %) fk-metadata)}))))</pre></td></tr><tr><td class="docs"><p>Sync the foreign keys in a <code>database</code>. This sets appropriate values for relevant Fields in the Metabase application
-DB based on values from the <code>FKMetadata</code> returned by [[metabase.driver/describe-table-fks]].</p>
+DB based on values returned by [[metabase.driver/describe-table-fks]].</p>
 
 <p>If the driver supports the <code>:describe-fks</code> feature, [[metabase.driver/describe-fks]] is used to fetch the FK metadata.</p>
 
 <p>This function also sets all the tables that should be synced to have <code>initial-sync-status=complete</code> once the sync is done.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn sync-fks!
   [database :- i/DatabaseInstance]
-  (u/prog1 (sync-fks-for-db! database)
+  (u/prog1 (sync-util/with-error-handling (format &quot;Error syncing FKs for %s&quot; (sync-util/name-for-logging database))
+             (let [driver       (driver.u/database-&gt;driver database)
+                   schema-names (when (driver/database-supports? driver :schemas database)
+                                  (sync-util/db-&gt;sync-schemas database))
+                   fk-metadata  (fetch-metadata/fk-metadata database :schema-names schema-names)]
+               (transduce (map (fn [x]
+                                 (let [[updated failed] (try [(mark-fk! database x) 0]
+                                                             (catch Exception e
+                                                               (log/error e)
+                                                               [0 1]))]
+                                   {:total-fks    1
+                                    :updated-fks  updated
+                                    :total-failed failed})))
+                          (partial merge-with +)
+                          {:total-fks    0
+                           :updated-fks  0
+                           :total-failed 0}
+                          fk-metadata)))
     ;; Mark the table as done with its initial sync once this step is done even if it failed, because only
     ;; sync-aborting errors should be surfaced to the UI (see
     ;; `:metabase.sync.util/exception-classes-not-to-retry`).
