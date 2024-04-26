@@ -2872,6 +2872,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.shared.util.internal.time-common :as common]
    [metabase.util.date-2 :as u.date])
   (:import
+   java.time.format.DateTimeFormatter
    java.util.Locale))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- now [] (t/offset-date-time))</pre></td></tr><tr><td class="docs"><p>Given any value, check if it's a datetime object.</p>
@@ -3078,44 +3079,49 @@ between Jan 1st and Feb 2nd.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- coerce-local-date-time [input]
   (cond-&gt; input
     (re-find #&quot;(?:Z|[+-]\d\d(?::?\d\d)?)$&quot; input) (t/offset-date-time)
-    :always (localize)))</pre></td></tr><tr><td class="docs"><p>Formats a date-time value given the temporal extraction unit.
+    :always (localize)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private unit-formats
+  {:day-of-week     &quot;EEEE&quot;
+   :month-of-year   &quot;MMM&quot;
+   :minute-of-hour  &quot;m&quot;
+   :hour-of-day     &quot;h a&quot;
+   :day-of-month    &quot;d&quot;
+   :day-of-year     &quot;D&quot;
+   :week-of-year    &quot;w&quot;
+   :quarter-of-year &quot;'Q'Q&quot;})</pre></td></tr><tr><td class="docs"><p>Formats a date-time value given the temporal extraction unit.
 If unit is not supported, returns nil.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn ^:private format-extraction-unit
-  [t unit]
-  (case unit
-    :day-of-week     (t/format &quot;EEEE&quot; t)
-    :month-of-year   (t/format &quot;MMM&quot; t)
-    :minute-of-hour  (t/format &quot;m&quot; t)
-    :hour-of-day     (t/format &quot;h a&quot; t)
-    :day-of-month    (t/format &quot;d&quot; t)
-    :day-of-year     (t/format &quot;D&quot; t)
-    :week-of-year    (t/format &quot;w&quot; t)
-    :quarter-of-year (t/format &quot;'Q'Q&quot; t)
-    nil))</pre></td></tr><tr><td class="docs"><p>Formats a temporal-value (iso date/time string, int for extraction units) given the temporal-bucketing unit.
+  [t unit ^Locale locale]
+  (when-let [^DateTimeFormatter formatter (some-&gt; unit
+                                                  unit-formats
+                                                  t/formatter
+                                                  (cond-&gt; #_formatter locale (.withLocale locale)))]
+    (.format formatter t)))</pre></td></tr><tr><td class="docs"><p>Formats a temporal-value (iso date/time string, int for extraction units) given the temporal-bucketing unit.
  If unit is nil, formats the full date/time</p>
 </td><td class="codes"><pre class="brush: clojure">(defn format-unit
-  [input unit]
-  (if (string? input)
-    (let [time? (common/matches-time? input)
-          date? (common/matches-date? input)
-          date-time? (common/matches-date-time? input)
-          t (cond
-              time? (t/local-time input)
-              date? (t/local-date input)
-              date-time? (coerce-local-date-time input))]
-      (if t
-        (or
-          (format-extraction-unit t unit)
-          (cond
-            time? (t/format &quot;h:mm a&quot; t)
-            date? (t/format &quot;MMM d, yyyy&quot; t)
-            :else (t/format &quot;MMM d, yyyy, h:mm a&quot; t)))
-        input))
-    (if (= unit :hour-of-day)
-      (str (cond (zero? input) &quot;12&quot; (&lt;= input 12) input :else (- input 12)) &quot; &quot; (if (&lt;= input 11) &quot;AM&quot; &quot;PM&quot;))
-      (or
-        (format-extraction-unit (common/number-&gt;timestamp input {:unit unit}) unit)
-        (str input)))))</pre></td></tr><tr><td class="docs"><p>Formats a time difference between two temporal values.
+  ([input unit] (format-unit input unit nil))
+  ([input unit locale]
+   (if (string? input)
+     (let [time? (common/matches-time? input)
+           date? (common/matches-date? input)
+           date-time? (common/matches-date-time? input)
+           t (cond
+               time? (t/local-time input)
+               date? (t/local-date input)
+               date-time? (coerce-local-date-time input))]
+       (if t
+         (or
+           (format-extraction-unit t unit locale)
+           (cond
+             time? (t/format &quot;h:mm a&quot; t)
+             date? (t/format &quot;MMM d, yyyy&quot; t)
+             :else (t/format &quot;MMM d, yyyy, h:mm a&quot; t)))
+         input))
+     (if (= unit :hour-of-day)
+       (str (cond (zero? input) &quot;12&quot; (&lt;= input 12) input :else (- input 12)) &quot; &quot; (if (&lt;= input 11) &quot;AM&quot; &quot;PM&quot;))
+       (or
+         (format-extraction-unit (common/number-&gt;timestamp input {:unit unit}) unit locale)
+         (str input))))))</pre></td></tr><tr><td class="docs"><p>Formats a time difference between two temporal values.
  Drops redundant information.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn format-diff
   [temporal-value-1 temporal-value-2]

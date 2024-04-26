@@ -2886,7 +2886,6 @@ file). QueryFields are maintained through the <code>update-query-fields-for-card
    [metabase.native-query-analyzer.parameter-substitution :as nqa.sub]
    [metabase.public-settings :as public-settings]
    [metabase.util :as u]
-   [metabase.util.log :as log]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs"><p>Normally, a native card's query is parsed on every create/update. For most tests, this is an unnecessary
 expense. Therefore, we skip parsing while testing unless this variable is turned on.</p>
 
@@ -2899,34 +2898,43 @@ expense. Therefore, we skip parsing while testing unless this variable is turned
   []
   (and (public-settings/sql-parsing-enabled)
        (or (not config/is-test?)
-           *parse-queries-in-test?*)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- normalize-name
-  ;; TODO: This is wildly naive and will be revisited once the rest of the plumbing is sorted out
-  ;; c.f. Milestone 3 of the epic: https://github.com/metabase/metabase/issues/36911
-  [name]
-  (-&gt; name
-      (str/replace &quot;\ )
-      u/lower-case-en))</pre></td></tr><tr><td class="docs"><p>HoneySQL fragment to get the Field and Table</p>
+           *parse-queries-in-test?*)))</pre></td></tr><tr><td class="docs"><p>HoneySQL fragment to get the Field and Table</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private field-and-table-fragment
   {:from [[:metabase_field :f]]
    ;; (t2/table-name :model/Table) doesn't work on CI since models/table.clj hasn't been loaded
-   :join [[:metabase_table :t] [:= :table_id :t.id]]})</pre></td></tr><tr><td class="docs"><p>Very naively selects the IDs of Fields that could be used in the query. Improvements to this are planned for Q2 2024,
-c.f. Milestone 3 of https://github.com/metabase/metabase/issues/36911</p>
+   :join [[:metabase_table :t] [:= :table_id :t.id]]})</pre></td></tr><tr><td class="docs"><p>Exact match for quoted fields, case-insensitive match for non-quoted fields</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- field-query
+  [field value]
+  (if (= (first value) \&quot;)
+    [:= field (-&gt; value (subs 1 (dec (count value))) (str/replace &quot;\&quot;\&quot;&quot; &quot;\&quot;&quot;))]
+    [:= [:lower field] (u/lower-case-en value)]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- table-query
+  [t]
+  (if-not (:schema t)
+    (field-query :t.name (:table t))
+    [:and
+     (field-query :t.name (:table t))
+     (field-query :t.schema (:schema t))]))</pre></td></tr><tr><td class="docs"><p>Generates the query for a column, incorporating its concrete table information (if known) or matching it against
+the provided list of all possible tables.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- column-query
+  [tables column]
+  (if (:table column)
+    [:and
+     (field-query :f.name (:column column))
+     (table-query column)]
+    [:and
+     (field-query :f.name (:column column))
+     (into [:or] (map table-query tables))]))</pre></td></tr><tr><td class="docs"><p>Selects IDs of Fields that could be used in the query</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- direct-field-ids-for-query
   [{column-maps :columns table-maps :tables} db-id]
   (let [columns (map :component column-maps)
-        tables (map :component table-maps)]
-    (t2/select-pks-set :model/Field (merge field-and-table-fragment
-                                           {:where [:and
-                                                    [:= :t.db_id db-id]
-                                                    (if (seq tables)
-                                                      [:in :%lower.t/name (map normalize-name tables)]
-                                                      ;; if we don't know what tables it's from, look everywhere
-                                                      true)
-                                                    (if (seq columns)
-                                                      [:in :%lower.f/name (map normalize-name columns)]
-                                                      ;; if there are no columns, it must be a select * or similar
-                                                      false)]}))))</pre></td></tr><tr><td class="docs"><p>Similar to direct-field-ids-for-query, but for wildcard selects</p>
+        tables  (map :component table-maps)]
+    (t2/select-pks-set :model/Field (assoc field-and-table-fragment
+                                           :where
+                                           [:and
+                                            [:= :t.db_id db-id]
+                                            (into [:or]
+                                                  (map (partial column-query tables) columns))]))))</pre></td></tr><tr><td class="docs"><p>Similar to direct-field-ids-for-query, but for wildcard selects</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- indirect-field-ids-for-query
   [{table-wildcard-maps :table-wildcards
     all-wildcard-maps   :has-wildcard?
@@ -2937,13 +2945,12 @@ c.f. Milestone 3 of https://github.com/metabase/metabase/issues/36911</p>
                                        (reduce #(and %1 %2) true (map :component all-wildcard-maps)))
         tables                    (map :component table-maps)
         active-fields-from-tables
-        (fn [table-names]
+        (fn [tables]
           (t2/select-pks-set :model/Field (merge field-and-table-fragment
                                                  {:where [:and
                                                           [:= :t.db_id db-id]
-                                                          [:= true :f.active]
-                                                          [:in :%lower.t/name
-                                                               (map normalize-name table-names)]]})))]
+                                                          [:= :f.active true]
+                                                          (into [:or] (map table-query tables))]})))]
     (cond
       ;; select * from ...
       ;; so, get everything in all the tables
@@ -2956,45 +2963,19 @@ to return fields that are in the query.</p>
 
 <p>Direct references are columns that are named in the query; indirect ones are from wildcards. If a field could be
 both direct and indirect, it will <em>only</em> show up in the <code>:direct</code> set.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- field-ids-for-card
-  [card]
-  (let [query        (:dataset_query card)
-        db-id        (:database query)
-        sql-string   (:query (nqa.sub/replace-tags query))
-        parsed-query (macaw/query-&gt;components (macaw/parsed-query sql-string))
-        direct-ids   (direct-field-ids-for-query parsed-query db-id)
-        indirect-ids (set/difference
-                      (indirect-field-ids-for-query parsed-query db-id)
-                      direct-ids)]
-    {:direct   direct-ids
-     :indirect indirect-ids}))</pre></td></tr><tr><td class="docs"><p>Clears QueryFields associated with this card and creates fresh, up-to-date-ones.</p>
-
-<p>Any card is accepted, but this functionality only works for ones with a native query.</p>
-
-<p>If you're invoking this from a test, be sure to turn on [[<em>parse-queries-in-test?</em>]].</p>
-
-<p>Returns <code>nil</code> (and logs the error) if there was a parse error.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn update-query-fields-for-card!
-  [{card-id :id, query :dataset_query :as card}]
+</td><td class="codes"><pre class="brush: clojure">(defn field-ids-for-sql
+  [query]
   (when (and (active?)
-             (= :native (:type query)))
-    (try
-      (let [{:keys [direct indirect]} (field-ids-for-card card)
-            id-&gt;record                (fn [direct? field-id]
-                                        {:card_id          card-id
-                                         :field_id         field-id
-                                         :direct_reference direct?})
-            query-field-records       (concat
-                                       (map (partial id-&gt;record true) direct)
-                                       (map (partial id-&gt;record false) indirect))]
-        ;; This feels inefficient at first glance, but the number of records should be quite small and doing some sort
-        ;; of upsert-or-delete would involve comparisons in Clojure-land that are more expensive than just &quot;killing and
-        ;; filling&quot; the records.
-        (t2/with-transaction [_conn]
-          (t2/delete! :model/QueryField :card_id card-id)
-          (t2/insert! :model/QueryField query-field-records)))
-      (catch Exception e
-        (log/error e &quot;Error parsing native query&quot;)))))</pre></td></tr><tr><td class="docs"><p>Returns a modified query with the given table and column renames applied. <code>renames</code> is expected to be a map with
+             (:native query))
+    (let [db-id        (:database query)
+          sql-string   (:query (nqa.sub/replace-tags query))
+          parsed-query (macaw/query-&gt;components (macaw/parsed-query sql-string))
+          direct-ids   (direct-field-ids-for-query parsed-query db-id)
+          indirect-ids (set/difference
+                        (indirect-field-ids-for-query parsed-query db-id)
+                        direct-ids)]
+      {:direct   direct-ids
+       :indirect indirect-ids})))</pre></td></tr><tr><td class="docs"><p>Returns a modified query with the given table and column renames applied. <code>renames</code> is expected to be a map with
 <code>:tables</code> and <code>:columns</code> keys, and values of the shape <code>old-name -&gt; new-name</code>:</p>
 
 <p>(replace-names "SELECT o.id, o.total FROM orders o" {:columns {"id" "pk"
