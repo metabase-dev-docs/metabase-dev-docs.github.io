@@ -2872,7 +2872,6 @@ strange, as the jvm datastructures, not just serialized versions are used. This 
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.pulse.render.js-svg
   (:require
    [cheshire.core :as json]
-   [clojure.string :as str]
    [metabase.config :as config]
    [metabase.public-settings :as public-settings]
    [metabase.pulse.render.js-engine :as js]
@@ -2929,10 +2928,19 @@ fill-opacity="0.0". Previously was just doing a string replacement but now is a 
       (doto ^Element node
         (.removeAttribute &quot;fill&quot;)
         (.setAttribute &quot;fill-opacity&quot; &quot;0.0&quot;))
+      node)))</pre></td></tr><tr><td class="docs"><p>The echarts library (whose output we get via the :javascript_visualization multimethod) adds a <style> tag that we don't need.
+It has some invalid styles that Batik warns about, but they're all for :hover states,
+which have no meaning or effect in the static-viz context anyway.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- clear-style-node
+  [^Node node]
+  (letfn [(element? [x] (instance? Element x))]
+    (if (and (element? node)
+             (= &quot;style&quot; (.getNodeName ^Element node)))
+      (doto ^Element node
+        (.setTextContent &quot;&quot;))
       node)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- parse-svg-string [^String s]
-  (let [s       (str/replace s #&quot;&lt;svg&quot; &quot;&lt;svg xmlns=\&quot;http://www.w3.org/2000/svg\)
-        factory (SAXSVGDocumentFactory. &quot;org.apache.xerces.parsers.SAXParser&quot;)]
+  (let [factory (SAXSVGDocumentFactory. &quot;org.apache.xerces.parsers.SAXParser&quot;)]
     (with-open [is (ByteArrayInputStream. (.getBytes s StandardCharsets/UTF_8))]
       (.createDocument factory &quot;file:///fake.svg&quot; is))))</pre></td></tr><tr><td class="docs"><p>Width to render svg images. Intentionally large to improve quality. Consumers should be aware and resize as
 needed. Email should include width tags; slack automatically resizes inline and provides a nice detail view when
@@ -2945,7 +2953,7 @@ clicked.</p>
   ^bytes [^SVGOMDocument svg-document]
   (style/register-fonts-if-needed!)
   (with-open [os (ByteArrayOutputStream.)]
-    (let [^SVGOMDocument fixed-svg-doc (post-process svg-document fix-fill)
+    (let [^SVGOMDocument fixed-svg-doc (post-process svg-document fix-fill clear-style-node)
           in                           (TranscoderInput. fixed-svg-doc)
           out                          (TranscoderOutput. os)
           transcoder                   (PNGTranscoder.)]
@@ -2956,16 +2964,7 @@ clicked.</p>
     (.toByteArray os)))</pre></td></tr><tr><td class="docs"><p>Convert a string (from svg rendering) an svg document then return the bytes</p>
 </td><td class="codes"><pre class="brush: clojure">(defn svg-string-&gt;bytes
   [s]
-  (-&gt; s parse-svg-string render-svg))</pre></td></tr><tr><td class="docs"><p>Clojure entrypoint to render a timeseries or categorical waterfall chart. Rows should be tuples of [datetime numeric-value]. Labels is
-a map of {:left "left-label" :botton "bottom-label". Returns a byte array of a png file.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn waterfall
-  [rows labels settings waterfall-type]
-  (let [svg-string (.asString (js/execute-fn-name (context) &quot;waterfall&quot; rows
-                                                  (map (fn [[k v]] [(name k) v]) labels)
-                                                  (json/generate-string settings)
-                                                  (name waterfall-type)
-                                                  (json/generate-string (public-settings/application-colors))))]
-    (svg-string-&gt;bytes svg-string)))</pre></td></tr><tr><td class="docs"><p>Clojure entrypoint to render a funnel chart. Data should be vec of [[Step Measure]] where Step is {:name name :format format-options} and Measure is {:format format-options} and you go and look to frontend/src/metabase/static-viz/components/FunnelChart/types.ts for the actual format options.
+  (-&gt; s parse-svg-string render-svg))</pre></td></tr><tr><td class="docs"><p>Clojure entrypoint to render a funnel chart. Data should be vec of [[Step Measure]] where Step is {:name name :format format-options} and Measure is {:format format-options} and you go and look to frontend/src/metabase/static-viz/components/FunnelChart/types.ts for the actual format options.
 Returns a byte array of a png file.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn funnel
   [data settings]
@@ -2980,20 +2979,7 @@ Returns a byte array of a png file.</p>
                                                 (json/generate-string (public-settings/application-colors))))]
     (-&gt; response
         (json/parse-string true)
-        (update :type (fnil keyword &quot;unknown&quot;)))))</pre></td></tr><tr><td class="docs"><p>Clojure entrypoint to render a combo or multiple chart.
-These are different conceptions in the BE but being smushed together
-because they're supposed to display similarly.
-Series should be list of dicts of {rows: rows, cols: cols, type: type}, where types is 'line' or 'bar' or 'area'.
-Rows should be tuples of [datetime numeric-value]. Labels is a
-map of {:left "left-label" :botton "bottom-label"}. Returns a byte array of a png file.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn combo-chart
-  [series-seqs settings]
-  (svg-string-&gt;bytes
-   (.asString (js/execute-fn-name (context)
-                                  &quot;combo_chart&quot;
-                                  (json/generate-string series-seqs)
-                                  (json/generate-string settings)
-                                  (json/generate-string (public-settings/application-colors))))))</pre></td></tr><tr><td class="docs"><p>Clojure entrypoint to render a row chart.</p>
+        (update :type (fnil keyword &quot;unknown&quot;)))))</pre></td></tr><tr><td class="docs"><p>Clojure entrypoint to render a row chart.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn row-chart
   [settings data]
   (let [svg-string (.asString (js/execute-fn-name (context) &quot;row_chart&quot;
@@ -3026,7 +3012,7 @@ byte array of a png file</p>
    :bell      &quot;M14.254 5.105c-7.422.874-8.136 7.388-8.136 11.12 0 4.007 0 5.61-.824 6.411-.549.535-1.647.802-3.294.802v4.006h28v-4.006c-1.647 0-2.47 0-3.294-.802-.55-.534-.824-3.205-.824-8.013-.493-5.763-3.205-8.936-8.136-9.518a2.365 2.365 0 0 0 .725-1.701C18.47 2.076 17.364 1 16 1s-2.47 1.076-2.47 2.404c0 .664.276 1.266.724 1.7zM11.849 29c.383 1.556 1.793 2.333 4.229 2.333s3.845-.777 4.229-2.333h-8.458z&quot;})</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- icon-svg-string
   [icon-name color]
-  (str &quot;&lt;svg&gt;&lt;path d=\ (get icon-paths icon-name) &quot;\&quot; fill=\ color &quot;\&quot;/&gt;&lt;/svg&gt;&quot;))</pre></td></tr><tr><td class="docs"><p>Entrypoint for rendering an SVG icon as a PNG, with a specific color</p>
+  (str &quot;&lt;svg xmlns=\&quot;http://www.w3.org/2000/svg\&quot;&gt;&lt;path d=\ (get icon-paths icon-name) &quot;\&quot; fill=\ color &quot;\&quot;/&gt;&lt;/svg&gt;&quot;))</pre></td></tr><tr><td class="docs"><p>Entrypoint for rendering an SVG icon as a PNG, with a specific color</p>
 </td><td class="codes"><pre class="brush: clojure">(defn icon
   [icon-name color]
   (let [svg-string (icon-svg-string icon-name color)]
