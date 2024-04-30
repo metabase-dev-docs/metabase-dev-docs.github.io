@@ -2955,7 +2955,7 @@ need to use this outside of this namespace.)</p>
   ;; For expression references (`[:expression \&quot;my_expression\&quot;]`) keep the arg as is but make sure it is a string.
   [[_ expression-name opts]]
   (let [expression [:expression (if (keyword? expression-name)
-                                  (mbql.u/qualified-name expression-name)
+                                  (u/qualified-name expression-name)
                                   expression-name)]
         opts (-&gt;&gt; opts
                   normalize-ref-opts
@@ -2983,7 +2983,7 @@ need to use this outside of this namespace.)</p>
   [[_ field-name field-type]]
   [:field-literal
    (if (keyword? field-name)
-     (mbql.u/qualified-name field-name)
+     (u/qualified-name field-name)
      field-name)
    (keyword field-type)])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod normalize-mbql-clause-tokens :datetime-field
@@ -3044,6 +3044,10 @@ need to use this outside of this namespace.)</p>
   ;; See https://github.com/metabase/metabase/issues/23354 for details
   [[_ value info]]
   [:value value info])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod normalize-mbql-clause-tokens :offset
+  [[_tag opts expr n, :as clause]]
+  {:pre [(= (count clause) 4)]}
+  [:offset (or opts {}) (normalize-tokens expr :ignore-path) n])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod normalize-mbql-clause-tokens :default
   ;; MBQL clauses by default are recursively normalized.
   ;; This includes the clause name (e.g. `[\&quot;COUNT\&quot; ...]` becomes `[:count ...]`) and args.
@@ -3078,7 +3082,7 @@ clauses like <code>{:aggregation [:count :count]}</code> need to be handled as w
 </td><td class="codes"><pre class="brush: clojure">(defn- normalize-expressions-tokens
   [expressions-clause]
   (into {} (for [[expression-name definition] expressions-clause]
-             [(mbql.u/qualified-name expression-name)
+             [(u/qualified-name expression-name)
               (normalize-tokens definition :ignore-path)])))</pre></td></tr><tr><td class="docs"><p>Normalize tokens in the order-by clause, which can have different syntax when using MBQL 95 or 98
 rules (<code>[&lt;field&gt; :asc]</code> vs <code>[:asc &lt;field&gt;]</code>, for example).</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- normalize-order-by-tokens
@@ -3124,7 +3128,7 @@ it.</p>
   (into
    {}
    (map (fn [[tag-name tag-definition]]
-          (let [tag-name (mbql.u/qualified-name tag-name)]
+          (let [tag-name (u/qualified-name tag-name)]
             [tag-name
              (-&gt; (normalize-template-tag-definition tag-definition)
                  (assoc :name tag-name))])))
@@ -3132,7 +3136,7 @@ it.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn normalize-query-parameter
   [{param-type :type, :keys [target id values_source_config], :as param}]
   (cond-&gt; param
-    id                   (update :id mbql.u/qualified-name)
+    id                   (update :id u/qualified-name)
     ;; some things that get ran thru here, like dashcard param targets, do not have :type
     param-type           (update :type maybe-normalize-token)
     target               (update :target #(normalize-tokens % :ignore-path))
@@ -3155,7 +3159,7 @@ it.</p>
       ((some-fn keyword? string?) fields)
       (update :fields maybe-normalize-token)
       join-alias
-      (update :alias mbql.u/qualified-name))))</pre></td></tr><tr><td class="docs">
+      (update :alias u/qualified-name))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(declare canonicalize-mbql-clauses)</pre></td></tr><tr><td class="docs"><p>Normalize the field ref. Ensure it's well-formed mbql, not just json.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn normalize-field-ref
   [clause]
@@ -3416,7 +3420,11 @@ true) then generate options to change <code>:name</code> rather than <code>:disp
          ;; 0 indexes were allowed in the past but we are now enforcing this rule in MBQL.
          ;; This allows stored queries with literal 0 in the index to work.
          (if (= 0 start) 1 (canonicalize-mbql-clause start))]
-        (map canonicalize-mbql-clause more)))</pre></td></tr><tr><td class="docs"><p>top-level key canonicalization</p>
+        (map canonicalize-mbql-clause more)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod canonicalize-mbql-clause :offset
+  [[_tag opts expr n, :as clause]]
+  {:pre [(= (count clause) 4)]}
+  [:offset (or opts {}) (canonicalize-mbql-clause expr) n])</pre></td></tr><tr><td class="docs"><p>top-level key canonicalization</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Walk an <code>mbql-query</code> an canonicalize non-top-level clauses like <code>:fk-&gt;</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- canonicalize-mbql-clauses
   [form]
@@ -3598,11 +3606,25 @@ consistent.</p>
                             [k v]))]
     (when (seq m)
       m)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- remove-empty-clauses-in-sequence [xs path]
+</td><td class="codes"><pre class="brush: clojure">(defn- remove-empty-clauses-in-sequence* [xs path]
   (let [xs (mapv #(remove-empty-clauses % (conj path ::sequence))
                  xs)]
     (when (some some? xs)
       xs)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmulti ^:private remove-empty-clauses-in-mbql-clause
+  {:arglists '([clause path])}
+  (fn [[tag] _path]
+    tag))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod remove-empty-clauses-in-mbql-clause :default
+  [clause path]
+  (remove-empty-clauses-in-sequence* clause path))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod remove-empty-clauses-in-mbql-clause :offset
+  [[_tag opts expr n] path]
+  [:offset opts (remove-empty-clauses expr (conj path :offset)) n])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- remove-empty-clauses-in-sequence [x path]
+  (if (mbql-clause? x)
+    (remove-empty-clauses-in-mbql-clause x path)
+    (remove-empty-clauses-in-sequence* x path)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- remove-empty-clauses-in-join [join]
   (remove-empty-clauses join [:query]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- remove-empty-clauses-in-source-query [{native? :native, :as source-query}]

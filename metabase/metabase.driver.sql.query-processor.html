@@ -3254,7 +3254,7 @@ do this if you cannot actually fix your code.</p>
   [driver x]
   ;; not i18n'ed because this is meant to be developer-facing.
   (throw
-   (ex-info (format &quot;%s called on something already compiled to Honey SQL. See %s for more info.&quot;
+   (ex-info (format &quot;%s called on something already compiled to Honey SQL, or something unknown. See %s for more info.&quot;
                     `-&gt;honeysql
                     `throw-double-compilation-error)
             {:driver driver
@@ -3444,6 +3444,37 @@ appropriately.</p>
   [:power
    (-&gt;honeysql driver mbql-expr)
    (-&gt;honeysql driver power)])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- window-aggregation-over-expr-for-query-with-breakouts [driver inner-query]
+  (let [num-breakouts   (count (:breakout inner-query))
+        group-bys       (:group-by (apply-top-level-clause driver :breakout {} inner-query))
+        partition-exprs (when ((fnil &gt; 0) num-breakouts 1)
+                          (butlast group-bys))
+        order-expr      (last group-bys)]
+    (merge
+     (when (seq partition-exprs)
+       {:partition-by (mapv (fn [expr]
+                              [expr])
+                            partition-exprs)})
+     {:order-by [[order-expr :asc]]})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- window-aggregation-over-expr-for-query-without-breakouts [driver inner-query]
+  (when-let [order-bys (not-empty (:order-by (apply-top-level-clause driver :order-by {} inner-query)))]
+    {:order-by (vec order-bys)}))</pre></td></tr><tr><td class="docs"><p>Generate an OVER (...) window function expression for stuff like <code>:offset</code> (<code>lag</code> and <code>lead</code>).</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- window-aggregation-over-rows
+  ([driver expr]
+   (window-aggregation-over-rows driver expr nil))
+  ([driver expr additional-hsql]
+   (let [f (cond
+             (seq (:breakout *inner-query*))
+             window-aggregation-over-expr-for-query-with-breakouts
+             (seq (:order-by *inner-query*))
+             window-aggregation-over-expr-for-query-without-breakouts
+             :else
+             (throw (ex-info (tru &quot;Window function requires either breakouts or order by in the query&quot;)
+                             {:type  qp.error-type/invalid-query
+                              :query *inner-query*})))
+         m (f driver *inner-query*)]
+     (-&gt; [:over [expr (merge m additional-hsql)]]
+         (h2x/with-database-type-info (h2x/database-type expr))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- format-rows-unbounded-preceding [_clause _args]
   [&quot;ROWS UNBOUNDED PRECEDING&quot;])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(sql/register-clause!
@@ -3458,7 +3489,7 @@ appropriately.</p>
     ROWS UNBOUNDED PRECEDING
   )</p>
 
-<p>Note that [[nest-breakouts-in-queries-with-cumulative-aggregations]] ensures we will always see a plain column
+<p>Note that [[nest-breakouts-in-queries-with-window-fn-aggregations]] ensures we will always see a plain column
 identifier here.</p>
 
 <p>With more than one breakout, we <code>PARTITION BY</code> all breakouts except the last, then <code>ORDER BY</code> the last breakout. See</p>
@@ -3472,26 +3503,7 @@ identifier here.</p>
   )</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- cumulative-aggregation-over-rows
   [driver expr]
-  (let [num-breakouts     (count (:breakout *inner-query*))
-        ;; sanity check: shouldn't be using this function if we don't have any breakouts, we should have just done
-        ;; `:count` or `:sum` (see `-&gt;honeysql` methods below)
-        _                 (assert (pos? num-breakouts)
-                                  &quot;we should be compiling cumulative count/sum as regular count/sum, with no breakouts&quot;)
-        ;; Only calculate this if it's needed, it won't be for drivers that support ordering by col numbers when we only
-        ;; have one breakout.
-        group-bys         (:group-by (apply-top-level-clause driver :breakout {} *inner-query*))
-        partition-exprs   (when (&gt; num-breakouts 1)
-                            (butlast group-bys))
-        order-expr        (last group-bys)]
-    [:over
-     [expr
-      (merge
-       (when (seq partition-exprs)
-         {:partition-by (mapv (fn [expr]
-                                [expr])
-                              partition-exprs)})
-       {:order-by                  [[order-expr :asc]]
-        ::rows-unbounded-preceding []})]]))</pre></td></tr><tr><td class="docs"><p>   cum-count()</p>
+  (window-aggregation-over-rows driver expr {::rows-unbounded-preceding []}))</pre></td></tr><tr><td class="docs"><p>   cum-count()</p>
 
 <p>should compile to SQL like</p>
 
@@ -3530,6 +3542,17 @@ identifier here.</p>
     (cumulative-aggregation-over-rows
      driver
      [:sum [:sum (-&gt;honeysql driver expr)]])))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;honeysql [:sql :offset]
+  [driver [_offset _opts expr n]]
+  {:pre [(integer? n) ((some-fn pos-int? neg-int?) n)]} ; offset not allowed to be zero
+  (window-aggregation-over-rows
+   driver
+   (let [[f n]     (if (pos? n)
+                     [:lead n]
+                     [:lag (- n)])
+         expr-hsql (-&gt;honeysql driver expr)]
+     (-&gt; [f expr-hsql [:inline n]]
+         (h2x/with-database-type-info (h2x/database-type expr-hsql))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- interval? [expr]
   (mbql.u/is-clause? :interval expr))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;honeysql [:sql :+]
@@ -4179,32 +4202,32 @@ same version of the query that we will ultimately be compiling.</p>
   {:changelog-test/ignore true, :arglists '([driver inner-query]), :added &quot;0.42.0&quot;}
   driver/dispatch-on-initialized-driver
   :hierarchy #'driver/hierarchy)</pre></td></tr><tr><td class="docs"><p>This is a wrapper
-around [[qp.util.transformations.nest-breakouts/nest-breakouts-in-stages-with-cumulative-aggregation]], which is
+around [[qp.util.transformations.nest-breakouts/nest-breakouts-in-stages-with-window-aggregation]], which is
 written for pMBQL, so we can use it with a legacy inner query. Once we rework the SQL QP to use pMBQL we can remove
 this.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private nest-breakouts-in-queries-with-cumulative-aggregations :- mbql.s/MBQLQuery
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private nest-breakouts-in-queries-with-window-fn-aggregations :- mbql.s/MBQLQuery
   [inner-query :- mbql.s/MBQLQuery]
   (let [metadata-provider (qp.store/metadata-provider)
         database-id       (u/the-id (lib.metadata/database (qp.store/metadata-provider)))]
     (-&gt; (lib.query/query-from-legacy-inner-query metadata-provider database-id inner-query)
-        qp.util.transformations.nest-breakouts/nest-breakouts-in-stages-with-cumulative-aggregation
+        qp.util.transformations.nest-breakouts/nest-breakouts-in-stages-with-window-aggregation
         lib.convert/-&gt;legacy-MBQL
-        :query)))</pre></td></tr><tr><td class="docs"><p>[[qp.util.transformations.nest-breakouts/nest-breakouts-in-stages-with-cumulative-aggregation]] already does
+        :query)))</pre></td></tr><tr><td class="docs"><p>[[qp.util.transformations.nest-breakouts/nest-breakouts-in-stages-with-window-aggregation]] already does
 basically the same check, this is here mostly to avoid the performance hit of converting to pMBQL and back in
 queries that have no cumulative aggregations at all. Once we convert the SQL QP to pMBQL we can remove this.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- has-cumulative-aggregations? [inner-query]
-  (or (lib.util.match/match (:aggregation inner-query)
-        #{:cum-sum :cum-count}
+</td><td class="codes"><pre class="brush: clojure">(defn- has-window-function-aggregations? [inner-query]
+  (or (lib.util.match/match (mapcat inner-query [:aggregation :expressions])
+        #{:cum-sum :cum-count :offset}
         true)
       (when-let [source-query (:source-query inner-query)]
-        (has-cumulative-aggregations? source-query))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- maybe-nest-breakouts-in-queries-with-cumulative-aggregations [inner-query]
+        (has-window-function-aggregations? source-query))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- maybe-nest-breakouts-in-queries-with-window-fn-aggregations [inner-query]
   (cond-&gt; inner-query
-    (has-cumulative-aggregations? inner-query) nest-breakouts-in-queries-with-cumulative-aggregations))</pre></td></tr><tr><td class="docs">
+    (has-window-function-aggregations? inner-query) nest-breakouts-in-queries-with-window-fn-aggregations))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod preprocess :sql
   [_driver inner-query]
   (-&gt; inner-query
-      maybe-nest-breakouts-in-queries-with-cumulative-aggregations
+      maybe-nest-breakouts-in-queries-with-window-fn-aggregations
       add/add-alias-info
       nest-query/nest-expressions))</pre></td></tr><tr><td class="docs"><p>Build the HoneySQL form we will compile to SQL and execute.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn mbql-&gt;honeysql
