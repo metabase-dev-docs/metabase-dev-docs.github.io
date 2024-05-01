@@ -2887,7 +2887,6 @@ should be represented as SQL. (Specifically, they return information in this for
    [metabase.lib.schema.parameter :as lib.schema.parameter]
    [metabase.query-processor.error-type :as qp.error-type]
    [metabase.query-processor.middleware.wrap-value-literals :as qp.wrap-value-literals]
-   [metabase.query-processor.timezone :as qp.timezone]
    [metabase.query-processor.util.add-alias-info :as add]
    [metabase.shared.util.time :as shared.ut]
    [metabase.util :as u]
@@ -2917,7 +2916,8 @@ inlcusion in the query, such as what's needed for SQLite and timestamps.</p>
    :param-values param-seq})</pre></td></tr><tr><td class="docs"><p>Convert X to a replacement snippet info map by passing it to HoneySQL's <code>format</code> function.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- honeysql-&gt;prepared-stmt-subs
   [driver x]
-  (let [[snippet &amp; args] (sql.qp/format-honeysql driver x)]
+  (let [honeysql         (sql.qp/-&gt;honeysql driver x)
+        [snippet &amp; args] (sql.qp/format-honeysql driver honeysql)]
     (make-stmt-subs snippet args)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defmethod -&gt;prepared-substitution [:sql nil] :- PreparedStatementSubstitution
   [driver _]
@@ -2927,19 +2927,19 @@ inlcusion in the query, such as what's needed for SQLite and timestamps.</p>
   (honeysql-&gt;prepared-stmt-subs driver (str obj)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defmethod -&gt;prepared-substitution [:sql Number] :- PreparedStatementSubstitution
   [driver num]
-  (honeysql-&gt;prepared-stmt-subs driver (sql.qp/inline-num num)))</pre></td></tr><tr><td class="docs">
+  (honeysql-&gt;prepared-stmt-subs driver num))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defmethod -&gt;prepared-substitution [:sql Boolean] :- PreparedStatementSubstitution
   [driver b]
   (honeysql-&gt;prepared-stmt-subs driver b))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defmethod -&gt;prepared-substitution [:sql Keyword] :- PreparedStatementSubstitution
   [driver kwd]
-  (honeysql-&gt;prepared-stmt-subs driver kwd))</pre></td></tr><tr><td class="docs"><p>TIMEZONE FIXME - remove this since we aren't using <code>Date</code> anymore</p>
+  (honeysql-&gt;prepared-stmt-subs driver kwd))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defmethod -&gt;prepared-substitution [:sql Date] :- PreparedStatementSubstitution
   [_driver date]
   (make-stmt-subs &quot;?&quot; [date]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defmethod -&gt;prepared-substitution [:sql Temporal] :- PreparedStatementSubstitution
-  [_driver t]
-  (make-stmt-subs &quot;?&quot; [t]))</pre></td></tr><tr><td class="docs"><p>Returns a suitable temporal unit conversion keyword for <code>field</code>, <code>param-type</code> and the given driver.
+  [driver t]
+  (honeysql-&gt;prepared-stmt-subs driver t))</pre></td></tr><tr><td class="docs"><p>Returns a suitable temporal unit conversion keyword for <code>field</code>, <code>param-type</code> and the given driver.
 The resulting keyword will be used to call the corresponding <code>metabase.driver.sql.query-processor/date</code>
 implementation to convert the <code>field</code>.
 Returns <code>nil</code> if the conversion is not necessary for this <code>field</code> and <code>param-type</code> combination.
@@ -3014,9 +3014,10 @@ Returns <code>nil</code> if the conversion is not necessary for this <code>field
   (let [values (map (partial -&gt;replacement-snippet-info driver) values)]
     {:replacement-snippet     (str/join &quot;, &quot; (map :replacement-snippet values))
      :prepared-statement-args (apply concat (map :prepared-statement-args values))}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- maybe-parse-temporal-literal [x]
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private maybe-parse-temporal-literal :- (lib.schema.common/instance-of-class java.time.temporal.Temporal)
+  [x]
   (condp instance? x
-    String   (u.date/parse x (qp.timezone/report-timezone-id-if-supported))
+    String   (u.date/parse x)
     Temporal x
     (throw (ex-info (tru &quot;Don''t know how to parse {0} {1} as a temporal literal&quot; (class x) (pr-str x))
              {:type      qp.error-type/invalid-parameter
