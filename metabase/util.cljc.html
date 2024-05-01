@@ -3062,16 +3062,27 @@ and duplicate subclauses from the clauses.</p>
     [:between
      (replace-field-or-expression field-or-expression unit)
      [:relative-datetime 1 unit]
-     [:relative-datetime n unit]]))</pre></td></tr><tr><td class="docs"><p>Rewrite <code>:does-not-contain</code> filter clauses as simpler <code>:not</code> clauses.</p>
+     [:relative-datetime n unit]]))</pre></td></tr><tr><td class="docs"><p>Rewrite <code>:does-not-contain</code> filter clauses as simpler <code>[:not [:contains ...]]</code> clauses.</p>
+
+<p>Note that [[desugar-multi-argument-comparisons]] will have already desugared any 3+ argument <code>:does-not-contain</code> to
+several <code>[:and [:does-not-contain ...] [:does-not-contain ...] ...]</code> clauses, which then get rewritten here into
+<code>[:and [:not [:contains ...]] [:not [:contains ...]]]</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn desugar-does-not-contain
   [m]
   (lib.util.match/replace m
     [:does-not-contain &amp; args]
-    [:not (into [:contains] args)]))</pre></td></tr><tr><td class="docs"><p><code>:=</code> and <code>!=</code> clauses with more than 2 args automatically get rewritten as compound filters.</p>
+    [:not (into [:contains] args)]))</pre></td></tr><tr><td class="docs"><p><code>:=</code>, <code>!=</code>, <code>:contains</code>, <code>:does-not-contain</code>, <code>:starts-with</code> and <code>:ends-with</code> clauses with more than 2 args
+automatically get rewritten as compound filters.</p>
 
-<p>   [:= field x y]  -> [:or  [:=  field x] [:=  field y]]
-   [:!= field x y] -> [:and [:!= field x] [:!= field y]]</p>
-</td><td class="codes"><pre class="brush: clojure">(defn desugar-equals-and-not-equals-with-extra-args
+<p>   [:= field x y]                -> [:or  [:=  field x] [:=  field y]]
+   [:!= field x y]               -> [:and [:!= field x] [:!= field y]]
+   [:does-not-contain field x y] -> [:and [:does-not-contain field x] [:does-not-contain field y]]</p>
+
+<p>Note that the optional options map is in different positions for <code>:contains</code>, <code>:does-not-contain</code>, <code>:starts-with</code> and
+<code>:ends-with</code> depending on the number of arguments. 2-argument forms use the legacy style <code>[:contains field x opts]</code>.
+Multi-argument forms use pMBQL style with the options at index 1, <strong>even if there are no options</strong>:
+<code>[:contains {} field x y z]</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn desugar-multi-argument-comparisons
   [m]
   (lib.util.match/replace m
     [:= field x y &amp; more]
@@ -3079,7 +3090,15 @@ and duplicate subclauses from the clauses.</p>
                         [:= field x]))
     [:!= field x y &amp; more]
     (apply vector :and (for [x (concat [x y] more)]
-                         [:!= field x]))))</pre></td></tr><tr><td class="docs"><p>Replace <code>relative-datetime</code> clauses like <code>[:relative-datetime :current]</code> with <code>[:relative-datetime 0 &lt;unit&gt;]</code>.
+                         [:!= field x]))
+    [(op :guard #{:contains :does-not-contain :starts-with :ends-with})
+     (opts :guard map?)
+     field x y &amp; more]
+    (let [tail (when (seq opts) [opts])]
+      (apply vector
+           (if (= op :does-not-contain) :and :or)
+           (for [x (concat [x y] more)]
+             (into [op field x] tail))))))</pre></td></tr><tr><td class="docs"><p>Replace <code>relative-datetime</code> clauses like <code>[:relative-datetime :current]</code> with <code>[:relative-datetime 0 &lt;unit&gt;]</code>.
 <code>&lt;unit&gt;</code> is inferred from the <code>:field</code> the clause is being compared to (if any), otherwise falls back to <code>default.</code></p>
 </td><td class="codes"><pre class="brush: clojure">(defn desugar-current-relative-datetime
   [m]
@@ -3238,7 +3257,7 @@ the query itself. Filtering should be done based on the number, rather than the 
   [filter-clause :- mbql.s/Filter]
   (-&gt; filter-clause
       desugar-current-relative-datetime
-      desugar-equals-and-not-equals-with-extra-args
+      desugar-multi-argument-comparisons
       desugar-does-not-contain
       desugar-time-interval
       desugar-is-null-and-not-null
