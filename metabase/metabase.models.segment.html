@@ -2874,12 +2874,12 @@ replaced by the <code>expand-macros</code> middleware with the appropriate claus
    [metabase.api.common :as api]
    [metabase.legacy-mbql.util :as mbql.u]
    [metabase.lib.core :as lib]
-   [metabase.lib.metadata :as lib.metadata]
    [metabase.lib.metadata.jvm :as lib.metadata.jvm]
    [metabase.lib.metadata.protocols :as lib.metadata.protocols]
    [metabase.lib.query :as lib.query]
    [metabase.lib.schema.common :as lib.schema.common]
    [metabase.lib.schema.id :as lib.schema.id]
+   [metabase.lib.schema.metadata :as lib.schema.metadata]
    [metabase.models.audit-log :as audit-log]
    [metabase.models.data-permissions :as data-perms]
    [metabase.models.database :as database]
@@ -2931,7 +2931,7 @@ We'll keep this till we replace all these symbols in our codebase.</p>
     (mi/perms-objects-set table read-or-write)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private definition-description :- [:maybe ::lib.schema.common/non-blank-string]
   &quot;Calculate a nice description of a Segment's definition.&quot;
-  [metadata-provider                                      :- lib.metadata/MetadataProvider
+  [metadata-provider                                      :- ::lib.schema.metadata/metadata-provider
    {table-id :table_id, :keys [definition], :as _segment} :- (ms/InstanceOf :model/Segment)]
   (when (seq definition)
     (try
@@ -2943,36 +2943,35 @@ We'll keep this till we replace all these symbols in our codebase.</p>
       (catch Throwable e
         (log/errorf e &quot;Error calculating Segment description: %s&quot; (ex-message e))
         nil))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private warmed-metadata-provider :- lib.metadata/MetadataProvider
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private warmed-metadata-provider :- ::lib.schema.metadata/metadata-provider
   [database-id :- ::lib.schema.id/database
    segments    :- [:maybe [:sequential (ms/InstanceOf :model/Segment)]]]
   (let [metadata-provider (doto (lib.metadata.jvm/application-database-metadata-provider database-id)
                             (lib.metadata.protocols/store-metadatas!
-                             :metadata/segment
                              (map #(lib.metadata.jvm/instance-&gt;metadata % :metadata/segment)
                                   segments)))
         field-ids         (mbql.u/referenced-field-ids (map :definition segments))
-        fields            (lib.metadata.protocols/bulk-metadata metadata-provider :metadata/column field-ids)
+        fields            (lib.metadata.protocols/metadatas metadata-provider :metadata/column field-ids)
         table-ids         (into #{}
                                 cat
                                 [(map :table-id fields)
                                  (map :table_id segments)])]
     ;; this is done for side effects
-    (lib.metadata.protocols/bulk-metadata metadata-provider :metadata/table table-ids)
+    (lib.metadata.protocols/warm-cache metadata-provider :metadata/table table-ids)
     metadata-provider))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private segments-&gt;table-id-&gt;warmed-metadata-provider :- fn?
   [segments :- [:maybe [:sequential (ms/InstanceOf :model/Segment)]]]
   (let [table-id-&gt;db-id             (when-let [table-ids (not-empty (into #{} (map :table_id segments)))]
                                       (t2/select-pk-&gt;fn :db_id :model/Table :id [:in table-ids]))
         db-id-&gt;metadata-provider    (memoize
-                                     (mu/fn db-id-&gt;warmed-metadata-provider :- lib.metadata/MetadataProvider
+                                     (mu/fn db-id-&gt;warmed-metadata-provider :- ::lib.schema.metadata/metadata-provider
                                        [database-id :- ::lib.schema.id/database]
                                        (let [segments-for-db (filter (fn [segment]
                                                                        (= (table-id-&gt;db-id (:table_id segment))
                                                                           database-id))
                                                                      segments)]
                                          (warmed-metadata-provider database-id segments-for-db))))]
-    (mu/fn table-id-&gt;warmed-metadata-provider :- lib.metadata/MetadataProvider
+    (mu/fn table-id-&gt;warmed-metadata-provider :- ::lib.schema.metadata/metadata-provider
       [table-id :- ::lib.schema.id/table]
       (-&gt; table-id table-id-&gt;db-id db-id-&gt;metadata-provider))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2.hydrate/batched-hydrate [Segment :definition_description]

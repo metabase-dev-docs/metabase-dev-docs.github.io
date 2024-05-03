@@ -3280,56 +3280,56 @@ key <code>_card</code> (not sure why), but if it is just unwrap it and then pars
    :segments  (parse-objects-delay :segment  metadata)})</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- database [metadata database-id]
   (some-&gt; metadata :databases deref (get database-id) deref))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- table [metadata table-id]
-  (some-&gt; metadata :tables deref (get table-id) deref))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- field [metadata field-id]
-  (some-&gt; metadata :fields deref (get field-id) deref))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- card [metadata card-id]
-  (some-&gt; metadata :cards deref (get card-id) deref))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- legacy-metric [metadata metric-id]
-  (some-&gt; metadata :metrics deref (get metric-id) deref))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- segment [metadata segment-id]
-  (some-&gt; metadata :segments deref (get segment-id) deref))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- metadatas [metadata metadata-type ids]
+  (let [k          (case metadata-type
+                     :metadata/table         :tables
+                     :metadata/column        :fields
+                     :metadata/card          :cards
+                     :metadata/legacy-metric :metrics
+                     :metadata/segment       :segments)
+        metadatas* (some-&gt; metadata k deref)]
+    (into []
+          (keep (fn [id]
+                  (some-&gt; metadatas* (get id) deref)))
+          ids)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- tables [metadata database-id]
-  (for [[_id table-delay] (some-&gt; metadata :tables deref)
-        :let              [a-table (some-&gt; table-delay deref)]
-        :when             (and a-table (= (:db-id a-table) database-id))]
-    a-table))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- fields [metadata table-id]
-  (for [[_id field-delay] (some-&gt; metadata :fields deref)
-        :let              [a-field (some-&gt; field-delay deref)]
-        :when             (and a-field (= (:table-id a-field) table-id))]
-    a-field))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- legacy-metrics [metadata table-id]
-  (for [[_id metric-delay] (some-&gt; metadata :metrics deref)
-        :let               [a-metric (some-&gt; metric-delay deref)]
-        :when              (and a-metric (= (:table-id a-metric) table-id))]
-    a-metric))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- segments [metadata table-id]
-  (for [[_id segment-delay] (some-&gt; metadata :segments deref)
-        :let               [a-segment (some-&gt; segment-delay deref)]
-        :when              (and a-segment (= (:table-id a-segment) table-id))]
-    a-segment))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- setting [setting-key ^js unparsed-metadata]
+  (into []
+        (keep (fn [[_id dlay]]
+                (when-let [table (some-&gt; dlay deref)]
+                  (when (= (:db-id table) database-id)
+                    table))))
+        (some-&gt; metadata :tables deref)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- metadatas-for-table
+  [metadata metadata-type table-id]
+  (let [k (case metadata-type
+            :metadata/column        :fields
+            :metadata/legacy-metric :metrics
+            :metadata/segment       :segments)]
+    (into []
+          (keep (fn [[_id dlay]]
+                  (when-let [object (some-&gt; dlay deref)]
+                    (when (= (:table-id object) table-id)
+                      object))))
+          (some-&gt; metadata k deref))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- setting [^js unparsed-metadata setting-key]
   (-&gt; unparsed-metadata
-    (object-get &quot;settings&quot;)
-    (object-get (name setting-key))))</pre></td></tr><tr><td class="docs"><p>Inner implementation for [[metadata-provider]], which wraps this with a cache.</p>
+      (object-get &quot;settings&quot;)
+      (object-get (name setting-key))))</pre></td></tr><tr><td class="docs"><p>Inner implementation for [[metadata-provider]], which wraps this with a cache.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- metadata-provider*
   [database-id unparsed-metadata]
   (let [metadata (parse-metadata unparsed-metadata)]
     (log/debug &quot;Created metadata provider for metadata&quot;)
     (reify lib.metadata.protocols/MetadataProvider
-      (database       [_this]             (database       metadata database-id))
-      (table          [_this table-id]    (table          metadata table-id))
-      (field          [_this field-id]    (field          metadata field-id))
-      (legacy-metric  [_this metric-id]   (legacy-metric  metadata metric-id))
-      (segment        [_this segment-id]  (segment        metadata segment-id))
-      (card           [_this card-id]     (card           metadata card-id))
-      (tables         [_this]             (tables         metadata database-id))
-      (fields         [_this table-id]    (fields         metadata table-id))
-      (legacy-metrics [_this table-id]    (legacy-metrics metadata table-id))
-      (segments       [_this table-id]    (segments       metadata table-id))
-      (setting        [_this setting-key] (setting        setting-key unparsed-metadata))
+      (database [_this]
+        (database metadata database-id))
+      (metadatas [_this metadata-type ids]
+        (metadatas metadata metadata-type ids))
+      (tables [_this]
+        (tables metadata database-id))
+      (metadatas-for-table [_this metadata-type table-id]
+        (metadatas-for-table metadata metadata-type table-id))
+      (setting [_this setting-key]
+        (setting unparsed-metadata setting-key))
       ;; for debugging: call [[clojure.datafy/datafy]] on one of these to parse all of our metadata and see the whole
       ;; thing at once.
       clojure.core.protocols/Datafiable
