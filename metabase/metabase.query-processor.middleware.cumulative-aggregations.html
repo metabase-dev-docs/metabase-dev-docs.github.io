@@ -2869,17 +2869,19 @@ net.brehaut.ClojureTools = (function (SH) {
 is only used for drivers that do not have native implementations of <code>:window-functions/cumulative</code>; see the driver
 changelog for 0.50.0 for more information.</p>
 
-<p>For queries with more than one breakout, we reset the totals every time breakouts other than the last one change, e.g.</p>
+<p>For queries with more than one breakout, we reset the totals every time breakouts other than the first one change,
+e.g.</p>
 
-<p>  ;; city date       count cumulative_count
-  LBC     2024-01-01 10    10
-  LBC     2024-01-02 2     12
-  LBC     2024-01-02 4     16
-  SF      2024-01-01 3     3
-  SF      2024-01-01 1     4
-  SF      2024-01-02 2     6</p>
+<p>  date       city  count cumulative_count
+  2024-01-01 LBC   10    10
+  2024-01-02 LBC   2     12
+  2024-01-02 LBC   4     16
+  2024-01-01 SF    3     3
+  2024-01-01 SF    1     4
+  2024-01-02 SF    2     6</p>
 
-<p>Rather than doing a cumulative sum across the entire set of query results -- see #2862 for more information.</p>
+<p>Rather than doing a cumulative sum across the entire set of query results -- see #2862 and #42003 for more
+information.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.query-processor.middleware.cumulative-aggregations
   (:require
    [metabase.driver :as driver]
@@ -2925,34 +2927,46 @@ information about the indecies of the replaced aggregations under the <code>::re
                                   (+ (count breakouts) i)))]
       (cond-&gt; query'
         (seq replaced-indexes) (assoc ::replaced-indexes replaced-indexes)))))</pre></td></tr><tr><td class="docs"><p>Post-processing</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- partition-values [num-breakouts row]
-  (when (&gt; num-breakouts 1)
-    (take (dec num-breakouts) row)))</pre></td></tr><tr><td class="docs"><p>Update values in <code>row</code> by adding values from <code>last-row</code> for a set of specified indexes.</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>The values to partition the cumulative aggregation accumulation by (the equivalent of SQL <code>PARTITION BY</code> in a window
+function). We partition by all breakouts other than the first. See #2862, #42003, and the docstring
+for [[metabase.query-processor.middleware.cumulative-aggregations]] for more info.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- partition-key
+  [num-breakouts row]
+  ;; breakouts are always the first results returned. Return all breakouts except the first.
+  (when (pos? num-breakouts)
+    (subvec (vec row) 1 num-breakouts)))</pre></td></tr><tr><td class="docs"><p>Create a stateful function that can add values from the previous row for each partition for a set of specified
+indexes.</p>
 
-<p>  ((add-values-from-last-row-fn 0) #{0} [100 200] [50 60]) ; -> [150 60]</p>
+<p> (let [f (add-values-from-last-partition-fn 0 #{1})]
+   (f [100 200]) ; => [100 200]
+   (f [50 60]))  ; => [50  260]</p>
 
 <p>We need to reset the totals every time breakouts other than the last change values --
 see [[metabase.query-processor.middleware.cumulative-aggregations]] docstring for more info.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- add-values-from-last-row
-  [num-breakouts indexes-to-sum last-row row]
-  (if (or (not last-row)
-          (not= (partition-values num-breakouts last-row)
-                (partition-values num-breakouts row)))
-    row
-    (reduce (fn [row index]
-              (update row index (partial (fnil + 0 0) (nth last-row index))))
-            (vec row)
-            indexes-to-sum)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- add-values-from-last-partition-fn
+  [num-breakouts indexes-to-sum]
+  (let [partition-&gt;last-row (volatile! nil)]
+    (fn [row]
+      (let [k        (partition-key num-breakouts row)
+            last-row (get @partition-&gt;last-row k)
+            row'     (if last-row
+                       (reduce (fn [row index]
+                                 (update row index (partial (fnil + 0 0) (nth last-row index))))
+                               (vec row)
+                               indexes-to-sum)
+                       row)]
+        ;; save the updated row for this partition key.
+        (vswap! partition-&gt;last-row assoc k row')
+        ;; now return the updated new row.
+        row'))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- cumulative-ags-xform [num-breakouts replaced-indexes rf]
   {:pre [(fn? rf)]}
-  (let [last-row (volatile! nil)]
+  (let [add-values-from-last-partition (add-values-from-last-partition-fn num-breakouts replaced-indexes)]
     (fn
       ([] (rf))
       ([result] (rf result))
       ([result row]
-       (let [row' (add-values-from-last-row num-breakouts replaced-indexes @last-row row)]
-         (vreset! last-row row')
+       (let [row' (add-values-from-last-partition row)]
          (rf result row'))))))</pre></td></tr><tr><td class="docs"><p>Post-processing middleware. Sum the cumulative count aggregations that were rewritten
 by [[rewrite-cumulative-aggregations]] in Clojure-land.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn sum-cumulative-aggregation-columns

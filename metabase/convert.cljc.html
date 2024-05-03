@@ -2990,7 +2990,7 @@ if it is used more than once.</p>
 aliases and truncate them or anything like that.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- deduplicate-join-aliases
   [joins]
-  (let [unique-name-fn (lib.util/unique-name-generator)]
+  (let [unique-name-fn (lib.util/unique-name-generator nil)]
     (mapv (fn [join]
             (cond-&gt; join
               (= (:alias join) legacy-default-join-alias) (update :alias unique-name-fn)))
@@ -3001,23 +3001,25 @@ aliases and truncate them or anything like that.</p>
     (-&gt; stage
         (assoc :source-card (lib.util/legacy-string-table-id-&gt;card-id (:source-table stage)))
         (dissoc :source-table))
-    stage))</pre></td></tr><tr><td class="docs"><p>Macro for capturing the context of a query stage's <code>:aggregation</code> list, so any legacy <code>[:aggregation 0]</code> indexed
+    stage))</pre></td></tr><tr><td class="docs"><p>Impl for [[with-aggregation-list]].</p>
+</td><td class="codes"><pre class="brush: clojure">(defn do-with-aggregation-list
+  [aggregations thunk]
+  (let [legacy-&gt;pMBQL (into {}
+                            (map-indexed (fn [idx [_tag {ag-uuid :lib/uuid}]]
+                                           [idx ag-uuid]))
+                            aggregations)
+        pMBQL-&gt;legacy (into {}
+                            (map-indexed (fn [idx [_tag {ag-uuid :lib/uuid}]]
+                                           [ag-uuid idx]))
+                            aggregations)]
+    (binding [*legacy-index-&gt;pMBQL-uuid* legacy-&gt;pMBQL
+              *pMBQL-uuid-&gt;legacy-index* pMBQL-&gt;legacy]
+      (thunk))))</pre></td></tr><tr><td class="docs"><p>Macro for capturing the context of a query stage's <code>:aggregation</code> list, so any legacy <code>[:aggregation 0]</code> indexed
    refs can be converted correctly to UUID-based pMBQL refs.</p>
 </td><td class="codes"><pre class="brush: clojure">#?(:clj
    (defmacro with-aggregation-list
      [aggregations &amp; body]
-     `(let [aggregations#  ~aggregations
-            legacy-&gt;pMBQL# (into {}
-                                 (map-indexed (fn [~'idx [~'_tag {~'ag-uuid :lib/uuid}]]
-                                                [~'idx ~'ag-uuid]))
-                                 aggregations#)
-            pMBQL-&gt;legacy# (into {}
-                                 (map-indexed (fn [~'idx [~'_tag {~'ag-uuid :lib/uuid}]]
-                                                [~'ag-uuid ~'idx]))
-                                 aggregations#)]
-        (binding [*legacy-index-&gt;pMBQL-uuid* legacy-&gt;pMBQL#
-                  *pMBQL-uuid-&gt;legacy-index* pMBQL-&gt;legacy#]
-          ~@body))))</pre></td></tr><tr><td class="docs">
+     `(do-with-aggregation-list ~aggregations (fn [] ~@body))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;pMBQL :mbql.stage/mbql
   [stage]
   (let [aggregations (-&gt;pMBQL (:aggregation stage))
