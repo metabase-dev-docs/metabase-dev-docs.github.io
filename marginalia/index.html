@@ -4223,10 +4223,9 @@ else we will crash and fail people's builds.</p>
           (extract-common-docstring form raw nspace-sym)
         :else
           (dispatch-inner-form form raw nspace-sym)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn extract-docstring [m raw nspace-sym]
-  (let [raw (join &quot;\n&quot; (subvec raw (-&gt; m :start dec) (:end m)))
-        form (:form m)]
-    (dispatch-form form raw nspace-sym)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn extract-docstring [{:keys [start end form]} raw-lines nspace-sym]
+  (let [new-lines (join &quot;\n&quot; (subvec raw-lines (dec start) (min end (count raw-lines))))]
+    (dispatch-form form new-lines nspace-sym)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- -&gt;str [m]
   (-&gt; (-&gt; m :form .content)
       (replace #&quot;^;+\s(\s*)&quot; &quot;$1&quot;)
@@ -4236,78 +4235,79 @@ else we will crash and fail people's builds.</p>
    :text (into (:text f) (:text s))
    :start (:start f)
    :end (:end s)})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn comment? [o]
-  (-&gt;&gt; o :form (instance? Comment)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn code? [o]
-  (and (-&gt;&gt; o :form (instance? Comment) not)
-       (-&gt;&gt; o :form nil? not)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn adjacent? [f s]
-  (= (-&gt; f :end) (-&gt; s :start dec)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn comment? [{:keys [form]}]
+  (instance? Comment form))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn code? [{:keys [form] :as o}]
+  (and (not (nil? form))
+       (not (comment? o))))</pre></td></tr><tr><td class="docs"><p>Two parsed objects are adjacent if the end of the first is followed by the start of the second.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn adjacent?
+  [{:keys [end] :as _first} {:keys [start] :as _second}]
+  (= end (dec start)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn arrange-in-sections [parsed-code raw-code]
   (loop [sections []
-         f (first parsed-code)
-         s (second parsed-code)
-         nn (nnext parsed-code)
-         nspace nil]
+         f        (first parsed-code)
+         s        (second parsed-code)
+         nn       (nnext parsed-code)
+         nspace   nil]
     (if f
       (cond
-       ;; ignore comments with only one semicolon
-       (and (comment? f) (re-find #&quot;^;(\s|$)&quot; (-&gt; f :form .content)))
-       (recur sections s (first nn) (next nn) nspace)
-       ;; merging comments block
-       (and (comment? f) (comment? s) (adjacent? f s))
-       (recur sections (merge-comments f s)
-              (first nn) (next nn)
-              nspace)
-       ;; merging adjacent code blocks
-       (and (code? f) (code? s) (adjacent? f s))
-       (let [[fdoc fcode nspace] (extract-docstring f raw-code nspace)
-             [sdoc scode _] (extract-docstring s raw-code nspace)]
-         (recur sections (assoc s
-                           :type :code
-                           :raw (str (or (:raw f) fcode) &quot;\n&quot; scode)
-                           :docstring (str (or (:docstring f) fdoc) &quot;\n\n&quot; sdoc))
-                (first nn) (next nn) nspace))
-       ;; adjacent comments are added as extra documentation to code block
-       (and (comment? f) (code? s) (adjacent? f s))
-       (let [[doc code nspace] (extract-docstring s raw-code nspace)]
-         (recur sections (assoc s
-                           :type :code
-                           :raw (if *delete-lifted-comments*
-                                  ;; this is far from perfect but should work
-                                  ;; for most cases: erase matching comments
-                                  ;; and then remove lines that are blank
-                                  (-&gt; (reduce (fn [raw comment]
-                                                (replace raw
-                                                         (str comment &quot;\n&quot;)
-                                                         &quot;\n&quot;))
-                                              code
-                                              (:text f))
-                                      (replace #&quot;\n\s+\n&quot; &quot;\n&quot;))
-                                  code)
-                           :docstring (str doc &quot;\n\n&quot; (-&gt;str f)))
-                (first nn) (next nn) nspace))
-       ;; adding comment section
-       (comment? f)
-       (recur (conj sections (assoc f :type :comment :raw (-&gt;str f)))
-              s
-              (first nn) (next nn)
-              nspace)
-       ;; adding code section
-       :else
-       (let [[doc code nspace] (extract-docstring f raw-code nspace)]
-         (recur (conj sections (if (= (:type f) :code)
-                                 f
-                                 {:type :code
-                                  :raw code
-                                  :docstring doc}))
-                s (first nn) (next nn) nspace)))
+        ;; ignore comments with only one semicolon
+        (and (comment? f) (re-find #&quot;^;(\s|$)&quot; (-&gt; f :form .content)))
+        (recur sections s (first nn) (next nn) nspace)
+        ;; merging comments block
+        (and (comment? f) (comment? s) (adjacent? f s))
+        (recur sections (merge-comments f s)
+               (first nn) (next nn)
+               nspace)
+        ;; merging adjacent code blocks
+        (and (code? f) (code? s) (adjacent? f s))
+        (let [[fdoc fcode nspace] (extract-docstring f raw-code nspace)
+              [sdoc scode _]      (extract-docstring s raw-code nspace)]
+          (recur sections (assoc s
+                                 :type      :code
+                                 :raw       (str (or (:raw f) fcode) &quot;\n&quot; scode)
+                                 :docstring (str (or (:docstring f) fdoc) &quot;\n\n&quot; sdoc))
+                 (first nn) (next nn) nspace))
+        ;; adjacent comments are added as extra documentation to code block
+        (and (comment? f) (code? s) (adjacent? f s))
+        (let [[doc code nspace] (extract-docstring s raw-code nspace)]
+          (recur sections (assoc s
+                                 :type :code
+                                 :raw (if *delete-lifted-comments*
+                                        ;; this is far from perfect but should work
+                                        ;; for most cases: erase matching comments
+                                        ;; and then remove lines that are blank
+                                        (-&gt; (reduce (fn [raw comment]
+                                                      (replace raw
+                                                               (str comment &quot;\n&quot;)
+                                                               &quot;\n&quot;))
+                                                    code
+                                                    (:text f))
+                                            (replace #&quot;\n\s+\n&quot; &quot;\n&quot;))
+                                        code)
+                                 :docstring (str doc &quot;\n\n&quot; (-&gt;str f)))
+                 (first nn) (next nn) nspace))
+        ;; adding comment section
+        (comment? f)
+        (recur (conj sections (assoc f :type :comment :raw (-&gt;str f)))
+               s
+               (first nn) (next nn)
+               nspace)
+        ;; adding code section
+        :else
+        (let [[doc code nspace] (extract-docstring f raw-code nspace)]
+          (recur (conj sections (if (= (:type f) :code)
+                                  f
+                                  {:type :code
+                                   :raw code
+                                   :docstring doc}))
+                 s (first nn) (next nn) nspace)))
       sections)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn parse [source-string]
   (let [make-reader #(java.io.BufferedReader.
                       (java.io.StringReader. (str source-string &quot;\n&quot;)))
-        lines (vec (line-seq (make-reader)))
-        reader (clojure.lang.LineNumberingPushbackReader. (make-reader))
+        lines       (vec (line-seq (make-reader)))
+        reader      (clojure.lang.LineNumberingPushbackReader. (make-reader))
         old-cmt-rdr (aget (get-field clojure.lang.LispReader :macros nil) (int \;))]
     (try
       (set-comment-reader read-comment)
@@ -4496,7 +4496,7 @@ See <a href="https://github.com/clj-commons/marginalia/issues/4">https://github.
    [marginalia.parser :as p]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest test-inline-literals
   (is (= (count (marginalia.parser/parse &quot;(ns test)&quot;)) 1))
-  ;; (is (= (count (marginalia.parser/parse &quot;(ns test)\n123&quot;)) 1)) ;; still failing
+  (is (= (count (marginalia.parser/parse &quot;(ns test)\n123&quot;)) 1))
   (is (= (count (marginalia.parser/parse &quot;(ns test)\n123\n&quot;)) 1))
   (is (= (count (marginalia.parser/parse &quot;(ns test)\n\&quot;string\)) 1))
   (is (= (count (marginalia.parser/parse &quot;(ns test)\n\&quot;some string\)) 1))
