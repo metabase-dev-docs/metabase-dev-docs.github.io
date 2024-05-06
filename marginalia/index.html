@@ -2904,37 +2904,37 @@ provides a virtuous circle spiraling inward toward maximal code quality.</p>
   (:require
    [clojure.java.io :as io]
    [clojure.string  :as str]
-   [clojure.tools.cli :refer [cli]]
-   [marginalia.html :refer [uberdoc-html index-html single-page-html]]
-   [marginalia.parser :refer [parse-file parse-ns *lift-inline-comments* *delete-lifted-comments*]])
+   [clojure.tools.cli :as cli]
+   [marginalia.html :as html]
+   [marginalia.parser :as parser])
   (:import
    (java.io File FileReader)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><h2>File System Utilities</h2>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Performs roughly the same task as the UNIX <code>ls</code>.  That is, returns a seq of the filenames
  at a given directory.  If a path to a file is supplied, then the seq contains only the
  original path given.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ls
+</td><td class="codes"><pre class="brush: clojure">(defn- ls
   [path]
   (let [file (io/file path)]
     (if (.isDirectory file)
       (seq (.list file))
       (when (.exists file)
         [path]))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn mkdir [path]
+</td><td class="codes"><pre class="brush: clojure">(defn- mkdir [path]
   (.mkdirs (io/file path)))</pre></td></tr><tr><td class="docs"><p>Ensure that the directory specified by <code>path</code> exists.  If not then make it so.
  Here is a snowman ☃</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ensure-directory!
+</td><td class="codes"><pre class="brush: clojure">(defn- ensure-directory!
   [path]
   (when-not (ls path)
     (mkdir path)))</pre></td></tr><tr><td class="docs"><p>Many Marginalia fns use dir? to recursively search a filepath.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn dir?
   [path]
   (.isDirectory (io/file path)))</pre></td></tr><tr><td class="docs"><p>Returns a string containing the files extension.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn find-file-extension
+</td><td class="codes"><pre class="brush: clojure">(defn- find-file-extension
   [^File file]
   (second (re-find #&quot;\.([^.]+)$&quot; (.getName file))))</pre></td></tr><tr><td class="docs"><p>Predicate. Returns true for "normal" files with a file extension which
 passes the provided predicate.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn processable-file?
+</td><td class="codes"><pre class="brush: clojure">(defn- processable-file?
   [pred ^File file]
   (when (.isFile file)
     (-&gt; file find-file-extension pred)))</pre></td></tr><tr><td class="docs"><p>Returns a seq of processable file paths (strings) in alphabetical order by
@@ -2944,7 +2944,7 @@ namespace.</p>
   (-&gt;&gt; (io/file dir)
        (file-seq)
        (filter (partial processable-file? pred))
-       (sort-by parse-ns)
+       (sort-by parser/parse-ns)
        (map #(.getCanonicalPath ^File %))))</pre></td></tr><tr><td class="docs"><h2>Project Info Parsing</h2>
 
 <p>Marginalia will parse info out of your project.clj to display in
@@ -2978,53 +2978,24 @@ forms (<code>:dependencies</code>, etc)</p>
               (if found-project?
                 (parse-project-form line)
                 (recur (read rdr))))))
-	(catch Exception e
+	(catch Exception _
           (throw (Exception.
                   (str
                    &quot;There was a problem reading the project definition from &quot;
-                   path)))))))</pre></td></tr><tr><td class="docs"><h2>Source File Analysis</h2>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>TODO: why are these args unused?</p>
-</td><td class="codes"><pre class="brush: clojure">(defn end-of-block? [_cur-group _groups lines]
-  (let [line (first lines)
-        next-line (second lines)
-        next-line-code (get next-line :code-text )]
-    (when (or (and (:code-text line)
-                   (:docs-text next-line))
-              (re-find #&quot;^\(def&quot; (str/trim next-line-code)))
-      true)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn merge-line [line m]
-  (cond
-   (:docstring-text line) (assoc m
-                            :docs
-                            (conj (get m :docs []) line))
-   (:code-text line)      (assoc m
-                            :codes
-                            (conj (get m :codes []) line))
-   (:docs-text line)      (assoc m
-                            :docs
-                            (conj (get m :docs []) line))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn group-lines [doc-lines]
-  (loop [cur-group {}
-         groups []
-         lines doc-lines]
-    (cond
-     (empty? lines) (conj groups cur-group)
-     (end-of-block? cur-group groups lines)
-     (recur (merge-line (first lines) {}) (conj groups cur-group) (rest lines))
-     :else (recur (merge-line (first lines) cur-group) groups (rest lines)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn path-to-doc [filename]
-  {:ns     (parse-ns (io/file filename))
-   :groups (parse-file filename)})</pre></td></tr><tr><td class="docs"><h2>Output Generation</h2>
+                   path)))))))</pre></td></tr><tr><td class="docs"><h2>Output Generation</h2>
 </td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn filename-contents
+</td><td class="codes"><pre class="brush: clojure">(defn- path-to-doc [filename]
+  {:ns     (parser/parse-ns (io/file filename))
+   :groups (parser/parse-file filename)})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- filename-contents
   [props output-dir all-files parsed-file]
   {:name     (io/file output-dir (str (:ns parsed-file) &quot;.html&quot;))
-   :contents (single-page-html props parsed-file all-files)})</pre></td></tr><tr><td class="docs">
+   :contents (html/single-page-html props parsed-file all-files)})</pre></td></tr><tr><td class="docs"><p>Generate documentation for the given <code>files-to-analyze</code>, write the doc files to disk in the <code>output-dir</code></p>
 </td><td class="codes"><pre class="brush: clojure">(defn multidoc!
   [output-dir files-to-analyze props]
   (let [parsed-files (map path-to-doc files-to-analyze)
-        index (index-html props parsed-files)
-        pages (map #(filename-contents props output-dir parsed-files %) parsed-files)]
+        index        (html/index-html props parsed-files)
+        pages        (map #(filename-contents props output-dir parsed-files %) parsed-files)]
     (doseq [f (conj pages {:name     (io/file output-dir &quot;toc.html&quot;)
                            :contents index})]
            (spit (:name f) (:contents f)))))</pre></td></tr><tr><td class="docs"><p>Generates an uberdoc html file from 3 pieces of information:</p>
@@ -3038,7 +3009,7 @@ forms (<code>:dependencies</code>, etc)</p>
 </ol>
 </td><td class="codes"><pre class="brush: clojure">(defn uberdoc!
   [output-file-name files-to-analyze props]
-  (let [source (uberdoc-html
+  (let [source (html/uberdoc-html
                 props
                 (map path-to-doc files-to-analyze))]
     (spit output-file-name source)))</pre></td></tr><tr><td class="docs"><h2>External Interface (command-line, lein, cake, etc)</h2>
@@ -3056,7 +3027,7 @@ users.</p>
          (mapcat #(if (dir? %)
                     (find-processable-file-paths % file-extensions)
                     [(.getCanonicalPath (io/file %))])))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn split-deps [deps]
+</td><td class="codes"><pre class="brush: clojure">(defn- split-deps [deps]
   (when deps
     (for [d (str/split deps #&quot;;&quot;)
           :let [[group artifact version] (str/split d #&quot;:&quot;)]]
@@ -3083,41 +3054,43 @@ using the found source files and a project file expected to be in its default lo
 </ol>
 </td><td class="codes"><pre class="brush: clojure">(defn run-marginalia
   [args &amp; [project]]
-  (let [[{:keys [dir file name version desc deps css js multi
+  (let [[{:keys [dir file version desc deps css js multi
                  leiningen exclude
-                 lift-inline-comments exclude-lifted-comments]} files help]
-        (cli args
-             [&quot;-d&quot; &quot;--dir&quot;
-              &quot;Directory into which the documentation will be written&quot; :default &quot;./docs&quot;]
-             [&quot;-f&quot; &quot;--file&quot;
-              &quot;File into which the documentation will be written&quot; :default &quot;uberdoc.html&quot;]
-             [&quot;-n&quot; &quot;--name&quot;
-              &quot;Project name - if not given will be taken from project.clj&quot;]
-             [&quot;-v&quot; &quot;--version&quot;
-              &quot;Project version - if not given will be taken from project.clj&quot;]
-             [&quot;-D&quot; &quot;--desc&quot;
-              &quot;Project description - if not given will be taken from project.clj&quot;]
-             [&quot;-a&quot; &quot;--deps&quot;
-              &quot;Project dependencies in the form &lt;group1&gt;:&lt;artifact1&gt;:&lt;version1&gt;;&lt;group2&gt;...
+                 lift-inline-comments exclude-lifted-comments]
+          project-name :name}
+         files help]
+        (cli/cli args
+                 [&quot;-d&quot; &quot;--dir&quot;
+                  &quot;Directory into which the documentation will be written&quot; :default &quot;./docs&quot;]
+                 [&quot;-f&quot; &quot;--file&quot;
+                  &quot;File into which the documentation will be written&quot; :default &quot;uberdoc.html&quot;]
+                 [&quot;-n&quot; &quot;--name&quot;
+                  &quot;Project name - if not given will be taken from project.clj&quot;]
+                 [&quot;-v&quot; &quot;--version&quot;
+                  &quot;Project version - if not given will be taken from project.clj&quot;]
+                 [&quot;-D&quot; &quot;--desc&quot;
+                  &quot;Project description - if not given will be taken from project.clj&quot;]
+                 [&quot;-a&quot; &quot;--deps&quot;
+                  &quot;Project dependencies in the form &lt;group1&gt;:&lt;artifact1&gt;:&lt;version1&gt;;&lt;group2&gt;...
                  If not given will be taken from project.clj&quot;]
-             [&quot;-c&quot; &quot;--css&quot;
-              &quot;Additional css resources &lt;resource1&gt;;&lt;resource2&gt;;...
+                 [&quot;-c&quot; &quot;--css&quot;
+                  &quot;Additional css resources &lt;resource1&gt;;&lt;resource2&gt;;...
                  If not given will be taken from project.clj.&quot;]
-             [&quot;-j&quot; &quot;--js&quot;
-              &quot;Additional javascript resources &lt;resource1&gt;;&lt;resource2&gt;;...
+                 [&quot;-j&quot; &quot;--js&quot;
+                  &quot;Additional javascript resources &lt;resource1&gt;;&lt;resource2&gt;;...
                  If not given will be taken from project.clj&quot;]
-             [&quot;-m&quot; &quot;--multi&quot;
-              &quot;Generate each namespace documentation as a separate file&quot; :flag true]
-             [&quot;-l&quot; &quot;--leiningen&quot;
-              &quot;Generate the documentation for a Leiningen project file.&quot;]
-             [&quot;-e&quot; &quot;--exclude&quot;
-              &quot;Exclude source file(s) from the document generation process &lt;file1&gt;;&lt;file2&gt;;...
+                 [&quot;-m&quot; &quot;--multi&quot;
+                  &quot;Generate each namespace documentation as a separate file&quot; :flag true]
+                 [&quot;-l&quot; &quot;--leiningen&quot;
+                  &quot;Generate the documentation for a Leiningen project file.&quot;]
+                 [&quot;-e&quot; &quot;--exclude&quot;
+                  &quot;Exclude source file(s) from the document generation process &lt;file1&gt;;&lt;file2&gt;;...
                  If not given will be taken from project.clj&quot;]
-             [&quot;-L&quot; &quot;--lift-inline-comments&quot;
-              &quot;Lift ;; inline comments to the top of the enclosing form.
+                 [&quot;-L&quot; &quot;--lift-inline-comments&quot;
+                  &quot;Lift ;; inline comments to the top of the enclosing form.
                  They will be treated as if they preceded the enclosing form.&quot; :flag true]
-             [&quot;-X&quot; &quot;--exclude-lifted-comments&quot;
-              &quot;If ;; inline comments are being lifted into documentation
+                 [&quot;-X&quot; &quot;--exclude-lifted-comments&quot;
+                  &quot;If ;; inline comments are being lifted into documentation
                  then also exclude them from the source code display.&quot; :flag true])
         sources (distinct (format-sources (seq files)))
         sources (if leiningen (cons leiningen sources) sources)]
@@ -3125,8 +3098,8 @@ using the found source files and a project file expected to be in its default lo
       (do
         (println &quot;Wrong number of arguments passed to Marginalia.&quot;)
         (println help))
-      (binding [*lift-inline-comments*   lift-inline-comments
-                *delete-lifted-comments* exclude-lifted-comments]
+      (binding [parser/*lift-inline-comments*   lift-inline-comments
+                parser/*delete-lifted-comments* exclude-lifted-comments]
         (let [project-clj (or project
                               (when (.exists (io/file &quot;project.clj&quot;))
                                 (parse-project-file)))
@@ -3138,7 +3111,7 @@ using the found source files and a project file expected to be in its default lo
                                      :leiningen  leiningen}
                                     (:marginalia project-clj))
               opts (merge-with choose
-                               {:name         name
+                               {:name         project-name
                                 :version      version
                                 :description  desc
                                 :dependencies (split-deps deps)
@@ -3160,19 +3133,34 @@ using the found source files and a project file expected to be in its default lo
           (println &quot;&quot;))))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#marginalia.hiccup" name="marginalia.hiccup"><h1 class="project-name">marginalia.hiccup</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Library for rendering a tree of vectors into a string of HTML.
 Pre-compiles where possible for performance.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns marginalia.hiccup
-  (:import [clojure.lang IPersistentVector ISeq]
-           java.net.URI))</pre></td></tr><tr><td class="docs"><p>Pulled from old-contrib to avoid dependency</p>
+  (:import
+   [clojure.lang IPersistentVector ISeq]
+   [java.net URI]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Very similar to <code>clojure.core/str</code>, but uses <code>name</code> instead of <code>str</code> when possible:</p>
+
+<p> ```
+ (for [x [{:a 1 :b 2} :foo "bar"]]
+   {:as-str (as-str x)
+    :str   (str x)})
+ ;; =>
+ ({:as-str "{:a 1, :b 2}"
+   :str    "{:a 1, :b 2}"},
+  {:as-str "foo"
+   :str    ":foo"},
+  {:as-str "bar"
+   :str    "bar"})
+ ```</p>
 </td><td class="codes"><pre class="brush: clojure">(defn as-str
-  ([] )
+  ([] &quot;&quot;)
   ([x] (if (instance? clojure.lang.Named x)
          (name x)
          (str x)))
   ([x &amp; ys]
-     ((fn [^StringBuilder sb more]
-        (if more
-          (recur (. sb  (append (as-str (first more)))) (next more))
-          (str sb)))
-      (new StringBuilder ^String (as-str x)) ys)))</pre></td></tr><tr><td class="docs">
+   ((fn [^StringBuilder sb more]
+      (if more
+        (recur (. sb  (append (as-str (first more)))) (next more))
+        (str sb)))
+    (new StringBuilder ^String (as-str x)) ys)))</pre></td></tr><tr><td class="docs"><p>TODO: where is this used? :O</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *html-mode* :xml)</pre></td></tr><tr><td class="docs"><p>Change special characters into HTML character entities.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn escape-html
   [text]
@@ -3181,22 +3169,21 @@ Pre-compiles where possible for performance.</p>
     (replace &quot;&lt;&quot;  &quot;&amp;lt;&quot;)
     (replace &quot;&gt;&quot;  &quot;&amp;gt;&quot;)
     (replace &quot;\&quot;&quot; &quot;&amp;quot;&quot;)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def h escape-html)  ; alias for escape-html</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- xml-mode? []
   (= *html-mode* :xml))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- end-tag []
   (if (xml-mode?) &quot; /&gt;&quot; &quot;&gt;&quot;))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- xml-attribute [name value]
-  (str &quot; &quot; (as-str name) &quot;=\ (escape-html value) &quot;\))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- render-attribute [[name value]]
+</td><td class="codes"><pre class="brush: clojure">(defn- xml-attribute [attr-name value]
+  (str &quot; &quot; (as-str attr-name) &quot;=\ (escape-html value) &quot;\))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- render-attribute [[attr-name value]]
   (cond
     (true? value)
       (if (xml-mode?)
-        (xml-attribute name name)
-        (str &quot; &quot; (as-str name)))
+        (xml-attribute attr-name attr-name)
+        (str &quot; &quot; (as-str attr-name)))
     (not value)
     :else
-      (xml-attribute name value)))</pre></td></tr><tr><td class="docs">
+      (xml-attribute attr-name value)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- render-attr-map [attrs]
   (apply str
     (sort (map render-attribute attrs))))</pre></td></tr><tr><td class="docs"><p>Regular expression that parses a CSS-style id and class from a tag name.</p>
@@ -3205,15 +3192,17 @@ Pre-compiles where possible for performance.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^{:doc  :private true}
   container-tags
   #{&quot;a&quot; &quot;b&quot; &quot;body&quot; &quot;canvas&quot; &quot;dd&quot; &quot;div&quot; &quot;dl&quot; &quot;dt&quot; &quot;em&quot; &quot;fieldset&quot; &quot;form&quot; &quot;h1&quot; &quot;h2&quot; &quot;h3&quot;
-    &quot;h4&quot; &quot;h5&quot; &quot;h6&quot; &quot;head&quot; &quot;html&quot; &quot;i&quot; &quot;iframe&quot; &quot;label&quot; &quot;li&quot; &quot;ol&quot; &quot;option&quot; &quot;pre&quot; 
+    &quot;h4&quot; &quot;h5&quot; &quot;h6&quot; &quot;head&quot; &quot;html&quot; &quot;i&quot; &quot;iframe&quot; &quot;label&quot; &quot;li&quot; &quot;ol&quot; &quot;option&quot; &quot;pre&quot;
     &quot;script&quot; &quot;span&quot; &quot;strong&quot; &quot;style&quot; &quot;table&quot; &quot;textarea&quot; &quot;ul&quot;})</pre></td></tr><tr><td class="docs"><p>Ensure a tag vector is of the form [tag-name attrs content].</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- normalize-element
   [[tag &amp; content]]
-  (when (not (or (keyword? tag) (symbol? tag) (string? tag)))
+  (when (not (or (keyword? tag)
+                 (symbol? tag)
+                 (string? tag)))
     (throw (IllegalArgumentException. (str tag &quot; is not a valid tag name.&quot;))))
-  (let [[_ tag id class] (re-matches re-tag (as-str tag))
-        tag-attrs        {:id id
-                          :class (if class (.replace ^String class &quot;.&quot; &quot; &quot;))}
+  (let [[_ tag id klass] (re-matches re-tag (as-str tag))
+        tag-attrs        {:id    id
+                          :class (when klass (.replace ^String klass &quot;.&quot; &quot; &quot;))}
         map-attrs        (first content)]
     (if (map? map-attrs)
       [tag (merge tag-attrs map-attrs) (next content)]
@@ -3249,7 +3238,8 @@ attributes.</p>
     (render-attr-map attrs)))</pre></td></tr><tr><td class="docs"><p>Get the name of the supplied form.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- form-name
   [form]
-  (if (and (seq? form) (symbol? (first form)))
+  (when (and (seq? form)
+             (symbol? (first form)))
     (name (first form))))</pre></td></tr><tr><td class="docs"><p>Pre-compile certain standard forms, where possible.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti compile-form
   {:private true}
@@ -3264,13 +3254,13 @@ attributes.</p>
   [expr]
   `(#'render-html ~expr))</pre></td></tr><tr><td class="docs"><p>True if x is not hinted to be the supplied type.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- not-hint?
-  [x type]
-  (if-let [hint (-&gt; x meta :tag)]
-    (not (isa? (eval hint) type))))</pre></td></tr><tr><td class="docs"><p>True if x is hinted to be the supplied type.</p>
+  [x the-type]
+  (when-let [hint (-&gt; x meta :tag)]
+    (not (isa? (eval hint) the-type))))</pre></td></tr><tr><td class="docs"><p>True if x is hinted to be the supplied type.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- hint?
-  [x type]
-  (if-let [hint (-&gt; x meta :tag)]
-    (isa? (eval hint) type)))</pre></td></tr><tr><td class="docs"><p>True if x is a literal value that can be rendered as-is.</p>
+  [x the-type]
+  (when-let [hint (-&gt; x meta :tag)]
+    (isa? (eval hint) the-type)))</pre></td></tr><tr><td class="docs"><p>True if x is a literal value that can be rendered as-is.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- literal?
   [x]
   (and (not (unevaluated? x))
@@ -3282,7 +3272,7 @@ attributes.</p>
       (not (unevaluated? x))
       (not-hint? x java.util.Map)))</pre></td></tr><tr><td class="docs"><p>Returns the compilation strategy to use for a given element.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- element-compile-strategy
-  [[tag attrs &amp; content :as element]]
+  [[tag attrs &amp; _ :as element]]
   (cond
     (every? literal? element)
       ::all-literal                    ; e.g. [:span &quot;foo&quot;]
@@ -3371,10 +3361,10 @@ element.</p>
            ~(make-html content)))
       (make-html (cons options content)))))</pre></td></tr><tr><td class="docs"><p>Define a function, but wrap its output in an implicit html macro.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmacro defhtml
-  [name &amp; fdecl]
+  [fn-name &amp; fdecl]
   (let [[fhead fbody] (split-with #(not (or (list? %) (vector? %))) fdecl)
         wrap-html (fn [[args &amp; body]] `(~args (html ~@body)))]
-    `(defn ~name
+    `(defn ~fn-name
        ~@fhead
        ~@(if (vector? (first fbody))
            (wrap-html fbody)
@@ -3387,14 +3377,13 @@ element.</p>
         (if (map? (first body))
           (apply vector tag (merge (first body) (first args)) (rest body))
           (apply vector tag (first args) body)))
-      (apply func args))))</pre></td></tr><tr><td class="docs"><p>Defines a function that will return a tag vector. If the first argument
-passed to the resulting function is a map, it merges it with the attribute
-map of the returned tag value.</p>
+      (apply func args))))</pre></td></tr><tr><td class="docs"><p>Defines a function that will return a tag vector. If the first argument passed to the resulting function is a map, it
+merges it with the attribute map of the returned tag value.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmacro defelem
-  [name &amp; fdecl]
-  `(do (defn ~name ~@fdecl)
-       (alter-var-root (var ~name) add-optional-attrs)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *base-url* nil)</pre></td></tr><tr><td class="docs"><p>Add a base-url that will be added to the output of the resolve-uri function.</p>
+  [fn-name &amp; fdecl]
+  `(do (defn ~fn-name ~@fdecl)
+       (alter-var-root (var ~name) add-optional-attrs)))</pre></td></tr><tr><td class="docs"><p>Base URL to prepend to URIs (if supplied)</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *base-url*  nil)</pre></td></tr><tr><td class="docs"><p>Add a base-url that will be added to the output of the resolve-uri function.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmacro with-base-url
   [base-url &amp; body]
   `(binding [*base-url* ~base-url]
@@ -3405,11 +3394,13 @@ map of the returned tag value.</p>
     uri
     (str *base-url* uri)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#marginalia.html" name="marginalia.html"><h1 class="project-name">marginalia.html</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Utilities for converting parse results into html.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns marginalia.html
-  (:use [marginalia.hiccup :only (html escape-html)])
-  (:require [clojure.string :as str])
-  (:import [com.petebevin.markdown MarkdownProcessor]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^{:dynamic true} *resources* &quot;./vendor/&quot;)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn css-rule [rule]
+  (:require
+   [marginalia.hiccup :as hiccup :refer [html]])
+  (:import
+   [com.petebevin.markdown MarkdownProcessor]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Directory in which to find resources (CSS, JS, etc.)</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^{:dynamic true} *resources*  &quot;./vendor/&quot;)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- css-rule [rule]
   (let [sels (reverse (rest (reverse rule)))
         props (last rule)]
     (str (apply str (interpose &quot; &quot; (map name sels)))
@@ -3429,7 +3420,7 @@ map of the returned tag value.</p>
         (.getResourceAsStream resource-name)
         (java.io.InputStreamReader.)
         (slurp))
-    (catch java.lang.NullPointerException npe
+    (catch java.lang.NullPointerException _
       (println (str &quot;Could not locate resources at &quot; resource-name))
       (println &quot;    ... attempting to fix.&quot;)
       (let [resource-name (str *resources* resource-name)]
@@ -3438,19 +3429,17 @@ map of the returned tag value.</p>
               (.getResourceAsStream resource-name)
               (java.io.InputStreamReader.)
               (slurp))
-          (catch java.lang.NullPointerException npe
+          (catch java.lang.NullPointerException _
             (println (str &quot;    STILL could not locate resources at &quot; resource-name &quot;. Giving up!&quot;))))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn inline-js [resource]
-  (let [src (slurp-resource resource)]
-    (html [:script {:type &quot;text/javascript&quot;}
-            src])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn inline-css [resource]
-  (let [src (slurp-resource resource)]
-    (html [:style {:type &quot;text/css&quot;}
-           (slurp-resource resource)])))</pre></td></tr><tr><td class="docs"><p>The following functions handle preparation of doc text (both comment and docstring
+</td><td class="codes"><pre class="brush: clojure">(defn- inline-js [resource]
+  (html [:script {:type &quot;text/javascript&quot;}
+         (slurp-resource resource)]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- inline-css [resource]
+  (html [:style {:type &quot;text/css&quot;}
+         (slurp-resource resource)]))</pre></td></tr><tr><td class="docs"><p>The following functions handle preparation of doc text (both comment and docstring
 based) for display through html &amp; css.</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Markdown processor.</p>
-</td><td class="codes"><pre class="brush: clojure">(def mdp (com.petebevin.markdown.MarkdownProcessor.))</pre></td></tr><tr><td class="docs"><p>Markdown string to html converter. Translates strings like:</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^MarkdownProcessor mdp (MarkdownProcessor.))</pre></td></tr><tr><td class="docs"><p>Markdown string to html converter. Translates strings like:</p>
 
 <p> "# header!" -> <code>"&lt;h1&gt;header!&lt;/h1&gt;"</code></p>
 
@@ -3458,7 +3447,7 @@ based) for display through html &amp; css.</p>
 
 <p> ...</p>
 </td><td class="codes"><pre class="brush: clojure">(defn md
-  [s]
+  [^String s]
   (.markdown mdp s))</pre></td></tr><tr><td class="docs"><p>As a result of docifying then grouping, you'll end up with a seq like this one:</p>
 
 <pre><code>[...
@@ -3479,10 +3468,10 @@ and <code>group-to-html</code> calls them on each seq item to do so.</p>
   (-&gt; docs
       str
       (md)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn codes-to-html [code-block]
+</td><td class="codes"><pre class="brush: clojure">(defn- codes-to-html [code-block]
   (html [:pre {:class &quot;brush: clojure&quot;}
-         (escape-html code-block)]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn section-to-html [section]
+         (hiccup/escape-html code-block)]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- section-to-html [section]
   (html [:tr
          [:td {:class &quot;docs&quot;} (docs-to-html
                                (if (= (:type section) :comment)
@@ -3490,7 +3479,7 @@ and <code>group-to-html</code> calls them on each seq item to do so.</p>
                                  (:docstring section)))]
          [:td {:class &quot;codes&quot;} (if (= (:type section) :code)
                                   (codes-to-html (:raw section)))]]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn dependencies-html [deps &amp; header-name]
+</td><td class="codes"><pre class="brush: clojure">(defn- dependencies-html [deps &amp; header-name]
   (when-let [deps (seq deps)]
     (let [header-name (or header-name &quot;dependencies&quot;)]
       (html [:div {:class &quot;dependencies&quot;}
@@ -3512,10 +3501,8 @@ docs, specify a hash map for the :meta key :marginalia in project.clj:</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Generate meta tags from project info.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn metadata-html
   [project-info]
-  (let [options (:marginalia project-info)
-        meta (:meta options)]
-    (html (when meta
-            (map #(vector :meta {:name (name (key %)) :contents (val %)}) meta)))))</pre></td></tr><tr><td class="docs"><h1>Load Optional Resources</h1>
+  (html (when-let [m (get-in project-info [:marginalia :meta])]
+          (map #(vector :meta {:name (name (key %)) :contents (val %)}) m))))</pre></td></tr><tr><td class="docs"><h1>Load Optional Resources</h1>
 
 <p>Use external Javascript and CSS in your documentation. For example:</p>
 
@@ -3545,16 +3532,14 @@ $$x = {-b \pm \sqrt{b^2-4ac} \over 2a}.$$</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Generate script and link tags for optional external javascript and css.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn opt-resources-html
   [project-info]
-  (let [options (:marginalia project-info)
-        javascript (:javascript options)
-        css (:css options)]
+  (let [options    (:marginalia project-info)]
     (html (concat
-           (when javascript
-             (map #(vector :script {:type &quot;text/javascript&quot; :src %}) javascript))
-           (when css
-             (map #(vector :link {:tyle &quot;text/css&quot; :rel &quot;stylesheet&quot; :href %}) css))))))</pre></td></tr><tr><td class="docs"><p>Is &lt;h1/&gt; overloaded?  Maybe we should consider redistributing
+           (when-let [js (:javascript options)]
+             (map #(vector :script {:type &quot;text/javascript&quot; :src %}) js))
+           (when-let [the-css (:css options)]
+             (map #(vector :link {:tyle &quot;text/css&quot; :rel &quot;stylesheet&quot; :href %}) the-css))))))</pre></td></tr><tr><td class="docs"><p>Is &lt;h1/&gt; overloaded?  Maybe we should consider redistributing
 header numbers instead of adding classes to all the h1 tags.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn header-html [project-info]
+</td><td class="codes"><pre class="brush: clojure">(defn- header-html [project-info]
   (html
    [:tr
     [:td {:class &quot;docs&quot;}
@@ -3586,7 +3571,7 @@ a reference to <code>toc.html</code> which might not even exist.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn link-to-toc
   [anchor?]
   (link-to-namespace &quot;toc&quot; anchor? {:class &quot;toc-link&quot;}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn toc-html [props docs]
+</td><td class="codes"><pre class="brush: clojure">(defn- toc-html [props docs]
   (html
    [:tr
     [:td {:class &quot;docs&quot;}
@@ -3596,14 +3581,14 @@ a reference to <code>toc.html</code> which might not even exist.</p>
        (map #(vector :li (link-to-namespace (:ns %) (:uberdoc? props)))
             docs)]]]
     [:td {:class &quot;codes&quot;} &quot;&amp;nbsp;&quot;]]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn floating-toc-html [docs]
+</td><td class="codes"><pre class="brush: clojure">(defn- floating-toc-html [docs]
   [:div {:id &quot;floating-toc&quot;}
    [:ul
     (map #(vector :li {:class &quot;floating-toc-li&quot;
                        :id (str &quot;floating-toc_&quot; (:ns %))}
                   (:ns %))
          docs)]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn groups-html [props doc]
+</td><td class="codes"><pre class="brush: clojure">(defn- groups-html [props doc]
   (html
    [:tr
     [:td {:class &quot;docs&quot;}
@@ -3617,7 +3602,7 @@ a reference to <code>toc.html</code> which might not even exist.</p>
    [:tr
     [:td {:class &quot;spacer docs&quot;} &quot;&amp;nbsp;&quot;]
     [:td {:class &quot;codes&quot;}]]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def reset-css
+</td><td class="codes"><pre class="brush: clojure">(def ^:private reset-css
   (css [:html {:margin 0 :padding 0}]
        [:h1 {:margin 0 :padding 0}]
        [:h2 {:margin 0 :padding 0}]
@@ -3625,7 +3610,7 @@ a reference to <code>toc.html</code> which might not even exist.</p>
        [:h4 {:margin 0 :padding 0}]
        [:a {:color &quot;#261A3B&quot;}]
        [:a:visited {:color &quot;#261A3B&quot;}]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def header-css
+</td><td class="codes"><pre class="brush: clojure">(def ^:private header-css
   (css [:.header {:margin-top &quot;30px&quot;}]
        [:h1.project-name {:font-size &quot;34px&quot;
                           :display &quot;inline&quot;}]
@@ -3677,7 +3662,7 @@ a reference to <code>toc.html</code> which might not even exist.</p>
        [:.plugins :li {:list-style-type &quot;none&quot;
                        :padding-left 0}]
        [:.header :p {:margin-left &quot;20px&quot;}]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def floating-toc-css
+</td><td class="codes"><pre class="brush: clojure">(def ^:private floating-toc-css
   (css [:#floating-toc {:position &quot;fixed&quot;
                         :top &quot;10px&quot;
                         :right &quot;20px&quot;
@@ -3687,7 +3672,7 @@ a reference to <code>toc.html</code> which might not even exist.</p>
        [:#floating-toc :li {:list-style-type &quot;none&quot;
                             :margin 0
                             :padding 0}]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def general-css
+</td><td class="codes"><pre class="brush: clojure">(def ^:private general-css
   (css
    [:body {:margin 0
            :padding 0
@@ -3737,9 +3722,10 @@ a reference to <code>toc.html</code> which might not even exist.</p>
            :padding-right &quot;3px&quot;
            :font-size &quot;14px&quot;}]
    [:.syntaxhighlighter :code {:font-size &quot;13px&quot;}]
-   [:.footer {:text-align &quot;center&quot;}]))</pre></td></tr><tr><td class="docs"><p>Notice that we're inlining the css &amp; javascript for <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a> (<code>inline-js</code>
- &amp; <code>inline-css</code>) to be able to package the output as a single file (uberdoc if you will).  It goes without
- saying that all this is WIP and will probably change in the future.</p>
+   [:.footer {:text-align &quot;center&quot;}]))</pre></td></tr><tr><td class="docs"><p>Notice that we're inlining the CSS and Javascript
+for <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a> (<code>inline-js</code> &amp; <code>inline-css</code>) to be able to
+package the output as a single file (uberdoc, if you will).  It goes without saying that all this is WIP and will
+probably change in the future.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn page-template
   [project-metadata opt-resources header toc content floating-toc]
   (html
@@ -3776,9 +3762,9 @@ a reference to <code>toc.html</code> which might not even exist.</p>
       [:a {:href &quot;http://alexgorbatchev.com/SyntaxHighlighter/&quot;}
        &quot;SyntaxHighlighter&quot;]
       floating-toc]
-     (inline-js (str *resources* &quot;app.js&quot;))]]))</pre></td></tr><tr><td class="docs"><p>Syntax highlighting is done a bit differently than docco.  Instead of embedding
-the highlighting metadata on the parse / html gen phase, we use <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a>
-to do it in javascript.</p>
+     (inline-js (str *resources* &quot;app.js&quot;))]]))</pre></td></tr><tr><td class="docs"><p>Syntax highlighting is done a bit differently than docco. Instead of embedding the highlighting metadata on the
+parse / html gen phase, we use <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a> to do it in
+Javascript.</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>This generates a stand alone html file (think <code>lein uberjar</code>).
  It's probably the only var consumers will use.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn uberdoc-html
@@ -3789,7 +3775,7 @@ to do it in javascript.</p>
    (header-html project-metadata)
    (toc-html {:uberdoc? true} docs)
    (map #(groups-html {:uberdoc? true} %) docs)
-   (floating-toc-html docs)))</pre></td></tr><tr><td class="docs">
+   (floating-toc-html docs)))</pre></td></tr><tr><td class="docs"><p>Generate the HTML for the index page (in multi-page mode)</p>
 </td><td class="codes"><pre class="brush: clojure">(defn index-html
   [project-metadata docs]
   (page-template
@@ -3797,47 +3783,49 @@ to do it in javascript.</p>
    (opt-resources-html project-metadata)
    (header-html project-metadata)
    (toc-html {:uberdoc? false} docs)
-      ;; no contents)) ;; no floating toc</pre></td></tr><tr><td class="docs"><p>no floating toc</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
+   &quot;&quot;   ;; no contents
+   &quot;&quot;)) ;; no floating toc</pre></td></tr><tr><td class="docs"><p>no floating toc</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Generate a given page's HTML</p>
 </td><td class="codes"><pre class="brush: clojure">(defn single-page-html
-  [project-metadata doc all-docs]
+  [project-metadata doc _all-docs]
   (page-template
    project-metadata
    (opt-resources-html project-metadata)
-    ;; no header
-    ;; no toc
+   &quot;&quot; ;; no header
+   &quot;&quot; ;; no toc
    (groups-html {:uberdoc? false} doc)
-    ;; no floating toc))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#marginalia.latex" name="marginalia.latex"><h1 class="project-name">marginalia.latex</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Utilities for converting parse results into LaTeX.</p>
+   &quot;&quot; ;; no floating toc))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#marginalia.latex" name="marginalia.latex"><h1 class="project-name">marginalia.latex</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Utilities for converting parse results into LaTeX.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns marginalia.latex
-  (:require [clojure.string :as str]
-            [clostache.parser :as mustache]
-            [clojure.java.shell :as shell]
-            [clojure.string :as string])
-  (:use [marginalia.html :only [slurp-resource]]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def template (slurp-resource &quot;latex.mustache&quot;))</pre></td></tr><tr><td class="docs"><h2>Namespace header calculation</h2>
+  (:require
+   [clojure.java.shell :as shell]
+   [clojure.string :as str]
+   [clostache.parser :as mustache]
+   [marginalia.html :as html]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Mustache-format template to use for the document</p>
+</td><td class="codes"><pre class="brush: clojure">(def template  (html/slurp-resource &quot;latex.mustache&quot;))</pre></td></tr><tr><td class="docs"><h2>Namespace header calculation</h2>
 </td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def headers [&quot;subsubsection&quot; &quot;subsection&quot; &quot;section&quot;])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def section-re #&quot;\\((sub){0,2}section)\s*\{&quot;)</pre></td></tr><tr><td class="docs"><p>It calculates the suitable header for a namespace <code>ns</code>. For example,
-if the generated output has subsections a section must be generated
-for each namespace in the table of contents. If it has
-subsubsections a subsection should be generated and so on.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^clojure.lang.APersistentVector headers [&quot;subsubsection&quot; &quot;subsection&quot; &quot;section&quot;])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private section-re #&quot;\\((sub){0,2}section)\s*\{&quot;)</pre></td></tr><tr><td class="docs"><p>It calculates the suitable header for a namespace <code>ns</code>. For example,
+if the generated output has subsections a section must be generated for each namespace in the table of contents. If
+it has subsubsections a subsection should be generated and so on.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn get-section-type
   [groups]
-  (let [docs (map :doc groups)
-        matches (-&gt;&gt; docs (mapcat (partial re-seq section-re))
-                     (map second))
-        matches (or (seq matches) [&quot;none&quot;])
+  (let [matches        (-&gt;&gt; groups
+                            (map :doc)
+                            (mapcat (partial re-seq section-re))
+                            (map second))
+        matches        (or (seq matches) [&quot;none&quot;])
         most-important (apply max (map #(.indexOf headers %) matches))
-        position (min (-&gt; most-important inc)
-                      (-&gt; (count headers) dec))]
+        position       (min (-&gt; most-important inc)
+                            (-&gt; (count headers) dec))]
     (nth headers (max position 0))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn get-header
-  [type ns]
-  (str &quot;\\&quot; type &quot;{&quot; ns &quot;}&quot;))</pre></td></tr><tr><td class="docs"><h2>Markdown to LaTeX conversion</h2>
+</td><td class="codes"><pre class="brush: clojure">(defn- get-header
+  [the-type ns']
+  (str &quot;\\&quot; the-type &quot;{&quot; ns' &quot;}&quot;))</pre></td></tr><tr><td class="docs"><h2>Markdown to LaTeX conversion</h2>
 </td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def mark (string/join (repeat 3 &quot;marginalialatex&quot;)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def separator-marker (str &quot;\n\n&quot; mark &quot;\n\n&quot;))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def separator-marker-re (re-pattern (str &quot;\n?\n?&quot; mark &quot;\n?\n?&quot;)))</pre></td></tr><tr><td class="docs"><p>We use pandoc to convert <code>markdown-input</code> to LaTeX.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private mark (str/join (repeat 3 &quot;marginalialatex&quot;)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private separator-marker (str &quot;\n\n&quot; mark &quot;\n\n&quot;))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private separator-marker-re (re-pattern (str &quot;\n?\n?&quot; mark &quot;\n?\n?&quot;)))</pre></td></tr><tr><td class="docs"><p>We use pandoc to convert <code>markdown-input</code> to LaTeX.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn invoke-pandoc
   [markdown-input]
   (let [{:keys [exit out err]} (shell/sh &quot;pandoc&quot;
@@ -3850,20 +3838,20 @@ subsubsections a subsection should be generated and so on.</p>
 output is split using a regex created from <code>separator-marker</code></p>
 </td><td class="codes"><pre class="brush: clojure">(defn md-&gt;latex
   [docs]
-  (let [joined (string/join separator-marker docs)
+  (let [joined (str/join separator-marker docs)
         output (invoke-pandoc joined)
-        result (string/split output separator-marker-re (count docs))]
+        result (str/split output separator-marker-re (count docs))]
     (assert (= (count docs) (count result))
             &quot;The converted docs must have the same number&quot;)
     result))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn to-latex
+</td><td class="codes"><pre class="brush: clojure">(defn- to-latex
   [groups]
-  (map #(assoc-in %1 [:doc] %2) groups (md-&gt;latex (map :doc groups))))</pre></td></tr><tr><td class="docs"><h2>Code and doc extraction</h2>
+  (map #(assoc %1 :doc %2) groups (md-&gt;latex (map :doc groups))))</pre></td></tr><tr><td class="docs"><h2>Code and doc extraction</h2>
 </td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn docs-from-group [group]
+</td><td class="codes"><pre class="brush: clojure">(defn- docs-from-group [group]
   (or (:docstring group)
       (and (= (:type group) :comment) (:raw group))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn code-from-group [group]
+</td><td class="codes"><pre class="brush: clojure">(defn- code-from-group [group]
   (if (= (:type group) :code)
     (:raw group)))</pre></td></tr><tr><td class="docs"><p>From the original data in each group we extract the code and the
 documentation.</p>
@@ -3872,16 +3860,16 @@ documentation.</p>
   (map (fn [group] {:code (code-from-group group) :doc (docs-from-group group)})
        groups))</pre></td></tr><tr><td class="docs"><h2>Uberdoc generation</h2>
 </td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def convert-groups (comp to-latex extract-code-and-doc))</pre></td></tr><tr><td class="docs"><ol>
-<li>Converts each <code>groups</code> data to the format expected by the template.</li>
-<li>Calculates the correct header level for namespaces.</li>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private convert-groups (comp to-latex extract-code-and-doc))</pre></td></tr><tr><td class="docs"><ol>
+<li>Converts each <code>groups</code> data to the format expected by the template.
+<ol><li>Calculates the correct header level for namespaces.</li></ol></li>
 </ol>
 </td><td class="codes"><pre class="brush: clojure">(defn as-data-for-template
   [project-metadata docs]
-  (let [namespaces (map #(update-in % [:groups] convert-groups) docs)
+  (let [namespaces   (map #(update % :groups convert-groups) docs)
         section-type (get-section-type (mapcat :groups namespaces))
-        namespaces (map #(assoc % :ns-header (get-header section-type (:ns %)))
-                        namespaces)]
+        namespaces   (map #(assoc % :ns-header (get-header section-type (:ns %)))
+                          namespaces)]
     {:namespaces namespaces :project project-metadata}))</pre></td></tr><tr><td class="docs"><p>It uses mustache to generate the LaTeX contents using a
 template. Before it needs to convert the data to the format expected
 for the template</p>
@@ -3889,41 +3877,38 @@ for the template</p>
   [project-metadata docs]
     (mustache/render template (as-data-for-template project-metadata docs)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#marginalia.main" name="marginalia.main"><h1 class="project-name">marginalia.main</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns marginalia.main
-  (:use [marginalia.html :only [*resources*]]
-        [marginalia.core :only [run-marginalia]])
+  (:require
+   [marginalia.core :as marginalia]
+   [marginalia.html :as html])
   (:gen-class))</pre></td></tr><tr><td class="docs"><p>The main entry point into Marginalia.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn -main
   [&amp; sources]
-  (binding [*resources* &quot;&quot;]
-    (run-marginalia sources)
+  (binding [html/*resources* &quot;&quot;]
+    (marginalia/run-marginalia sources)
     (shutdown-agents)))</pre></td></tr><tr><td class="docs"><h1>Example Usage</h1>
 </td><td class="codes"><pre class="brush: clojure">(comment
   ;; Command line example
-  (-main &quot;./src/marginalia/core.clj&quot; &quot;./src/marginalia/html.clj&quot;)
-
-  ;; This will find all marginalia source files, and then generate an uberdoc.
-  (apply -main (find-clojure-file-paths &quot;./src&quot;))
-
-;; Move these to tests
-  (merge-line {:docstring-text &quot;hello world&quot; :line 3} {:docs [&quot;stuff&quot;]})
-  (merge-line {:code-text &quot;(defn asdf&quot; :line 4} {:docs [&quot;stuff&quot;]})
-  (merge-line {:docs-text &quot;There's only one method in this module&quot;, :line 4} {}))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#marginalia.parser" name="marginalia.parser"><h1 class="project-name">marginalia.parser</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Provides the parsing facilities for Marginalia.</p>
+  (-main &quot;./src/marginalia/core.clj&quot; &quot;./src/marginalia/html.clj&quot;))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#marginalia.parser" name="marginalia.parser"><h1 class="project-name">marginalia.parser</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Provides the parsing facilities for Marginalia.</p>
 
 <p>This file contains the complete Marginalia parser.
 It leverages the Clojure reader instead of implementing a complete
 Clojure parsing solution.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns marginalia.parser
-  (:refer-clojure :exclude [replace])
   (:require
-   [cljs.tagged-literals :refer [*cljs-data-readers*]]
-   [clojure.string :refer [join replace lower-case]]
-   [clojure.tools.namespace :refer [read-file-ns-decl]]))</pre></td></tr><tr><td class="docs"><p>Access to private or protected field.  field-name is a symbol or
+   [cljs.tagged-literals :as cljs]
+   [clojure.string :as str]
+   [clojure.tools.namespace :as tools.ns])
+  (:import
+   [clojure.lang LineNumberingPushbackReader LispReader]
+   [java.io File Reader Writer]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Access to private or protected field.  field-name is a symbol or
 keyword.</p>
 
 <p>Extracted from clojure.contrib.reflect</p>
 </td><td class="codes"><pre class="brush: clojure">(defn get-field
-  [klass field-name obj]
-  (-&gt; klass (.getDeclaredField (name field-name))
+  [^Class klass field-name obj]
+  (-&gt;  klass
+      (.getDeclaredField (name field-name))
       (doto (.setAccessible true))
       (.get obj)))</pre></td></tr><tr><td class="docs"><p>Calls a private or protected method.</p>
 
@@ -3936,21 +3921,28 @@ keyword.</p>
 
 <p>Extracted from clojure.contrib.reflect</p>
 </td><td class="codes"><pre class="brush: clojure">(defn call-method
-  [klass method-name params obj &amp; args]
-  (-&gt; klass (.getDeclaredMethod (name method-name)
-                                (into-array Class params))
+  [^Class klass method-name params obj &amp; args]
+  (-&gt; klass
+      (.getDeclaredMethod (name method-name)
+                          (into-array Class params))
       (doto (.setAccessible true))
       (.invoke obj (into-array Object args))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defrecord Comment [content])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod print-method Comment [comment ^String out]
-  (.write out (str \&quot; (.content comment) \&quot;)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def top-level-comments (atom []))
-(def sub-level-comments (atom []))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^{:dynamic true} *comments* nil)
-(def ^{:dynamic true} *comments-enabled* nil)
-(def ^{:dynamic true} *lift-inline-comments* nil)
-(def ^{:dynamic true} *delete-lifted-comments* nil)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn comments-enabled?
+</td><td class="codes"><pre class="brush: clojure">(defmethod print-method Comment [^Comment the-comment ^Writer out]
+  (.write out (str \&quot; (.content the-comment) \&quot;)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private top-level-comments (atom []))
+(def ^:private sub-level-comments (atom []))</pre></td></tr><tr><td class="docs"><p>TODO: document</p>
+
+<p>TODO: document</p>
+
+<p>TODO: document</p>
+
+<p>TODO: document</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *comments*  nil)
+(def ^:dynamic *comments-enabled*  nil)
+(def ^:dynamic *lift-inline-comments*  nil)
+(def ^:dynamic *delete-lifted-comments* nil)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- comments-enabled?
   []
   @*comments-enabled*)</pre></td></tr><tr><td class="docs"><p>Marginalia can be given directives in comments.  A directive is a comment
  line containing a directive name, in the form <code>;; @DirectiveName</code>.
@@ -3976,8 +3968,8 @@ keyword.</p>
     (when directive
       (directive))
     (not directive)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn read-comment
-  ([reader semicolon]
+</td><td class="codes"><pre class="brush: clojure">(defn- read-comment
+  ([^LineNumberingPushbackReader reader semicolon]
    (let [sb (StringBuilder.)]
      (.append sb semicolon)
      (loop [c (.read reader)]
@@ -3996,14 +3988,14 @@ keyword.</p>
            (do
              (.append sb (Character/toString ch))
              (recur (.read reader))))))))
-  ([reader semicolon opts pending]
+  ([^Reader reader semicolon _opts _pending] ;; TODO: who uses this?
    (read-comment reader semicolon)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn set-comment-reader [reader]
-  (aset (get-field clojure.lang.LispReader :macros nil)
+</td><td class="codes"><pre class="brush: clojure">(defn- set-comment-reader [^Reader reader]
+  (aset ^&quot;[Lclojure.lang.IFn;&quot; (get-field LispReader :macros nil)
         (int \;)
         reader))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defrecord DoubleColonKeyword [content])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod print-method DoubleColonKeyword [dck ^java.io.Writer out]
+</td><td class="codes"><pre class="brush: clojure">(defmethod print-method DoubleColonKeyword [^DoubleColonKeyword dck ^java.io.Writer out]
   (.write out (str \: (.content dck))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod print-dup DoubleColonKeyword [dck ^java.io.Writer out]
   (print-method dck out))</pre></td></tr><tr><td class="docs">
@@ -4018,15 +4010,15 @@ existence of the <em>reader-resolver</em> var to detect running under 1.9.</p>
 else we will crash and fail people's builds.</p>
 </td><td class="codes"><pre class="brush: clojure">(if-let [resolver-var (resolve '*reader-resolver*)]
   (defn ^:private match-symbol [s]
-    (call-method clojure.lang.LispReader :matchSymbol
+    (call-method LispReader :matchSymbol
                  [String, (Class/forName &quot;clojure.lang.LispReader$Resolver&quot;)]
                  nil s (deref resolver-var)))
   (defn ^:private match-symbol [s]
-    (call-method clojure.lang.LispReader :matchSymbol
+    (call-method LispReader :matchSymbol
                  [String]
                  nil s)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn read-keyword
-  ([reader colon]
+</td><td class="codes"><pre class="brush: clojure">(defn- read-keyword
+  ([^LineNumberingPushbackReader reader colon]
    (let [c (.read reader)]
      (if (= (int \:) c)
        (-&gt; (read-token reader (char c))
@@ -4035,24 +4027,27 @@ else we will crash and fail people's builds.</p>
        (do (.unread reader c)
            (-&gt; (read-token reader colon)
                match-symbol)))))
-  ([reader colon opts pending]
+  ([^LineNumberingPushbackReader reader colon _opts _pending] ;; TODO: who uses this?
    (read-keyword reader colon)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn set-keyword-reader [reader]
-  (aset (get-field clojure.lang.LispReader :macros nil)
+</td><td class="codes"><pre class="brush: clojure">(defn- set-keyword-reader [reader]
+  (aset ^&quot;[Lclojure.lang.IFn;&quot; (get-field LispReader :macros nil)
         (int \:)
         reader))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn skip-spaces-and-comments [rdr]
+</td><td class="codes"><pre class="brush: clojure">(defn- skip-spaces-and-comments [^LineNumberingPushbackReader rdr]
   (loop [c (.read rdr)]
-    (cond (= c -1) nil
-          (= (char c) \;)
-          (do (read-comment rdr \;)
-              (recur (.read rdr)))
-          (#{\space \tab \return \newline \,} (char c))
-          (recur (.read rdr))
-          :else (.unread rdr c))))</pre></td></tr><tr><td class="docs">
+    (cond
+      (= c -1)
+      nil
+      (= (char c) \;)
+      (do (read-comment rdr \;)
+          (recur (.read rdr)))
+      (#{\space \tab \return \newline \,} (char c))
+      (recur (.read rdr))
+      :else
+      (.unread rdr c))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(declare adjacent?)
 (declare merge-comments)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn parse* [reader]
+</td><td class="codes"><pre class="brush: clojure">(defn- parse* [^LineNumberingPushbackReader reader]
   (take-while
    #(not= :_eof (:form %))
    (flatten
@@ -4060,122 +4055,128 @@ else we will crash and fail people's builds.</p>
      (fn []
        (binding [*comments* top-level-comments]
          (skip-spaces-and-comments reader))
-       (let [start (.getLineNumber reader)
-             form (binding [*comments* sub-level-comments]
-                    (try (. clojure.lang.LispReader
-                            (read reader {:read-cond :allow
-                                          :eof       :_eof}))
-                         (catch Exception ex
-                           (let [msg (str &quot;Problem parsing near line &quot; start
-                                          &quot; &lt;&quot; (.readLine reader) &quot;&gt;&quot;
-                                          &quot; original reported cause is &quot;
-                                          (.getCause ex) &quot; -- &quot;
-                                          (.getMessage ex))
-                                 e (RuntimeException. msg)]
-                             (.setStackTrace e (.getStackTrace ex))
-                             (throw e)))))
-             end (.getLineNumber reader)
-             code {:form form :start start :end end}
+       (let [start                 (.getLineNumber reader)
+             form                  (binding [*comments* sub-level-comments]
+                                     (try (. LispReader
+                                             (read reader {:read-cond :allow
+                                                           :eof       :_eof}))
+                                          (catch Exception ex
+                                            (let [msg (str &quot;Problem parsing near line &quot; start
+                                                           &quot; &lt;&quot; (.readLine reader) &quot;&gt;&quot;
+                                                           &quot; original reported cause is &quot;
+                                                           (.getCause ex) &quot; -- &quot;
+                                                           (.getMessage ex))
+                                                  e (RuntimeException. msg)]
+                                              (.setStackTrace e (.getStackTrace ex))
+                                              (throw e)))))
+             end                   (.getLineNumber reader)
+             code                  {:form form :start start :end end}
              ;; We optionally lift inline comments to the top of the form.
              ;; This monstrosity ensures that each consecutive group of inline
              ;; comments is treated as a mergable block, but with a fake
              ;; blank comment between non-adjacent inline comments. When merged
              ;; and converted to markdown, this will produce a paragraph for
              ;; each separate block of inline comments.
-             paragraph-comment {:form (Comment. &quot;;;&quot;)
-                                :text [&quot;;;&quot;]}
+             paragraph-comment     {:form (Comment. &quot;;;&quot;)
+                                    :text [&quot;;;&quot;]}
              merge-inline-comments (fn [cs c]
                                      (if (re-find #&quot;^;(\s|$)&quot;
-                                                  (.content (:form c)))
+                                                  (.content ^Comment (:form c)))
                                        cs
                                        (if-let [t (peek cs)]
                                          (if (adjacent? t c)
                                            (conj cs c)
                                            (conj cs paragraph-comment c))
                                          (conj cs c))))
-             inline-comments (when (and *lift-inline-comments*
-                                        (seq @sub-level-comments))
-                               (cond-&gt;&gt; (reduce merge-inline-comments
-                                                []
-                                                @sub-level-comments)
-                                 (seq @top-level-comments)
-                                 (into [paragraph-comment])
-                                 true
-                                 (mapv #(assoc % :start start :end (dec start)))))
-             comments (concat @top-level-comments inline-comments)]
+             inline-comments       (when (and *lift-inline-comments*
+                                              (seq @sub-level-comments))
+                                     (cond-&gt;&gt; (reduce merge-inline-comments
+                                                      []
+                                                      @sub-level-comments)
+                                       (seq @top-level-comments)
+                                       (into [paragraph-comment])
+                                       true
+                                       (mapv #(assoc % :start start :end (dec start)))))
+             comments              (concat @top-level-comments inline-comments)]
          (swap! top-level-comments (constantly []))
          (swap! sub-level-comments (constantly []))
          (if (empty? comments)
            [code]
            (vec (concat comments [code])))))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn strip-docstring [docstring raw]
+</td><td class="codes"><pre class="brush: clojure">(defn- strip-docstring [docstring raw]
   (-&gt; raw
-      (replace (str \&quot; (-&gt; docstring
-                           str
-                           (replace &quot;\ &quot;\\\))
-                    \&quot;))
-      (replace #&quot;#?\^\{\s*:doc\s*\}&quot; )
-      (replace #&quot;\n\s*\n&quot; &quot;\n&quot;)
-      (replace #&quot;\n\s*\)&quot; &quot;)&quot;)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn get-var-docstring [nspace-sym sym]
+      (str/replace (str \&quot; (-&gt; docstring
+                               str
+                               (str/replace &quot;\ &quot;\\\))
+                        \&quot;))
+      (str/replace #&quot;#?\^\{\s*:doc\s*\}&quot; )
+      (str/replace #&quot;\n\s*\n&quot; &quot;\n&quot;)
+      (str/replace #&quot;\n\s*\)&quot; &quot;)&quot;)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- get-var-docstring [nspace-sym sym]
   (let [s (if nspace-sym
             (symbol (str nspace-sym) (str sym))
             (symbol (str sym)))]
     (try
       (-&gt; `(var ~s) eval meta :doc)
       ;; HACK: to handle types
-      (catch Exception _))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmulti dispatch-form (fn [form _ _]
-                          (if (seq? form) (first form) form)))</pre></td></tr><tr><td class="docs">
+      (catch Exception _))))</pre></td></tr><tr><td class="docs"><p>TODO: document</p>
+</td><td class="codes"><pre class="brush: clojure">(defmulti dispatch-form 
+  (fn [form _ _]
+    (if (seq? form)
+      (first form)
+      form)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- extract-common-docstring
   [form raw nspace-sym]
   (let [sym (second form)]
     (if (symbol? sym)
-      (let [maybe-metadocstring (:doc (meta sym))]
-        (let [nspace (find-ns sym)
-              [maybe-ds remainder] (let [[_ _ ? &amp; more?] form] [? more?])
-              docstring (if (and (string? maybe-ds) remainder)
-                          maybe-ds
-                          (if (= (first form) 'ns)
-                            (if (not maybe-metadocstring)
-                              (when (string? maybe-ds) maybe-ds)
-                              maybe-metadocstring)
-                            (if-let [ds maybe-metadocstring]
-                              ds
-                              (when nspace
-                                (-&gt; nspace meta :doc)
-                                (get-var-docstring nspace-sym sym)))))]
-          [(when docstring
-             ;; Exclude flush left docstrings from adjustment:
-             (if (re-find #&quot;\n[^\s]&quot; docstring)
-               docstring
-               (replace docstring #&quot;\n  &quot; &quot;\n&quot;)))
-           (strip-docstring docstring raw)
-           (if (or (= 'ns (first form)) nspace) sym nspace-sym)]))
+      (let [maybe-metadocstring  (:doc (meta sym))
+            nspace               (find-ns sym)
+            [maybe-ds remainder] (let [[_ _ ? &amp; more?] form] [? more?])
+            docstring            (if (and (string? maybe-ds) remainder)
+                                   maybe-ds
+                                   (if (= (first form) 'ns)
+                                     (if (not maybe-metadocstring)
+                                       (when (string? maybe-ds) maybe-ds)
+                                       maybe-metadocstring)
+                                     (if-let [ds maybe-metadocstring]
+                                       ds
+                                       (when nspace
+                                         (-&gt; nspace meta :doc)
+                                         (get-var-docstring nspace-sym sym)))))]
+        [#_form
+         (when docstring
+           ;; Exclude flush left docstrings from adjustment:
+           (if (re-find #&quot;\n[^\s]&quot; docstring)
+             docstring
+             (str/replace docstring #&quot;\n  &quot; &quot;\n&quot;)))
+         #_raw
+         (strip-docstring docstring raw)
+         #_nspace-sym
+         (if (or (= 'ns (first form)) nspace) sym nspace-sym)])
       [nil raw nspace-sym])))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- extract-impl-docstring
   [fn-body]
   (filter string? (rest fn-body)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- extract-internal-docstrings
   [body]
-  (mapcat #(extract-impl-docstring %)
+  (mapcat extract-impl-docstring
           body))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod dispatch-form 'defprotocol
   [form raw nspace-sym]
-  (let [[ds r s] (extract-common-docstring form raw nspace-sym)
+  (let [[ds r s]      (extract-common-docstring form raw nspace-sym)
         ;; Clojure 1.10 added `:extend-via-metadata` to the `defprotocol` macro.
         ;; If the flag is present, `extract-internal-docstrings` needs to start
         ;; 2 forms later, to account for the presence of a keyword,
         ;; `:extend-via-metadata` and a boolean `true` in the macro body.
-        evm      (contains? (set form) :extend-via-metadata)]
-    (let [internal-dses (cond
-                          (and evm ds) (extract-internal-docstrings (nthnext form 5))
-                          evm          (extract-internal-docstrings (nthnext form 4))
-                          ds           (extract-internal-docstrings (nthnext form 3))
-                          :else        (extract-internal-docstrings (nthnext form 2)))]
-      (with-meta
-        [ds r s]
-        {:internal-docstrings internal-dses}))))</pre></td></tr><tr><td class="docs">
+        evm           (contains? (set form) :extend-via-metadata)
+        internal-dses (cond
+                        (and evm ds) (extract-internal-docstrings (nthnext form 5))
+                        evm          (extract-internal-docstrings (nthnext form 4))
+                        ds           (extract-internal-docstrings (nthnext form 3))
+                        :else        (extract-internal-docstrings (nthnext form 2)))]
+    (with-meta
+      [ds r s]
+      {:internal-docstrings internal-dses})))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod dispatch-form 'ns
   [form raw nspace-sym]
   (extract-common-docstring form raw nspace-sym))</pre></td></tr><tr><td class="docs">
@@ -4192,9 +4193,9 @@ else we will crash and fail people's builds.</p>
   [form raw nspace-sym]
   (extract-common-docstring form raw nspace-sym))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod dispatch-form 'defmethod
-  [form raw nspace-sym]
+  [_form raw nspace-sym]
   [nil raw nspace-sym])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn dispatch-inner-form
+</td><td class="codes"><pre class="brush: clojure">(defn- dispatch-inner-form
   [form raw nspace-sym]
   (conj
    (reduce (fn [[adoc araw] inner-form]
@@ -4208,7 +4209,7 @@ else we will crash and fail people's builds.</p>
            form)
    nspace-sym))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- dispatch-literal
-  [form raw nspace-sym]
+  [_form raw _nspace-sym]
   [nil raw])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- literal-form? [form]
   (or (string? form) (number? form) (keyword? form) (symbol? form)
@@ -4223,27 +4224,27 @@ else we will crash and fail people's builds.</p>
           (extract-common-docstring form raw nspace-sym)
         :else
           (dispatch-inner-form form raw nspace-sym)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn extract-docstring [{:keys [start end form]} raw-lines nspace-sym]
-  (let [new-lines (join &quot;\n&quot; (subvec raw-lines (dec start) (min end (count raw-lines))))]
+</td><td class="codes"><pre class="brush: clojure">(defn- extract-docstring [{:keys [start end form]} raw-lines nspace-sym]
+  (let [new-lines (str/join &quot;\n&quot; (subvec raw-lines (dec start) (min end (count raw-lines))))]
     (dispatch-form form new-lines nspace-sym)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- -&gt;str [m]
-  (-&gt; (-&gt; m :form .content)
-      (replace #&quot;^;+\s(\s*)&quot; &quot;$1&quot;)
-      (replace #&quot;^;+&quot; )))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn merge-comments [f s]
+</td><td class="codes"><pre class="brush: clojure">(defn- -&gt;str [{:keys [form]}]
+  (-&gt; (.content ^Comment form)
+      (str/replace #&quot;^;+\s(\s*)&quot; &quot;$1&quot;)
+      (str/replace #&quot;^;+&quot; )))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- merge-comments [f s]
   {:form (Comment. (str (-&gt;str f) &quot;\n&quot; (-&gt;str s)))
    :text (into (:text f) (:text s))
    :start (:start f)
    :end (:end s)})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn comment? [{:keys [form]}]
+</td><td class="codes"><pre class="brush: clojure">(defn- comment? [{:keys [form]}]
   (instance? Comment form))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn code? [{:keys [form] :as o}]
+</td><td class="codes"><pre class="brush: clojure">(defn- code? [{:keys [form] :as o}]
   (and (not (nil? form))
        (not (comment? o))))</pre></td></tr><tr><td class="docs"><p>Two parsed objects are adjacent if the end of the first is followed by the start of the second.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn adjacent?
   [{:keys [end] :as _first} {:keys [start] :as _second}]
   (= end (dec start)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn arrange-in-sections [parsed-code raw-code]
+</td><td class="codes"><pre class="brush: clojure">(defn- arrange-in-sections [parsed-code raw-code]
   (loop [sections []
          f        (first parsed-code)
          s        (second parsed-code)
@@ -4252,7 +4253,7 @@ else we will crash and fail people's builds.</p>
     (if f
       (cond
         ;; ignore comments with only one semicolon
-        (and (comment? f) (re-find #&quot;^;(\s|$)&quot; (-&gt; f :form .content)))
+        (and (comment? f) (re-find #&quot;^;(\s|$)&quot; (.content ^Comment (:form f))))
         (recur sections s (first nn) (next nn) nspace)
         ;; merging comments block
         (and (comment? f) (comment? s) (adjacent? f s))
@@ -4277,13 +4278,13 @@ else we will crash and fail people's builds.</p>
                                         ;; this is far from perfect but should work
                                         ;; for most cases: erase matching comments
                                         ;; and then remove lines that are blank
-                                        (-&gt; (reduce (fn [raw comment]
-                                                      (replace raw
-                                                               (str comment &quot;\n&quot;)
-                                                               &quot;\n&quot;))
+                                        (-&gt; (reduce (fn [raw the-comment]
+                                                      (str/replace raw
+                                                                   (str the-comment &quot;\n&quot;)
+                                                                   &quot;\n&quot;))
                                                     code
                                                     (:text f))
-                                            (replace #&quot;\n\s+\n&quot; &quot;\n&quot;))
+                                            (str/replace #&quot;\n\s+\n&quot; &quot;\n&quot;))
                                         code)
                                  :docstring (str doc &quot;\n\n&quot; (-&gt;str f)))
                  (first nn) (next nn) nspace))
@@ -4302,13 +4303,14 @@ else we will crash and fail people's builds.</p>
                                    :raw code
                                    :docstring doc}))
                  s (first nn) (next nn) nspace)))
-      sections)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn parse [source-string]
+      sections)))</pre></td></tr><tr><td class="docs"><p>Return a parse tree for the given code (provided as a string)</p>
+</td><td class="codes"><pre class="brush: clojure">(defn parse
+  [source-string]
   (let [make-reader #(java.io.BufferedReader.
                       (java.io.StringReader. (str source-string &quot;\n&quot;)))
         lines       (vec (line-seq (make-reader)))
         reader      (clojure.lang.LineNumberingPushbackReader. (make-reader))
-        old-cmt-rdr (aget (get-field clojure.lang.LispReader :macros nil) (int \;))]
+        old-cmt-rdr (aget ^&quot;[Lclojure.lang.IFn;&quot; (get-field LispReader :macros nil) (int \;))]
     (try
       (set-comment-reader read-comment)
       (set-keyword-reader read-keyword)
@@ -4320,31 +4322,33 @@ else we will crash and fail people's builds.</p>
         (set-comment-reader old-cmt-rdr)
         (set-keyword-reader nil)
         (throw e)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn cljs-file? [filepath]
-  (.endsWith (lower-case filepath) &quot;cljs&quot;))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn cljx-file? [filepath]
-  (.endsWith (lower-case filepath) &quot;cljx&quot;))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def cljx-data-readers {'+clj identity
+</td><td class="codes"><pre class="brush: clojure">(defn- cljs-file? [filepath]
+  (str/ends-with? (str/lower-case filepath) &quot;cljs&quot;))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- cljx-file? [filepath]
+  (str/ends-with? (str/lower-case filepath) &quot;cljx&quot;))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private cljx-data-readers {'+clj identity
                         '+cljs identity})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmacro with-readers-for [file &amp; body]
+</td><td class="codes"><pre class="brush: clojure">(defmacro ^:private with-readers-for [file &amp; body]
   `(let [readers# (merge {}
-                        (when (cljs-file? ~file) *cljs-data-readers*)
+                        (when (cljs-file? ~file) cljs/*cljs-data-readers*)
                         (when (cljx-file? ~file) cljx-data-readers)
                         default-data-readers)]
      (binding [*data-readers* readers#]
-       ~@body)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn parse-file [fn]
-  (with-readers-for fn
+       ~@body)))</pre></td></tr><tr><td class="docs"><p>Return a parse tree for the given <code>filename</code></p>
+</td><td class="codes"><pre class="brush: clojure">(defn parse-file
+  [filename]
+  (with-readers-for filename
     (binding [*comments-enabled* (atom true)]
-      (parse (slurp fn)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn parse-ns [file]
+      (parse (slurp filename)))))</pre></td></tr><tr><td class="docs"><p>Return a parse tree for all the files in the namespace</p>
+</td><td class="codes"><pre class="brush: clojure">(defn parse-ns
+  [^File file]
   (let [filename (.getName file)]
     (with-readers-for filename
-                      (or (not-empty (-&gt; file
-                                         (read-file-ns-decl)
-                                         (second)
-                                         (str)))
-                          filename))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#problem-cases.general" name="problem-cases.general"><h1 class="project-name">problem-cases.general</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>A place to examine poor parser behavior.  These should go in tests when they get written.</p>
+      (or (not-empty (-&gt; file
+                         (tools.ns/read-file-ns-decl)
+                         (second)
+                         (str)))
+          filename))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#problem-cases.general" name="problem-cases.general"><h1 class="project-name">problem-cases.general</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>A place to examine poor parser behavior.  These should go in tests when they get written.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns problem-cases.general)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">[::foo]</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">{:foo 43}
@@ -4474,10 +4478,10 @@ See <a href="https://github.com/clj-commons/marginalia/issues/4">https://github.
 </td><td class="codes"><pre class="brush: clojure">(ns marginalia.core-test
   (:require
    [clojure.test :refer :all]
-   [marginalia.core :as core]))</pre></td></tr><tr><td class="docs">
+   [marginalia.core :as marginalia]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest parse-project-file-simple
   (is (= &quot;project-name&quot;
-         (:name (marginalia.core/parse-project-file &quot;test/marginalia/resources/multi-def-project.clj.txt&quot;)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#marginalia.multidoc-test" name="marginalia.multidoc-test"><h1 class="project-name">marginalia.multidoc-test</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+         (:name (marginalia/parse-project-file &quot;test/marginalia/resources/multi-def-project.clj.txt&quot;)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#marginalia.multidoc-test" name="marginalia.multidoc-test"><h1 class="project-name">marginalia.multidoc-test</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns marginalia.multidoc-test
   (:require
    [clojure.test :refer :all]
@@ -4509,8 +4513,8 @@ See <a href="https://github.com/clj-commons/marginalia/issues/4">https://github.
   [x]
   (* x x))&quot;)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest test-parse-fn-docstring
-  (let [{:keys [type docstring]} (first (marginalia.parser/parse simple-fn))]
-    (is (= :code type))
+  (let [{docstring :docstring the-type :type} (first (marginalia.parser/parse simple-fn))]
+    (is (= :code the-type))
     (is (= &quot;the docstring&quot; docstring))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def reader-conditional-fn
   &quot;(defn error
@@ -4519,8 +4523,8 @@ See <a href="https://github.com/clj-commons/marginalia/issues/4">https://github.
   #?(:clj  (Exception. msg)
      :cljs (js/Error. msg)))&quot;)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest test-reader-conditional
-  (let [{:keys [type docstring]} (first (marginalia.parser/parse reader-conditional-fn))]
-    (is (= :code type))
+  (let [{docstring :docstring the-type :type} (first (marginalia.parser/parse reader-conditional-fn))]
+    (is (= :code the-type))
     (is (= &quot;Returns a language-appropriate error&quot; docstring))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest inline-comments
   (testing &quot;inline comments ignored by default&quot;
@@ -4795,25 +4799,28 @@ See <a href="https://github.com/clj-commons/marginalia/issues/4">https://github.
         (is (= &quot;docstring\n\nA\n\n\nB\nC\n\nD&quot; (:docstring (second result))))))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#marginalia.test.helpers" name="marginalia.test.helpers"><h1 class="project-name">marginalia.test.helpers</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns marginalia.test.helpers
   (:require
-   [clojure.java.io :refer [file delete-file]]
+   [clojure.java.io :as io]
    [clojure.test :refer :all]
-   [marginalia.core :as core]
-   [marginalia.html :as html]))</pre></td></tr><tr><td class="docs"><p>Delete file f. If it's a directory, recursively delete all its contents. Raise an exception if any deletion fails unless silently is true.</p>
+   [marginalia.core :as marginalia]
+   [marginalia.html :as html]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Delete file f. If it's a directory, recursively delete all its contents. Raise an exception if any deletion fails unless silently is true.</p>
 
 <p>copied from http://clojuredocs.org/clojure_contrib/clojure.contrib.io/delete-file-recursively
 N.B. that Raynes's filesystem library could possibly replace this,
 but that's a separate task.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn delete-file-recursively
   [f &amp; [silently]]
-  (let [f (file f)]
+  (let [f (io/file f)]
     (when (.isDirectory f)
       (doseq [child (.listFiles f)]
         (delete-file-recursively child silently)))
-    (delete-file f silently)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn find-clojure-file-paths [source-dir]
-  (core/find-processable-file-paths source-dir #(re-find #&quot;clj$&quot; %)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn files-in [dir]
-  (seq (.listFiles (file dir))))</pre></td></tr><tr><td class="docs"><p>Runs assertions in the context of a project set up for testing in the <code>test_projects</code> directory.
+    (io/delete-file f silently)))</pre></td></tr><tr><td class="docs"><p>Returns a seq of string paths for Clojure files in the given <code>source-dir</code></p>
+</td><td class="codes"><pre class="brush: clojure">(defn find-clojure-file-paths
+  [source-dir]
+  (marginalia/find-processable-file-paths source-dir #(re-find #&quot;clj$&quot; %)))</pre></td></tr><tr><td class="docs"><p>A seq of <code>File</code>s in the <code>dir</code></p>
+</td><td class="codes"><pre class="brush: clojure">(defn files-in
+  [dir]
+  (seq (.listFiles (io/file dir))))</pre></td></tr><tr><td class="docs"><p>Runs assertions in the context of a project set up for testing in the <code>test_projects</code> directory.
  Provides the following variables to the assertion context:</p>
 
 <ul>
@@ -4828,19 +4835,17 @@ functions.</p></li>
 </ul>
 </td><td class="codes"><pre class="brush: clojure">(defmacro with-project
   [project-name doc-generator &amp; tests]
-  (let [project (file &quot;test_projects&quot; project-name)
-        test-project-src (str (file project &quot;src&quot;))
-        test-project-target (str (file project &quot;docs&quot;))
-        test-metadata {
-           :dependencies [[&quot;some/dep&quot; &quot;0.0.1&quot;]]
-           :description &quot;Test project&quot;
-           :name &quot;test&quot;
-           :dev-dependencies []
-           :version &quot;0.0.1&quot;
-         }]
+  (let [project             (io/file &quot;test_projects&quot; project-name)
+        test-project-src    (str (io/file project &quot;src&quot;))
+        test-project-target (str (io/file project &quot;docs&quot;))
+        test-metadata       {:dependencies [[&quot;some/dep&quot; &quot;0.0.1&quot;]]
+                             :description &quot;Test project&quot;
+                             :name &quot;test&quot;
+                             :dev-dependencies []
+                             :version &quot;0.0.1&quot;}]
     `(do
        (delete-file-recursively ~test-project-target true)
-       (.mkdirs (file ~test-project-target))
+       (.mkdirs (io/file ~test-project-target))
        (binding [html/*resources* &quot;&quot;]
          (~doc-generator ~test-project-src ~test-project-target ~test-metadata))
        (let [~'number-of-generated-pages (count (files-in ~test-project-target))]
