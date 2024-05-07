@@ -2943,19 +2943,28 @@ only be done when the associated dashboard is being moved to a new collection.</
   false)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(t2/define-before-update :model/Pulse
   [notification]
-  (let [{:keys [collection_id dashboard_id]} (t2/original notification)]
+  (let [{:keys [collection_id dashboard_id]} (t2/original notification)
+        changes                              (t2/changes notification)]
     (when (and dashboard_id
                (contains? notification :collection_id)
                (not= (:collection_id notification) collection_id)
                (not *allow-moving-dashboard-subscriptions*))
       (throw (ex-info (tru &quot;collection ID of a dashboard subscription cannot be directly modified&quot;) notification)))
+    (when (contains? changes :archived)
+      (if (:archived changes)
+        (t2/update! :model/PulseChannel :pulse_id (u/the-id notification) {:enabled false})
+        (t2/update! :model/PulseChannel :pulse_id (u/the-id notification) {:enabled true})))
     (when (and dashboard_id
                (contains? notification :dashboard_id)
                (not= (:dashboard_id notification) dashboard_id))
       (throw (ex-info (tru &quot;dashboard ID of a dashboard subscription cannot be modified&quot;) notification))))
   (u/prog1 (t2/changes notification)
     (assert-valid-parameters notification)
-    (collection/check-collection-namespace Pulse (:collection_id notification))))</pre></td></tr><tr><td class="docs"><p>Return the Card associated with an Alert, fetching it if needed, for permissions-checking purposes.</p>
+    (collection/check-collection-namespace Pulse (:collection_id notification))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(t2/define-before-delete :model/Pulse
+  [pulse]
+  ;; to trigger deleting the scheduled jobs
+  (t2/delete! :model/PulseChannel :pulse_id (u/the-id pulse)))</pre></td></tr><tr><td class="docs"><p>Return the Card associated with an Alert, fetching it if needed, for permissions-checking purposes.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- alert-&gt;card
   [alert]
   (or

@@ -2873,13 +2873,11 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.config :as config]
    [metabase.db.query :as mdb.query]
    [metabase.models.interface :as mi]
-   [metabase.models.pulse-channel-recipient :refer [PulseChannelRecipient]]
    [metabase.models.serialization :as serdes]
-   [metabase.models.user :as user :refer [User]]
+   [metabase.models.user :as user]
    [metabase.plugins.classloader :as classloader]
    [metabase.util :as u]
    [metabase.util.i18n :refer [tru]]
-   [metabase.util.malli :as mu]
    [methodical.core :as methodical]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs"><h2>Static Definitions</h2>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Simple <code>vector</code> of the days in the week used for reference and lookups.</p>
@@ -2986,18 +2984,25 @@ We'll keep this till we replace all these symbols in our codebase.</p>
         (assoc pc :recipients (concat
                                (for [email (get-in pc [:details :emails] [])]
                                  {:email email})
-                               (get pcid-&gt;recipients (:id pc))))))))</pre></td></tr><tr><td class="docs"><p>Should we automatically archive a Pulse when its last <code>PulseChannel</code> is deleted? Normally we do, but this is disabled
+                               (get pcid-&gt;recipients (:id pc))))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- update-send-pulse-trigger-if-needed!
+  [&amp; args]
+  (classloader/require 'metabase.task.send-pulses)
+  (apply (resolve 'metabase.task.send-pulses/update-send-pulse-trigger-if-needed!) args))</pre></td></tr><tr><td class="docs"><p>Should we automatically archive a Pulse when its last <code>PulseChannel</code> is deleted? Normally we do, but this is disabled
 in [[update-notification-channels!]] which creates/deletes/updates several channels sequentially.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *archive-parent-pulse-when-last-channel-is-deleted*
   true)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(t2/define-before-delete :model/PulseChannel
-  [{pulse-id :pulse_id, pulse-channel-id :id}]
+  [{pulse-id :pulse_id, pulse-channel-id :id :as pulse-channel}]
   ;; This function is called by [[metabase.models.pulse-channel/pre-delete]] when the `PulseChannel` is about to be
   ;; deleted. Archives `Pulse` if the channel being deleted is its last channel.&quot;
   (when *archive-parent-pulse-when-last-channel-is-deleted*
     (let [other-channels-count (t2/count PulseChannel :pulse_id pulse-id, :id [:not= pulse-channel-id])]
       (when (zero? other-channels-count)
-        (t2/update! :model/Pulse pulse-id {:archived true})))))</pre></td></tr><tr><td class="docs"><p>we want to load this at the top level so the Setting the namespace defines gets loaded</p>
+        (t2/update! :model/Pulse pulse-id {:archived true}))))
+  ;; it's best if this is done in after-delete, but toucan2 doesn't support that yet See toucan2#70S
+  ;; remove this pulse from its existing trigger
+  (update-send-pulse-trigger-if-needed! pulse-id pulse-channel :remove-pc-ids #{(:id pulse-channel)}))</pre></td></tr><tr><td class="docs"><p>we want to load this at the top level so the Setting the namespace defines gets loaded</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([email-addresses])} validate-email-domains*
   (or (when config/ee-available?
         (classloader/require 'metabase-enterprise.advanced-config.models.pulse-channel)
@@ -3026,7 +3031,7 @@ will no-op if <code>subscription-allowed-domains</code> is unset or if we do not
       ;; be sneaky and pass in a valid User ID but different email so they can send test Pulses out to arbitrary email
       ;; addresses
       (when-let [user-ids (not-empty (into #{} (comp (filter some?) (map :id)) user-recipients))]
-        (let [user-id-&gt;email (t2/select-pk-&gt;fn :email User, :id [:in user-ids])]
+        (let [user-id-&gt;email (t2/select-pk-&gt;fn :email :model/User, :id [:in user-ids])]
           (doseq [{:keys [id email]} user-recipients
                   :let               [correct-email (get user-id-&gt;email id)]]
             (when-not correct-email
@@ -3040,54 +3045,35 @@ will no-op if <code>subscription-allowed-domains</code> is unset or if we do not
 </td><td class="codes"><pre class="brush: clojure">(t2/define-before-insert :model/PulseChannel
   [pulse-channel]
   (validate-email-domains pulse-channel))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(t2/define-after-insert :model/PulseChannel
+  [{:keys [pulse_id id] :as pulse-channel}]
+  (u/prog1 pulse-channel
+    (when (:enabled pulse-channel)
+      (update-send-pulse-trigger-if-needed! pulse_id pulse-channel :add-pc-ids #{id}))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(t2/define-before-update :model/PulseChannel
-  [pulse-channel]
+  [{:keys [pulse_id id] :as pulse-channel}]
+  ;; IT's really best if this is done in after-update
+  (let [changes (t2/changes pulse-channel)]
+    ;; if there are changes in schedule
+    ;; better be done in after-update, but t2/changes isn't available in after-update yet See toucan2#129
+    (when (some #(contains? #{:schedule_type :schedule_hour :schedule_day :schedule_frame} %) (keys changes))
+      ;; need to remove this PC from the existing trigger
+      (update-send-pulse-trigger-if-needed! pulse_id (t2/original pulse-channel)
+                                            :remove-pc-ids #{(:id pulse-channel)})
+      ;; create a new PC with the updated schedule
+      (update-send-pulse-trigger-if-needed! pulse_id pulse-channel
+                                            :add-pc-ids #{id}))
+    (when (contains? changes :enabled)
+      (if (:enabled changes)
+        (update-send-pulse-trigger-if-needed! pulse_id pulse-channel
+                                              :add-pc-ids #{(:id pulse-channel)})
+        (update-send-pulse-trigger-if-needed! pulse_id (t2/original pulse-channel)
+                                              :remove-pc-ids #{(:id pulse-channel)}))))
   (validate-email-domains (mi/changes-with-pk pulse-channel)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/hash-fields PulseChannel
   [_pulse-channel]
   [(serdes/hydrated-hash :pulse) :channel_type :details :created_at])</pre></td></tr><tr><td class="docs"><h2>Persistence Functions</h2>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Fetch all <code>PulseChannels</code> that are scheduled to run at a given time described by <code>hour</code>, <code>weekday</code>, <code>monthday</code>, and
-<code>monthweek</code>.</p>
-
-<p>Examples:</p>
-
-<p>  (retrieve-scheduled-channels 14 "mon" :first :first)  -  2pm on the first Monday of the month
-  (retrieve-scheduled-channels 8 "wed" :other :last)    -  8am on Wednesday of the last week of the month</p>
-
-<p>Based on the given input the appropriate <code>PulseChannels</code> are returned:</p>
-
-<ul>
-<li><code>hourly</code> scheduled channels are always included.</li>
-<li><code>daily</code> scheduled channels are included if the <code>hour</code> matches.</li>
-<li><code>weekly</code> scheduled channels are included if the <code>weekday</code> &amp; <code>hour</code> match.</li>
-<li><code>monthly</code> scheduled channels are included if the <code>monthday</code>, <code>monthweek</code>, <code>weekday</code>, &amp; <code>hour</code> all match.</li>
-</ul>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn retrieve-scheduled-channels
-  [hour      :- [:maybe :int]
-   weekday   :- [:maybe [:fn {:error/message &quot;valid day of week&quot;} day-of-week?]]
-   monthday  :- [:enum :first :last :mid :other]
-   monthweek :- [:enum :first :last :other]]
-  (let [schedule-frame              (cond
-                                      (= :mid monthday)    &quot;mid&quot;
-                                      (= :first monthweek) &quot;first&quot;
-                                      (= :last monthweek)  &quot;last&quot;
-                                      :else                &quot;invalid&quot;)
-        monthly-schedule-day-or-nil (when (= :other monthday)
-                                      weekday)]
-    (t2/select [PulseChannel :id :pulse_id :schedule_type :channel_type]
-      {:where [:and [:= :enabled true]
-               [:or [:= :schedule_type &quot;hourly&quot;]
-                [:and [:= :schedule_type &quot;daily&quot;]
-                 [:= :schedule_hour hour]]
-                [:and [:= :schedule_type &quot;weekly&quot;]
-                 [:= :schedule_hour hour]
-                 [:= :schedule_day weekday]]
-                [:and [:= :schedule_type &quot;monthly&quot;]
-                 [:= :schedule_hour hour]
-                 [:= :schedule_frame schedule-frame]
-                 [:or [:= :schedule_day weekday]
-                  ;; this is here specifically to allow for cases where day doesn't have to match
-                  [:= :schedule_day monthly-schedule-day-or-nil]]]]]})))</pre></td></tr><tr><td class="docs"><p>Update the <code>PulseChannelRecipients</code> for <code>pulse-CHANNEL</code>.
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Update the <code>PulseChannelRecipients</code> for <code>pulse-CHANNEL</code>.
 <code>user-ids</code> should be a definitive collection of <em>all</em> IDs of users who should receive the pulse.</p>
 
 <ul>
@@ -3099,15 +3085,15 @@ will no-op if <code>subscription-allowed-domains</code> is unset or if we do not
   {:pre [(integer? id)
          (coll? user-ids)
          (every? integer? user-ids)]}
-  (let [recipients-old (set (t2/select-fn-set :user_id PulseChannelRecipient, :pulse_channel_id id))
+  (let [recipients-old (set (t2/select-fn-set :user_id :model/PulseChannelRecipient, :pulse_channel_id id))
         recipients-new (set user-ids)
         recipients+    (set/difference recipients-new recipients-old)
         recipients-    (set/difference recipients-old recipients-new)]
     (when (seq recipients+)
       (let [vs (map #(assoc {:pulse_channel_id id} :user_id %) recipients+)]
-        (t2/insert! PulseChannelRecipient vs)))
+        (t2/insert! :model/PulseChannelRecipient vs)))
     (when (seq recipients-)
-      (t2/delete! (t2/table-name PulseChannelRecipient)
+      (t2/delete! (t2/table-name :model/PulseChannelRecipient)
         :pulse_channel_id id
         :user_id          [:in recipients-]))))</pre></td></tr><tr><td class="docs"><p>Updates an existing <code>PulseChannel</code> along with all related data associated with the channel such as
 <code>PulseChannelRecipients</code>.</p>
@@ -3190,10 +3176,10 @@ will no-op if <code>subscription-allowed-domains</code> is unset or if we do not
       (update :pulse_id serdes/*import-fk* 'Pulse)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- import-recipients [channel-id emails]
   (let [incoming-users (set (for [email emails
-                                  :let [id (t2/select-one-pk 'User :email email)]]
+                                  :let [id (t2/select-one-pk :model/User :email email)]]
                               (or id
                                   (:id (user/serdes-synthesize-user! {:email email})))))
-        current-users  (set (t2/select-fn-set :user_id PulseChannelRecipient :pulse_channel_id channel-id))
+        current-users  (set (t2/select-fn-set :user_id :model/PulseChannelRecipient :pulse_channel_id channel-id))
         combined       (set/union incoming-users current-users)]
     (when-not (empty? combined)
       (update-recipients! channel-id combined))))</pre></td></tr><tr><td class="docs"><p>Customized load-insert! and load-update! to handle the embedded recipients field - it's really a separate table.</p>

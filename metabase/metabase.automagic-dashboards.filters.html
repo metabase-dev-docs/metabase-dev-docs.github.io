@@ -2899,7 +2899,7 @@ net.brehaut.ClojureTools = (function (SH) {
   [fields]
   (-&gt;&gt; fields
        (map #(assoc % :interestingness (interestingness %)))
-       (sort-by interestingness &gt;)
+       (sort-by :interestingness &gt;)
        (partition-by :interestingness)
        (mapcat (fn [fields]
                  (-&gt;&gt; fields
@@ -2913,14 +2913,6 @@ net.brehaut.ClojureTools = (function (SH) {
                  (or (temporal? field)
                      (isa? semantic_type :type/Category))))
        sort-by-interestingness))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- candidates-for-filtering
-  [fieldset cards]
-  (-&gt;&gt; cards
-       (mapcat magic.util/collect-field-references)
-       (map magic.util/field-reference-&gt;id)
-       distinct
-       (map fieldset)
-       interesting-fields))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- build-fk-map
   [fks field]
   (if (:id field)
@@ -2958,47 +2950,35 @@ net.brehaut.ClojureTools = (function (SH) {
     (isa? semantic_type :type/Category) &quot;category&quot;))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([dimensions])} remove-unqualified
   (partial remove (fn [{:keys [fingerprint]}]
-                    (some-&gt; fingerprint :global :distinct-count (&lt; 2)))))</pre></td></tr><tr><td class="docs"><p>Add up to <code>max-filters</code> filters to dashboard <code>dashboard</code>. Takes an optional
- argument <code>dimensions</code> which is a list of fields for which to create filters, else
- it tries to infer by which fields it would be useful to filter.</p>
+                    (some-&gt; fingerprint :global :distinct-count (&lt; 2)))))</pre></td></tr><tr><td class="docs"><p>Add up to <code>max-filters</code> filters to dashboard <code>dashboard</code>. The <code>dimensions</code> argument is a list of fields for which to
+create filters.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn add-filters
-  ([dashboard max-filters]
-   (-&gt;&gt; dashboard
-        :orderd_cards
-        (candidates-for-filtering (-&gt;&gt; dashboard
-                                       :context
-                                       :tables
-                                       (mapcat :fields)
-                                       (map (fn [field]
-                                              [((some-fn :id :name) field) field]))
-                                       (into {})))
-        (add-filters dashboard max-filters)))
-  ([dashboard dimensions max-filters]
-   (let [fks (when-let [table-ids (not-empty (set (keep (comp :table_id :card)
-                                                        (:dashcards dashboard))))]
-               (-&gt;&gt; (t2/select Field :fk_target_field_id [:not= nil]
-                               :table_id [:in table-ids])
-                    field/with-targets))]
-     (-&gt;&gt; dimensions
-          remove-unqualified
-          sort-by-interestingness
-          (take max-filters)
-          (reduce
-           (fn [dashboard candidate]
-             (let [filter-id     (-&gt; candidate ((juxt :id :name :unit)) hash str)
-                   candidate     (assoc candidate :fk-map (build-fk-map fks candidate))
-                   dashcards     (:dashcards dashboard)
-                   dashcards-new (keep #(add-filter % filter-id candidate) dashcards)]
-               ;; Only add filters that apply to all cards.
-               (if (= (count dashcards) (count dashcards-new))
-                 (-&gt; dashboard
-                     (assoc :dashcards dashcards-new)
-                     (update :parameters conj {:id   filter-id
-                                               :type (filter-type candidate)
-                                               :name (:display_name candidate)
-                                               :slug (:name candidate)}))
-                 dashboard)))
-           dashboard)))))</pre></td></tr><tr><td class="docs"><p>Returns a sequence of filter subclauses making up <code>filter-clause</code> by flattening <code>:and</code> compound filters.</p>
+  [dashboard dimensions max-filters]
+  (let [fks (when-let [table-ids (not-empty (set (keep (comp :table_id :card)
+                                                       (:dashcards dashboard))))]
+              (field/with-targets (t2/select Field
+                                             :fk_target_field_id [:not= nil]
+                                             :table_id [:in table-ids])))]
+    (-&gt;&gt; dimensions
+         remove-unqualified
+         sort-by-interestingness
+         (take max-filters)
+         (reduce
+          (fn [dashboard candidate]
+            (let [filter-id     (-&gt; candidate ((juxt :id :name :unit)) hash str)
+                  candidate     (assoc candidate :fk-map (build-fk-map fks candidate))
+                  dashcards     (:dashcards dashboard)
+                  dashcards-new (keep #(add-filter % filter-id candidate) dashcards)]
+              ;; Only add filters that apply to all cards.
+              (if (= (count dashcards) (count dashcards-new))
+                (-&gt; dashboard
+                    (assoc :dashcards dashcards-new)
+                    (update :parameters conj {:id   filter-id
+                                              :type (filter-type candidate)
+                                              :name (:display_name candidate)
+                                              :slug (:name candidate)}))
+                dashboard)))
+          dashboard))))</pre></td></tr><tr><td class="docs"><p>Returns a sequence of filter subclauses making up <code>filter-clause</code> by flattening <code>:and</code> compound filters.</p>
 
 <p>  (flatten-filter-clause [:and
                           [:= [:field 1 nil] 2]
