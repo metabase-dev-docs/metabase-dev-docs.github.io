@@ -2994,7 +2994,9 @@ added.</p>
    =?-diff
    m))</pre></td></tr><tr><td class="docs"><p>Whether to enable Methodical method tracing for debug purposes.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *debug*
-  false)</pre></td></tr><tr><td class="docs"><p>Are <code>expected</code> and <code>actual</code> 'approximately' equal to one another?</p>
+  false)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^:dynamic *same*
+  nil)</pre></td></tr><tr><td class="docs"><p>Are <code>expected</code> and <code>actual</code> 'approximately' equal to one another?</p>
 </td><td class="codes"><pre class="brush: clojure">(defn =?-diff*
   ([expected actual]
    (=?-diff* =?-diff expected actual))
@@ -3002,7 +3004,8 @@ added.</p>
    (let [diff-fn (if (map? diff-fn)
                    (add-primary-methods diff-fn)
                    diff-fn)]
-     (binding [=?-diff diff-fn]
+     (binding [=?-diff diff-fn
+               *same* (atom {})]
        (if *debug*
          (methodical/trace diff-fn expected actual)
          (diff-fn expected actual))))))</pre></td></tr><tr><td class="docs"><p>Default method impls</p>
@@ -3138,7 +3141,40 @@ would compare things. This works inside collections as well.</p>
   (let [expected (.expected this)
         epsilon  (.epsilon this)]
     (when-not (algo.generic.math/approx= expected actual epsilon)
-      (list 'not (list 'approx expected actual (symbol &quot;#_epsilon&quot;) epsilon)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#mb.hawk.core" name="mb.hawk.core"><h1 class="project-name">mb.hawk.core</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+      (list 'not (list 'approx expected actual (symbol &quot;#_epsilon&quot;) epsilon)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(deftype Same [k])</pre></td></tr><tr><td class="docs"><p>Used inside a =? expression. Checks that all occurrences of the same [[k]] value are equal.</p>
+
+<p> On the first occurrence of <code>(same k)</code>, it saves the actual value under [[k]].
+ All other occurrences of <code>(same k)</code> are expected to be equal to that saved value.</p>
+
+<p> ```
+ (is (?= [(same :id) (same :id)}] [1 1])) ; => true
+ (is (?= [(same :id) (same :id)}] [1 2])) ; => false
+ ```</p>
+</td><td class="codes"><pre class="brush: clojure">(defn same
+  [k]
+  (-&gt;Same k))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod print-dup Same
+  [^Same this ^java.io.Writer writer]
+  (.write writer (format &quot;(same %s)&quot; (pr-str (.k this)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod print-method Same
+  [this writer]
+  ((get-method print-dup Same) this writer))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod pprint/simple-dispatch Same
+  [^Same this]
+  (pprint/pprint-logical-block
+   :prefix &quot;(same &quot; :suffix &quot;)&quot;
+   (pprint/write-out (.k this))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod =?-diff [Same :default]
+  [^Same this actual]
+  (when *same*
+    (if (contains? @*same* (.k this))
+      (let [previous-value (get @*same* (.k this))]
+        (when-not (= previous-value actual)
+          (list 'not= (symbol &quot;#_&quot;) (list 'same (.k this)) previous-value actual)))
+      (do
+        (swap! *same* assoc (.k this) actual)
+        nil))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#mb.hawk.core" name="mb.hawk.core"><h1 class="project-name">mb.hawk.core</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns mb.hawk.core
   (:require
    [clojure.java.classpath :as classpath]
