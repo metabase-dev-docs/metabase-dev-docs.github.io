@@ -2865,7 +2865,7 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.events.view-log" name="metabase.events.view-log"><h1 class="project-name">metabase.events.view-log</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>This namespace is responsible for subscribing to events which should update the view log.</p>
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.events.view-log" name="metabase.events.view-log"><h1 class="project-name">metabase.events.view-log</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>This namespace is responsible for subscribing to events which should update the view log and view counts.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.events.view-log
   (:require
    [metabase.api.common :as api]
@@ -2877,7 +2877,14 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.util.log :as log]
    [methodical.core :as m]
    [steffan-westcott.clj-otel.api.trace.span :as span]
-   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs"><p>Simple base function for recording a view of a given <code>model</code> and <code>model-id</code> by a certain <code>user</code>.</p>
+   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs"><p>Increments the view_count column for a model given a list of ids.
+ Assumes the model has one primary key <code>id</code>, and the column for the view count is named <code>view_count</code></p>
+</td><td class="codes"><pre class="brush: clojure">(defn increment-view-counts!
+  [model &amp; ids]
+  (when (seq ids)
+    (t2/query {:update (t2/table-name model)
+               :set    {:view_count [:+ :view_count [:inline 1]]}
+               :where  [:in :id ids]})))</pre></td></tr><tr><td class="docs"><p>Simple base function for recording a view of a given <code>model</code> and <code>model-id</code> by a certain <code>user</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- record-views!
   [view-or-views]
   (span/with-span!
@@ -2895,18 +2902,19 @@ net.brehaut.ClojureTools = (function (SH) {
 (derive :event/card-read ::card-read-event)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(m/defmethod events/publish-event! ::card-read-event
   &quot;Handle processing for a generic read event notification&quot;
-  [topic event]
+  [topic {:keys [object user-id] :as event}]
   (span/with-span!
     {:name &quot;view-log-card-read&quot;
      :topic topic
-     :user-id (:user-id event)}
+     :user-id user-id}
     (try
+      (increment-view-counts! :model/Card (:id object))
       (-&gt; event
           generate-view
           (assoc :context &quot;question&quot;)
           record-views!)
       (catch Throwable e
-        (log/warnf e &quot;Failed to process view_log event. %s&quot; topic)))))</pre></td></tr><tr><td class="docs">
+        (log/warnf e &quot;Failed to process view event. %s&quot; topic)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(derive ::collection-read-event :metabase/event)
 (derive :event/collection-read ::collection-read-event)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(m/defmethod events/publish-event! ::collection-read-event
@@ -2917,7 +2925,7 @@ net.brehaut.ClojureTools = (function (SH) {
         generate-view
         record-views!)
     (catch Throwable e
-      (log/warnf e &quot;Failed to process view_log event. %s&quot; topic))))</pre></td></tr><tr><td class="docs">
+      (log/warnf e &quot;Failed to process view event. %s&quot; topic))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(derive ::read-permission-failure :metabase/event)
 (derive :event/read-permission-failure ::read-permission-failure)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(m/defmethod events/publish-event! ::read-permission-failure
@@ -2931,7 +2939,7 @@ net.brehaut.ClojureTools = (function (SH) {
          generate-view
          record-views!))
     (catch Throwable e
-      (log/warnf e &quot;Failed to process view_log event. %s&quot; topic))))</pre></td></tr><tr><td class="docs">
+      (log/warnf e &quot;Failed to process view event. %s&quot; topic))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(derive ::dashboard-read :metabase/event)
 (derive :event/dashboard-read ::dashboard-read)</pre></td></tr><tr><td class="docs"><p>Returns true if the dashcard's card was readable by the current user, and false otherwise. Unreadable cards are
 replaced with maps containing just the card's ID, so we can check for this to determine whether the card was readable</p>
@@ -2951,16 +2959,18 @@ replaced with maps containing just the card's ID, so we can check for this to de
       (let [dashcards (filter :card_id (:dashcards object)) ;; filter out link/text cards wtih no card_id
             user-id   (or user-id api/*current-user-id*)
             views     (map (fn [dashcard]
-                               {:model      &quot;card&quot;
-                                :model_id   (u/id (:card_id dashcard))
-                                :user_id    user-id
-                                :has_access (readable-dashcard? dashcard)
-                                :context    &quot;dashboard&quot;})
+                             {:model      &quot;card&quot;
+                              :model_id   (u/id (:card_id dashcard))
+                              :user_id    user-id
+                              :has_access (readable-dashcard? dashcard)
+                              :context    &quot;dashboard&quot;})
                            dashcards)
             dash-view (generate-view event)]
+        (apply increment-view-counts! :model/Card (map :card_id dashcards))
+        (increment-view-counts! :model/Dashboard (:id object))
         (record-views! (cons dash-view views)))
       (catch Throwable e
-        (log/warnf e &quot;Failed to process view_log event. %s&quot; topic)))))</pre></td></tr><tr><td class="docs">
+        (log/warnf e &quot;Failed to process view event. %s&quot; topic)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(derive ::table-read :metabase/event)
 (derive :event/table-read ::table-read)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(m/defmethod events/publish-event! ::table-read
@@ -2972,6 +2982,7 @@ replaced with maps containing just the card's ID, so we can check for this to de
      :topic topic
      :user-id user-id}
     (try
+      (increment-view-counts! :model/Table (:id object))
       (let [table-id    (u/id object)
             database-id (:db_id object)
             has-access? (when (= api/*current-user-id* user-id)
@@ -2981,7 +2992,7 @@ replaced with maps containing just the card's ID, so we can check for this to de
             generate-view
             record-views!))
       (catch Throwable e
-        (log/warnf e &quot;Failed to process view_log event. %s&quot; topic)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+        (log/warnf e &quot;Failed to process view event. %s&quot; topic)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
