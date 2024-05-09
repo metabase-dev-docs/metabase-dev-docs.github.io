@@ -3036,24 +3036,31 @@ regex that this param that arg must match.</p>
   [route]
   (-&gt;&gt; (re-seq #&quot;:([\w-]+)&quot; route)
        (map second)
-       (map keyword)))</pre></td></tr><tr><td class="docs"><p>Note: this is called in a macro context, so it can potentially be passed a symbol that evaluates to a schema.</p>
+       (map keyword)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- requiring-resolve-form [form]
+  (walk/postwalk
+   (fn [x]
+     (if (symbol? x)
+       (try @(requiring-resolve x)
+            (catch Exception _ x)) x))
+   form))</pre></td></tr><tr><td class="docs"><p>Note: this is called in a macro context, so it can potentially be passed a symbol that resolves to a schema.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- -&gt;matching-regex
   [schema]
-  (let [schema-type (try (mc/type schema)
-                         (catch clojure.lang.ExceptionInfo _
-                           (mc/type #_:clj-kondo/ignore (eval schema))))]
+  (let [schema      (try #_:clj-kondo/ignore
+                         (eval schema)
+                         (catch Exception _ #_:clj-kondo/ignore
+                                (requiring-resolve-form schema)))
+        schema-type (mc/type schema)]
     [schema-type
      (condp = schema-type
        ;; can use any regex directly
-       :re (first (try (mc/children schema)
-                       (catch clojure.lang.ExceptionInfo _
-                         (mc/children #_:clj-kondo/ignore (eval schema)))))
-       :keyword #&quot;[\S]+&quot;
+       :re       (first (mc/children schema))
+       :keyword  #&quot;[\S]+&quot;
        'pos-int? #&quot;[0-9]+&quot;
-       :int #&quot;-?[0-9]+&quot;
-       'int? #&quot;-?[0-9]+&quot;
-       :uuid u/uuid-regex
-       'uuid? u/uuid-regex
+       :int      #&quot;-?[0-9]+&quot;
+       'int?     #&quot;-?[0-9]+&quot;
+       :uuid     u/uuid-regex
+       'uuid?    u/uuid-regex
        nil)]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private no-regex-schemas #{(mc/type ms/NonBlankString)
                                   (mc/type (mc/schema [:maybe ms/PositiveInt]))
