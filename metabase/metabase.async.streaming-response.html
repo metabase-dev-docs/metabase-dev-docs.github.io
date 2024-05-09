@@ -2888,7 +2888,7 @@ net.brehaut.ClojureTools = (function (SH) {
    (java.util.zip GZIPOutputStream)
    (jakarta.servlet AsyncContext)
    (jakarta.servlet.http HttpServletResponse)
-   (org.eclipse.jetty.io EofException)
+   (org.eclipse.jetty.io EofException SocketChannelEndPoint)
    (org.eclipse.jetty.server Request)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- write-to-output-stream!
@@ -2978,7 +2978,27 @@ use.</p>
       ([ba offset length]
        (write-to-output-stream! @dlay ba offset length)))))</pre></td></tr><tr><td class="docs"><p>How often to check whether the request was canceled by the client.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private async-cancellation-poll-interval-ms
-  1000)</pre></td></tr><tr><td class="docs"><p>Check whether the HTTP request has been canceled by the client.</p>
+  1000)</pre></td></tr><tr><td class="docs"><p>Protocol to get a SocketChannel from various types of transports.</p>
+</td><td class="codes"><pre class="brush: clojure">(p.types/defprotocol+ ^:private ChannelProvider
+  (^SocketChannel get-channel [transport] &quot;Method to extract a SocketChannel.&quot;))</pre></td></tr><tr><td class="docs"><p>Extend the protocol to SocketChannel, returning itself</p>
+</td><td class="codes"><pre class="brush: clojure">(extend-protocol ChannelProvider
+  SocketChannel
+  (get-channel [self] self)
+
+  SocketChannelEndPoint
+  (get-channel [self] (.getChannel self))
+
+  Object
+  (get-channel [_] nil))</pre></td></tr><tr><td class="docs"><p>A set of types returned from <code>.getTransport</code> have already been reported as errors. This is used to avoid spamming the logs with the same
+error over and over.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private *reported-types
+  (atom #{}))</pre></td></tr><tr><td class="docs"><p>Log an error when an unexpected transport is encountered.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn log-unexpected-transport!
+  [transport]
+  (let [transport-type (type transport)]
+    (when-not (contains? @*reported-types transport-type)
+      (log/errorf &quot;Unexpected transport type encountered in `canceled?`: %s&quot; transport-type))
+    (swap! *reported-types conj transport-type)))</pre></td></tr><tr><td class="docs"><p>Check whether the HTTP request has been canceled by the client.</p>
 
 <p>This function attempts to read a single byte from the underlying TCP socket; if the request is canceled, <code>.read</code>
 will return <code>-1</code>. Otherwise, since the entire request has already been read, <code>.read</code> <em>should</em> probably complete
@@ -2986,15 +3006,17 @@ immediately, returning <code>0</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- canceled?
   [^Request request]
   (try
-    (let [^SocketChannel channel (.. request getHttpChannel getEndPoint getTransport)
-          buf    (ByteBuffer/allocate 1)
-          status (.read channel buf)]
-      (log/tracef &quot;Check cancelation status: .read returned %d&quot; status)
-      (neg? status))
-    (catch InterruptedException _
-      false)
-    (catch ClosedChannelException _
-      true)
+    (let [transport (.. request getHttpChannel getEndPoint getTransport)]
+      (if-let [channel (get-channel transport)]
+        (let [buf        (ByteBuffer/allocate 1)
+              status     (.read channel buf)]
+          (log/tracef &quot;Check cancelation status: .read returned %d&quot; status)
+          (neg? status))
+        (do
+          (log-unexpected-transport! transport)
+          false)))
+    (catch InterruptedException _ false)
+    (catch ClosedChannelException _ true)
     (catch Throwable e
       (log/error e &quot;Error determining whether HTTP request was canceled&quot;)
       false)))</pre></td></tr><tr><td class="docs"><p>How long to wait for the cancelation check to complete (it should usually complete immediately -- see above -- but if
