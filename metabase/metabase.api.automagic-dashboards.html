@@ -2872,12 +2872,6 @@ net.brehaut.ClojureTools = (function (SH) {
    [cheshire.core :as json]
    [compojure.core :refer [GET]]
    [metabase.api.common :as api]
-   [metabase.automagic-dashboards.comparison :refer [comparison-dashboard]]
-   [metabase.automagic-dashboards.core
-    :as magic
-    :refer [automagic-analysis candidate-tables]]
-   [metabase.automagic-dashboards.dashboard-templates
-    :as dashboard-templates]
    [metabase.models.card :refer [Card]]
    [metabase.models.collection :refer [Collection]]
    [metabase.models.database :refer [Database]]
@@ -2888,11 +2882,10 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.models.query.permissions :as query-perms]
    [metabase.models.segment :refer [Segment]]
    [metabase.models.table :refer [Table]]
-   [metabase.transforms.dashboard :as transform.dashboard]
-   [metabase.transforms.materialize :as tf.materialize]
    [metabase.util.i18n :refer [deferred-tru]]
    [metabase.util.malli :as mu]
    [metabase.util.malli.schema :as ms]
+   [metabase.xrays :as xrays]
    [ring.util.codec :as codec]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
@@ -2903,17 +2896,17 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(def ^:private Prefix
   (mu/with-api-error-message
     [:fn (fn [prefix]
-           (some #(not-empty (dashboard-templates/get-dashboard-templates [% prefix])) [&quot;table&quot; &quot;metric&quot; &quot;field&quot;]))]
+           (some #(not-empty (xrays/get-dashboard-templates [% prefix])) [&quot;table&quot; &quot;metric&quot; &quot;field&quot;]))]
     (deferred-tru &quot;invalid value for prefix&quot;)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private DashboardTemplate
   (mu/with-api-error-message
     [:fn (fn [dashboard-template]
            (some (fn [toplevel]
-                   (some (comp dashboard-templates/get-dashboard-template
+                   (some (comp xrays/get-dashboard-template
                                (fn [prefix]
                                  [toplevel prefix dashboard-template])
                                :dashboard-template-name)
-                         (dashboard-templates/get-dashboard-templates [toplevel])))
+                         (xrays/get-dashboard-templates [toplevel])))
                  [&quot;table&quot; &quot;metric&quot; &quot;field&quot;]))]
     (deferred-tru &quot;invalid value for dashboard template name&quot;)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([s])} decode-base64-json
@@ -2928,7 +2921,7 @@ net.brehaut.ClojureTools = (function (SH) {
   {id ms/PositiveInt}
   (-&gt; (t2/select-one Database :id id)
       api/read-check
-      candidate-tables))</pre></td></tr><tr><td class="docs"><p>----------------------------------------- API Endpoints for viewing a transient dashboard ----------------</p>
+      xrays/candidate-tables))</pre></td></tr><tr><td class="docs"><p>----------------------------------------- API Endpoints for viewing a transient dashboard ----------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- adhoc-query-read-check
   [query]
@@ -2977,7 +2970,7 @@ encoded query, or transform name.</p>
   (api/read-check (t2/select-one Field :id (ensure-int field-id-str))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;entity :transform
   [_entity-type transform-name]
-  (api/read-check (t2/select-one Collection :id (tf.materialize/get-collection transform-name)))
+  (api/read-check (t2/select-one Collection :id (xrays/get-collection transform-name)))
   transform-name)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private entities
   (map name (keys (methods -&gt;entity))))</pre></td></tr><tr><td class="docs">
@@ -2997,12 +2990,12 @@ encoded query, or transform name.</p>
   [entity entity-id-or-query show]
   {show   [:maybe [:or [:= &quot;all&quot;] nat-int?]]
    entity (mu/with-api-error-message
-            (into [:enum] entities)
-            (deferred-tru &quot;Invalid entity type&quot;))}
+           (into [:enum] entities)
+           (deferred-tru &quot;Invalid entity type&quot;))}
   (if (= entity &quot;transform&quot;)
-    (transform.dashboard/dashboard (-&gt;entity entity entity-id-or-query))
+    (xrays/dashboard (-&gt;entity entity entity-id-or-query))
     (-&gt; (-&gt;entity entity entity-id-or-query)
-        (automagic-analysis {:show (coerce-show show)}))))</pre></td></tr><tr><td class="docs"><p>Identify the pk field of the model with <code>pk_ref</code>, and then find any fks that have that pk as a target.</p>
+        (xrays/automagic-analysis {:show (coerce-show show)}))))</pre></td></tr><tr><td class="docs"><p>Identify the pk field of the model with <code>pk_ref</code>, and then find any fks that have that pk as a target.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn linked-entities
   [{{field-ref :pk_ref} :model-index {rsmd :result_metadata} :model}]
   (when-let [field-id (:id (some #(when ((comp #{field-ref} :field_ref) %) %) rsmd))]
@@ -3037,7 +3030,7 @@ encoded query, or transform name.</p>
   (if (seq linked-tables)
     (let [child-dashboards (map (fn [{:keys [linked-table-id linked-field-id]}]
                                   (let [table (t2/select-one Table :id linked-table-id)]
-                                    (magic/automagic-analysis
+                                    (xrays/automagic-analysis
                                      table
                                      {:show         :all
                                       :query-filter [:= [:field linked-field-id nil] model_pk]})))
@@ -3074,15 +3067,15 @@ encoded query, or transform name.</p>
                 :dashcards (fn [cards] (add-source-model-link model cards)))))
     {:name      (format &quot;Here's a look at \&quot;%s\&quot; from \&quot;%s\&quot;&quot; indexed-entity-name model-name)
      :dashcards (add-source-model-link
-                     model
-                     [{:row                    0
-                       :col                    0
-                       :size_x                 18
-                       :size_y                 2
-                       :visualization_settings {:text                &quot;# Unfortunately, there's not much else to show right now...&quot;
-                                                :virtual_card        {:display :text}
-                                                :dashcard.background false
-                                                :text.align_vertical :bottom}}])}))</pre></td></tr><tr><td class="docs"><p>/model<em>index/:model-index-id/primary</em>key/:pk-id</p>
+                 model
+                 [{:row                    0
+                   :col                    0
+                   :size_x                 18
+                   :size_y                 2
+                   :visualization_settings {:text                &quot;# Unfortunately, there's not much else to show right now...&quot;
+                                            :virtual_card        {:display :text}
+                                            :dashcard.background false
+                                            :text.align_vertical :bottom}}])}))</pre></td></tr><tr><td class="docs"><p>/model<em>index/:model-index-id/primary</em>key/:pk-id</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
   &quot;Return an automagic dashboard for an entity detail specified by `entity`
   with id `id` and a primary key of `indexed-value`.&quot;
@@ -3112,8 +3105,8 @@ encoded query, or transform name.</p>
    prefix             Prefix
    dashboard-template DashboardTemplate}
   (-&gt; (-&gt;entity entity entity-id-or-query)
-      (automagic-analysis {:show               (coerce-show show)
-                           :dashboard-template [&quot;table&quot; prefix dashboard-template]})))</pre></td></tr><tr><td class="docs"><p>/:entity/:entity-id-or-query/cell/:cell-query</p>
+      (xrays/automagic-analysis {:show               (coerce-show show)
+                                 :dashboard-template [&quot;table&quot; prefix dashboard-template]})))</pre></td></tr><tr><td class="docs"><p>/:entity/:entity-id-or-query/cell/:cell-query</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
   &quot;Return an automagic dashboard analyzing cell in  automagic dashboard for entity `entity`
    defined by
@@ -3124,8 +3117,8 @@ encoded query, or transform name.</p>
    show               Show
    cell-query         Base64EncodedJSON}
   (-&gt; (-&gt;entity entity entity-id-or-query)
-      (automagic-analysis {:show       (coerce-show show)
-                           :cell-query (decode-base64-json cell-query)})))</pre></td></tr><tr><td class="docs"><p>/:entity/:entity-id-or-query/cell/:cell-query/rule/:prefix/:dashboard-template</p>
+      (xrays/automagic-analysis {:show       (coerce-show show)
+                                 :cell-query (decode-base64-json cell-query)})))</pre></td></tr><tr><td class="docs"><p>/:entity/:entity-id-or-query/cell/:cell-query/rule/:prefix/:dashboard-template</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
   &quot;Return an automagic dashboard analyzing cell in question  with id `id` defined by
    query `cell-query` using dashboard-template `dashboard-template`.&quot;
@@ -3137,9 +3130,9 @@ encoded query, or transform name.</p>
    dashboard-template DashboardTemplate
    cell-query         Base64EncodedJSON}
   (-&gt; (-&gt;entity entity entity-id-or-query)
-      (automagic-analysis {:show               (coerce-show show)
-                           :dashboard-template [&quot;table&quot; prefix dashboard-template]
-                           :cell-query         (decode-base64-json cell-query)})))</pre></td></tr><tr><td class="docs"><p>/:entity/:entity-id-or-query/compare/:comparison-entity/:comparison-entity-id-or-query</p>
+      (xrays/automagic-analysis {:show               (coerce-show show)
+                                 :dashboard-template [&quot;table&quot; prefix dashboard-template]
+                                 :cell-query         (decode-base64-json cell-query)})))</pre></td></tr><tr><td class="docs"><p>/:entity/:entity-id-or-query/compare/:comparison-entity/:comparison-entity-id-or-query</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
   &quot;Return an automagic comparison dashboard for entity `entity` with id `id` compared with entity
    `comparison-entity` with id `comparison-entity-id-or-query.`&quot;
@@ -3150,10 +3143,10 @@ encoded query, or transform name.</p>
    comparison-entity  ComparisonEntity}
   (let [left      (-&gt;entity entity entity-id-or-query)
         right     (-&gt;entity comparison-entity comparison-entity-id-or-query)
-        dashboard (automagic-analysis left {:show         (coerce-show show)
-                                            :query-filter nil
-                                            :comparison?  true})]
-    (comparison-dashboard dashboard left right {})))</pre></td></tr><tr><td class="docs"><p>/:entity/:entity-id-or-query/rule/:prefix/:dashboard-template/compare/:comparison-entity/:comparison-entity-id-or-query</p>
+        dashboard (xrays/automagic-analysis left {:show         (coerce-show show)
+                                                  :query-filter nil
+                                                  :comparison?  true})]
+    (xrays/comparison-dashboard dashboard left right {})))</pre></td></tr><tr><td class="docs"><p>/:entity/:entity-id-or-query/rule/:prefix/:dashboard-template/compare/:comparison-entity/:comparison-entity-id-or-query</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
   &quot;Return an automagic comparison dashboard for entity `entity` with id `id` using dashboard-template `dashboard-template`;
    compared with entity `comparison-entity` with id `comparison-entity-id-or-query.`.&quot;
@@ -3166,11 +3159,11 @@ encoded query, or transform name.</p>
    comparison-entity  ComparisonEntity}
   (let [left      (-&gt;entity entity entity-id-or-query)
         right     (-&gt;entity comparison-entity comparison-entity-id-or-query)
-        dashboard (automagic-analysis left {:show               (coerce-show show)
-                                            :dashboard-template [&quot;table&quot; prefix dashboard-template]
-                                            :query-filter       nil
-                                            :comparison?        true})]
-    (comparison-dashboard dashboard left right {})))</pre></td></tr><tr><td class="docs"><p>/:entity/:entity-id-or-query/cell/:cell-query/compare/:comparison-entity/:comparison-entity-id-or-query</p>
+        dashboard (xrays/automagic-analysis left {:show               (coerce-show show)
+                                                  :dashboard-template [&quot;table&quot; prefix dashboard-template]
+                                                  :query-filter       nil
+                                                  :comparison?        true})]
+    (xrays/comparison-dashboard dashboard left right {})))</pre></td></tr><tr><td class="docs"><p>/:entity/:entity-id-or-query/cell/:cell-query/compare/:comparison-entity/:comparison-entity-id-or-query</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
   &quot;Return an automagic comparison dashboard for cell in automagic dashboard for entity `entity`
    with id `id` defined by query `cell-query`; compared with entity `comparison-entity` with id
@@ -3183,10 +3176,10 @@ encoded query, or transform name.</p>
    comparison-entity  ComparisonEntity}
   (let [left      (-&gt;entity entity entity-id-or-query)
         right     (-&gt;entity comparison-entity comparison-entity-id-or-query)
-        dashboard (automagic-analysis left {:show         (coerce-show show)
-                                            :query-filter nil
-                                            :comparison?  true})]
-    (comparison-dashboard dashboard left right {:left {:cell-query (decode-base64-json cell-query)}})))</pre></td></tr><tr><td class="docs"><p>/:entity/:entity-id-or-query/cell/:cell-query/rule/:prefix/:dashboard-template/compare/:comparison-entity/:comparison-entity-id-or-query</p>
+        dashboard (xrays/automagic-analysis left {:show         (coerce-show show)
+                                                  :query-filter nil
+                                                  :comparison?  true})]
+    (xrays/comparison-dashboard dashboard left right {:left {:cell-query (decode-base64-json cell-query)}})))</pre></td></tr><tr><td class="docs"><p>/:entity/:entity-id-or-query/cell/:cell-query/rule/:prefix/:dashboard-template/compare/:comparison-entity/:comparison-entity-id-or-query</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
   &quot;Return an automagic comparison dashboard for cell in automagic dashboard for entity `entity`
    with id `id` defined by query `cell-query` using dashboard-template `dashboard-template`; compared with entity
@@ -3201,10 +3194,10 @@ encoded query, or transform name.</p>
    comparison-entity  ComparisonEntity}
   (let [left      (-&gt;entity entity entity-id-or-query)
         right     (-&gt;entity comparison-entity comparison-entity-id-or-query)
-        dashboard (automagic-analysis left {:show               (coerce-show show)
-                                            :dashboard-template [&quot;table&quot; prefix dashboard-template]
-                                            :query-filter       nil})]
-    (comparison-dashboard dashboard left right {:left {:cell-query (decode-base64-json cell-query)}})))</pre></td></tr><tr><td class="docs">
+        dashboard (xrays/automagic-analysis left {:show               (coerce-show show)
+                                                  :dashboard-template [&quot;table&quot; prefix dashboard-template]
+                                                  :query-filter       nil})]
+    (xrays/comparison-dashboard dashboard left right {:left {:cell-query (decode-base64-json cell-query)}})))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(api/define-routes)</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 

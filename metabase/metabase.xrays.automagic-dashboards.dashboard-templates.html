@@ -2865,107 +2865,414 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#dev.deps-graph" name="dev.deps-graph"><h1 class="project-name">dev.deps-graph</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns dev.deps-graph
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.xrays.automagic-dashboards.dashboard-templates" name="metabase.xrays.automagic-dashboards.dashboard-templates"><h1 class="project-name">metabase.xrays.automagic-dashboards.dashboard-templates</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Validation, transformation to canonical form, and loading of heuristics.</p>
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.xrays.automagic-dashboards.dashboard-templates
+  (:gen-class)
   (:require
-   [clojure.java.io :as io]
-   [clojure.tools.namespace.find :as ns.find]
-   [clojure.tools.namespace.parse :as ns.parse]))</pre></td></tr><tr><td class="docs">
+   [clojure.set :as set]
+   [clojure.string :as str]
+   [clojure.walk :as walk]
+   [malli.core :as mc]
+   [malli.transform :as mtx]
+   [metabase.query-processor.util :as qp.util]
+   [metabase.shared.dashboards.constants :as dashboards.constants]
+   [metabase.util :as u]
+   [metabase.util.files :as u.files]
+   [metabase.util.i18n :as i18n]
+   [metabase.util.malli.registry :as mr]
+   [metabase.util.yaml :as yaml]
+   [metabase.xrays.automagic-dashboards.populate :as populate])
+  (:import
+   (java.nio.file Files Path)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- project-root-directory ^java.io.File []
-  (.. (java.nio.file.Paths/get (.toURI (io/resource &quot;dev/deps_graph.clj&quot;)))
-      toFile          ; /home/cam/metabase/dev/src/dev/deps_graph.clj
-      getParentFile   ; /home/cam/metabase/dev/src/dev/
-      getParentFile   ; /home/cam/metabase/dev/src/
-      getParentFile   ; /home/cam/metabase/dev/
-      getParentFile)) ; /home/cam/metabase/</pre></td></tr><tr><td class="docs"><p>This is basically a non-hardcoded version of</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private LocalizedString
+  [:schema
+   {:decode/dashboard-template (fn [s]
+                                 (if (i18n/localized-string? s)
+                                   s
+                                   (i18n/-&gt;UserLocalizedString s nil {})))}
+   i18n/LocalizedString])</pre></td></tr><tr><td class="docs"><p>Maximal (and default) value for heuristics scores.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^Long ^:const max-score
+  100)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private Score
+  [:int {:min 0, :max max-score}])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private MBQL [:maybe [:sequential :any]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private Identifier
+  [:string
+   {:decode/dashboard-template (fn [x]
+                                 (if (keyword? x)
+                                   (name x)
+                                   x))}])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- with-defaults
+  [defaults]
+  (fn [identifier-&gt;definition]
+    (update-vals identifier-&gt;definition
+                 (fn [definition]
+                   (merge defaults definition)))))</pre></td></tr><tr><td class="docs"><p>Expand definition of the form {identifier value} with regards to key <code>k</code> into
+ {identifier {k value}}.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- shorthand-definition
+  [k]
+  (fn [x]
+    (let [[identifier definition] (first x)]
+      (if (map? definition)
+        x
+        {identifier {k definition}}))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private Metric
+  [:map-of
+   {:decode/dashboard-template
+    (comp (with-defaults {:score max-score})
+          (shorthand-definition :metric))}
+   Identifier
+   [:map
+    [:metric MBQL]
+    [:score  Score]
+    [:name {:optional true} LocalizedString]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private Filter
+  [:map-of
+   {:decode/dashboard-template
+    (comp (with-defaults {:score max-score})
+          (shorthand-definition :filter))}
+   Identifier
+   [:map
+    [:filter MBQL]
+    [:score  Score]]])</pre></td></tr><tr><td class="docs"><p>Does string <code>t</code> denote a Google Analytics dimension?</p>
+</td><td class="codes"><pre class="brush: clojure">(defn ga-dimension?
+  [t]
+  (str/starts-with? t &quot;ga:&quot;))</pre></td></tr><tr><td class="docs"><p>Turn <code>x</code> into proper type name.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn -&gt;type
+  [x]
+  (cond
+    (keyword? x)      x
+    (ga-dimension? x) x
+    :else             (keyword &quot;type&quot; x)))</pre></td></tr><tr><td class="docs"><p>Turn <code>x</code> into proper entity name.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn -&gt;entity
+  [x]
+  (cond
+    (keyword? x)      x
+    (ga-dimension? x) x
+    :else             (keyword &quot;entity&quot; x)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- field-type?
+  [t]
+  (some
+   (partial isa? t)
+   [:type/* :Semantic/* :Relation/*]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- table-type?
+  [t]
+  (isa? t :entity/*))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private TableType
+  [:and
+   {:decode/dashboard-template -&gt;entity}
+   :keyword
+   [:fn {:error/message &quot;valid table type&quot;} table-type?]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private FieldType
+  [:or
+   {:decode/dashboard-template -&gt;type}
+   [:and
+    :string
+    [:fn {:error/message &quot;Google Analytics dimension&quot;} ga-dimension?]]
+   [:and
+    :keyword
+    [:fn {:error/message &quot;Valid Field type&quot;} field-type?]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private AppliesTo
+  [:or
+   {:decode/dashboard-template
+    (fn [x]
+      (if (string? x)
+        (let [[table-type field-type] (str/split x #&quot;\.&quot;)]
+          (if field-type
+            [(-&gt;entity table-type) (-&gt;type field-type)]
+            [(if (-&gt; table-type -&gt;entity table-type?)
+               (-&gt;entity table-type)
+               (-&gt;type table-type))]))
+        x))}
+   [:sequential FieldType]
+   [:sequential TableType]
+   [:cat TableType [:* FieldType]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private Dimension
+  [:map-of
+   {:decode/dashboard-template
+    (comp (with-defaults {:score max-score})
+          (shorthand-definition :field_type))}
+   Identifier
+   [:map
+    [:field_type AppliesTo]
+    [:score      Score]
+    [:links_to        {:optional true} TableType]
+    [:named           {:optional true} :string]
+    [:max_cardinality {:optional true} :int]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private OrderByPair
+  [:map-of
+   {:decode/dashboard-template (fn [x]
+                                 (if (string? x)
+                                   {x &quot;ascending&quot;}
+                                   x))}
+   Identifier
+   [:enum &quot;descending&quot; &quot;ascending&quot;]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private Visualization
+  [:cat
+   {:decode/dashboard-template (fn [x]
+                                 (cond
+                                   (string? x) [x {}]
+                                   ;; for malformed YAML when this comes back as a map
+                                   (map? x)    (first x)
+                                   :else       x))}
+   [:string {:decode/dashboard-template (fn [x]
+                                          (if (string? x)
+                                            x
+                                            (u/qualified-name x)))}]
+   [:* :map]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private Width
+  [:int {:min 1, :max populate/grid-width}])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private Height pos-int?)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private CardDimension
+  [:map-of
+   {:decode/dashboard-template (fn [x]
+                                 (if (string? x)
+                                   {x {}}
+                                   x))}
+   Identifier
+   [:map [:aggregation {:optional true} :string]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private Card
+  [:map-of
+   {:decode/dashboard-template
+    (with-defaults {:card-score max-score
+                    :width      populate/default-card-width
+                    :height     populate/default-card-height})}
+   Identifier
+   [:map
+    {:decode/dashboard-template (fn [x]
+                                  (if (sequential? x)
+                                    (into {} x)
+                                    x))}
+    [:title      LocalizedString]
+    [:card-score Score]
+    [:visualization {:optional true} Visualization]
+    [:text          {:optional true} LocalizedString]
+    [:dimensions    {:optional true} [:maybe [:sequential {:decode/dashboard-template u/one-or-many} CardDimension]]]
+    [:filters       {:optional true} [:maybe [:sequential {:decode/dashboard-template u/one-or-many} :string]]]
+    [:metrics       {:optional true} [:maybe [:sequential {:decode/dashboard-template u/one-or-many} :string]]]
+    [:limit         {:optional true} pos-int?]
+    [:order_by      {:optional true} [:maybe [:sequential {:decode/dashboard-template u/one-or-many} OrderByPair]]]
+    [:description   {:optional true} LocalizedString]
+    [:query         {:optional true} :string]
+    [:width         {:optional true} Width]
+    [:height        {:optional true} Height]
+    [:group         {:optional true} :string]
+    [:y_label       {:optional true} LocalizedString]
+    [:x_label       {:optional true} LocalizedString]
+    [:series_labels {:optional true} [:maybe [:sequential LocalizedString]]]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private Groups
+  [:map-of
+   {:decode/dashboard-template (fn [x]
+                                 (if (map? x)
+                                   x
+                                   (apply merge x)))}
+   Identifier
+   [:map
+    [:title LocalizedString]
+    [:score :int]
+    [:comparison_title {:optional true} LocalizedString]
+    [:description      {:optional true} LocalizedString]]])</pre></td></tr><tr><td class="docs"><p>Return <code>key</code> in <code>{key {}}</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^{:arglists '([definition])} identifier
+  (comp key first))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([definitions])} identifiers
+  (partial into #{&quot;this&quot;} (map identifier)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- all-references
+  [k cards]
+  (mapcat (comp k val first) cards))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private DimensionForm
+  [:cat
+   [:and
+    [:or :string :keyword]
+    [:fn
+     {:error/message &quot;:dimension&quot;}
+     (comp #{:dimension} qp.util/normalize-token)]]
+   :string
+   [:* :map]])</pre></td></tr><tr><td class="docs"><p>Does form denote a dimension reference?</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^{:arglists '([form])} dimension-form?
+  (mr/validator DimensionForm))</pre></td></tr><tr><td class="docs"><p>Return all dimension references in form.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn collect-dimensions
+  [form]
+  (-&gt;&gt; form
+       (tree-seq (some-fn map? sequential?) identity)
+       (mapcat (fn [subform]
+                 (cond
+                   (dimension-form? subform) [(second subform)]
+                   (string? subform)         (-&gt;&gt; subform
+                                                  (re-seq #&quot;\[\[(\w+)\]\]&quot;)
+                                                  (map second)))))
+       distinct))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- valid-metrics-references?
+  [{:keys [metrics cards]}]
+  (every? (identifiers metrics) (all-references :metrics cards)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- valid-filters-references?
+  [{:keys [filters cards]}]
+  (every? (identifiers filters) (all-references :filters cards)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- valid-group-references?
+  [{:keys [cards groups]}]
+  (every? groups (keep (comp :group val first) cards)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- valid-order-by-references?
+  [{:keys [dimensions metrics cards]}]
+  (every? (comp (into (identifiers dimensions)
+                      (identifiers metrics))
+                identifier)
+          (all-references :order_by cards)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- valid-dimension-references?
+  [{:keys [dimensions] :as dashboard-template}]
+  (every? (some-fn (identifiers dimensions) (comp table-type? -&gt;entity))
+          (collect-dimensions dashboard-template)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- valid-dashboard-filters-references?
+  [{:keys [dimensions dashboard_filters]}]
+  (every? (identifiers dimensions) dashboard_filters))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- valid-breakout-dimension-references?
+  [{:keys [cards dimensions]}]
+  (-&gt;&gt; cards
+       (all-references :dimensions)
+       (map identifier)
+       (every? (identifiers dimensions))))</pre></td></tr><tr><td class="docs"><p>Specification defining an automagic dashboard.</p>
+</td><td class="codes"><pre class="brush: clojure">(def DashboardTemplate
+  [:and
+   [:map
+    [:title                   LocalizedString]
+    [:dashboard-template-name :string]
+    [:specificity             :int]
+    [:cards             {:optional true} [:maybe [:sequential Card]]]
+    [:dimensions        {:optional true} [:maybe [:sequential Dimension]]]
+    [:applies_to        {:optional true} AppliesTo]
+    [:transient_title   {:optional true} LocalizedString]
+    [:description       {:optional true} LocalizedString]
+    [:metrics           {:optional true} [:maybe [:sequential Metric]]]
+    [:filters           {:optional true} [:maybe [:sequential Filter]]]
+    [:groups            {:optional true} Groups]
+    [:indepth           {:optional true} [:maybe [:sequential :any]]]
+    [:dashboard_filters {:optional true} [:maybe [:sequential {:decode/dashboard-template u/one-or-many} :string]]]]
+   [:fn {:error/message &quot;Valid metrics references&quot;}           valid-metrics-references?]
+   [:fn {:error/message &quot;Valid filters references&quot;}           valid-filters-references?]
+   [:fn {:error/message &quot;Valid group references&quot;}             valid-group-references?]
+   [:fn {:error/message &quot;Valid order_by references&quot;}          valid-order-by-references?]
+   [:fn {:error/message &quot;Valid dashboard filters references&quot;} valid-dashboard-filters-references?]
+   [:fn {:error/message &quot;Valid dimension references&quot;}         valid-dimension-references?]
+   [:fn {:error/message &quot;Valid card dimension references&quot;}    valid-breakout-dimension-references?]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private dashboard-templates-dir &quot;automagic_dashboards/&quot;)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([f])} file-&gt;entity-type
+  (comp (partial re-find #&quot;.+(?=\.yaml$)&quot;) str (memfn ^Path getFileName)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- specificity
+  [dashboard-template]
+  (transduce (map (comp count ancestors)) + (:applies_to dashboard-template)))</pre></td></tr><tr><td class="docs"><p>Given a card definition from a template, fill in the card template with default width and height
+values based on the template display type if those dimensions aren't already present.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- ensure-default-card-sizes
+  [card-spec]
+  (update-vals
+    card-spec
+    (fn [{:keys [visualization] :as card-spec}]
+      (let [defaults (get-in dashboards.constants/card-size-defaults [(keyword visualization) :default])]
+        (into defaults card-spec)))))</pre></td></tr><tr><td class="docs"><p>Update the card template dimensions to align with the default FE dimensions.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- set-default-card-dimensions
+  [dashboard-template]
+  (update dashboard-template :cards #(mapv ensure-default-card-sizes %)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- coerce-to-dashboard-template [template]
+  (mc/coerce DashboardTemplate
+             template
+             (mtx/transformer
+              mtx/string-transformer
+              mtx/json-transformer
+              (mtx/transformer {:name :dashboard-template}))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- make-dashboard-template
+  [entity-type {:keys [cards] :as r}]
+  (-&gt; (cond-&gt; r
+        (seq cards)
+        (update :cards (partial mapv (fn [m] (update-vals m #(set/rename-keys % {:score :card-score}))))))
+      (assoc :dashboard-template-name entity-type
+             :specificity 0)
+      (update :applies_to #(or % entity-type))
+      set-default-card-dimensions
+      coerce-to-dashboard-template
+      (as-&gt; dashboard-template
+            (assoc dashboard-template
+                   :specificity (specificity dashboard-template)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- trim-trailing-slash
+  [s]
+  (if (str/ends-with? s &quot;/&quot;)
+    (subs s 0 (-&gt; s count dec))
+    s))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- load-dashboard-template-dir
+  ([dir]
+   (load-dashboard-template-dir dir [] {}))
+  ([dir path dashboard-templates]
+   (with-open [ds (Files/newDirectoryStream dir)]
+     (reduce
+      (fn [acc ^Path f]
+        (let [entity-type (file-&gt;entity-type f)]
+          (cond
+            (Files/isDirectory f (into-array java.nio.file.LinkOption []))
+            (load-dashboard-template-dir f (-&gt;&gt; f (.getFileName) str trim-trailing-slash (conj path)) acc)
+            entity-type
+            (let [template (try
+                             (yaml/load (partial make-dashboard-template entity-type) f)
+                             (catch Throwable e
+                               (throw (ex-info (format &quot;Error loading template %s: %s&quot; (str f) (ex-message e))
+                                               {:path path, :f f}
+                                               e))))]
+              (assoc-in acc (concat path [entity-type ::leaf]) template))
+            :else
+            acc)))
+      dashboard-templates
+      ds))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private dashboard-templates
+  (delay
+    (u.files/with-open-path-to-resource [path dashboard-templates-dir]
+      (into {} (load-dashboard-template-dir path)))))</pre></td></tr><tr><td class="docs"><p>Get all dashboard templates with prefix <code>prefix</code>.
+ prefix is greedy, so ["table"] will match table/TransactionTable.yaml, but not
+ table/TransactionTable/ByCountry.yaml</p>
+</td><td class="codes"><pre class="brush: clojure">(defn get-dashboard-templates
+  [prefix]
+  (-&gt;&gt; prefix
+       (get-in @dashboard-templates)
+       (keep (comp ::leaf val))))</pre></td></tr><tr><td class="docs"><p>Get dashboard template at path <code>path</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn get-dashboard-template
+  [path]
+  (get-in @dashboard-templates (concat path [::leaf])))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- extract-localized-strings
+  [[path dashboard-template]]
+  (let [strings      (atom [])
+        template     (coerce-to-dashboard-template dashboard-template)
+        i18n-string? (mr/validator LocalizedString)]
+    (walk/postwalk
+     (fn [form]
+       (when (i18n-string? form)
+         (swap! strings conj (str form))))
+     template)
+    (map vector (distinct @strings) (repeat path))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- make-pot
+  [strings]
+  (-&gt;&gt; strings
+       (group-by first)
+       (mapcat (fn [[s ctxs]]
+                 (concat (for [[_ ctx] ctxs]
+                           (format &quot;#: resources/%s%s.yaml&quot; dashboard-templates-dir (str/join &quot;/&quot; ctx)))
+                         [(format &quot;msgid \&quot;%s\&quot;\nmsgstr \&quot;\&quot;\n&quot; s)])))
+       (str/join &quot;\n&quot;)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- all-dashboard-templates
+  ([]
+   (all-dashboard-templates [] @dashboard-templates))
+  ([path dashboard-templates]
+   (when (map? dashboard-templates)
+     (mapcat (fn [[k v]]
+               (if (= k ::leaf)
+                 [[path v]]
+                 (all-dashboard-templates (conj path k) v)))
+             dashboard-templates))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- generate-templates! []
+  (-&gt;&gt; (all-dashboard-templates)
+       (mapcat extract-localized-strings)
+       make-pot
+       (spit &quot;locales/metabase-automatic-dashboards.pot&quot;)))</pre></td></tr><tr><td class="docs"><p>Entry point for Clojure CLI task <code>generate-automagic-dashboards-pot</code>. Run it with</p>
 
-<p>  (io/file "/home/cam/metabase/src/metabase")</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- source-root
-  ^java.io.File []
-  (io/file (str (.getAbsolutePath (project-root-directory)) &quot;/src/metabase&quot;)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- find-ns-decls []
-  (ns.find/find-ns-decls [(source-root)]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- module [ns-symb]
-  (some-&gt; (re-find #&quot;^metabase\.[^.]+&quot; (str ns-symb)) symbol))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- dependencies []
-  (for [decl (find-ns-decls)
-        :let [ns-symb (ns.parse/name-from-ns-decl decl)
-              deps    (ns.parse/deps-from-ns-decl decl)]]
-    {:namespace ns-symb
-     :module    (module ns-symb)
-     :deps      (into #{}
-                      (keep (fn [dep-symb]
-                              (when-let [module (module dep-symb)]
-                                {:namespace dep-symb
-                                 :module    module})))
-                      deps)}))</pre></td></tr><tr><td class="docs"><p>All usages of a module named by <code>module-symb</code> outside that module.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn external-usages
-  [module-symb]
-  (for [dep    (dependencies)
-        :when  (not= (:module dep) module-symb)
-        ns-dep (:deps dep)
-        :when  (= (:module ns-dep) module-symb)]
-    {:namespace            (:namespace dep)
-     :module               (:module dep)
-     :depends-on-namespace (:namespace ns-dep)
-     :depends-on-module    (:module ns-dep)}))</pre></td></tr><tr><td class="docs"><p>All namespaces from a module that are used outside that module.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn externally-used-namespaces
-  [module-symb]
-  (into (sorted-set) (map :depends-on-namespace) (external-usages module-symb)))</pre></td></tr><tr><td class="docs"><p>Build a graph of module => set of modules it refers to.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn module-dependencies
-  ([]
-   (letfn [(reduce-module-deps [module-deps module deps]
-             (reduce
-              (fn [module-deps {dep-module :module, :as _dep}]
-                (cond-&gt; module-deps
-                  (not= dep-module module) (conj dep-module)))
-              (or module-deps (sorted-set))
-              deps))
-           (reduce-deps [module-&gt;deps {:keys [module deps]}]
-             (update module-&gt;deps module reduce-module-deps module deps))]
-     (reduce reduce-deps (sorted-map) (dependencies))))
-  ([module]
-   (get (module-dependencies) module)))</pre></td></tr><tr><td class="docs"><p>Build a graph of module => set of modules it refers to that also refer to this module.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn circular-dependencies
-  ([]
-   (let [module-&gt;deps (module-dependencies)]
-     (letfn [(circular-dependency? [module-x module-y]
-               (and (contains? (get module-&gt;deps module-x) module-y)
-                    (contains? (get module-&gt;deps module-y) module-x)))
-             (circular-deps [module]
-               (let [module-deps (get module-&gt;deps module)]
-                 (not-empty (into (sorted-set)
-                                  (filter (fn [dep]
-                                            (circular-dependency? module dep)))
-                                  module-deps))))]
-       (into (sorted-map)
-             (keep (fn [module]
-                     (when-let [circular-deps (circular-deps module)]
-                       [module circular-deps])))
-             (keys module-&gt;deps)))))
-  ([module]
-   (get (circular-dependencies) module)))</pre></td></tr><tr><td class="docs"><p>A graph of [[module-dependencies]], but with modules that have any circular dependencies filtered out. This is mostly
-meant to make it easier to fill out the <code>:metabase/ns-module-checker</code> <code>:allowed-modules</code> section of the Kondo
-config, or to figure out which ones can easily get a consolidated API namespace without drama.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn non-circular-module-dependencies
-  []
-  (let [circular-dependencies (circular-dependencies)]
-    (into (sorted-map)
-          (remove (fn [[module _deps]]
-                    (contains? circular-dependencies module)))
-          (module-dependencies))))</pre></td></tr><tr><td class="docs"><p>Information about how <code>module-x</code> uses <code>module-y</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn module-usages-of-other-module
-  [module-x module-y]
-  (let [module-x-ns-&gt;module-y-ns   (-&gt;&gt; (external-usages module-y)
-                                        (filter #(= (:module %) module-x))
-                                        (map (juxt :namespace :depends-on-namespace)))]
-    (reduce
-     (fn [m [module-x-ns module-y-ns]]
-       (update m module-x-ns (fn [deps]
-                               (conj (or deps (sorted-set)) module-y-ns))))
-     (sorted-map)
-     module-x-ns-&gt;module-y-ns)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+<p>  clojure -M:generate-automagic-dashboards-pot</p>
+</td><td class="codes"><pre class="brush: clojure">(defn -main
+  [&amp; _options]
+  (generate-templates!)
+  (System/exit 0))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

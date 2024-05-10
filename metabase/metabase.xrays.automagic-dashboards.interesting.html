@@ -2865,107 +2865,452 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#dev.deps-graph" name="dev.deps-graph"><h1 class="project-name">dev.deps-graph</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns dev.deps-graph
-  (:require
-   [clojure.java.io :as io]
-   [clojure.tools.namespace.find :as ns.find]
-   [clojure.tools.namespace.parse :as ns.parse]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- project-root-directory ^java.io.File []
-  (.. (java.nio.file.Paths/get (.toURI (io/resource &quot;dev/deps_graph.clj&quot;)))
-      toFile          ; /home/cam/metabase/dev/src/dev/deps_graph.clj
-      getParentFile   ; /home/cam/metabase/dev/src/dev/
-      getParentFile   ; /home/cam/metabase/dev/src/
-      getParentFile   ; /home/cam/metabase/dev/
-      getParentFile)) ; /home/cam/metabase/</pre></td></tr><tr><td class="docs"><p>This is basically a non-hardcoded version of</p>
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.xrays.automagic-dashboards.interesting" name="metabase.xrays.automagic-dashboards.interesting"><h1 class="project-name">metabase.xrays.automagic-dashboards.interesting</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Generate "interesting" inputs for the automatic dashboard pipeline.</p>
 
-<p>  (io/file "/home/cam/metabase/src/metabase")</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- source-root
-  ^java.io.File []
-  (io/file (str (.getAbsolutePath (project-root-directory)) &quot;/src/metabase&quot;)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- find-ns-decls []
-  (ns.find/find-ns-decls [(source-root)]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- module [ns-symb]
-  (some-&gt; (re-find #&quot;^metabase\.[^.]+&quot; (str ns-symb)) symbol))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- dependencies []
-  (for [decl (find-ns-decls)
-        :let [ns-symb (ns.parse/name-from-ns-decl decl)
-              deps    (ns.parse/deps-from-ns-decl decl)]]
-    {:namespace ns-symb
-     :module    (module ns-symb)
-     :deps      (into #{}
-                      (keep (fn [dep-symb]
-                              (when-let [module (module dep-symb)]
-                                {:namespace dep-symb
-                                 :module    module})))
-                      deps)}))</pre></td></tr><tr><td class="docs"><p>All usages of a module named by <code>module-symb</code> outside that module.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn external-usages
-  [module-symb]
-  (for [dep    (dependencies)
-        :when  (not= (:module dep) module-symb)
-        ns-dep (:deps dep)
-        :when  (= (:module ns-dep) module-symb)]
-    {:namespace            (:namespace dep)
-     :module               (:module dep)
-     :depends-on-namespace (:namespace ns-dep)
-     :depends-on-module    (:module ns-dep)}))</pre></td></tr><tr><td class="docs"><p>All namespaces from a module that are used outside that module.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn externally-used-namespaces
-  [module-symb]
-  (into (sorted-set) (map :depends-on-namespace) (external-usages module-symb)))</pre></td></tr><tr><td class="docs"><p>Build a graph of module => set of modules it refers to.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn module-dependencies
-  ([]
-   (letfn [(reduce-module-deps [module-deps module deps]
-             (reduce
-              (fn [module-deps {dep-module :module, :as _dep}]
-                (cond-&gt; module-deps
-                  (not= dep-module module) (conj dep-module)))
-              (or module-deps (sorted-set))
-              deps))
-           (reduce-deps [module-&gt;deps {:keys [module deps]}]
-             (update module-&gt;deps module reduce-module-deps module deps))]
-     (reduce reduce-deps (sorted-map) (dependencies))))
-  ([module]
-   (get (module-dependencies) module)))</pre></td></tr><tr><td class="docs"><p>Build a graph of module => set of modules it refers to that also refer to this module.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn circular-dependencies
-  ([]
-   (let [module-&gt;deps (module-dependencies)]
-     (letfn [(circular-dependency? [module-x module-y]
-               (and (contains? (get module-&gt;deps module-x) module-y)
-                    (contains? (get module-&gt;deps module-y) module-x)))
-             (circular-deps [module]
-               (let [module-deps (get module-&gt;deps module)]
-                 (not-empty (into (sorted-set)
-                                  (filter (fn [dep]
-                                            (circular-dependency? module dep)))
-                                  module-deps))))]
-       (into (sorted-map)
-             (keep (fn [module]
-                     (when-let [circular-deps (circular-deps module)]
-                       [module circular-deps])))
-             (keys module-&gt;deps)))))
-  ([module]
-   (get (circular-dependencies) module)))</pre></td></tr><tr><td class="docs"><p>A graph of [[module-dependencies]], but with modules that have any circular dependencies filtered out. This is mostly
-meant to make it easier to fill out the <code>:metabase/ns-module-checker</code> <code>:allowed-modules</code> section of the Kondo
-config, or to figure out which ones can easily get a consolidated API namespace without drama.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn non-circular-module-dependencies
-  []
-  (let [circular-dependencies (circular-dependencies)]
-    (into (sorted-map)
-          (remove (fn [[module _deps]]
-                    (contains? circular-dependencies module)))
-          (module-dependencies))))</pre></td></tr><tr><td class="docs"><p>Information about how <code>module-x</code> uses <code>module-y</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn module-usages-of-other-module
-  [module-x module-y]
-  (let [module-x-ns-&gt;module-y-ns   (-&gt;&gt; (external-usages module-y)
-                                        (filter #(= (:module %) module-x))
-                                        (map (juxt :namespace :depends-on-namespace)))]
-    (reduce
-     (fn [m [module-x-ns module-y-ns]]
-       (update m module-x-ns (fn [deps]
-                               (conj (or deps (sorted-set)) module-y-ns))))
-     (sorted-map)
-     module-x-ns-&gt;module-y-ns)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+<p>In this context, "interesting" means "grounded" values. In particular, the most interesting values of all are
+metrics. Metrics are intrinsically interesting and can be displayed on their own. Dimensions and filters, while not
+interesting on their own, can be combined with metrics to add more interest to the metric. In MBQL parlance, metrics
+are aggregates, dimensions are breakouts, and filters are filters. However, a user-defined metric may go beyond a
+simple aggregate.</p>
+
+<p>Our main namespace function, <code>identify</code>, takes an object to be analyzed for interestingness and a data structure
+consisting of templates for interesting combinations of metrics, dimensions, and filters. In this stage, we return
+grounded metrics (inherently interesting) along with grounded dimensions and filters that can be combined with our
+grounded metrics downstream for added interest.</p>
+
+<p>The template arguments are defined in terms of Dimensions, Metrics, and Filters. These are <em>named</em> values, such as:
+ - Dimension:
+   - GenericNumber
+   - Timestamp
+   - Country
+   - Longitude
+   - Latitude
+   - Income
+   - Discount
+ - Metric:
+   - Count - Dimensionless
+   - Sum - A metric over a single field
+   - AverageDiscount - A metric defined by the Income and Discount fields (as an example)
+ - Filter:
+   - Last30Days - A named quantity that is defined by one or more constituent Dimensions</p>
+
+<p> Template Metrics and Filters are made up of some combination of field references (Dimensions). These are referenced
+ using the Dimension names (e.g. Avg of some GenericNumber) despite these constituent fields technically not being
+ Dimensions. Metrics and Dimensions should be thought of as orthogonal concerns, but for our matching algorithm, this
+ is how constituent fields are selected.</p>
+
+<p> The "grounding" process binds individual fields to named Dimensions as well as constituent elements of Filter and
+ Metric definitions.</p>
+
+<p> Note that the binding process is 1:N, where a single dimension may match to multiple fields.
+ A field can only bind to one dimension.</p>
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.xrays.automagic-dashboards.interesting
+  (:require
+   [clojure.math.combinatorics :as math.combo]
+   [clojure.string :as str]
+   [clojure.walk :as walk]
+   [java-time.api :as t]
+   [medley.core :as m]
+   [metabase.legacy-mbql.normalize :as mbql.normalize]
+   [metabase.legacy-mbql.util :as mbql.u]
+   [metabase.models.field :as field :refer [Field]]
+   [metabase.models.interface :as mi]
+   [metabase.models.legacy-metric :refer [LegacyMetric]]
+   [metabase.models.table :refer [Table]]
+   [metabase.util :as u]
+   [metabase.util.date-2 :as u.date]
+   [metabase.util.malli :as mu]
+   [metabase.xrays.automagic-dashboards.dashboard-templates :as dashboard-templates]
+   [metabase.xrays.automagic-dashboards.schema :as ads]
+   [metabase.xrays.automagic-dashboards.util :as magic.util]
+   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs"><p>Code for creation of instantiated affinities</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>A utility function for pulling field definitions from mbql queries and return their IDs.
+ Does something like this already exist in our utils? I was unable to find anything like it.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn find-field-ids
+  [m]
+  (let [fields (atom #{})]
+    (walk/prewalk
+      (fn [v]
+        (when (vector? v)
+          (let [[f id] v]
+            (when (and id (= :field f))
+              (swap! fields conj id))))
+        v)
+      m)
+    @fields))</pre></td></tr><tr><td class="docs"><p>From a :model/LegacyMetric, construct a mapping of semantic types of linked fields to
+ sets of fields that can satisfy that type. A linked field is one that is in the
+ source table for the metric contribute to the metric itself, is not a PK, and
+ has a semantic<em>type (we assume nil semantic</em>type fields are boring).</p>
+</td><td class="codes"><pre class="brush: clojure">(defn semantic-groups
+  [{:keys [table_id definition]}]
+  (let [field-ids            (find-field-ids definition)
+        potential-dimensions (t2/select :model/Field
+                               :id [:not-in field-ids]
+                               :table_id table_id
+                               :semantic_type [:not-in [:type/PK]])]
+    (update-vals
+      (-&gt;&gt; potential-dimensions
+           (group-by :semantic_type))
+      set)))</pre></td></tr><tr><td class="docs"><p>Get a reference for a given model to be injected into a template
+        (either MBQL, native query, or string).</p>
+</td><td class="codes"><pre class="brush: clojure">(defmulti
+  ^{:doc      
+    :arglists '([template-type model])}
+  -&gt;reference (fn [template-type model]
+                [template-type (mi/model model)]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- optimal-datetime-resolution
+  [field]
+  (let [[earliest latest] (some-&gt;&gt; field
+                                   :fingerprint
+                                   :type
+                                   :type/DateTime
+                                   ((juxt :earliest :latest))
+                                   (map u.date/parse))]
+    (if (and earliest latest)
+      ;; e.g. if 3 hours &gt; [duration between earliest and latest] then use `:minute` resolution
+      (condp u.date/greater-than-period-duration? (u.date/period-duration earliest latest)
+        (t/hours 3) :minute
+        (t/days 7) :hour
+        (t/months 6) :day
+        (t/years 10) :month
+        :year)
+      :day)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;reference [:mbql Field]
+  [_ {:keys [fk_target_field_id id link aggregation name base_type] :as field}]
+  (let [reference (mbql.normalize/normalize
+                    (cond
+                      link [:field id {:source-field link}]
+                      fk_target_field_id [:field fk_target_field_id {:source-field id}]
+                      id [:field id nil]
+                      :else [:field name {:base-type base_type}]))]
+    (cond
+      (isa? base_type :type/Temporal)
+      (mbql.u/with-temporal-unit reference (keyword (or aggregation
+                                                        (optimal-datetime-resolution field))))
+
+      (and aggregation
+           (isa? base_type :type/Number))
+      (mbql.u/update-field-options reference assoc-in [:binning :strategy] (keyword aggregation))
+
+      :else
+      reference)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;reference [:string Field]
+  [_ {:keys [display_name full-name link]}]
+  (cond
+    full-name full-name
+    link (format &quot;%s → %s&quot;
+                 (-&gt; (t2/select-one Field :id link) :display_name (str/replace #&quot;(?i)\sid$&quot; &quot;&quot;))
+                 display_name)
+    :else display_name))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;reference [:string Table]
+  [_ {:keys [display_name full-name]}]
+  (or full-name display_name))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;reference [:string LegacyMetric]
+  [_ {:keys [name full-name]}]
+  (or full-name name))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;reference [:mbql LegacyMetric]
+  [_ {:keys [id definition]}]
+  (if id
+    [:metric id]
+    (-&gt; definition :aggregation first)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;reference [:native Field]
+  [_ field]
+  (field/qualified-name field))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;reference [:native Table]
+  [_ {:keys [name]}]
+  name)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;reference :default
+  [_ form]
+  (or (cond-&gt; form
+        (map? form) ((some-fn :full-name :name) form))
+      form))</pre></td></tr><tr><td class="docs"><p>Map a metric aggregate definition from nominal types to semantic types.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn transform-metric-aggregate
+  [m decoder]
+  (walk/prewalk
+    (fn [v]
+      (if (vector? v)
+        (let [[d n] v]
+          (if (= &quot;dimension&quot; d)
+            (decoder n)
+            v))
+        v))
+    m))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ground-metric :- [:sequential ads/grounded-metric]
+  &quot;Generate \&quot;grounded\&quot; metrics from the mapped dimensions (dimension name -&gt; field matches).
+   Since there may be multiple matches to a dimension, this will produce a sequence of potential matches.&quot;
+  [{metric-name       :metric-name
+    metric-score      :score
+    metric-definition :metric} :- ads/normalized-metric-template
+   ground-dimensions :- ads/dim-name-&gt;matching-fields]
+  (let [named-dimensions (dashboard-templates/collect-dimensions metric-definition)]
+    (-&gt;&gt; (map (comp :matches ground-dimensions) named-dimensions)
+         (apply math.combo/cartesian-product)
+         (map (partial zipmap named-dimensions))
+         (map (fn [nm-&gt;field]
+                (let [xform (update-vals nm-&gt;field (partial -&gt;reference :mbql))]
+                  {:metric-name           metric-name
+                   :metric-title          metric-name
+                   :metric-score          metric-score
+                   :metric-definition     {:aggregation
+                                           [(transform-metric-aggregate metric-definition xform)]}
+                   ;; Required for title interpolation in grounded-metrics-&gt;dashcards
+                   :dimension-name-&gt;field nm-&gt;field}))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn grounded-metrics :- [:sequential ads/grounded-metric]
+  &quot;Given a set of metric definitions and grounded (assigned) dimensions, produce a sequence of grounded metrics.&quot;
+  [metric-templates :- [:sequential ads/normalized-metric-template]
+   ground-dimensions :- ads/dim-name-&gt;matching-fields]
+  (mapcat #(ground-metric % ground-dimensions) metric-templates))</pre></td></tr><tr><td class="docs"><p>Utility function to convert a seq of maps of one string key to another map into a simpler seq of maps.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn normalize-seq-of-maps
+  [typename items]
+  (let [kw (keyword (format &quot;%s-name&quot; (name typename)))]
+    (-&gt;&gt; items
+         (map first)
+         (map (fn [[name value]]
+                (assoc value kw name))))))</pre></td></tr><tr><td class="docs"><p>dimensions</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Generate a predicate of the form (f field) -> truthy value based on a fieldspec.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- fieldspec-matcher
+  [fieldspec]
+  (if (and (string? fieldspec)
+           (dashboard-templates/ga-dimension? fieldspec))
+    (comp #{fieldspec} :name)
+    (fn [{:keys [semantic_type target] :as field}]
+      (cond
+        ;; This case is mostly relevant for native queries
+        (#{:type/PK :type/FK} fieldspec) (isa? semantic_type fieldspec)
+        target (recur target)
+        :else (and (not (magic.util/key-col? field)) (magic.util/field-isa? field fieldspec))))))</pre></td></tr><tr><td class="docs"><p>Generate a truthy predicate of the form (f field) -> truthy value based on a regex applied to the field name.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- name-regex-matcher
+  [name-pattern]
+  (comp (-&gt;&gt; name-pattern
+             u/lower-case-en
+             re-pattern
+             (partial re-find))
+        u/lower-case-en
+        :name))</pre></td></tr><tr><td class="docs"><p>Generate a predicate of the form (f field) -> true | false based on the provided cardinality.
+Returns true if the distinct count of fingerprint values is less than or equal to the cardinality.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- max-cardinality-matcher
+  [cardinality]
+  (fn [field]
+    (some-&gt; field
+            (get-in [:fingerprint :global :distinct-count])
+            (&lt;= cardinality))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private field-filters
+  {:fieldspec       fieldspec-matcher
+   :named           name-regex-matcher
+   :max-cardinality max-cardinality-matcher})</pre></td></tr><tr><td class="docs"><p>Find all fields belonging to table <code>table</code> for which all predicates in
+ <code>preds</code> are true. <code>preds</code> is a map with keys :fieldspec, :named, and :max-cardinality.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- filter-fields
+  [preds fields]
+  (filter (-&gt;&gt; preds
+               (keep (fn [[k v]]
+                       (when-let [pred (field-filters k)]
+                         (some-&gt; v pred))))
+               (apply every-pred))
+          fields))</pre></td></tr><tr><td class="docs"><p>Given a context and a dimension definition, find all fields from the context
+ that match the definition of this dimension.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- matching-fields
+  [{{:keys [fields]} :source :keys [tables] :as context}
+   {:keys [field_type links_to named max_cardinality] :as constraints}]
+  (if links_to
+    (filter (comp (-&gt;&gt; (magic.util/filter-tables links_to tables)
+                       (keep :link)
+                       set)
+                  u/the-id)
+            (matching-fields context (dissoc constraints :links_to)))
+    (let [[tablespec fieldspec] field_type]
+      (if fieldspec
+        (mapcat (fn [table]
+                  (some-&gt;&gt; table
+                           :fields
+                           (filter-fields {:fieldspec       fieldspec
+                                           :named           named
+                                           :max-cardinality max_cardinality})
+                           (map #(assoc % :link (:link table)))))
+                (magic.util/filter-tables tablespec tables))
+        (filter-fields {:fieldspec       tablespec
+                        :named           named
+                        :max-cardinality max_cardinality}
+                       fields)))))</pre></td></tr><tr><td class="docs"><p>util candidate</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([field])} id-or-name
+  (some-fn :id :name))</pre></td></tr><tr><td class="docs"><p>For every field in a given context determine all potential dimensions each field may map to.
+This will return a map of field id (or name) to collection of potential matching dimensions.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- candidate-bindings
+  [context dimension-specs]
+  ;; TODO - Fix this so that the intermediate representations aren't so crazy.
+  ;; all-bindings a map of binding dim identifier to binding def which contains
+  ;; field matches which are all the same field except they are merged with the binding.
+  ;; What we want instead is just a map of field to potential bindings.
+  ;; Just rack and stack the bindings then return that with the field or something.
+  (let [all-bindings (for [dimension      dimension-specs
+                           :let [[identifier definition] (first dimension)]
+                           matching-field (matching-fields context definition)]
+                       {(name identifier)
+                        (assoc definition :matches [(merge matching-field definition)])})]
+    (group-by (comp id-or-name first :matches val first) all-bindings)))</pre></td></tr><tr><td class="docs"><p>Assign a value to each potential binding.
+Takes a seq of potential bindings and returns a seq of vectors in the shape
+of [score binding], where score is a 3 element vector. This is computed as:
+   1) Number of ancestors <code>field_type</code> has (if field_type has a table prefix,
+      ancestors for both table and field are counted);
+   2) Number of fields in the definition, which would include additional filters
+      (<code>named</code>, <code>max_cardinality</code>, <code>links_to</code>, ...) etc.;
+   3) The manually assigned score for the binding definition</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- score-bindings
+  [candidate-binding-values]
+  (letfn [(score [a]
+            (let [[_ definition] a]
+              [(reduce + (map (comp count ancestors) (:field_type definition)))
+               (count definition)
+               (:score definition)]))]
+    (map (juxt (comp score first) identity) candidate-binding-values)))</pre></td></tr><tr><td class="docs"><p>Return the most specific dimension from one or more dimensions that all
+ match the same field. Specificity is determined based on:
+ 1) how many ancestors <code>field_type</code> has (if field_type has a table prefix,
+    ancestors for both table and field are counted);
+ 2) if there is a tie, how many additional filters (<code>named</code>, <code>max_cardinality</code>,
+    <code>links_to</code>, ...) are used;
+ 3) if there is still a tie, <code>score</code>.</p>
+
+<p> candidate-binding-values is a sequence of maps. Each map is a has a key
+ of dimension spec name to potential dimension binding spec along with a
+ collection of matches, all of which are merges of this spec with the same
+ column.</p>
+
+<p> Note that it would make a lot more sense to refactor this to return a
+ map of column to potential binding dimensions. This return value is kind of
+ the opposite of what makes sense.</p>
+
+<p> Here's an example input with :matches updated as just the names of the
+ columns in the matches. IRL, matches are the entire field n times, with
+ each field a merge of the spec with the field.</p>
+
+<p> ({"Timestamp" {:field_type [:type/DateTime],
+                  :score 60,
+                  :matches ["CREATED_AT"]}}
+  {"CreateTimestamp" {:field_type [:type/CreationTimestamp],
+                        :score 80
+                        :matches ["CREATED_AT"]}})</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- most-specific-matched-dimension
+  [candidate-binding-values]
+  (let [scored-bindings (score-bindings candidate-binding-values)]
+    (second (last (sort-by first scored-bindings)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn find-dimensions :- ads/dim-name-&gt;dim-defs+matches
+  &quot;Bind fields to dimensions from the dashboard template and resolve overloaded cases in which multiple fields match the
+  dimension specification.
+   Each field will be bound to only one dimension. If multiple dimension definitions match a single field, the field
+  is bound to the most specific definition used
+   (see `most-specific-definition` for details).
+  The context is passed in, but it only needs tables and fields in `candidate-bindings`. It is not extensively used.&quot;
+  [context dimension-specs :- [:maybe [:sequential ads/dimension-template]]]
+  (-&gt;&gt; (candidate-bindings context dimension-specs)
+       (map (comp most-specific-matched-dimension val))
+       (apply merge-with (fn [a b]
+                           (case (compare (:score a) (:score b))
+                             1 a
+                             0 (update a :matches concat (:matches b))
+                             -1 b))
+              {})))</pre></td></tr><tr><td class="docs"><p>TODO - Deduplicate from core</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([source])} source-&gt;db
+  (comp (partial t2/select-one :model/Database :id) (some-fn :db_id :database_id)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- enriched-field-with-sources [{:keys [tables source]} field]
+  (assoc field
+    :link (m/find-first (comp :link #{(:table_id field)} u/the-id) tables)
+    :db (source-&gt;db source)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- add-field-links-to-definitions [dimensions field]
+  (-&gt;&gt; dimensions
+       (keep (fn [[identifier definition]]
+               (when-let [matches (-&gt;&gt; definition
+                                       :matches
+                                       (remove (comp #{(id-or-name field)} id-or-name))
+                                       not-empty)]
+                 [identifier (assoc definition :matches matches)])))
+       (concat [[&quot;this&quot; {:matches [field]
+                         :name    (:display_name field)
+                         :score   dashboard-templates/max-score
+                         :card-score   dashboard-templates/max-score}]])
+       (into {})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- add-field-self-reference [{{:keys [entity]} :root :as context} dimensions]
+  (cond-&gt; dimensions
+    (= Field (mi/model entity))
+    (add-field-links-to-definitions (enriched-field-with-sources context entity))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Take filter templates (as from a dashboard template's :filters) and ground dimensions and produce a map of the
+filter name to grounded versions of the filter.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn grounded-filters
+  [filter-templates ground-dimensions]
+  (-&gt;&gt; filter-templates
+       (keep (fn [fltr]
+               (let [[fname {:keys [filter] :as v}] (first fltr)
+                     dims (dashboard-templates/collect-dimensions v)
+                     opts (-&gt;&gt; (map (comp
+                                      (partial map (partial -&gt;reference :mbql))
+                                      :matches
+                                      ground-dimensions) dims)
+                               (apply math.combo/cartesian-product)
+                               (map (partial zipmap dims)))]
+                 (seq (for [opt opts
+                            :let [f
+                                  (walk/prewalk
+                                    (fn [x]
+                                      (if (vector? x)
+                                        (let [[ds dim-name] x]
+                                          (if (and (= &quot;dimension&quot; ds)
+                                                   (string? dim-name))
+                                            (opt dim-name)
+                                            x))
+                                        x))
+                                    filter)]]
+                        (assoc v :filter f :filter-name fname))))))
+       flatten))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn identify
+  :- [:map
+      [:dimensions ads/dim-name-&gt;matching-fields]
+      [:metrics [:sequential ads/grounded-metric]]]
+  &quot;Identify interesting metrics and dimensions of a `thing`. First identifies interesting dimensions, and then
+  interesting metrics which are satisfied.
+  Metrics from the template are assigned a score of 50; user defined metrics a score of 95&quot;
+  [{{:keys [linked-metrics]} :root :as context}
+   {:keys [dimension-specs
+           metric-specs
+           filter-specs]} :- [:map
+                               [:dimension-specs [:maybe [:sequential ads/dimension-template]]]
+                               [:metric-specs [:maybe [:sequential ads/metric-template]]]
+                               [:filter-specs [:maybe [:sequential ads/filter-template]]]]]
+  (let [dims      (-&gt;&gt; (find-dimensions context dimension-specs)
+                       (add-field-self-reference context))
+        metrics   (-&gt; (normalize-seq-of-maps :metric metric-specs)
+                      (grounded-metrics dims))
+        set-score (fn [score metrics]
+                    (map #(assoc % :metric-score score) metrics))]
+    {:dimensions dims
+     :metrics    (concat (set-score 50 metrics) (set-score 95 linked-metrics)
+                         (let [entity (-&gt; context :root :entity)]
+                           ;; metric x-rays talk about &quot;this&quot; in the template
+                           (when (mi/instance-of? :model/LegacyMetric entity)
+                             [{:metric-name       &quot;this&quot;
+                               :metric-title      (:name entity)
+                               :metric-definition {:aggregation [(-&gt;reference :mbql entity)]}
+                               :metric-score      dashboard-templates/max-score}])))
+     :filters (grounded-filters filter-specs dims)}))</pre></td></tr><tr><td class="docs"><p>Convert a card to a dashboard card.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn card-&gt;dashcard
+  [{:keys [width height] :as card}]
+  {:id                     (gensym)
+   :size_x                 width
+   :size_y                 height
+   :dashboard_tab_id       nil
+   :card                   (dissoc card :width :height)
+   :visualization_settings {}})</pre></td></tr><tr><td class="docs"><p>Assign <code>:row</code> and <code>:col</code> values to the provied seq of dashcards.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn make-layout
+  [dashcards]
+  (loop [[{:keys [size_x size_y] :as dashcard} &amp; dashcards] dashcards
+         [xmin ymin xmax ymax] [0 0 0 0]
+         final-cards []]
+    (if dashcard
+      (let [dashcard (assoc dashcard :row ymin :col xmax)
+            bounds   (if (&gt; xmax 20)
+                       [xmin ymax 0 (+ ymax size_y)]
+                       [xmin ymin (+ xmax size_x) (max ymax (+ ymin size_y))])]
+        (recur dashcards
+               bounds
+               (conj final-cards dashcard)))
+      final-cards)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

@@ -2865,107 +2865,942 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#dev.deps-graph" name="dev.deps-graph"><h1 class="project-name">dev.deps-graph</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns dev.deps-graph
-  (:require
-   [clojure.java.io :as io]
-   [clojure.tools.namespace.find :as ns.find]
-   [clojure.tools.namespace.parse :as ns.parse]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- project-root-directory ^java.io.File []
-  (.. (java.nio.file.Paths/get (.toURI (io/resource &quot;dev/deps_graph.clj&quot;)))
-      toFile          ; /home/cam/metabase/dev/src/dev/deps_graph.clj
-      getParentFile   ; /home/cam/metabase/dev/src/dev/
-      getParentFile   ; /home/cam/metabase/dev/src/
-      getParentFile   ; /home/cam/metabase/dev/
-      getParentFile)) ; /home/cam/metabase/</pre></td></tr><tr><td class="docs"><p>This is basically a non-hardcoded version of</p>
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.xrays.automagic-dashboards.core" name="metabase.xrays.automagic-dashboards.core"><h1 class="project-name">metabase.xrays.automagic-dashboards.core</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><h1>Automagic Dashboards</h1>
 
-<p>  (io/file "/home/cam/metabase/src/metabase")</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- source-root
-  ^java.io.File []
-  (io/file (str (.getAbsolutePath (project-root-directory)) &quot;/src/metabase&quot;)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- find-ns-decls []
-  (ns.find/find-ns-decls [(source-root)]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- module [ns-symb]
-  (some-&gt; (re-find #&quot;^metabase\.[^.]+&quot; (str ns-symb)) symbol))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- dependencies []
-  (for [decl (find-ns-decls)
-        :let [ns-symb (ns.parse/name-from-ns-decl decl)
-              deps    (ns.parse/deps-from-ns-decl decl)]]
-    {:namespace ns-symb
-     :module    (module ns-symb)
-     :deps      (into #{}
-                      (keep (fn [dep-symb]
-                              (when-let [module (module dep-symb)]
-                                {:namespace dep-symb
-                                 :module    module})))
-                      deps)}))</pre></td></tr><tr><td class="docs"><p>All usages of a module named by <code>module-symb</code> outside that module.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn external-usages
-  [module-symb]
-  (for [dep    (dependencies)
-        :when  (not= (:module dep) module-symb)
-        ns-dep (:deps dep)
-        :when  (= (:module ns-dep) module-symb)]
-    {:namespace            (:namespace dep)
-     :module               (:module dep)
-     :depends-on-namespace (:namespace ns-dep)
-     :depends-on-module    (:module ns-dep)}))</pre></td></tr><tr><td class="docs"><p>All namespaces from a module that are used outside that module.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn externally-used-namespaces
-  [module-symb]
-  (into (sorted-set) (map :depends-on-namespace) (external-usages module-symb)))</pre></td></tr><tr><td class="docs"><p>Build a graph of module => set of modules it refers to.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn module-dependencies
-  ([]
-   (letfn [(reduce-module-deps [module-deps module deps]
-             (reduce
-              (fn [module-deps {dep-module :module, :as _dep}]
-                (cond-&gt; module-deps
-                  (not= dep-module module) (conj dep-module)))
-              (or module-deps (sorted-set))
-              deps))
-           (reduce-deps [module-&gt;deps {:keys [module deps]}]
-             (update module-&gt;deps module reduce-module-deps module deps))]
-     (reduce reduce-deps (sorted-map) (dependencies))))
-  ([module]
-   (get (module-dependencies) module)))</pre></td></tr><tr><td class="docs"><p>Build a graph of module => set of modules it refers to that also refer to this module.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn circular-dependencies
-  ([]
-   (let [module-&gt;deps (module-dependencies)]
-     (letfn [(circular-dependency? [module-x module-y]
-               (and (contains? (get module-&gt;deps module-x) module-y)
-                    (contains? (get module-&gt;deps module-y) module-x)))
-             (circular-deps [module]
-               (let [module-deps (get module-&gt;deps module)]
-                 (not-empty (into (sorted-set)
-                                  (filter (fn [dep]
-                                            (circular-dependency? module dep)))
-                                  module-deps))))]
-       (into (sorted-map)
-             (keep (fn [module]
-                     (when-let [circular-deps (circular-deps module)]
-                       [module circular-deps])))
-             (keys module-&gt;deps)))))
-  ([module]
-   (get (circular-dependencies) module)))</pre></td></tr><tr><td class="docs"><p>A graph of [[module-dependencies]], but with modules that have any circular dependencies filtered out. This is mostly
-meant to make it easier to fill out the <code>:metabase/ns-module-checker</code> <code>:allowed-modules</code> section of the Kondo
-config, or to figure out which ones can easily get a consolidated API namespace without drama.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn non-circular-module-dependencies
-  []
-  (let [circular-dependencies (circular-dependencies)]
-    (into (sorted-map)
-          (remove (fn [[module _deps]]
-                    (contains? circular-dependencies module)))
-          (module-dependencies))))</pre></td></tr><tr><td class="docs"><p>Information about how <code>module-x</code> uses <code>module-y</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn module-usages-of-other-module
-  [module-x module-y]
-  (let [module-x-ns-&gt;module-y-ns   (-&gt;&gt; (external-usages module-y)
-                                        (filter #(= (:module %) module-x))
-                                        (map (juxt :namespace :depends-on-namespace)))]
-    (reduce
-     (fn [m [module-x-ns module-y-ns]]
-       (update m module-x-ns (fn [deps]
-                               (conj (or deps (sorted-set)) module-y-ns))))
-     (sorted-map)
-     module-x-ns-&gt;module-y-ns)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+<p>Automatically generate questions and dashboards based on predefined heuristics.</p>
+
+<p>Note that the primary entry point into this namespace is <code>automagic-analysis</code>. This function primarily gathers
+needed data about the input value and any special options then calls into <code>automagic-dashboard</code>, where most of
+the work occurs.</p>
+
+<p>There are two key inputs to this algorithm:
+- An entity to generate the dashboard for. The primary data needed from this entity is:
+  - The entity type itself
+  - The field information, especially the metadata about these fields
+  - This data gathering happens in the <code>-&gt;root</code> function
+- A dashboard template from which a dashboard can be realized based on the entity and field data</p>
+
+<h2>Template Selection</h2>
+
+<p>Within the <code>automagic-dashboard</code> function, a template is selected based on the entity type being analyzed unless a
+dashboard template is specified in the argument. This is a critically important fact:</p>
+
+<p><em>* The template selection is based on the entity type of the item being x-rayed.  *</em></p>
+
+<p>Example: X-raying the "ORDERS" table will result in matching the template
+<code>resources/automagic_dashboards/table/TransactionTable.yaml</code>.</p>
+
+<p>This is because the <code>:entity_type</code> of the table is <code>:entity/TransactionTable</code> as can be seen here:</p>
+
+<p>```clojure
+(t2/select-one-fn :entity_type :model/Table :name "ORDERS")
+;=> :entity/TransactionTable
+```</p>
+
+<p><em>Most</em> tables and <em>all</em> models (as of this writing) will bottom out at <code>:entity/GenericTable</code> and thus, use the
+<code>resources/automagic_dashboards/table/GenericTable.yaml</code> template. <code>:entity_type</code> for a given table type is made in
+the <code>metabase.sync.analyze.classifiers.name/infer-entity-type</code> function, where the primary logic is table naming
+based on the <code>prefix-or-postfix</code> var in that ns.</p>
+
+<p>ProTip: If you want to introduce a new template type, do the following:</p>
+
+<ol>
+<li>Update <code>prefix-or-postfix</code> to include the match logic and new entity type</li>
+<li>Add a template file, <code>resources/automagic_dashboards/table/NewEntityType.yaml</code>, where NewEntityType is the new
+entity type (e.g. <code>:entity/NewEntityType</code>).</li>
+</ol>
+
+<h2>Template Files</h2>
+
+<p>Template files define a potential dashboard, potentially including titles, seconds, cards, filters, and more.
+They are found in <code>resources/automagic_dashboards</code>. Once you've read through several, the format should be fairly
+self-explanatory, but here are a few critical details:</p>
+
+<ul>
+<li>Templated strings are matched with <code>[[double square brackets]]</code></li>
+<li><code>title</code>, <code>transient_title</code>, and <code>description</code> should be self-explanatory</li>
+<li>The fundamental "dynamic" building blocks are:
+<ul><li>dimensions - The base building block in the process. Dimensions map to the columns of the entity being x-rayed
+and are matched by dimension field_type to entity type (semantic, effective, etc.). These form the x-axis in a
+card and the breakout column of a query.</li>
+<li>metrics - Metrics form the y-axis in a card and are the aggregates in a query. They are always defined in terms
+of 0 or more dimensions. Metrics can be dimensionless quantities (e.g. count), based on a single value (e.g.
+average of a column), or a more complicated expression (e.g. ratio of average of column 1 and average of column 2).</li>
+<li>filters - Filters add a filter clause to a query and are also defined in terms of dimensions.</li>
+<li>cards - The final product of the dynamic process. Cards are built from predefined metrics, dimensions, and
+filters as discussed above along with preferences such as display type and title.</li>
+<li>groups - Dashboard sections in which matching cards are added.</li></ul></li>
+</ul>
+
+<h2>The Dynamic Binding and Dashboard Generation Process</h2>
+
+<p>Once data has been accreted in <code>automagic-analysis</code>, <code>automagic-dashboard</code> will first select a template as described
+above. It then calls <code>metabase.xrays.automagic-dashboards.interesting/identify</code> which takes the actual column data and
+dimension, metric, and filter definitions from the template and matches all potential columns to potential dimensions,
+metrics, and filters. The resulting "grounded-values" are now passed into <code>generate-dashboard</code>, which matches all
+of these values to card templates to produce a dashboard. The majority of the card generation work is done in
+<code>metabase.xrays.automagic-dashboards.combination/grounded-metrics-&gt;dashcards</code>.</p>
+
+<p>Note that if a card template's dimensions, metrics, and filters are not matched to grounded values the card will not
+be generated. Conversely, if a card template can be matched by multiple combinations of dimensions, multiple cards
+may be generated.</p>
+
+<p>Once a selection of cards have been generated, the top N are selected (default 15), added to the dashboard, and grouped.</p>
+
+<h2>Example</h2>
+
+<p>The following example is provided to better illustrate the template process and how dimensions and metrics work.</p>
+
+<p>This is a notional dashboard template:</p>
+
+<pre><code>                        Card 1: You have N Items!
+
+        Card 2:                      Card 3:                       Card 4:
+  Avg Income over Time        Total Income per Category            X vs. Y
+             ___
+Avg  |    __/                  Total | #     #                 | *    *      *
+</code></pre>
+
+<p>  Income | __/                    Income | #  #  #               X |    <em>*</em>
+         |/                              | #  #  #  #              |      <em>*</em>   *  *
+         +----------                     +-----------              +-----------------
+            Time                           Category                        Y</p>
+
+<p>Key things to note:
+- Each dimension <em>in a card</em> is specified by <em>name</em>.
+- There are 5 dimensions across all cards:
+  - Income
+  - Time
+  - Category
+  - X
+  - Y
+- There are 3 metrics:
+  - Count (N Items)
+  - Avg Income
+  - Total Income
+- Each metric is a <em>computed value</em> based on 0 or more dimensions, also specified by <em>name</em>.
+  - Count is dimensionless
+  - Avg and Total require the Income dimensions
+  - Not shown, but a card such as "Sales by Location" could require 3 dimensions:
+    - Total of the Sales dimension
+    - Longitude and Latitude dimensions
+  - A metric can also have multiple dimensions with its calculated value, such as the quotient of 2 dimensions.
+- Not described here are filters, which have the same nominal syntax for referencing dimensions as cards and metrics.</p>
+
+<p> Dimensions are the key Lego™ brick for all of the above and are specified as a named element with specialization
+ based on entity and field semantic types as well as a score.</p>
+
+<p> For example, Income could have the following potential matches to underlying fields:
+ - A field from a Sales table with semantic type <code>:type/Income</code> and score of 100
+ - A field from an unspecified table with semantic type <code>:type/Income</code> and score of 90
+ - A field from a Sales table with semantic type <code>:type/Number</code> and score of 50</p>
+
+<p> When matched with actual fields from an x-rayed entity, the highest matching field, by score, is selected to be
+ "bound" to the Income dimensions. Suppose you have an entity of type SalesTable and fields of INCOME (semantic
+ type Income), TAX (type Float), and TOTAL (Float). In this case, the INCOME field would match best (score 100)
+ and be bound to the Income dimension.</p>
+
+<p> The other specified dimensions will have similar matching rules. Note that X &amp; Y are, like all other dimensions,
+ <em>named</em> dimensions. In our above example the Income dimension matched to the INCOME field of type <code>:type/Income</code>.
+ This happens to be well-aligned data. X and Y might look like:
+ - X is a field from the Sales table of type <code>:type/Decimal</code>
+ - Y is a field from the Sales table of type <code>:type/Decimal</code>
+ So long as two fields match the above criteria (decimal types (including descendants) and from a Sales table), they
+ can be bound to the X and Y dimensions. They could be, for example, TAX and TOTAL.</p>
+
+<p> The above example, starting from the dashboard template, works backwards from the actual x-ray generation algorithm
+ but should provide clarity as to the terminology and how everything fits together.</p>
+
+<p> In practice, we gather the entity data (including fields), the dashboard templates, attempt to bind dimensions to
+ fields specified in the template, then build metrics, filters, and finally cards based on the bound dimensions.</p>
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.xrays.automagic-dashboards.core
+  (:require
+   [clojure.set :as set]
+   [clojure.string :as str]
+   [clojure.walk :as walk]
+   [kixi.stats.core :as stats]
+   [kixi.stats.math :as math]
+   [medley.core :as m]
+   [metabase.analyze.classifiers.core :as classifiers]
+   [metabase.db.query :as mdb.query]
+   [metabase.legacy-mbql.normalize :as mbql.normalize]
+   [metabase.models.card :refer [Card]]
+   [metabase.models.database :refer [Database]]
+   [metabase.models.field :as field :refer [Field]]
+   [metabase.models.interface :as mi]
+   [metabase.models.legacy-metric :refer [LegacyMetric]]
+   [metabase.models.query :refer [Query]]
+   [metabase.models.segment :refer [Segment]]
+   [metabase.models.table :refer [Table]]
+   [metabase.query-processor.util :as qp.util]
+   [metabase.related :as related]
+   [metabase.util :as u]
+   [metabase.util.i18n :as i18n :refer [tru trun]]
+   [metabase.util.malli :as mu]
+   [metabase.util.malli.schema :as ms]
+   [metabase.xrays.automagic-dashboards.combination :as combination]
+   [metabase.xrays.automagic-dashboards.dashboard-templates :as dashboard-templates]
+   [metabase.xrays.automagic-dashboards.filters :as filters]
+   [metabase.xrays.automagic-dashboards.interesting :as interesting]
+   [metabase.xrays.automagic-dashboards.names :as names]
+   [metabase.xrays.automagic-dashboards.populate :as populate]
+   [metabase.xrays.automagic-dashboards.util :as magic.util]
+   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private public-endpoint &quot;/auto/dashboard/&quot;)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([field])} id-or-name
+  (some-fn :id :name))</pre></td></tr><tr><td class="docs"><p>Get user-defined metrics linked to a given entity.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmulti
+  ^{:doc      
+    :arglists '([entity])}
+  linked-metrics mi/model)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod linked-metrics :model/LegacyMetric [{metric-name :name :keys [definition]}]
+  [{:metric-name       metric-name
+    :metric-title      metric-name
+    :metric-definition definition
+    :metric-score      100}])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod linked-metrics :model/Table [{table-id :id}]
+  (mapcat
+   linked-metrics
+   (t2/select :model/LegacyMetric :table_id table-id)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod linked-metrics :default [_] [])</pre></td></tr><tr><td class="docs"><p>root is a datatype that is an entity augmented with metadata for the purposes of creating an automatic dashboard with
+respect to that entity. It is called a root because the automated dashboard uses productions to recursively create a
+tree of dashboard cards to fill the dashboards. This multimethod is for turning a given entity into a root.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmulti -&gt;root
+  {:arglists '([entity])}
+  mi/model)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;root Table
+  [table]
+  {:entity                     table
+   :full-name                  (:display_name table)
+   :short-name                 (:display_name table)
+   :source                     table
+   :database                   (:db_id table)
+   :url                        (format &quot;%stable/%s&quot; public-endpoint (u/the-id table))
+   :dashboard-templates-prefix [&quot;table&quot;]
+   :linked-metrics             (linked-metrics table)})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;root Segment
+  [segment]
+  (let [table (-&gt;&gt; segment :table_id (t2/select-one Table :id))]
+    {:entity                     segment
+     :full-name                  (tru &quot;{0} in the {1} segment&quot; (:display_name table) (:name segment))
+     :short-name                 (:display_name table)
+     :comparison-name            (tru &quot;{0} segment&quot; (:name segment))
+     :source                     table
+     :database                   (:db_id table)
+     :query-filter               [:segment (u/the-id segment)]
+     :url                        (format &quot;%ssegment/%s&quot; public-endpoint (u/the-id segment))
+     :dashboard-templates-prefix [&quot;table&quot;]}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;root LegacyMetric
+  [metric]
+  (let [table (-&gt;&gt; metric :table_id (t2/select-one Table :id))]
+    {:entity                     metric
+     :full-name                  (if (:id metric)
+                                   (trun &quot;{0} metric&quot; &quot;{0} metrics&quot; (:name metric))
+                                   (:name metric))
+     :short-name                 (:name metric)
+     :source                     table
+     :database                   (:db_id table)
+     ;; We use :id here as it might not be a concrete field but rather one from a nested query which
+     ;; does not have an ID.
+     :url                        (format &quot;%smetric/%s&quot; public-endpoint (:id metric))
+     :dashboard-templates-prefix [&quot;metric&quot;]}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;root Field
+  [field]
+  (let [table (field/table field)]
+    {:entity                     field
+     :full-name                  (trun &quot;{0} field&quot; &quot;{0} fields&quot; (:display_name field))
+     :short-name                 (:display_name field)
+     :source                     table
+     :database                   (:db_id table)
+     ;; We use :id here as it might not be a concrete metric but rather one from a nested query
+     ;; which does not have an ID.
+     :url                        (format &quot;%sfield/%s&quot; public-endpoint (:id field))
+     :dashboard-templates-prefix [&quot;field&quot;]}))</pre></td></tr><tr><td class="docs"><p>Is this card or question derived from another model or question?</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([card-or-question])} nested-query?
+  (comp some? qp.util/query-&gt;source-card-id :dataset_query))</pre></td></tr><tr><td class="docs"><p>Is this card or question native (SQL)?</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([card-or-question])} native-query?
+  (comp some? #{:native} qp.util/normalize-token #(get-in % [:dataset_query :type])))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- source-question
+  [card-or-question]
+  (when-let [source-card-id (qp.util/query-&gt;source-card-id (:dataset_query card-or-question))]
+    (t2/select-one Card :id source-card-id)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- table-like?
+  [card-or-question]
+  (nil? (get-in card-or-question [:dataset_query :query :aggregation])))</pre></td></tr><tr><td class="docs"><p>Get the Table ID from <code>card-or-question</code>, which can be either a Card from the DB (which has a <code>:table_id</code> property)
+or an ad-hoc query (referred to as a 'question' in this namespace) created with the
+<code>metabase.models.query/adhoc-query</code> function, which has a <code>:table-id</code> property.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- table-id
+  ;; TODO - probably better if we just changed `adhoc-query` to use the same keys as Cards (e.g. `:table_id`) so we
+  ;; didn't need this function, seems like something that would be too easy to forget
+  [card-or-question]
+  (or (:table_id card-or-question)
+      (:table-id card-or-question)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- source
+  [card]
+  (cond
+    ;; This is a model
+    (= (:type card) :model) (assoc card :entity_type :entity/GenericTable)
+    ;; This is a query based on a query. Eventually we will want to change this as it suffers from the same sourcing
+    ;; problems as other cards -- The x-ray is not done on the card, but on its source.
+    (nested-query? card)    (-&gt; card
+                                source-question
+                                (assoc :entity_type :entity/GenericTable))
+    (native-query? card)    (-&gt; card (assoc :entity_type :entity/GenericTable))
+    :else                   (-&gt;&gt; card table-id (t2/select-one Table :id))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;root Card
+  [card]
+  (let [source (source card)]
+    {:entity                     card
+     :source                     source
+     :database                   (:database_id card)
+     :query-filter               (get-in card [:dataset_query :query :filter])
+     :full-name                  (tru &quot;\&quot;{0}\&quot;&quot; (:name card))
+     :short-name                 (names/source-name {:source source})
+     :url                        (format &quot;%s%s/%s&quot; public-endpoint (name (:type source :question)) (u/the-id card))
+     :dashboard-templates-prefix [(if (table-like? card)
+                                    &quot;table&quot;
+                                    &quot;question&quot;)]}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;root Query
+  [query]
+  (let [source (source query)]
+    {:entity                     query
+     :source                     source
+     :database                   (:database-id query)
+     :query-filter               (get-in query [:dataset_query :query :filter])
+     :full-name                  (cond
+                                   (native-query? query) (tru &quot;Native query&quot;)
+                                   (table-like? query) (-&gt; source -&gt;root :full-name)
+                                   :else (names/question-description {:source source} query))
+     :short-name                 (names/source-name {:source source})
+     :url                        (format &quot;%sadhoc/%s&quot; public-endpoint
+                                         (magic.util/encode-base64-json (:dataset_query query)))
+     :dashboard-templates-prefix [(if (table-like? query)
+                                    &quot;table&quot;
+                                    &quot;question&quot;)]}))</pre></td></tr><tr><td class="docs"><p>NOTE - This has been lifted to foo. Nuke it here as well.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- fill-templates
+  [template-type {:keys [root tables]} bindings s]
+  (let [bindings (some-fn (merge {&quot;this&quot; (-&gt; root
+                                             :entity
+                                             (assoc :full-name (:full-name root)))}
+                                 bindings)
+                          (comp first #(magic.util/filter-tables % tables) dashboard-templates/-&gt;entity)
+                          identity)]
+    (str/replace s #&quot;\[\[(\w+)(?:\.([\w\-]+))?\]\]&quot;
+                 (fn [[_ identifier attribute]]
+                   (let [entity    (bindings identifier)
+                         attribute (some-&gt; attribute qp.util/normalize-token)]
+                     (str (or (and (ifn? entity) (entity attribute))
+                              (root attribute)
+                              (interesting/-&gt;reference template-type entity))))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- instantiate-visualization
+  [[k v] dimensions metrics]
+  (let [dimension-&gt;name (comp vector :name dimensions)
+        metric-&gt;name    (comp vector first :metric metrics)]
+    [k (-&gt; v
+           (m/update-existing :map.latitude_column dimension-&gt;name)
+           (m/update-existing :map.longitude_column dimension-&gt;name)
+           (m/update-existing :graph.metrics metric-&gt;name)
+           (m/update-existing :graph.dimensions dimension-&gt;name))]))</pre></td></tr><tr><td class="docs"><p>Capitalize only the first letter in a given string.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn capitalize-first
+  [s]
+  (let [s (str s)]
+    (str (u/upper-case-en (subs s 0 1)) (subs s 1))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- instantiate-metadata
+  [x context available-metrics bindings]
+  (-&gt; (walk/postwalk
+       (fn [form]
+         (if (i18n/localized-string? form)
+           (let [s     (str form)
+                 new-s (fill-templates :string context bindings s)]
+             (if (not= new-s s)
+               (capitalize-first new-s)
+               s))
+           form))
+       x)
+      (m/update-existing :visualization #(instantiate-visualization % bindings available-metrics))))</pre></td></tr><tr><td class="docs"><p>Return the set of ids referenced in a cell query</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- singular-cell-dimension-field-ids
+  [{:keys [cell-query]}]
+  (letfn [(collect-dimensions [[op &amp; args]]
+            (case (some-&gt; op qp.util/normalize-token)
+              :and (mapcat collect-dimensions args)
+              :=   (magic.util/collect-field-references args)
+              nil))]
+    (-&gt;&gt; cell-query
+         collect-dimensions
+         (map magic.util/field-reference-&gt;id)
+         set)))</pre></td></tr><tr><td class="docs"><p>Return matching dashboard templates ordered by specificity.
+ Most specific is defined as entity type specification the longest ancestor
+ chain.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- matching-dashboard-templates
+  [dashboard-templates {:keys [source entity]}]
+  ;; Should this be here or lifted to the calling context. It's a magic step.
+  (let [table-type (or (:entity_type source) :entity/GenericTable)]
+    (-&gt;&gt; dashboard-templates
+         (filter (fn [{:keys [applies_to]}]
+                   (let [[entity-type field-type] applies_to]
+                     (and (isa? table-type entity-type)
+                          (or (nil? field-type)
+                              (magic.util/field-isa? entity field-type))))))
+         (sort-by :specificity &gt;))))</pre></td></tr><tr><td class="docs"><p>Return all tables accessible from a given table with the paths to get there.
+ If there are multiple FKs pointing to the same table, multiple entries will
+ be returned.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- linked-tables
+  [table]
+  (for [{:keys [id target]} (field/with-targets
+                              (t2/select Field
+                                         :table_id           (u/the-id table)
+                                         :fk_target_field_id [:not= nil]
+                                         :active             true))
+        :when (some-&gt; target mi/can-read?)]
+    (-&gt; target field/table (assoc :link id))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([source])} source-&gt;db
+  (comp (partial t2/select-one Database :id) (some-fn :db_id :database_id)))</pre></td></tr><tr><td class="docs"><p>Source fields from tables that are applicable to the entity being x-rayed.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- relevant-fields
+  [{:keys [source _entity] :as _root} tables]
+  (let [db (source-&gt;db source)]
+    (if (mi/instance-of? Table source)
+      (comp (-&gt;&gt; (t2/select Field
+                            :table_id [:in (map u/the-id tables)]
+                            :visibility_type &quot;normal&quot;
+                            :preview_display true
+                            :active true)
+                 field/with-targets
+                 (map #(assoc % :db db))
+                 (group-by :table_id))
+            u/the-id)
+      (let [source-fields (-&gt;&gt; source
+                               :result_metadata
+                               (map (fn [field]
+                                      (as-&gt; field field
+                                        (update field :base_type keyword)
+                                        (update field :semantic_type keyword)
+                                        (mi/instance Field field)
+                                        (classifiers/run-classifiers field {})
+                                        (assoc field :db db)))))]
+        (constantly source-fields)))))</pre></td></tr><tr><td class="docs"><p>Create the underlying context to which we will add metrics, dimensions, and filters.</p>
+
+<p>This is applicable to all dashboard templates.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- make-base-context
+  [{:keys [source] :as root}]
+  {:pre [source]}
+  (let [tables        (concat [source] (when (mi/instance-of? Table source)
+                                         (linked-tables source)))
+        table-&gt;fields (relevant-fields root tables)]
+    {:source       (assoc source :fields (table-&gt;fields source))
+     :root         root
+     :tables       (map #(assoc % :fields (table-&gt;fields %)) tables)
+     :query-filter (filters/inject-refinement (:query-filter root)
+                                              (:cell-query root))}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- make-dashboard
+  ([root dashboard-template]
+   (make-dashboard root dashboard-template {:tables [(:source root)] :root root} nil))
+  ([root dashboard-template context {:keys [available-metrics]}]
+   (-&gt; dashboard-template
+       (select-keys [:title :description :transient_title :groups])
+       (cond-&gt;
+         (:comparison? root)
+         (update :groups (partial m/map-vals (fn [{:keys [title comparison_title] :as group}]
+                                               (assoc group :title (or comparison_title title))))))
+       (instantiate-metadata context available-metrics {}))))</pre></td></tr><tr><td class="docs"><p>Generate a map of satisfiable affinity sets (sets of dimensions that belong together)
+to visualization types that would be appropriate for each affinity set.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn affinities-&gt;viz-types
+  [normalized-card-templates ground-dimensions]
+  (reduce (partial merge-with set/union)
+          {}
+          (for [{:keys [dimensions visualization]} normalized-card-templates
+                :let [dim-set (into #{} (map ffirst) dimensions)]
+                :when (every? ground-dimensions dim-set)]
+            {dim-set #{visualization}})))</pre></td></tr><tr><td class="docs"><p>Create a dashboard group for each user-defined metric.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn user-defined-groups
+  [linked-metrics]
+  (zipmap (map :metric-name linked-metrics)
+          (map (fn [{:keys [metric-name]}]
+                 {:title (format &quot;Your %s Metric&quot; metric-name)
+                  :score 0}) linked-metrics)))</pre></td></tr><tr><td class="docs"><p>Produce card templates for user-defined metrics. The basic algorithm is to generate the
+cross product of all user defined metrics to all provided dimension affinities to all
+potential visualization options for these affinities.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn user-defined-metrics-&gt;card-templates
+  [affinities-&gt;viz-types user-defined-metrics]
+  (let [found-summary? (volatile! false)
+        summary-viz-types #{[&quot;scalar&quot; {}] [&quot;smartscalar&quot; {}]}]
+    (for [[dimension-affinities viz-types] affinities-&gt;viz-types
+          viz viz-types
+          {:keys [metric-name] :as _user-defined-metric} user-defined-metrics
+          :let [metric-title (if (seq dimension-affinities)
+                               (format &quot;%s by %s&quot; metric-name
+                                       (combination/items-&gt;str
+                                        (map (fn [s] (format &quot;[[%s]]&quot; s)) (vec dimension-affinities))))
+                               metric-name)
+                group-name (if (and (not @found-summary?)
+                                    (summary-viz-types viz))
+                             (do (vreset! found-summary? true)
+                                 &quot;Overview&quot;)
+                             metric-name)]]
+      {:card-score    100
+       :metrics       [metric-name]
+       :dimensions    (mapv (fn [dim] {dim {}}) dimension-affinities)
+       :visualization viz
+       :width         6
+       :title         (i18n/-&gt;UserLocalizedString metric-title nil {})
+       :height        4
+       :group         group-name
+       :card-name     (format &quot;Card[%s][%s]&quot; metric-title (first viz))})))</pre></td></tr><tr><td class="docs"><p>Produce the "base" dashboard from the base context for an item and a dashboard template.
+This includes dashcards and global filters, but does not include related items and is not yet populated.
+Repeated calls of this might be generated (e.g. the main dashboard and related) then combined once using
+create dashboard.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn generate-base-dashboard
+  [{{user-defined-metrics :linked-metrics :as root} :root :as base-context}
+   {template-cards      :cards
+    :keys               [dashboard_filters]
+    :as                 dashboard-template}
+   {grounded-dimensions :dimensions
+    grounded-metrics    :metrics
+    grounded-filters    :filters}]
+  (let [card-templates                 (interesting/normalize-seq-of-maps :card template-cards)
+        user-defined-card-templates    (user-defined-metrics-&gt;card-templates
+                                        (affinities-&gt;viz-types card-templates grounded-dimensions)
+                                        user-defined-metrics)
+        all-cards                      (into card-templates user-defined-card-templates)
+        dashcards                      (combination/grounded-metrics-&gt;dashcards
+                                        base-context
+                                        all-cards
+                                        grounded-dimensions
+                                        grounded-filters
+                                        grounded-metrics)
+        template-with-user-groups      (update dashboard-template
+                                               :groups into (user-defined-groups user-defined-metrics))
+        empty-dashboard                (make-dashboard root template-with-user-groups)]
+    (assoc empty-dashboard
+           ;; Adds the filters that show at the top of the dashboard
+           ;; Why do we need (or do we) the last remove form?
+           :filters (-&gt;&gt; dashboard_filters
+                         (mapcat (comp :matches grounded-dimensions))
+                         (remove (comp (singular-cell-dimension-field-ids root) id-or-name)))
+           :cards dashcards)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^:const ^Long max-related 8)
+(def ^:private ^:const ^Long max-cards 15)</pre></td></tr><tr><td class="docs"><p>Turn <code>entity</code> into an entry in <code>:related.</code></p>
+</td><td class="codes"><pre class="brush: clojure">(defn -&gt;related-entity
+  [entity]
+  (let [{:keys [dashboard-templates-prefix] :as root} (-&gt;root entity)
+        candidate-templates (dashboard-templates/get-dashboard-templates dashboard-templates-prefix)
+        dashboard-template  (-&gt;&gt; root
+                                 (matching-dashboard-templates candidate-templates)
+                                 first)
+        dashboard           (make-dashboard root dashboard-template)]
+    {:url         (:url root)
+     :title       (:full-name root)
+     :description (:description dashboard)}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- related-entities
+  [root]
+  (-&gt; root
+      :entity
+      related/related
+      (update :fields (partial remove magic.util/key-col?))
+      (-&gt;&gt; (m/map-vals (comp (partial map -&gt;related-entity) u/one-or-many)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private indepth
+  [{:keys [dashboard-templates-prefix url] :as root}
+   {:keys [dashboard-template-name]} :- [:maybe dashboard-templates/DashboardTemplate]]
+  (let [base-context (make-base-context root)]
+    (-&gt;&gt; (dashboard-templates/get-dashboard-templates (concat dashboard-templates-prefix [dashboard-template-name]))
+         (keep (fn [{indepth-template-name :dashboard-template-name
+                     template-dimensions   :dimensions
+                     template-metrics      :metrics
+                     template-filters      :filters
+                     :as                   indepth}]
+                 (let [grounded-values (interesting/identify
+                                         base-context
+                                         {:dimension-specs template-dimensions
+                                          :metric-specs    template-metrics
+                                          :filter-specs    template-filters})
+                       {:keys [description cards] :as dashboard} (generate-base-dashboard
+                                                                   base-context
+                                                                   indepth
+                                                                   grounded-values)]
+                   (when (and description (seq cards))
+                     {:title       ((some-fn :short-title :title) dashboard)
+                      :description description
+                      :url         (format &quot;%s/rule/%s/%s&quot; url dashboard-template-name indepth-template-name)}))))
+         (hash-map :indepth))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- drilldown-fields
+  [root available-dimensions]
+  (when (and (-&gt;&gt; root :source (mi/instance-of? Table))
+             (-&gt; root :entity magic.util/ga-table? not))
+    (-&gt;&gt; available-dimensions
+         vals
+         (mapcat :matches)
+         (filter mi/can-read?)
+         filters/interesting-fields
+         (map -&gt;related-entity)
+         (hash-map :drilldown-fields))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- comparisons
+  [root]
+  {:compare (concat
+             (for [segment (-&gt;&gt; root :entity related/related :segments (map -&gt;root))]
+               {:url         (str (:url root) &quot;/compare/segment/&quot; (-&gt; segment :entity u/the-id))
+                :title       (tru &quot;Compare with {0}&quot; (:comparison-name segment))
+                :description })
+             (when ((some-fn :query-filter :cell-query) root)
+               [{:url         (if (-&gt;&gt; root :source (mi/instance-of? Table))
+                                (str (:url root) &quot;/compare/table/&quot; (-&gt; root :source u/the-id))
+                                (str (:url root) &quot;/compare/adhoc/&quot;
+                                     (magic.util/encode-base64-json
+                                      {:database (:database root)
+                                       :type     :query
+                                       :query    {:source-table (-&gt;&gt; root
+                                                                     :source
+                                                                     u/the-id
+                                                                     (str &quot;card__&quot;))}})))
+                 :title       (tru &quot;Compare with entire dataset&quot;)
+                 :description }]))})</pre></td></tr><tr><td class="docs"><p>We fill available slots round-robin style. Each selector is a list of fns that are tried against
+ <code>related</code> in sequence until one matches.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- fill-related
+  [available-slots selectors related]
+  (let [pop-first         (fn [m ks]
+                            (loop [[k &amp; ks] ks]
+                              (let [item (-&gt; k m first)]
+                                (cond
+                                  item        [item (update m k rest)]
+                                  (empty? ks) [nil m]
+                                  :else       (recur ks)))))
+        count-leafs        (comp count (partial mapcat val))
+        [selected related] (reduce-kv
+                            (fn [[selected related] k v]
+                              (loop [[selector &amp; remaining-selectors] v
+                                     related                          related
+                                     selected                         selected]
+                                (let [[next related] (pop-first related (mapcat shuffle selector))
+                                      num-selected   (count-leafs selected)]
+                                  (cond
+                                    (= num-selected available-slots)
+                                    (reduced [selected related])
+                                    next
+                                    (recur remaining-selectors related (update selected k conj next))
+                                    (empty? remaining-selectors)
+                                    [selected related]
+                                    :else
+                                    (recur remaining-selectors related selected)))))
+                            [{} related]
+                            selectors)
+        num-selected (count-leafs selected)]
+    (if (pos? num-selected)
+      (merge-with concat
+        selected
+        (fill-related (- available-slots num-selected) selectors related))
+      {})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private related-selectors
+  {Table   (let [down     [[:indepth] [:segments :metrics] [:drilldown-fields]]
+                 sideways [[:linking-to :linked-from] [:tables]]
+                 compare  [[:compare]]]
+             {:zoom-in [down down down down]
+              :related [sideways sideways]
+              :compare [compare compare]})
+   Segment (let [down     [[:indepth] [:segments :metrics] [:drilldown-fields]]
+                 sideways [[:linking-to] [:tables]]
+                 up       [[:table]]
+                 compare  [[:compare]]]
+             {:zoom-in  [down down down]
+              :zoom-out [up]
+              :related  [sideways sideways]
+              :compare  [compare compare]})
+   LegacyMetric  (let [down     [[:drilldown-fields]]
+                 sideways [[:metrics :segments]]
+                 up       [[:table]]
+                 compare  [[:compare]]]
+             {:zoom-in  [down down]
+              :zoom-out [up]
+              :related  [sideways sideways sideways]
+              :compare  [compare compare]})
+   Field   (let [sideways [[:fields]]
+                 up       [[:table] [:metrics :segments]]
+                 compare  [[:compare]]]
+             {:zoom-out [up]
+              :related  [sideways sideways]
+              :compare  [compare]})
+   Card    (let [down     [[:drilldown-fields]]
+                 sideways [[:metrics] [:similar-questions :dashboard-mates]]
+                 up       [[:table]]
+                 compare  [[:compare]]]
+             {:zoom-in  [down down]
+              :zoom-out [up]
+              :related  [sideways sideways sideways]
+              :compare  [compare compare]})
+   Query   (let [down     [[:drilldown-fields]]
+                 sideways [[:metrics] [:similar-questions]]
+                 up       [[:table]]
+                 compare  [[:compare]]]
+             {:zoom-in  [down down]
+              :zoom-out [up]
+              :related  [sideways sideways sideways]
+              :compare  [compare compare]})})</pre></td></tr><tr><td class="docs"><p>Build a balanced list of related X-rays. General composition of the list is determined for each
+ root type individually via <code>related-selectors</code>. That recipe is then filled round-robin style.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private related
+  [root
+   available-dimensions
+   dashboard-template :- [:maybe dashboard-templates/DashboardTemplate]]
+  (-&gt;&gt; (merge (indepth root dashboard-template)
+              (drilldown-fields root available-dimensions)
+              (related-entities root)
+              (comparisons root))
+       (fill-related max-related (get related-selectors (-&gt; root :entity mi/model)))))</pre></td></tr><tr><td class="docs"><p>Return a map of fields referenced in filter clause.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- filter-referenced-fields
+  [root filter-clause]
+  (-&gt;&gt; filter-clause
+       magic.util/collect-field-references
+       (map (fn [[_ id-or-name _options]]
+              [id-or-name (magic.util/-&gt;field root id-or-name)]))
+       (remove (comp nil? second))
+       (into {})))</pre></td></tr><tr><td class="docs"><p>Produce a fully-populated dashboard from the base context for an item and a dashboard template.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn generate-dashboard
+  [{{:keys [show url query-filter] :as root} :root :as base-context}
+   {:as dashboard-template}
+   {grounded-dimensions :dimensions :as grounded-values}]
+  (let [show      (or show max-cards)
+        dashboard (generate-base-dashboard base-context dashboard-template grounded-values)]
+    (-&gt; dashboard
+        (populate/create-dashboard show)
+        (assoc
+         :related (related
+                   root grounded-dimensions
+                   dashboard-template)
+         :more (when (and (not= show :all)
+                          (-&gt; dashboard :cards count (&gt; show)))
+                 (format &quot;%s#show=all&quot; url))
+         :transient_filters query-filter
+         :param_fields (filter-referenced-fields root query-filter)
+         :auto_apply_filters true
+         :width &quot;fixed&quot;))))</pre></td></tr><tr><td class="docs"><p>Create dashboards for table <code>root</code> using the best matching heuristics.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- automagic-dashboard
+  [{:keys [dashboard-template dashboard-templates-prefix] :as root}]
+  (let [base-context    (make-base-context root)
+        {template-dimensions :dimensions
+         template-metrics    :metrics
+         template-filters    :filters
+         :as                 template} (if dashboard-template
+                                         (dashboard-templates/get-dashboard-template dashboard-template)
+                                         (first (matching-dashboard-templates
+                                                  (dashboard-templates/get-dashboard-templates dashboard-templates-prefix)
+                                                  root)))
+        grounded-values (interesting/identify
+                          base-context
+                          {:dimension-specs template-dimensions
+                           :metric-specs    template-metrics
+                           :filter-specs    template-filters})]
+    (generate-dashboard base-context template grounded-values)))</pre></td></tr><tr><td class="docs"><p>Create a transient dashboard analyzing given entity.</p>
+
+<p>This function eventually calls out to <code>automagic-dashboard</code> with two primary arguments:
+- The item to be analyzed. This entity is a 'decorated' version of the raw input that has been
+  passed through the <code>-&gt;root</code> function, which is an aggregate including the original entity, its
+  source, what dashboard template categories to apply, etc.
+- Additional options such as how many cards to show, a cell query (a drill through), etc.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmulti automagic-analysis
+  {:arglists '([entity opts])}
+  (fn [entity _]
+    (mi/model entity)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod automagic-analysis Table
+  [table opts]
+  (automagic-dashboard (merge (-&gt;root table) opts)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod automagic-analysis Segment
+  [segment opts]
+  (automagic-dashboard (merge (-&gt;root segment) opts)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod automagic-analysis LegacyMetric
+  [metric opts]
+  (automagic-dashboard (merge (-&gt;root metric) opts)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private collect-metrics :- [:maybe [:sequential (ms/InstanceOf LegacyMetric)]]
+  [root question]
+  (map (fn [aggregation-clause]
+         (if (-&gt; aggregation-clause
+                 first
+                 qp.util/normalize-token
+                 (= :metric))
+           (-&gt;&gt; aggregation-clause second (t2/select-one LegacyMetric :id))
+           (let [table-id (table-id question)]
+             (mi/instance LegacyMetric {:definition {:aggregation  [aggregation-clause]
+                                               :source-table table-id}
+                                  :name       (names/metric-&gt;description root aggregation-clause)
+                                  :table_id   table-id}))))
+       (get-in question [:dataset_query :query :aggregation])))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private collect-breakout-fields :- [:maybe [:sequential (ms/InstanceOf Field)]]
+  [root question]
+  (for [breakout     (get-in question [:dataset_query :query :breakout])
+        field-clause (take 1 (magic.util/collect-field-references breakout))
+        :let         [field (magic.util/-&gt;field root field-clause)]
+        :when        field]
+    field))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- decompose-question
+  [root question opts]
+  (letfn [(analyze [x]
+            (try
+              (automagic-analysis x (assoc opts
+                                           :source       (:source root)
+                                           :query-filter (:query-filter root)
+                                           :database     (:database root)))
+              (catch Throwable e
+                (throw (ex-info (tru &quot;Error decomposing question: {0}&quot; (ex-message e))
+                                {:root root, :question question, :object x}
+                                e)))))]
+    (into []
+          (comp cat (map analyze))
+          [(collect-metrics root question)
+           (collect-breakout-fields root question)])))</pre></td></tr><tr><td class="docs"><p>Ensure that elements of an original dataset query are preserved in dashcard queries.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- preserve-entity-element
+  [dashboard entity entity-element]
+  (if-let [element-value (get-in entity [:dataset_query :query entity-element])]
+    (letfn [(splice-element [dashcard]
+              (cond-&gt; dashcard
+                (get-in dashcard [:card :dataset_query :query])
+                (update-in [:card :dataset_query :query entity-element]
+                           (fnil into (empty element-value))
+                           element-value)))]
+      (update dashboard :dashcards (partial map splice-element)))
+    dashboard))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- query-based-analysis
+  [{:keys [entity] :as root} opts {:keys [cell-query cell-url]}]
+  (let [transient-dash (if (table-like? entity)
+                         (let [root' (merge root
+                                            (when cell-query
+                                              {:url                        cell-url
+                                               :entity                     (:source root)
+                                               :dashboard-templates-prefix [&quot;table&quot;]})
+                                            opts)]
+                           (automagic-dashboard root'))
+                         (let [opts      (assoc opts :show :all)
+                               root'     (merge root
+                                                (when cell-query
+                                                  {:url cell-url})
+                                                opts)
+                               base-dash (automagic-dashboard root')
+                               dash      (reduce populate/merge-dashboards
+                                                 base-dash
+                                                 (decompose-question root entity opts))]
+                           (merge dash
+                                  (when cell-query
+                                    (let [title (tru &quot;A closer look at {0}&quot; (names/cell-title root cell-query))]
+                                      {:transient_name title
+                                       :name           title})))))]
+    (-&gt; transient-dash
+        (preserve-entity-element (:entity root) :joins)
+        (preserve-entity-element (:entity root) :expressions))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod automagic-analysis Card
+  [card {:keys [cell-query] :as opts}]
+  (let [root     (-&gt;root card)
+        cell-url (format &quot;%squestion/%s/cell/%s&quot; public-endpoint
+                         (u/the-id card)
+                         (magic.util/encode-base64-json cell-query))]
+    (query-based-analysis root opts
+                          (when cell-query
+                            {:cell-query cell-query
+                             :cell-url   cell-url}))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod automagic-analysis Query
+  [query {:keys [cell-query] :as opts}]
+  (let [root       (-&gt;root query)
+        cell-query (when cell-query (mbql.normalize/normalize-fragment [:query :filter] cell-query))
+        opts       (cond-&gt; opts
+                     cell-query (assoc :cell-query cell-query))
+        cell-url   (format &quot;%sadhoc/%s/cell/%s&quot; public-endpoint
+                           (magic.util/encode-base64-json (:dataset_query query))
+                           (magic.util/encode-base64-json cell-query))]
+    (query-based-analysis root opts
+                          (when cell-query
+                            {:cell-query cell-query
+                             :cell-url   cell-url}))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod automagic-analysis Field
+  [field opts]
+  (automagic-dashboard (merge (-&gt;root field) opts)))</pre></td></tr><tr><td class="docs"><p>Add a stats field to each provided table with the following data:
+- num-fields: The number of Fields in each table
+- list-like?: Is this field 'list like'
+- link-table?: Is every Field a foreign key to another table</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- enhance-table-stats
+  [tables]
+  (when (not-empty tables)
+    (let [field-count (-&gt;&gt; (mdb.query/query {:select   [:table_id [:%count.* &quot;count&quot;]]
+                                             :from     [:metabase_field]
+                                             :where    [:and [:in :table_id (map u/the-id tables)]
+                                                        [:= :active true]]
+                                             :group-by [:table_id]})
+                           (into {} (map (juxt :table_id :count))))
+          list-like?  (-&gt;&gt; (when-let [candidates (-&gt;&gt; field-count
+                                                      (filter (comp (partial &gt;= 2) val))
+                                                      (map key)
+                                                      not-empty)]
+                             (mdb.query/query {:select   [:table_id]
+                                               :from     [:metabase_field]
+                                               :where    [:and [:in :table_id candidates]
+                                                          [:= :active true]
+                                                          [:or [:not= :semantic_type &quot;type/PK&quot;]
+                                                           [:= :semantic_type nil]]]
+                                               :group-by [:table_id]
+                                               :having   [:= :%count.* 1]}))
+                           (into #{} (map :table_id)))
+          ;; Table comprised entierly of join keys
+          link-table? (when (seq field-count)
+                        (-&gt;&gt; (mdb.query/query {:select   [:table_id [:%count.* &quot;count&quot;]]
+                                               :from     [:metabase_field]
+                                               :where    [:and [:in :table_id (keys field-count)]
+                                                          [:= :active true]
+                                                          [:in :semantic_type [&quot;type/PK&quot; &quot;type/FK&quot;]]]
+                                               :group-by [:table_id]})
+                             (filter (fn [{:keys [table_id count]}]
+                                       (= count (field-count table_id))))
+                             (into #{} (map :table_id))))]
+      (for [table tables]
+        (let [table-id (u/the-id table)]
+          (assoc table :stats {:num-fields  (field-count table-id 0)
+                               :list-like?  (boolean (contains? list-like? table-id))
+                               :link-table? (boolean (contains? link-table? table-id))}))))))</pre></td></tr><tr><td class="docs"><p>Maximal number of tables per schema shown in <code>candidate-tables</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^:const ^Long max-candidate-tables
+  10)</pre></td></tr><tr><td class="docs"><p>Return a list of tables in database with ID <code>database-id</code> for which it makes sense
+ to generate an automagic dashboard. Results are grouped by schema and ranked
+ acording to interestingness (both schemas and tables within each schema). Each
+ schema contains up to <code>max-candidate-tables</code> tables.</p>
+
+<p> Tables are ranked based on how specific dashboard template has been used, and
+ the number of fields.
+ Schemes are ranked based on the number of distinct entity types and the
+ interestingness of tables they contain (see above).</p>
+</td><td class="codes"><pre class="brush: clojure">(defn candidate-tables
+  ([database] (candidate-tables database nil))
+  ([database schema]
+   (let [dashboard-templates (dashboard-templates/get-dashboard-templates [&quot;table&quot;])]
+     (-&gt;&gt; (apply t2/select [Table :id :schema :display_name :entity_type :db_id]
+                 (cond-&gt; [:db_id (u/the-id database)
+                          :visibility_type nil
+                          :active true]
+                   schema (concat [:schema schema])))
+          (filter mi/can-read?)
+          enhance-table-stats
+          (remove (comp (some-fn :link-table? (comp zero? :num-fields)) :stats))
+          (map (fn [table]
+                 (let [root      (-&gt;root table)
+                       {:keys [dashboard-template-name]
+                        :as   dashboard-template} (-&gt;&gt; root
+                                                       (matching-dashboard-templates dashboard-templates)
+                                                       first)
+                       dashboard (make-dashboard root dashboard-template)]
+                   {:url                     (format &quot;%stable/%s&quot; public-endpoint (u/the-id table))
+                    :title                   (:short-name root)
+                    :score                   (+ (math/sq (:specificity dashboard-template))
+                                                (math/log (-&gt; table :stats :num-fields))
+                                                (if (-&gt; table :stats :list-like?)
+                                                  -10
+                                                  0))
+                    :description             (:description dashboard)
+                    :table                   table
+                    :dashboard-template-name dashboard-template-name})))
+          (group-by (comp :schema :table))
+          (map (fn [[schema tables]]
+                 (let [tables (-&gt;&gt; tables
+                                   (sort-by :score &gt;)
+                                   (take max-candidate-tables))]
+                   {:id     (format &quot;%s/%s&quot; (u/the-id database) schema)
+                    :tables tables
+                    :schema schema
+                    :score  (+ (math/sq (transduce (m/distinct-by :dashboard-template-name)
+                                                   stats/count
+                                                   tables))
+                               (math/sqrt (transduce (map (comp math/sq :score))
+                                                     stats/mean
+                                                     tables)))})))
+          (sort-by :score &gt;)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

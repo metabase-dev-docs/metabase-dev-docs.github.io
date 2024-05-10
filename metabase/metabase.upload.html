@@ -2921,13 +2921,8 @@ net.brehaut.ClojureTools = (function (SH) {
                    (= (normalize-column-name (:name field)) auto-pk-column-name))
                  (t2/select :model/Field :table_id table-id :active true))))</pre></td></tr><tr><td class="docs"><p>Consumes the header and rows from a CSV file.</p>
 
-<p> Returns a map with two keys:
-   - <code>:extant-columns</code>: an ordered map of columns found in the CSV file, excluding columns that have the same normalized name as the generated columns.
-   - <code>:generated-columns</code>: an ordered map of columns we are generating ourselves. Currently, this is just the auto-incrementing PK.</p>
-
-<p> The value of <code>extant-columns</code> and <code>generated-columns</code> is an ordered map of normalized-column-name -> type for the
- given CSV file. Supported types include <code>::int</code>, <code>::datetime</code>, etc. A column that is completely blank is assumed to
- be of type <code>::text</code>.</p>
+<p> Returns an ordered map of normalized-column-name -> type for the given CSV file. Supported types include <code>::int</code>,
+ <code>::datetime</code>, etc. A column that is completely blank is assumed to be of type <code>::text</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- detect-schema
   [settings header rows]
   (let [normalized-header   (map normalize-column-name header)
@@ -2936,8 +2931,7 @@ net.brehaut.ClojureTools = (function (SH) {
         initial-types       (repeat column-count nil)
         col-name+type-pairs (-&gt;&gt; (upload-types/column-types-from-rows settings initial-types rows)
                                  (map vector unique-header))]
-    {:extant-columns    (ordered-map/ordered-map col-name+type-pairs)
-     :generated-columns (ordered-map/ordered-map auto-pk-column-keyword ::upload-types/auto-incrementing-int-pk)}))</pre></td></tr><tr><td class="docs"><p>+------------------+
+    (ordered-map/ordered-map col-name+type-pairs)))</pre></td></tr><tr><td class="docs"><p>+------------------+
 |  Parsing values  |
 +------------------+</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
@@ -3053,33 +3047,44 @@ Exclude separators which give incompatible column counts between the header and 
   [file]
   (let [s (infer-separator file)]
     (fn [stream]
-      (csv/read-csv stream :separator s))))</pre></td></tr><tr><td class="docs"><p>Creates a table from a CSV file. If the table already exists, it will throw an error.
+      (csv/read-csv stream :separator s))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- columns-with-auto-pk [columns]
+  (merge (ordered-map/ordered-map auto-pk-column-keyword ::upload-types/auto-incrementing-int-pk) columns))</pre></td></tr><tr><td class="docs"><p>Returns true if there should be an auto-incrementing primary key column in any table created or updated from an
+ upload.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- auto-pk-column?
+  [driver db]
+  (driver/database-supports? driver :upload-with-auto-pk db))</pre></td></tr><tr><td class="docs"><p>Creates a table from a CSV file. If the table already exists, it will throw an error.
  Returns the file size, number of rows, and number of columns.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- create-from-csv!
-  [driver db-id table-name ^File csv-file]
+  [driver db table-name ^File csv-file]
   (let [parse (infer-parser csv-file)]
     (with-open [reader (bom/bom-reader csv-file)]
-      (let [[header &amp; rows] (without-auto-pk-columns (parse reader))
+      (let [auto-pk?          (auto-pk-column? driver db)
+            [header &amp; rows]   (cond-&gt; (parse reader)
+                                auto-pk?
+                                without-auto-pk-columns)
             settings          (upload-parsing/get-settings)
-            {:keys [extant-columns generated-columns]} (detect-schema settings header rows)
-            cols-&gt;upload-type (merge generated-columns extant-columns)
-            col-definitions   (column-definitions driver cols-&gt;upload-type)
-            csv-col-names     (keys extant-columns)
-            col-upload-types  (vals extant-columns)
+            cols-&gt;upload-type (detect-schema settings header rows)
+            col-definitions   (column-definitions driver (cond-&gt; cols-&gt;upload-type
+                                                           auto-pk?
+                                                           columns-with-auto-pk))
+            csv-col-names     (keys cols-&gt;upload-type)
+            col-upload-types  (vals cols-&gt;upload-type)
             parsed-rows       (vec (parse-rows settings col-upload-types rows))]
         (driver/create-table! driver
-                              db-id
+                              (:id db)
                               table-name
                               col-definitions
-                              :primary-key [auto-pk-column-keyword])
+                              (when auto-pk?
+                                {:primary-key [auto-pk-column-keyword]}))
         (try
-          (driver/insert-into! driver db-id table-name csv-col-names parsed-rows)
+          (driver/insert-into! driver (:id db) table-name csv-col-names parsed-rows)
           {:num-rows          (count rows)
-           :num-columns       (count extant-columns)
-           :generated-columns (count generated-columns)
+           :num-columns       (count cols-&gt;upload-type)
+           :generated-columns (if auto-pk? 1 0)
            :size-mb           (file-size-mb csv-file)}
           (catch Throwable e
-            (driver/drop-table! driver db-id table-name)
+            (driver/drop-table! driver (:id db) table-name)
             (throw (ex-info (ex-message e) {:status-code 400}))))))))</pre></td></tr><tr><td class="docs"><p>+------------------+
 |  Create upload
 +------------------+</p>
@@ -3162,15 +3167,16 @@ It may involve redundantly reading the file, or even failing again if the file i
         schema            (some-&gt;&gt; schema (ddl.i/format-name driver))
         table-name        (some-&gt;&gt; table-name (ddl.i/format-name driver))
         schema+table-name (table-identifier {:schema schema :name table-name})
-        stats             (create-from-csv! driver (:id db) schema+table-name file)
+        stats             (create-from-csv! driver db schema+table-name file)
         ;; Sync immediately to create the Table and its Fields; the scan is settings-dependent and can be async
         table             (sync-tables/create-or-reactivate-table! db {:name table-name :schema (not-empty schema)})
         _set_is_upload    (t2/update! :model/Table (:id table) {:is_upload true})
         _sync             (scan-and-sync-table! db table)
         ;; Set the display_name of the auto-generated primary key column to the same as its name, so that if users
         ;; download results from the table as a CSV and reupload, we'll recognize it as the same column
-        auto-pk-field     (table-id-&gt;auto-pk-column (:id table))
-        _                 (t2/update! :model/Field (:id auto-pk-field) {:display_name (:name auto-pk-field)})]
+        _ (when (auto-pk-column? driver db)
+            (let [auto-pk-field (table-id-&gt;auto-pk-column (:id table))]
+              (t2/update! :model/Field (:id auto-pk-field) {:display_name (:name auto-pk-field)})))]
     {:table table
      :stats stats}))</pre></td></tr><tr><td class="docs"><p>Main entry point for CSV uploading.</p>
 
@@ -3337,15 +3343,20 @@ Returns the newly created model. May throw validation, permimissions, or DB erro
     (let [parse (infer-parser file)]
       (with-open [reader (bom/bom-reader file)]
         (let [timer              (start-timer)
-              [header &amp; rows] (without-auto-pk-columns (parse reader))
               driver             (driver.u/database-&gt;driver database)
+              auto-pk?           (auto-pk-column? driver database)
+              [header &amp; rows]    (cond-&gt; (parse reader)
+                                   auto-pk?
+                                   without-auto-pk-columns)
               normed-name-&gt;field (m/index-by (comp normalize-column-name :name)
                                              (t2/select :model/Field :table_id (:id table) :active true))
               normed-header      (map normalize-column-name header)
               create-auto-pk?    (and
+                                  auto-pk?
                                   (driver/create-auto-pk-with-append-csv? driver)
                                   (not (contains? normed-name-&gt;field auto-pk-column-name)))
-              _                  (check-schema (dissoc normed-name-&gt;field auto-pk-column-name) header)
+              normed-name-&gt;field (cond-&gt; normed-name-&gt;field auto-pk? (dissoc auto-pk-column-name))
+              _                  (check-schema normed-name-&gt;field header)
               settings           (upload-parsing/get-settings)
               old-types          (map (comp upload-types/base-type-&gt;upload-type :base_type normed-name-&gt;field) normed-header)
               ;; in the happy, and most common, case all the values will match the existing types

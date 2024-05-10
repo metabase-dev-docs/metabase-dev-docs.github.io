@@ -2865,107 +2865,198 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#dev.deps-graph" name="dev.deps-graph"><h1 class="project-name">dev.deps-graph</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns dev.deps-graph
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.xrays.transforms.core" name="metabase.xrays.transforms.core"><h1 class="project-name">metabase.xrays.transforms.core</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.xrays.transforms.core
   (:require
-   [clojure.java.io :as io]
-   [clojure.tools.namespace.find :as ns.find]
-   [clojure.tools.namespace.parse :as ns.parse]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- project-root-directory ^java.io.File []
-  (.. (java.nio.file.Paths/get (.toURI (io/resource &quot;dev/deps_graph.clj&quot;)))
-      toFile          ; /home/cam/metabase/dev/src/dev/deps_graph.clj
-      getParentFile   ; /home/cam/metabase/dev/src/dev/
-      getParentFile   ; /home/cam/metabase/dev/src/
-      getParentFile   ; /home/cam/metabase/dev/
-      getParentFile)) ; /home/cam/metabase/</pre></td></tr><tr><td class="docs"><p>This is basically a non-hardcoded version of</p>
+   [medley.core :as m]
+   [metabase.driver :as driver]
+   [metabase.legacy-mbql.schema :as mbql.s]
+   [metabase.lib.schema.id :as lib.schema.id]
+   [metabase.lib.util.match :as lib.util.match]
+   [metabase.models.field :refer [Field]]
+   [metabase.models.interface :as mi]
+   [metabase.models.table :as table :refer [Table]]
+   [metabase.query-processor.preprocess :as qp.preprocess]
+   [metabase.util :as u]
+   [metabase.util.i18n :refer [tru]]
+   [metabase.util.malli :as mu]
+   [metabase.util.malli.schema :as ms]
+   [metabase.xrays.domain-entities.core
+    :as de
+    :refer [Bindings DimensionBindings SourceEntity SourceName]]
+   [metabase.xrays.domain-entities.specs
+    :refer [domain-entity-specs DomainEntitySpec]]
+   [metabase.xrays.transforms.materialize :as tf.materialize]
+   [metabase.xrays.transforms.specs :refer [Step transform-specs TransformSpec]]
+   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private add-bindings :- Bindings
+  [bindings     :- Bindings
+   source       :- SourceName
+   new-bindings :- [:maybe DimensionBindings]]
+  (reduce-kv (fn [bindings name definition]
+               (-&gt;&gt; definition
+                    (de/resolve-dimension-clauses bindings source)
+                    (assoc-in bindings [source :dimensions name])))
+             bindings
+             new-bindings))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- mbql-reference-&gt;col-name
+  [field-clause]
+  (lib.util.match/match-one field-clause
+    [:field (field-name :guard string?) _]
+    field-name
+    [:field (id :guard integer?) _]
+    (t2/select-one-fn :name Field :id id)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private infer-resulting-dimensions :- DimensionBindings
+  [bindings             :- Bindings
+   {:keys [joins name]} :- Step
+   query                :- mbql.s/Query]
+  (let [flattened-bindings (merge (apply merge (map (comp :dimensions bindings :source) joins))
+                                  (get-in bindings [name :dimensions]))]
+    (into {} (for [{:keys [name] :as col} (qp.preprocess/query-&gt;expected-cols query)]
+               [(if (flattened-bindings name)
+                  name
+                  ;; If the col is not one of our own we have to reconstruct to what it refers in
+                  ;; our parlance
+                  (or (some-&gt;&gt; flattened-bindings
+                               (m/find-first (comp #{name} mbql-reference-&gt;col-name))
+                               key)
+                      ;; If that doesn't work either, it's a duplicated col from a join
+                      name))
+                (de/mbql-reference col)]))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- maybe-add-fields
+  [bindings {:keys [aggregation source]} query]
+  (if-not aggregation
+    (assoc query :fields (vals (get-in bindings [source :dimensions])))
+    query))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- maybe-add-expressions
+  [bindings {:keys [expressions name]} query]
+  (if expressions
+    (-&gt; query
+        (assoc :expressions (-&gt;&gt; expressions
+                                 keys
+                                 (select-keys (get-in bindings [name :dimensions]))))
+        (update :fields concat (for [expression (keys expressions)]
+                                 [:expression expression])))
+    query))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- maybe-add-aggregation
+  [bindings {:keys [name aggregation]} query]
+  (-&gt;&gt; (for [agg (keys aggregation)]
+         [:aggregation-options (get-in bindings [name :dimensions agg]) {:name agg}])
+       not-empty
+       (m/assoc-some query :aggregation)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- maybe-add-breakout
+  [bindings {:keys [name breakout]} query]
+  (m/assoc-some query :breakout (not-empty
+                                 (for [breakout breakout]
+                                   (de/resolve-dimension-clauses bindings name breakout)))))</pre></td></tr><tr><td class="docs"><p>Serialize <code>entity</code> into a form suitable as <code>:source-table</code> value.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private -&gt;source-table-reference
+  [entity :- SourceEntity]
+  (if (mi/instance-of? Table entity)
+    (u/the-id entity)
+    (str &quot;card__&quot; (u/the-id entity))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- maybe-add-joins
+  [bindings {context-source :source joins :joins} query]
+  (m/assoc-some query :joins
+    (not-empty
+     (for [{:keys [source condition strategy]} joins]
+       (-&gt; {:condition    (de/resolve-dimension-clauses bindings context-source condition)
+            :source-table (-&gt; source bindings :entity -&gt;source-table-reference)
+            :alias        source
+            :fields       :all}
+           (m/assoc-some :strategy strategy))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- maybe-add-filter
+  [bindings {:keys [name filter]} query]
+  (m/assoc-some query :filter (de/resolve-dimension-clauses bindings name filter)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- maybe-add-limit
+  [_bindings {:keys [limit]} query]
+  (m/assoc-some query :limit limit))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private transform-step! :- Bindings
+  [bindings :- Bindings
+   {:keys [name source aggregation expressions] :as step} :- Step]
+  (let [source-entity  (get-in bindings [source :entity])
+        local-bindings (-&gt; bindings
+                           (add-bindings name (get-in bindings [source :dimensions]))
+                           (add-bindings name expressions)
+                           (add-bindings name aggregation))
+        query          {:type     :query
+                        :query    (-&gt;&gt; {:source-table (-&gt;source-table-reference source-entity)}
+                                       (maybe-add-fields local-bindings step)
+                                       (maybe-add-expressions local-bindings step)
+                                       (maybe-add-aggregation local-bindings step)
+                                       (maybe-add-breakout local-bindings step)
+                                       (maybe-add-joins local-bindings step)
+                                       (maybe-add-filter local-bindings step)
+                                       (maybe-add-limit local-bindings step))
+                        :database ((some-fn :db_id :database_id) source-entity)}]
+    (assoc bindings name {:entity     (tf.materialize/make-card-for-step! step query)
+                          :dimensions (infer-resulting-dimensions local-bindings step query)})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private Tableset
+  [:sequential (ms/InstanceOf Table)])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private find-tables-with-domain-entity :- Tableset
+  [tableset           :- Tableset
+   domain-entity-spec :- DomainEntitySpec]
+  (filter #(-&gt; % :domain_entity :type (isa? (:type domain-entity-spec))) tableset))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private tableset-&gt;bindings :- Bindings
+  [tableset :- Tableset]
+  (into {} (for [{{domain-entity-name :name dimensions :dimensions} :domain_entity :as table} tableset]
+             [domain-entity-name
+              {:dimensions (m/map-vals de/mbql-reference dimensions)
+               :entity     table}])))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private apply-transform-to-tableset! :- Bindings
+  [tableset                  :- Tableset
+   {:keys [steps _provides]} :- TransformSpec]
+  (driver/with-driver (-&gt; tableset first table/database :engine)
+    (reduce transform-step! (tableset-&gt;bindings tableset) (vals steps))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private resulting-entities :- [:sequential SourceEntity]
+  [bindings           :- Bindings
+   {:keys [provides]} :- TransformSpec]
+  (map (comp :entity val) (select-keys bindings provides)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private validate-results :- Bindings
+  [bindings           :- Bindings
+   {:keys [provides]} :- TransformSpec]
+  (doseq [domain-entity-name provides]
+    (assert (de/satisfies-requierments? (get-in bindings [domain-entity-name :entity])
+                                        (@domain-entity-specs domain-entity-name))
+      (str (tru &quot;Resulting transforms do not conform to expectations.\nExpected: {0}&quot;
+                domain-entity-name))))
+  bindings)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private tables-matching-requirements :- [:maybe Tableset]
+  [tableset           :- Tableset
+   {:keys [requires]} :- TransformSpec]
+  (let [matches (map (comp (partial find-tables-with-domain-entity tableset)
+                           @domain-entity-specs)
+                     requires)]
+    (when (every? (comp #{1} count) matches)
+      (map first matches))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private tableset :- Tableset
+  [db-id  :- ::lib.schema.id/database
+   schema :- [:maybe :string]]
+  (-&gt; (t2/select :model/Table :db_id db-id :schema schema)
+      de/with-domain-entity
+      (t2/hydrate :fields)))</pre></td></tr><tr><td class="docs"><p>Apply transform defined by transform spec <code>spec</code> to schema <code>schema</code> in database <code>db-id</code>.</p>
 
-<p>  (io/file "/home/cam/metabase/src/metabase")</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- source-root
-  ^java.io.File []
-  (io/file (str (.getAbsolutePath (project-root-directory)) &quot;/src/metabase&quot;)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- find-ns-decls []
-  (ns.find/find-ns-decls [(source-root)]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- module [ns-symb]
-  (some-&gt; (re-find #&quot;^metabase\.[^.]+&quot; (str ns-symb)) symbol))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- dependencies []
-  (for [decl (find-ns-decls)
-        :let [ns-symb (ns.parse/name-from-ns-decl decl)
-              deps    (ns.parse/deps-from-ns-decl decl)]]
-    {:namespace ns-symb
-     :module    (module ns-symb)
-     :deps      (into #{}
-                      (keep (fn [dep-symb]
-                              (when-let [module (module dep-symb)]
-                                {:namespace dep-symb
-                                 :module    module})))
-                      deps)}))</pre></td></tr><tr><td class="docs"><p>All usages of a module named by <code>module-symb</code> outside that module.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn external-usages
-  [module-symb]
-  (for [dep    (dependencies)
-        :when  (not= (:module dep) module-symb)
-        ns-dep (:deps dep)
-        :when  (= (:module ns-dep) module-symb)]
-    {:namespace            (:namespace dep)
-     :module               (:module dep)
-     :depends-on-namespace (:namespace ns-dep)
-     :depends-on-module    (:module ns-dep)}))</pre></td></tr><tr><td class="docs"><p>All namespaces from a module that are used outside that module.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn externally-used-namespaces
-  [module-symb]
-  (into (sorted-set) (map :depends-on-namespace) (external-usages module-symb)))</pre></td></tr><tr><td class="docs"><p>Build a graph of module => set of modules it refers to.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn module-dependencies
-  ([]
-   (letfn [(reduce-module-deps [module-deps module deps]
-             (reduce
-              (fn [module-deps {dep-module :module, :as _dep}]
-                (cond-&gt; module-deps
-                  (not= dep-module module) (conj dep-module)))
-              (or module-deps (sorted-set))
-              deps))
-           (reduce-deps [module-&gt;deps {:keys [module deps]}]
-             (update module-&gt;deps module reduce-module-deps module deps))]
-     (reduce reduce-deps (sorted-map) (dependencies))))
-  ([module]
-   (get (module-dependencies) module)))</pre></td></tr><tr><td class="docs"><p>Build a graph of module => set of modules it refers to that also refer to this module.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn circular-dependencies
-  ([]
-   (let [module-&gt;deps (module-dependencies)]
-     (letfn [(circular-dependency? [module-x module-y]
-               (and (contains? (get module-&gt;deps module-x) module-y)
-                    (contains? (get module-&gt;deps module-y) module-x)))
-             (circular-deps [module]
-               (let [module-deps (get module-&gt;deps module)]
-                 (not-empty (into (sorted-set)
-                                  (filter (fn [dep]
-                                            (circular-dependency? module dep)))
-                                  module-deps))))]
-       (into (sorted-map)
-             (keep (fn [module]
-                     (when-let [circular-deps (circular-deps module)]
-                       [module circular-deps])))
-             (keys module-&gt;deps)))))
-  ([module]
-   (get (circular-dependencies) module)))</pre></td></tr><tr><td class="docs"><p>A graph of [[module-dependencies]], but with modules that have any circular dependencies filtered out. This is mostly
-meant to make it easier to fill out the <code>:metabase/ns-module-checker</code> <code>:allowed-modules</code> section of the Kondo
-config, or to figure out which ones can easily get a consolidated API namespace without drama.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn non-circular-module-dependencies
-  []
-  (let [circular-dependencies (circular-dependencies)]
-    (into (sorted-map)
-          (remove (fn [[module _deps]]
-                    (contains? circular-dependencies module)))
-          (module-dependencies))))</pre></td></tr><tr><td class="docs"><p>Information about how <code>module-x</code> uses <code>module-y</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn module-usages-of-other-module
-  [module-x module-y]
-  (let [module-x-ns-&gt;module-y-ns   (-&gt;&gt; (external-usages module-y)
-                                        (filter #(= (:module %) module-x))
-                                        (map (juxt :namespace :depends-on-namespace)))]
-    (reduce
-     (fn [m [module-x-ns module-y-ns]]
-       (update m module-x-ns (fn [deps]
-                               (conj (or deps (sorted-set)) module-y-ns))))
-     (sorted-map)
-     module-x-ns-&gt;module-y-ns)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+<p>The algorithm is as follows:
+1) Try to find a set of tables in the given schema that have required domain entities.
+2) If found, use these tables and their fields as the initial bindings.
+3) Go through the transform steps, materialize them as cards, and accure these and their result
+   cols to the bindings.
+4) Check that all output cards have the expected result shape.
+5) Return the output cards.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn apply-transform!
+  [db-id  :- ::lib.schema.id/database
+   schema :- [:maybe :string]
+   spec   :- TransformSpec]
+  (tf.materialize/fresh-collection-for-transform! spec)
+  (some-&gt; (tableset db-id schema)
+          (tables-matching-requirements spec)
+          (apply-transform-to-tableset! spec)
+          (validate-results spec)
+          (resulting-entities spec)))</pre></td></tr><tr><td class="docs"><p>Return a list of candidate transforms for a given table.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn candidates
+  [table]
+  (filter (comp (partial some (comp #{(u/the-id table)} u/the-id))
+                (partial tables-matching-requirements (tableset (:db_id table) (:schema table))))
+          @transform-specs))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

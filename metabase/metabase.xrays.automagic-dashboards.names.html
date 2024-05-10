@@ -2865,107 +2865,199 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#dev.deps-graph" name="dev.deps-graph"><h1 class="project-name">dev.deps-graph</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns dev.deps-graph
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.xrays.automagic-dashboards.names" name="metabase.xrays.automagic-dashboards.names"><h1 class="project-name">metabase.xrays.automagic-dashboards.names</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.xrays.automagic-dashboards.names
   (:require
-   [clojure.java.io :as io]
-   [clojure.tools.namespace.find :as ns.find]
-   [clojure.tools.namespace.parse :as ns.parse]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- project-root-directory ^java.io.File []
-  (.. (java.nio.file.Paths/get (.toURI (io/resource &quot;dev/deps_graph.clj&quot;)))
-      toFile          ; /home/cam/metabase/dev/src/dev/deps_graph.clj
-      getParentFile   ; /home/cam/metabase/dev/src/dev/
-      getParentFile   ; /home/cam/metabase/dev/src/
-      getParentFile   ; /home/cam/metabase/dev/
-      getParentFile)) ; /home/cam/metabase/</pre></td></tr><tr><td class="docs"><p>This is basically a non-hardcoded version of</p>
-
-<p>  (io/file "/home/cam/metabase/src/metabase")</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- source-root
-  ^java.io.File []
-  (io/file (str (.getAbsolutePath (project-root-directory)) &quot;/src/metabase&quot;)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- find-ns-decls []
-  (ns.find/find-ns-decls [(source-root)]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- module [ns-symb]
-  (some-&gt; (re-find #&quot;^metabase\.[^.]+&quot; (str ns-symb)) symbol))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- dependencies []
-  (for [decl (find-ns-decls)
-        :let [ns-symb (ns.parse/name-from-ns-decl decl)
-              deps    (ns.parse/deps-from-ns-decl decl)]]
-    {:namespace ns-symb
-     :module    (module ns-symb)
-     :deps      (into #{}
-                      (keep (fn [dep-symb]
-                              (when-let [module (module dep-symb)]
-                                {:namespace dep-symb
-                                 :module    module})))
-                      deps)}))</pre></td></tr><tr><td class="docs"><p>All usages of a module named by <code>module-symb</code> outside that module.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn external-usages
-  [module-symb]
-  (for [dep    (dependencies)
-        :when  (not= (:module dep) module-symb)
-        ns-dep (:deps dep)
-        :when  (= (:module ns-dep) module-symb)]
-    {:namespace            (:namespace dep)
-     :module               (:module dep)
-     :depends-on-namespace (:namespace ns-dep)
-     :depends-on-module    (:module ns-dep)}))</pre></td></tr><tr><td class="docs"><p>All namespaces from a module that are used outside that module.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn externally-used-namespaces
-  [module-symb]
-  (into (sorted-set) (map :depends-on-namespace) (external-usages module-symb)))</pre></td></tr><tr><td class="docs"><p>Build a graph of module => set of modules it refers to.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn module-dependencies
-  ([]
-   (letfn [(reduce-module-deps [module-deps module deps]
-             (reduce
-              (fn [module-deps {dep-module :module, :as _dep}]
-                (cond-&gt; module-deps
-                  (not= dep-module module) (conj dep-module)))
-              (or module-deps (sorted-set))
-              deps))
-           (reduce-deps [module-&gt;deps {:keys [module deps]}]
-             (update module-&gt;deps module reduce-module-deps module deps))]
-     (reduce reduce-deps (sorted-map) (dependencies))))
-  ([module]
-   (get (module-dependencies) module)))</pre></td></tr><tr><td class="docs"><p>Build a graph of module => set of modules it refers to that also refer to this module.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn circular-dependencies
-  ([]
-   (let [module-&gt;deps (module-dependencies)]
-     (letfn [(circular-dependency? [module-x module-y]
-               (and (contains? (get module-&gt;deps module-x) module-y)
-                    (contains? (get module-&gt;deps module-y) module-x)))
-             (circular-deps [module]
-               (let [module-deps (get module-&gt;deps module)]
-                 (not-empty (into (sorted-set)
-                                  (filter (fn [dep]
-                                            (circular-dependency? module dep)))
-                                  module-deps))))]
-       (into (sorted-map)
-             (keep (fn [module]
-                     (when-let [circular-deps (circular-deps module)]
-                       [module circular-deps])))
-             (keys module-&gt;deps)))))
-  ([module]
-   (get (circular-dependencies) module)))</pre></td></tr><tr><td class="docs"><p>A graph of [[module-dependencies]], but with modules that have any circular dependencies filtered out. This is mostly
-meant to make it easier to fill out the <code>:metabase/ns-module-checker</code> <code>:allowed-modules</code> section of the Kondo
-config, or to figure out which ones can easily get a consolidated API namespace without drama.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn non-circular-module-dependencies
-  []
-  (let [circular-dependencies (circular-dependencies)]
-    (into (sorted-map)
-          (remove (fn [[module _deps]]
-                    (contains? circular-dependencies module)))
-          (module-dependencies))))</pre></td></tr><tr><td class="docs"><p>Information about how <code>module-x</code> uses <code>module-y</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn module-usages-of-other-module
-  [module-x module-y]
-  (let [module-x-ns-&gt;module-y-ns   (-&gt;&gt; (external-usages module-y)
-                                        (filter #(= (:module %) module-x))
-                                        (map (juxt :namespace :depends-on-namespace)))]
-    (reduce
-     (fn [m [module-x-ns module-y-ns]]
-       (update m module-x-ns (fn [deps]
-                               (conj (or deps (sorted-set)) module-y-ns))))
-     (sorted-map)
-     module-x-ns-&gt;module-y-ns)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+   [clojure.string :as str]
+   [java-time.api :as t]
+   [metabase.legacy-mbql.normalize :as mbql.normalize]
+   [metabase.legacy-mbql.util :as mbql.u]
+   [metabase.lib.util.match :as lib.util.match]
+   [metabase.query-processor.util :as qp.util]
+   [metabase.util.date-2 :as u.date]
+   [metabase.util.i18n :refer [deferred-tru tru]]
+   [metabase.xrays.automagic-dashboards.util :as magic.util]
+   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs"><p>TODO - rename "minumum" to "minimum". Note that there are internationalization string implications
+here so make sure to do a <em>thorough</em> find and replace on this.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private op-&gt;name
+  {:sum       (deferred-tru &quot;sum&quot;)
+   :avg       (deferred-tru &quot;average&quot;)
+   :min       (deferred-tru &quot;minumum&quot;)
+   :max       (deferred-tru &quot;maximum&quot;)
+   :count     (deferred-tru &quot;number&quot;)
+   :distinct  (deferred-tru &quot;distinct count&quot;)
+   :stddev    (deferred-tru &quot;standard deviation&quot;)
+   :cum-count (deferred-tru &quot;cumulative count&quot;)
+   :cum-sum   (deferred-tru &quot;cumulative sum&quot;)})</pre></td></tr><tr><td class="docs"><p>Return the name of the metric or name by describing it.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn metric-name
+  [[op &amp; args :as metric]]
+  (cond
+    (mbql.u/ga-metric-or-segment? metric) (-&gt; args first str (subs 3) str/capitalize)
+    (magic.util/adhoc-metric? metric)     (-&gt; op qp.util/normalize-token op-&gt;name)
+    (magic.util/saved-metric? metric)     (-&gt;&gt; args first (t2/select-one :model/LegacyMetric :id) :name)
+    :else                                 (second args)))</pre></td></tr><tr><td class="docs"><p>Join a sequence as [1 2 3 4] to "1, 2, 3 and 4"</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- join-enumeration
+  [xs]
+  (if (next xs)
+    (tru &quot;{0} and {1}&quot; (str/join &quot;, &quot; (butlast xs)) (last xs))
+    (first xs)))</pre></td></tr><tr><td class="docs"><p>Return the (display) name of the source of a given root object.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^{:arglists '([root])} source-name
+  (comp (some-fn :display_name :name) :source))</pre></td></tr><tr><td class="docs"><p>Return a description for the metric.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn metric-&gt;description
+  [root aggregation-clause]
+  (join-enumeration
+   (for [metric (if (sequential? (first aggregation-clause))
+                  aggregation-clause
+                  [aggregation-clause])]
+     (if (magic.util/adhoc-metric? metric)
+       (tru &quot;{0} of {1}&quot; (metric-name metric) (or (some-&gt;&gt; metric
+                                                           second
+                                                           (magic.util/-&gt;field root)
+                                                           :display_name)
+                                                  (source-name root)))
+       (metric-name metric)))))</pre></td></tr><tr><td class="docs"><p>Generate a description for the question.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn question-description
+  [root question]
+  (let [aggregations (-&gt;&gt; (get-in question [:dataset_query :query :aggregation])
+                          (metric-&gt;description root))
+        dimensions   (-&gt;&gt; (get-in question [:dataset_query :query :breakout])
+                          (mapcat magic.util/collect-field-references)
+                          (map (comp :display_name
+                                     (partial magic.util/-&gt;field root)))
+                          join-enumeration)]
+    (if dimensions
+      (tru &quot;{0} by {1}&quot; aggregations dimensions)
+      aggregations)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmulti
+  ^{:private true
+    :arglists '([fieldset [op &amp; args]])}
+  humanize-filter-value (fn [_ [op &amp; _args]]
+                          (qp.util/normalize-token op)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private unit-name (comp {:minute-of-hour  (deferred-tru &quot;minute&quot;)
+                                :hour-of-day     (deferred-tru &quot;hour&quot;)
+                                :day-of-week     (deferred-tru &quot;day of week&quot;)
+                                :day-of-month    (deferred-tru &quot;day of month&quot;)
+                                :day-of-year     (deferred-tru &quot;day of year&quot;)
+                                :week-of-year    (deferred-tru &quot;week&quot;)
+                                :month-of-year   (deferred-tru &quot;month&quot;)
+                                :quarter-of-year (deferred-tru &quot;quarter&quot;)
+                                :year            (deferred-tru &quot;year&quot;)}
+                               qp.util/normalize-token))</pre></td></tr><tr><td class="docs"><p>Turn a field reference into a field.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn item-reference-&gt;field
+  [root [item-type :as item-reference]]
+  (case item-type
+    (:field &quot;field&quot;) (let [normalized-field-reference (mbql.normalize/normalize item-reference)
+                           temporal-unit              (lib.util.match/match-one normalized-field-reference
+                                                                        [:field _ (opts :guard :temporal-unit)]
+                                                                        (:temporal-unit opts))
+                           {:keys [display_name] :as field-record} (cond-&gt; (-&gt;&gt; normalized-field-reference
+                                                                                magic.util/collect-field-references
+                                                                                first
+                                                                                (magic.util/-&gt;field root))
+                                                                     temporal-unit
+                                                                     (assoc :unit temporal-unit))
+                           item-name                  (cond-&gt;&gt; display_name
+                                                               (some-&gt; temporal-unit u.date/extract-units)
+                                                               (tru &quot;{0} of {1}&quot; (unit-name temporal-unit)))]
+                       (assoc field-record :item-name item-name))
+    (:expression &quot;expression&quot;) {:item-name (second item-reference)}
+    {:item-name &quot;item&quot;}))</pre></td></tr><tr><td class="docs"><p>Determine the right name to display from an individual humanized item.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn item-name
+  ([root [field-type potential-name :as field-reference]]
+   (case field-type
+     (:field &quot;field&quot;) (-&gt;&gt; field-reference (item-reference-&gt;field root) item-name)
+     (:expression &quot;expression&quot;) potential-name
+     &quot;item&quot;))
+  ([{:keys [display_name unit] :as _field}]
+   (cond-&gt;&gt; display_name
+     (some-&gt; unit u.date/extract-units) (tru &quot;{0} of {1}&quot; (unit-name unit)))))</pre></td></tr><tr><td class="docs"><p>Add appropriate pluralization suffixes for integer numbers.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn pluralize
+  [x]
+  ;; the `int` cast here is to fix performance warnings if `*warn-on-reflection*` is enabled
+  (case (int (mod x 10))
+    1 (tru &quot;{0}st&quot; x)
+    2 (tru &quot;{0}nd&quot; x)
+    3 (tru &quot;{0}rd&quot; x)
+    (tru &quot;{0}th&quot; x)))</pre></td></tr><tr><td class="docs"><p>Convert a time data type into a human friendly string.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn humanize-datetime
+  [t-str unit]
+  (let [dt (u.date/parse t-str)]
+    (case unit
+      :second          (tru &quot;at {0}&quot; (t/format &quot;h:mm:ss a, MMMM d, YYYY&quot; dt))
+      :minute          (tru &quot;at {0}&quot; (t/format &quot;h:mm a, MMMM d, YYYY&quot; dt))
+      :hour            (tru &quot;at {0}&quot; (t/format &quot;h a, MMMM d, YYYY&quot; dt))
+      :day             (tru &quot;on {0}&quot; (t/format &quot;MMMM d, YYYY&quot; dt))
+      :week            (tru &quot;in {0} week - {1}&quot;
+                            (pluralize (u.date/extract dt :week-of-year))
+                            (str (u.date/extract dt :year)))
+      :month           (tru &quot;in {0}&quot; (t/format &quot;MMMM YYYY&quot; dt))
+      :quarter         (tru &quot;in Q{0} - {1}&quot;
+                            (u.date/extract dt :quarter-of-year)
+                            (str (u.date/extract dt :year)))
+      :year            (t/format &quot;YYYY&quot; dt)
+      :day-of-week     (t/format &quot;EEEE&quot; dt)
+      :hour-of-day     (tru &quot;at {0}&quot; (t/format &quot;h a&quot; dt))
+      :month-of-year   (t/format &quot;MMMM&quot; dt)
+      :quarter-of-year (tru &quot;Q{0}&quot; (u.date/extract dt :quarter-of-year))
+      (:minute-of-hour
+       :day-of-month
+       :day-of-year
+       :week-of-year)  (u.date/extract dt unit))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod humanize-filter-value :=
+  [root [_ field-reference value]]
+  (let [{:keys [item-name effective_type base_type unit]} (item-reference-&gt;field root field-reference)]
+    (if (isa? (or effective_type base_type) :type/Temporal)
+      (tru &quot;{0} is {1}&quot; item-name (humanize-datetime value unit))
+      (tru &quot;{0} is {1}&quot; item-name value))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod humanize-filter-value :&gt;=
+  [root [_ field-reference value]]
+  (let [{:keys [item-name effective_type base_type unit]} (item-reference-&gt;field root field-reference)]
+    (if (isa? (or effective_type base_type) :type/Temporal)
+      (tru &quot;{0} is not before {1}&quot; item-name (humanize-datetime value unit))
+      (tru &quot;{0} is at least {1}&quot; item-name value))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod humanize-filter-value :&gt;
+  [root [_ field-reference value]]
+  (let [{:keys [item-name effective_type base_type unit]} (item-reference-&gt;field root field-reference)]
+    (if (isa? (or effective_type base_type) :type/Temporal)
+      (tru &quot;{0} is after {1}&quot; item-name (humanize-datetime value unit))
+      (tru &quot;{0} is greater than {1}&quot; item-name value))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod humanize-filter-value :&lt;=
+  [root [_ field-reference value]]
+  (let [{:keys [item-name effective_type base_type unit]} (item-reference-&gt;field root field-reference)]
+    (if (isa? (or effective_type base_type) :type/Temporal)
+      (tru &quot;{0} is not after {1}&quot; item-name (humanize-datetime value unit))
+      (tru &quot;{0} is no more than {1}&quot; item-name value))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod humanize-filter-value :&lt;
+  [root [_ field-reference value]]
+  (let [{:keys [item-name effective_type base_type unit]} (item-reference-&gt;field root field-reference)]
+    (if (isa? (or effective_type base_type) :type/Temporal)
+      (tru &quot;{0} is before {1}&quot; item-name (humanize-datetime value unit))
+      (tru &quot;{0} is less than {1}&quot; item-name value))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod humanize-filter-value :between
+  [root [_ field-reference min-value max-value]]
+  (tru &quot;{0} is between {1} and {2}&quot; (item-name root field-reference) min-value max-value))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod humanize-filter-value :inside
+  [root [_ lat-reference lon-reference lat-max lon-min lat-min lon-max]]
+  (tru &quot;{0} is between {1} and {2}; and {3} is between {4} and {5}&quot;
+       (item-name root lon-reference) lon-min lon-max
+       (item-name root lat-reference) lat-min lat-max))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod humanize-filter-value :and
+  [root [_ &amp; clauses]]
+  (-&gt;&gt; clauses
+       (map (partial humanize-filter-value root))
+       join-enumeration))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod humanize-filter-value :default
+  [root [_ field-reference value]]
+  (let [{:keys [item-name effective_type base_type unit]} (item-reference-&gt;field root field-reference)]
+    (if (isa? (or effective_type base_type) :type/Temporal)
+      (tru &quot;{0} relates to {1}&quot; item-name (humanize-datetime value unit))
+      (tru &quot;{0} relates to {1}&quot; item-name value))))</pre></td></tr><tr><td class="docs"><p>Return a cell title given a root object and a cell query.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn cell-title
+  [root cell-query]
+  (str/join &quot; &quot; [(if-let [aggregation (get-in root [:entity :dataset_query :query :aggregation])]
+                   (metric-&gt;description root aggregation)
+                   (:full-name root))
+                 (tru &quot;where {0}&quot; (humanize-filter-value root cell-query))]))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
