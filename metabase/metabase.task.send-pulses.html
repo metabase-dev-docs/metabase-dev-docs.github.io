@@ -2897,23 +2897,35 @@ and send the pulse to both channels. </p>
                         pulse-id (-&gt; schedule-map
                                      u.cron/schedule-map-&gt;cron-string
                                      (str/replace &quot; &quot; &quot;_&quot;)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- send-pulse-trigger-key-&gt;schedule-map
+  [trigger-key]
+  (let [[_ _pulse-id schedule-str] (re-matches #&quot;metabase\.task\.send-pulse\.trigger\.(\d+)\.(.*)&quot; trigger-key)]
+    (-&gt; schedule-str
+        (str/replace &quot;_&quot; &quot; &quot;)
+        u.cron/cron-string-&gt;schedule-map)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- send-pulse!
   [pulse-id channel-ids]
   (try
     (task-history/with-task-history {:task         &quot;send-pulse&quot;
                                      :task_details {:pulse-id    pulse-id
                                                     :channel-ids (seq channel-ids)}}
-      (log/debugf &quot;Starting Pulse Execution: %d&quot; pulse-id)
       (when-let [pulse (pulse/retrieve-notification pulse-id :archived false)]
-        (metabase.pulse/send-pulse! pulse :channel-ids channel-ids))
-      (log/debugf &quot;Finished Pulse Execution: %d&quot; pulse-id))
+        (log/debugf &quot;Starting Pulse Execution: %d&quot; pulse-id)
+        (metabase.pulse/send-pulse! pulse :channel-ids channel-ids)
+        (log/debugf &quot;Finished Pulse Execution: %d&quot; pulse-id)
+        :done))
     (catch Throwable e
       (log/errorf e &quot;Error sending Pulse %d to channel ids: %s&quot; pulse-id (str/join &quot;, &quot; channel-ids)))))</pre></td></tr><tr><td class="docs"><p>Build a Quartz trigger to send a pulse to a list of channel-ids.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private send-pulse-trigger
   ^CronTrigger
-  [pulse-id     :- pos-int?
+  ([pulse-id     :- pos-int?
+    schedule-map :- u.cron/ScheduleMap
+    pc-ids       :- [:set pos-int?]]
+   (send-pulse-trigger pulse-id schedule-map pc-ids 6))
+ ([pulse-id     :- pos-int?
    schedule-map :- u.cron/ScheduleMap
-   pc-ids       :- [:set pos-int?]]
+   pc-ids       :- [:set pos-int?]
+   priority     :- pos-int?]
   (triggers/build
    (triggers/with-identity (send-pulse-trigger-key pulse-id schedule-map))
    (triggers/for-job send-pulse-job-key)
@@ -2926,7 +2938,8 @@ and send the pulse to both channels. </p>
       ;; Just wait until the next sync cycle.
       ;;
       ;; See https://www.nurkiewicz.com/2012/04/quartz-scheduler-misfire-instructions.html for more info
-      (cron/with-misfire-handling-instruction-fire-and-proceed)))))</pre></td></tr><tr><td class="docs"><p>Delete PulseChannels that have no recipients and no channel set for a pulse, returns the channel ids that were deleted.</p>
+      (cron/with-misfire-handling-instruction-fire-and-proceed)))
+   (triggers/with-priority priority))))</pre></td></tr><tr><td class="docs"><p>Delete PulseChannels that have no recipients and no channel set for a pulse, returns the channel ids that were deleted.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- clear-pulse-channels-no-recipients!
   [pulse-id]
   (when-let [ids-to-delete (seq
@@ -2941,20 +2954,41 @@ and send the pulse to both channels. </p>
                                 (:id channel))))]
     (log/infof &quot;Deleting %d PulseChannels with id: %s due to having no recipients&quot; (count ids-to-delete) (str/join &quot;, &quot; ids-to-delete))
     (t2/delete! :model/PulseChannel :id [:in ids-to-delete])
-    (set ids-to-delete)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- clear-pcs-and-send-pulse!
-  [pulse-id channel-ids]
+    (set ids-to-delete)))</pre></td></tr><tr><td class="docs"><p>Converts a duration in milliseconds to a priority value for a trigger.</p>
+
+<p>Pulses are time sensitive, so we need it to have higher priority than other tasks, in which has a default priority of 5.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- ms-duration-&gt;priority
+  [ms-duration]
+  (-&gt; ms-duration
+      (/ 1000)
+      ;; assuming 1 hour is the max duration a pulse can take
+      (#(- (* 60 60) %))
+      ;; make sure it's higher than 5 (the default priority)
+      (max 6)
+      int))</pre></td></tr><tr><td class="docs"><p>Do several things:
+- Clear PulseChannels that have no recipients and no channel set for a pulse
+- Send a pulse to a list of channels
+- Update the priority of the trigger if the pulse is sent successfully</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- send-pulse!*
+  [schedule-map pulse-id channel-ids]
   (let [cleared-channel-ids         (clear-pulse-channels-no-recipients! pulse-id)
         to-send-channel-ids         (set/difference channel-ids cleared-channel-ids)
         to-send-enabled-channel-ids (t2/select-pks-set :model/PulseChannel :id [:in to-send-channel-ids] :enabled true)]
     (if (seq to-send-enabled-channel-ids)
-     (send-pulse! pulse-id to-send-enabled-channel-ids)
-     (log/infof &quot;Skip sending pulse %d because all channels have no recipients&quot; pulse-id))))</pre></td></tr><tr><td class="docs"><p>Triggers that send a pulse to a list of channels at a specific time</p>
+      (let [start    (System/currentTimeMillis)
+            result   (send-pulse! pulse-id to-send-enabled-channel-ids)
+            end      (System/currentTimeMillis)
+            priority (ms-duration-&gt;priority (- end start))]
+        (when (= :done result)
+          (log/infof &quot;Updating priority of trigger %s to %d&quot; (.getName ^TriggerKey (send-pulse-trigger-key pulse-id schedule-map)) priority)
+          (task/reschedule-trigger! (send-pulse-trigger pulse-id schedule-map channel-ids priority))))
+      (log/infof &quot;Skip sending pulse %d because all channels have no recipients&quot; pulse-id))))</pre></td></tr><tr><td class="docs"><p>Triggers that send a pulse to a list of channels at a specific time</p>
 </td><td class="codes"><pre class="brush: clojure">(jobs/defjob 
   SendPulse
   [context]
-  (let [{:strs [pulse-id channel-ids]} (qc/from-job-data context)]
-    (clear-pcs-and-send-pulse! pulse-id channel-ids)))</pre></td></tr><tr><td class="docs"><p>--------------------------------------------- Helpers -------------------------------------------</p>
+  (let [{:strs [pulse-id channel-ids]} (qc/from-job-data context)
+        trigger-key                    (.. context getTrigger getKey getName)]
+    (send-pulse!* (send-pulse-trigger-key-&gt;schedule-map trigger-key) pulse-id channel-ids)))</pre></td></tr><tr><td class="docs"><p>--------------------------------------------- Helpers -------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Update send pulse trigger of a pulse for a specific schedule map with new pulse channel ids.</p>
 
 <p>Send Pulse triggers are grouped by pulse id and schedule time, meaning PulseChannels of a Pulse that scheduled
