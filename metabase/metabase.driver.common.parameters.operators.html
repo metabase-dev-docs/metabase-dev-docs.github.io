@@ -2883,7 +2883,14 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.util.malli :as mu]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private operator-arity :- [:maybe [:enum :unary :binary :variadic]]
   [param-type]
-  (get-in lib.schema.parameter/types [param-type :operator]))</pre></td></tr><tr><td class="docs"><p>Returns whether param-type is an "operator" type.</p>
+  (get-in lib.schema.parameter/types [param-type :operator]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- operator-options-fn
+  [param-type]
+  (get-in lib.schema.parameter/types [param-type :options-fn]
+          ;; Default is to conj on the end if options are provided.
+          (fn [clause options]
+            (cond-&gt; clause
+              options (conj options)))))</pre></td></tr><tr><td class="docs"><p>Returns whether param-type is an "operator" type.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn operator?
   [param-type]
   (boolean (operator-arity param-type)))</pre></td></tr><tr><td class="docs">
@@ -2919,17 +2926,12 @@ net.brehaut.ClojureTools = (function (SH) {
   `:type qp.error-type/invalid-parameter` if arity is incorrect.&quot;
   [{param-type :type [a b :as param-value] :value [_ field :as _target] :target options :options :as _param}]
   (verify-type-and-arity field param-type param-value)
-  (let [field' (mbql.u/wrap-field-id-if-needed field)]
+  (let [field'  (mbql.u/wrap-field-id-if-needed field)
+        opts-fn (operator-options-fn param-type)]
     (case (operator-arity param-type)
-      :binary
-      (cond-&gt; [(keyword (name param-type)) field' a b]
-        (boolean options) (conj options))
-      :unary
-      (cond-&gt; [(keyword (name param-type)) field' a]
-        (boolean options) (conj options))
-      :variadic
-      (cond-&gt; (into [(keyword (name param-type)) field'] param-value)
-        (boolean options) (conj options))
+      :binary   (opts-fn [(keyword (name param-type)) field' a b] options)
+      :unary    (opts-fn [(keyword (name param-type)) field' a] options)
+      :variadic (opts-fn (into [(keyword (name param-type)) field'] param-value) options)
       (throw (ex-info (format &quot;Unrecognized operator: %s&quot; param-type)
                       {:param-type param-type
                        :param-value param-value
