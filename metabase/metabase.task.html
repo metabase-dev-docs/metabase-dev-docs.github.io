@@ -2889,7 +2889,7 @@ task to the scheduler as usual via <code>schedule-task!</code>.</p>
    [metabase.util.malli :as mu]
    [metabase.util.malli.schema :as ms])
   (:import
-   (org.quartz CronTrigger JobDetail JobKey Scheduler Trigger TriggerKey)))</pre></td></tr><tr><td class="docs">
+   (org.quartz CronTrigger JobDetail JobKey JobPersistenceException Scheduler Trigger TriggerKey)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
 |                                               SCHEDULER INSTANCE                                               |
 +----------------------------------------------------------------------------------------------------------------+</p>
@@ -2980,7 +2980,17 @@ connection properties ahead of time, we'll need to set these at runtime rather t
 </td><td class="codes"><pre class="brush: clojure">(defn- set-jdbc-backend-properties!
   []
   (when (= (mdb/db-type) :postgres)
-    (System/setProperty &quot;org.quartz.jobStore.driverDelegateClass&quot; &quot;org.quartz.impl.jdbcjobstore.PostgreSQLDelegate&quot;)))</pre></td></tr><tr><td class="docs"><p>Initialize our Quartzite scheduler which allows jobs to be submitted and triggers to scheduled. Puts scheduler in
+    (System/setProperty &quot;org.quartz.jobStore.driverDelegateClass&quot; &quot;org.quartz.impl.jdbcjobstore.PostgreSQLDelegate&quot;)))</pre></td></tr><tr><td class="docs"><p>Delete any jobs that have been scheduled but whose class is no longer available.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- delete-jobs-with-no-class!
+  []
+  (when-let [scheduler (scheduler)]
+    (doseq [job-key (.getJobKeys scheduler nil)]
+      (try
+        (qs/get-job scheduler job-key)
+        (catch JobPersistenceException e
+          (when (instance? ClassNotFoundException (.getCause e))
+            (log/infof &quot;Deleting job %s due to class not found&quot; (.getName ^JobKey job-key))
+            (qs/delete-job scheduler job-key)))))))</pre></td></tr><tr><td class="docs"><p>Initialize our Quartzite scheduler which allows jobs to be submitted and triggers to scheduled. Puts scheduler in
 standby mode. Call [[start-scheduler!]] to begin running scheduled tasks.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- init-scheduler!
   []
@@ -2992,6 +3002,7 @@ standby mode. Call [[start-scheduler!]] to begin running scheduled tasks.</p>
         (find-and-load-task-namespaces!)
         (qs/standby new-scheduler)
         (log/info &quot;Task scheduler initialized into standby mode.&quot;)
+        (delete-jobs-with-no-class!)
         (init-tasks!)))))</pre></td></tr><tr><td class="docs"><p>this is a function mostly to facilitate testing.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- disable-scheduler? []
   (some-&gt; (env/env :mb-disable-scheduler) Boolean/parseBoolean))</pre></td></tr><tr><td class="docs"><p>Start the task scheduler. Tasks do not run before calling this function.</p>
