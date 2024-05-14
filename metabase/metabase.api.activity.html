@@ -2881,6 +2881,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.models.table :refer [Table]]
    [metabase.models.view-log :refer [ViewLog]]
    [metabase.util.honey-sql-2 :as h2x]
+   [metabase.util.malli :as mu]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- models-query
   [model ids]
@@ -2976,23 +2977,10 @@ query results for dashboard and table views.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private views-limit 8)
 (def ^:private card-runs-limit 8)</pre></td></tr><tr><td class="docs"><p>/recent_views</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
-  &quot;Get a list of 5 things the current user has been viewing most recently.&quot;
+  &quot;Get a list of 100 models (cards, models, tables, dashboards, and collections) that the current user has been viewing most
+  recently. Return a maximum of 20 model of each, if they've looked at at least 20.&quot;
   []
-  (let [views            (recent-views/user-recent-views api/*current-user-id* 10)
-        model-&gt;id-&gt;items (models-for-views views)]
-    (-&gt;&gt; (for [{:keys [model model_id] :as view-log} views
-               :let
-               [model-object (-&gt; (get-in model-&gt;id-&gt;items [model model_id])
-                                 (dissoc :dataset_query))]
-               :when
-               (and model-object
-                    (mi/can-read? model-object)
-                    ;; hidden tables, archived cards/dashboards
-                    (not (or (:archived model-object)
-                             (= (:visibility_type model-object) :hidden))))]
-           (cond-&gt; (assoc view-log :model_object model-object)
-             (= (keyword (:type model-object)) :model) (assoc :model &quot;dataset&quot;)))
-         (take 5))))</pre></td></tr><tr><td class="docs"><p>/most<em>recently</em>viewed_dashboard</p>
+  {:recent_views (recent-views/get-list *current-user-id*)})</pre></td></tr><tr><td class="docs"><p>/most<em>recently</em>viewed_dashboard</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
   &quot;Get the most recently viewed dashboard for the current user. Returns a 204 if the user has not viewed any dashboards
    in the last 24 hours.&quot;
@@ -3019,37 +3007,38 @@ if the item can be placed in a collection.</p>
   (when (seq items)
     (let [n-items (count items)
           max-count (apply max (map :cnt items))]
-      (for [[recency-pos {:keys [cnt model_object] :as item}] (zipmap (range) items)]
-        (let [verified-wt 1
-              official-wt 1
-              recency-wt 2
-              views-wt 4
-              scores [;; cards and dashboards? can be 'verified' in enterprise
-                      (if (verified? model_object) verified-wt 0)
-                      ;; items may exist in an 'official' collection in enterprise
-                      (if (official? model_object) official-wt 0)
-                      ;; most recent item = 1 * recency-wt, least recent item of 10 items = 1/10 * recency-wt
-                      (* (/ (- n-items recency-pos) n-items) recency-wt)
-                      ;; item with highest count = 1 * views-wt, lowest = item-view-count / max-view-count * views-wt
-                      ;; NOTE: the query implementation `views-and-runs` has an order-by clause using most recent timestamp
-                      ;; this has an effect on the outcomes. Consider an item with a massively high viewcount but a last view by the user
-                      ;; a long time ago. This may not even make it into the firs 10 items from the query, even though it might be worth showing
-                      (* (/ cnt max-count) views-wt)]]
-          (assoc item :score (double (reduce + scores))))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private model-precedence [&quot;dashboard&quot; &quot;card&quot; &quot;dataset&quot; &quot;table&quot;])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- order-items
-  [items]
-  (when (seq items)
-    (let [groups (group-by :model items)]
-      (mapcat #(get groups %) model-precedence))))</pre></td></tr><tr><td class="docs"><p>/popular_items</p>
-</td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
-  &quot;Get the list of 5 popular things for the current user. Query takes 8 and limits to 5 so that if it
-  finds anything archived, deleted, etc it can usually still get 5.&quot;
-  []
-  ;; we can do a weighted score which incorporates:
-  ;; total count -&gt; higher = higher score
-  ;; recently viewed -&gt; more recent = higher score
-  ;; official/verified -&gt; yes = higher score
+      (map-indexed
+       (fn [recency-pos {:keys [cnt model_object] :as item}]
+         (let [verified-wt 1
+               official-wt 1
+               recency-wt 2
+               views-wt 4
+               scores [;; cards and dashboards? can be 'verified' in enterprise
+                       (if (verified? model_object) verified-wt 0)
+                       ;; items may exist in an 'official' collection in enterprise
+                       (if (official? model_object) official-wt 0)
+                       ;; most recent item = 1 * recency-wt, least recent item of 10 items = 1/10 * recency-wt
+                       (* (/ (- n-items recency-pos) n-items) recency-wt)
+                       ;; item with highest count = 1 * views-wt, lowest = item-view-count / max-view-count * views-wt
+                       ;; NOTE: the query implementation `views-and-runs` has an order-by clause using most recent timestamp
+                       ;; this has an effect on the outcomes. Consider an item with a massively high viewcount but a last view by the user
+                       ;; a long time ago. This may not even make it into the firs 10 items from the query, even though it might be worth showing
+                       (* (/ cnt max-count) views-wt)]]
+           (assoc item :score (double (reduce + scores))))) items))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private model-&gt;precedence
+  {&quot;dashboard&quot;  0
+   &quot;card&quot;       1
+   &quot;dataset&quot;    2
+   &quot;table&quot;      3
+   &quot;collection&quot; 4})</pre></td></tr><tr><td class="docs"><p>Returns the 'popular' items for the current user. This is a list of 5 items that the user has viewed recently.
+ The items are sorted by a weighted score that takes into account the total count of views, the recency of the view,
+ whether the item is 'official' or 'verified', and more.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn get-popular-items-model-and-id
+  [] :- [:sequential recent-views/Item]
+  ;; we do a weighted score which incorporates:
+  ;; - total count -&gt; higher = higher score
+  ;; - recently viewed -&gt; more recent = higher score
+  ;; - official/verified -&gt; yes = higher score
   (let [views (views-and-runs views-limit card-runs-limit true)
         model-&gt;id-&gt;items (models-for-views views)
         filtered-views (for [{:keys [model model_id] :as view-log} views
@@ -3059,16 +3048,28 @@ if the item can be placed in a collection.</p>
                                         (mi/can-read? model-object)
                                         ;; hidden tables, archived cards/dashboards
                                         (not (or (:archived model-object)
-                                                 (= (:visibility_type model-object) :hidden))))]
+                                                 (= (:visibility_type model-object) :hidden))))
+                             :let [is-dataset? (= (keyword (:type model-object)) :model)]]
                          (cond-&gt; (assoc view-log :model_object model-object)
-                           (= (keyword (:type model-object)) :model) (assoc :model &quot;dataset&quot;)))
+                           is-dataset? (assoc :model &quot;dataset&quot;)))
         scored-views (score-items filtered-views)]
     (-&gt;&gt; scored-views
-         (sort-by :score)
-         reverse
-         order-items
+         (sort-by
+          ;; sort by model first, and then score when they are the same model
+          (juxt #(-&gt; % :model model-&gt;precedence) #(- (% :score))))
          (take 5)
-         (map #(dissoc % :score)))))</pre></td></tr><tr><td class="docs">
+         (map #(-&gt; %
+                   (assoc :timestamp (:max_ts % &quot;&quot;))
+                   recent-views/fill-recent-view-info)))))</pre></td></tr><tr><td class="docs"><p>/popular_items</p>
+</td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
+  &quot;Get the list of 5 popular things for the current user. Query takes 8 and limits to 5 so that if it
+  finds anything archived, deleted, etc it can usually still get 5.&quot;
+  []
+  ;; we can do a weighted score which incorporates:
+  ;; total count -&gt; higher = higher score
+  ;; recently viewed -&gt; more recent = higher score
+  ;; official/verified -&gt; yes = higher score
+  {:popular_items (get-popular-items-model-and-id)})</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(define-routes)</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
