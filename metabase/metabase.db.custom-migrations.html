@@ -2889,9 +2889,9 @@ net.brehaut.ClojureTools = (function (SH) {
    [medley.core :as m]
    [metabase.config :as config]
    [metabase.db.connection :as mdb.connection]
-   [metabase.models.interface :as mi]
    [metabase.plugins.classloader :as classloader]
    [metabase.util.date-2 :as u.date]
+   [metabase.util.encryption :as encryption]
    [metabase.util.honey-sql-2 :as h2x]
    [metabase.util.log :as log]
    [toucan2.core :as t2]
@@ -2955,7 +2955,33 @@ similar to the bodies of multi-arity Clojure functions.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- lower-case-en
   ^String [s]
   (when s
-    (.toLowerCase (str s) Locale/US)))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
+    (.toLowerCase (str s) Locale/US)))</pre></td></tr><tr><td class="docs"><p>Default in function for columns given a Toucan type <code>:json</code>. Serializes object as JSON.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn json-in
+  [obj]
+  (if (string? obj)
+    obj
+    (json/generate-string obj)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- json-out [s keywordize-keys?]
+  (if (string? s)
+    (try
+      (json/parse-string s keywordize-keys?)
+      (catch Throwable e
+        (log/error e &quot;Error parsing JSON&quot;)
+        s))
+    s))</pre></td></tr><tr><td class="docs"><p>Should mirror [[metabase.models.interface/encrypted-json-in]]</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private encrypted-json-in
+  (comp encryption/maybe-encrypt json-in))</pre></td></tr><tr><td class="docs"><p>Should mirror [[metabase.models.interface/encrypted-json-out]]</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- encrypted-json-out
+  [v]
+  (let [decrypted (encryption/maybe-decrypt v)]
+    (try
+      (json/parse-string decrypted true)
+      (catch Throwable e
+        (if (or (encryption/possibly-encrypted-string? decrypted)
+                (encryption/possibly-encrypted-bytes? decrypted))
+          (log/error e &quot;Could not decrypt encrypted field! Have you forgot to set MB_ENCRYPTION_SECRET_KEY?&quot;)
+          (log/error e &quot;Error parsing JSON&quot;))  ; same message as in `json-out`
+        v))))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
 |                                                  MIGRATIONS                                                    |
 +----------------------------------------------------------------------------------------------------------------+</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
@@ -3527,9 +3553,9 @@ The card in revision contains legacy field name and maybe even lacking fields.</
                                                     [:like :object &quot;%join-alias%&quot;]]}))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(define-reversible-migration MigrateDatabaseOptionsToSettings
   (let [update-one! (fn [{:keys [id settings options]}]
-                      (let [settings     (mi/encrypted-json-out settings)
-                            options      (mi/json-out-with-keywordization options)
-                            new-settings (mi/encrypted-json-in (merge settings options))]
+                      (let [settings     (encrypted-json-out settings)
+                            options      (json-out options true)
+                            new-settings (encrypted-json-in (merge settings options))]
                         (t2/query {:update :metabase_database
                                    :set    {:settings new-settings}
                                    :where  [:= :id id]})))]
@@ -3540,12 +3566,12 @@ The card in revision contains legacy field name and maybe even lacking fields.</
                                                     [:not= :options &quot;{}&quot;]
                                                     [:not= :options nil]]})))
   (let [rollback-one! (fn [{:keys [id settings options]}]
-                        (let [settings (mi/encrypted-json-out settings)
-                              options  (mi/json-out-with-keywordization options)]
+                        (let [settings (encrypted-json-out settings)
+                              options  (json-out options true)]
                           (when (some? (:persist-models-enabled settings))
                             (t2/query {:update :metabase_database
                                        :set    {:options (json/generate-string (select-keys settings [:persist-models-enabled]))
-                                                :settings (mi/encrypted-json-in (dissoc settings :persist-models-enabled))}
+                                                :settings (encrypted-json-in (dissoc settings :persist-models-enabled))}
                                        :where  [:= :id id]}))))]
     (run! rollback-one! (t2/reducible-query {:select [:id :settings :options]
                                              :from   [:metabase_database]}))))</pre></td></tr><tr><td class="docs"><p>Fix click through migration</p>
@@ -3863,7 +3889,7 @@ For some reasons during data-migration [[metabase.models.setting/get]] return th
   ;; this migraiton to remove triggers for any existing DB that have this option on.
   ;; See #40715
   (when-let [;; find all dbs which are configured not to scan field values
-             dbs (seq (filter #(and (-&gt; % :details (json/parse-string keyword) :let-user-control-scheduling)
+             dbs (seq (filter #(and (-&gt; % :details encrypted-json-out :let-user-control-scheduling)
                                     (false? (:is_full_sync %)))
                               (t2/select :metabase_database)))]
     (classloader/the-classloader)
