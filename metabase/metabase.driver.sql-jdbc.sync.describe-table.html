@@ -2869,7 +2869,6 @@ net.brehaut.ClojureTools = (function (SH) {
 <code>describe-table-fks</code> is deprecated and will be replaced by <code>describe-fks</code> in the future.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.driver.sql-jdbc.sync.describe-table
   (:require
-   [cheshire.core :as json]
    [clojure.java.jdbc :as jdbc]
    [clojure.set :as set]
    [clojure.string :as str]
@@ -2891,6 +2890,7 @@ net.brehaut.ClojureTools = (function (SH) {
    #_{:clj-kondo/ignore [:discouraged-namespace]}
    [toucan2.core :as t2])
   (:import
+   (com.fasterxml.jackson.core JsonFactory JsonParser JsonToken JsonParser$NumberType)
    (java.sql Connection DatabaseMetaData ResultSet)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod sql-jdbc.sync.interface/column-&gt;semantic-type :sql-jdbc
@@ -3170,44 +3170,70 @@ Ref: https://docs.oracle.com/javase/8/docs/api/java/sql/DatabaseMetaData.html#ge
                     (when-let [index-name (some :column_name (sort-by :ordinal_position idx-values))]
                       {:type  :normal-column-index
                        :value index-name})))
-            set)))))</pre></td></tr><tr><td class="docs"><p>Max string length for a row for nested field column before we just give up on parsing it.
-Marked as mutable because we mutate it for tests.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *nested-field-column-max-row-length*
-  50000)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- flattened-row [field-name row]
-  (letfn [(flatten-row [row path]
-            (lazy-seq
-              (when-let [[[k v] &amp; xs] (seq row)]
-                (cond (and (map? v) (not-empty v))
-                      (into (flatten-row v (conj path k))
-                            (flatten-row xs path))
-                      :else
-                      (cons [(conj path k) v]
-                            (flatten-row xs path))))))]
-    (into {} (flatten-row row [field-name]))))</pre></td></tr><tr><td class="docs"><p>Returns whether a string can be parsed to an ISO 8601 datetime or not.</p>
+            set)))))</pre></td></tr><tr><td class="docs"><p>Maximum number of nested field columns.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:const max-nested-field-columns
+  100)</pre></td></tr><tr><td class="docs"><p>Returns whether a string can be parsed to an ISO 8601 datetime or not.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([s])} can-parse-datetime?
   (mr/validator ::lib.schema.literal/string.datetime))</pre></td></tr><tr><td class="docs"><p>Mostly just (type member) but with a bit to suss out strings which are ISO8601 and say that they are datetimes</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- type-by-parsing-string
-  [member]
-  (let [member-type (type member)]
-    (if (and (instance? String member)
-             (can-parse-datetime? member))
-      java.time.LocalDateTime
-      member-type)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- row-&gt;types [row]
-  (into {} (for [[field-name field-val] row
-                 ;; We put top-level array row type semantics on JSON roadmap but skip for now
-                 :when (map? field-val)]
-             (let [flat-row (flattened-row field-name field-val)]
-               (into {} (map (fn [[k v]] [k (type-by-parsing-string v)]) flat-row))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- describe-json-xform [member]
-  ((comp (map #(for [[k v] %
-                     :when (&lt; (count v) *nested-field-column-max-row-length*)]
-                 [k (json/parse-string v)]))
-         (map #(into {} %))
-         (map row-&gt;types)) member))</pre></td></tr><tr><td class="docs"><p>Maximum number of nested field columns.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:const max-nested-field-columns
-  100)</pre></td></tr><tr><td class="docs"><p>Reducing function that takes a bunch of maps from row->types,
+  [value]
+  (if (and (string? value)
+           (can-parse-datetime? value))
+    java.time.LocalDateTime
+    (type value)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- json-parser ^JsonParser [v]
+  (let [f (JsonFactory.)]
+    (if (string? v)
+      (.createParser f ^String v)
+      (.createParser f ^java.io.Reader v))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- number-type [t]
+  (u/case-enum t
+    JsonParser$NumberType/INT         Long
+    JsonParser$NumberType/LONG        Long
+    JsonParser$NumberType/FLOAT       Double
+    JsonParser$NumberType/DOUBLE      Double
+    JsonParser$NumberType/BIG_INTEGER clojure.lang.BigInt
+    ;; there seem to be no way to encounter this, search in tests for `BigDecimal`
+    JsonParser$NumberType/BIG_DECIMAL BigDecimal))</pre></td></tr><tr><td class="docs"><p>Parses given json (a string or a reader) into a map of paths to types, i.e. <code>{["bob"} String}</code>.</p>
+
+<p>Uses Jackson Streaming API to skip allocating data structures, eschews allocating values when possible.
+Respects <em>nested-field-column-max-row-length</em>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- json-&gt;types
+  [v path]
+  (let [p (json-parser v)]
+    (loop [path (or path [])
+           key  nil
+           res  (transient {})]
+      (let [token (.nextToken p)]
+        (cond
+          (nil? token)
+          (persistent! res)
+          ;; we could be more precise here and issue warning about nested fields (the one in `describe-json-fields`),
+          ;; but this limit could be hit by multiple json fields (fetched in `describe-json-fields`) rather than only
+          ;; by this one. So for the sake of issuing only a single warning in logs we'll spill over limit by a single
+          ;; entry (instead of doing `&lt;=`).
+          (&lt; max-nested-field-columns (count res))
+          (persistent! res)
+          :else
+          (u/case-enum token
+            JsonToken/VALUE_NUMBER_INT   (recur path key (assoc! res (conj path key) (number-type (.getNumberType p))))
+            JsonToken/VALUE_NUMBER_FLOAT (recur path key (assoc! res (conj path key) (number-type (.getNumberType p))))
+            JsonToken/VALUE_TRUE         (recur path key (assoc! res (conj path key) Boolean))
+            JsonToken/VALUE_FALSE        (recur path key (assoc! res (conj path key) Boolean))
+            JsonToken/VALUE_NULL         (recur path key (assoc! res (conj path key) nil))
+            JsonToken/VALUE_STRING       (recur path key (assoc! res (conj path key)
+                                                                 (type-by-parsing-string (.getText p))))
+            JsonToken/FIELD_NAME         (recur path (.getText p) res)
+            JsonToken/START_OBJECT       (recur (cond-&gt; path key (conj key)) key res)
+            JsonToken/END_OBJECT         (recur (cond-&gt; path (seq path) pop) key res)
+            ;; We put top-level array row type semantics on JSON roadmap but skip for now
+            JsonToken/START_ARRAY        (do (.skipChildren p)
+                                             (if key
+                                               (recur path key (assoc! res (conj path key) clojure.lang.PersistentVector))
+                                               (recur path key res)))
+            JsonToken/END_ARRAY          (recur path key res)))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- json-map-&gt;types [json-map]
+  (apply merge (map #(json-&gt;types (second %) [(first %)]) json-map)))</pre></td></tr><tr><td class="docs"><p>Reducing function that takes a bunch of maps from json-map->types,
 and gets them to conform to the type hierarchy,
 going through and taking the lowest common denominator type at each pass,
 ignoring the nils.</p>
@@ -3346,7 +3372,7 @@ Else fetch the first n rows only.</p>
                           driver
                           (sample-json-row-honey-sql table-identifier json-field-identifiers pk-identifiers))
         query            (jdbc/reducible-query jdbc-spec sql-args {:identifiers identity})
-        field-types      (transduce describe-json-xform describe-json-rf query)
+        field-types      (transduce (map json-map-&gt;types) describe-json-rf query)
         fields           (field-types-&gt;fields field-types)]
     (if (&gt; (count fields) max-nested-field-columns)
       (do

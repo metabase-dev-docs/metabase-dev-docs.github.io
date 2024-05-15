@@ -2873,6 +2873,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [macaw.util :as u]
    [macaw.walk :as mw])
   (:import
+   (com.metabase.macaw AstWalker$QueueItem)
    (net.sf.jsqlparser.expression Alias)
    (net.sf.jsqlparser.parser CCJSqlParserUtil)
    (net.sf.jsqlparser.schema Column Table)
@@ -2885,7 +2886,10 @@ net.brehaut.ClojureTools = (function (SH) {
   ([key-name xf]
    (fn item-conjer [results component context]
      (update results key-name conj {:component (xf component)
-                                    :context   (vec context)}))))</pre></td></tr><tr><td class="docs">
+                                    :context   (mapv
+                                                 (fn [^AstWalker$QueueItem x]
+                                                   [(keyword (.getKey x)) (.getValue x)])
+                                                 context)}))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- query-&gt;raw-components
   [^Statement parsed-query]
   (mw/fold-query parsed-query
@@ -2898,53 +2902,73 @@ net.brehaut.ClojureTools = (function (SH) {
                   :has-wildcard?     #{}
                   :mutation-commands #{}
                   :tables            #{}
-                  :table-wildcards   #{}}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- make-table [^Table t]
+                  :table-wildcards   #{}}))</pre></td></tr><tr><td class="docs"><p>tables</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- make-table [^Table t _ctx]
   (merge
     {:table (.getName t)}
     (when-let [s (.getSchemaName t)]
       {:schema s})))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- make-column [alias-map table-map ^Column c]
-  (merge
-    {:column (.getColumnName c)}
-    (if-let [t (.getTable c)]
-      (or
-        (get alias-map (.getName t))
-        (:component (get table-map (.getName t))))
-      ;; if we see only a single table, we can safely say it's the table of that column
-      (when (= (count table-map) 1)
-        (:component (val (first table-map)))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- alias-mapping
-  [^Table table]
+  [^Table table ctx]
   (when-let [^Alias table-alias (.getAlias table)]
-    [(.getName table-alias) (make-table table)]))</pre></td></tr><tr><td class="docs"><p>JSQLParser can't tell whether the <code>f</code> in <code>select f.*</code> refers to a real table or an alias. Therefore, we have to
+    [(.getName table-alias) (make-table table ctx)]))</pre></td></tr><tr><td class="docs"><p>JSQLParser can't tell whether the <code>f</code> in <code>select f.*</code> refers to a real table or an alias. Therefore, we have to
 disambiguate them based on our own map of aliases->table names. So this function will return the real name of the table
 referenced in a table-wildcard (as far as can be determined from the query).</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- resolve-table-name
-  [alias-&gt;table name-&gt;table ^AllTableColumns atc]
+  [{:keys [alias-&gt;table name-&gt;table]} ^AllTableColumns atc _ctx]
   (let [table-name (-&gt; atc .getTable .getName)]
     (or (alias-&gt;table table-name)
-        (name-&gt;table table-name))))</pre></td></tr><tr><td class="docs">
+        (name-&gt;table table-name))))</pre></td></tr><tr><td class="docs"><p>columns</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- maybe-column-alias [[maybe-alias :as _ctx]]
+  (when (= (first maybe-alias) :alias)
+    {:alias (second maybe-alias)}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- maybe-column-table [{:keys [alias-&gt;table name-&gt;table]} ^Column c]
+  (if-let [t (.getTable c)]
+    (or
+      (get alias-&gt;table (.getName t))
+      (:component (get name-&gt;table (.getName t))))
+    ;; if we see only a single table, we can safely say it's the table of that column
+    (when (= (count name-&gt;table) 1)
+      (:component (val (first name-&gt;table))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- make-column [data ^Column c ctx]
+  (merge
+    {:column (.getColumnName c)}
+    (maybe-column-alias ctx)
+    (maybe-column-table data c)))</pre></td></tr><tr><td class="docs"><p>get them together</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- only-query-context [ctx]
+  (into [] (comp (filter #(= (first %) :query))
+                 (map second))
+    ctx))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- update-components
   [f components]
-  (map #(update % :component f) components))</pre></td></tr><tr><td class="docs"><p>Given a parsed query (i.e., a [subclass of] <code>Statement</code>) return a map with the elements found within it.</p>
+  (map #(-&gt; %
+            (update :component f (:context %))
+            (update :context only-query-context))
+    components))</pre></td></tr><tr><td class="docs"><p>Given a parsed query (i.e., a [subclass of] <code>Statement</code>) return a map with the elements found within it.</p>
 
 <p>(Specifically, it returns their fully-qualified names as strings, where 'fully-qualified' means 'as referred to in
 the query'; this function doesn't do additional inference work to find out a table's schema.)</p>
 </td><td class="codes"><pre class="brush: clojure">(defn query-&gt;components
   [^Statement parsed-query]
-  (let [{:keys [columns has-wildcard?
+  (let [{:keys [columns
+                has-wildcard?
                 mutation-commands
-                tables table-wildcards]} (query-&gt;raw-components parsed-query)
-        alias-map                        (into {} (map #(-&gt; % :component alias-mapping) tables))
-        table-map                        (-&gt;&gt; (update-components make-table tables)
-                                                 (u/group-with #(-&gt; % :component :table)
-                                                   (fn [a b] (if (:schema a) a b))))]
-    {:columns           (into #{} (update-components (partial make-column alias-map table-map) columns))
-     :has-wildcard?     (into #{} has-wildcard?)
+                tables
+                table-wildcards]} (query-&gt;raw-components parsed-query)
+        alias-map                 (into {} (map #(-&gt; % :component (alias-mapping (:context %))) tables))
+        table-map                 (-&gt;&gt; (update-components make-table tables)
+                                              (u/group-with #(-&gt; % :component :table)
+                                                (fn [a b] (if (:schema a) a b))))
+        data                      {:alias-&gt;table alias-map
+                                   :name-&gt;table  table-map}]
+    {:columns           (into #{} (update-components (partial make-column data) columns))
+     :has-wildcard?     (into #{} (update-components (fn [x &amp; _args] x) has-wildcard?))
      :mutation-commands (into #{} mutation-commands)
      :tables            (into #{} (vals table-map))
-     :table-wildcards   (into #{} (update-components (partial resolve-table-name alias-map table-map) table-wildcards))}))</pre></td></tr><tr><td class="docs"><p>Main entry point: takes a string query and returns a <code>Statement</code> object that can be handled by the other functions.</p>
+     :table-wildcards   (into #{} (update-components (partial resolve-table-name data) table-wildcards))}))</pre></td></tr><tr><td class="docs"><p>Main entry point: takes a string query and returns a <code>Statement</code> object that can be handled by the other functions.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn parsed-query
   [^String query]
   (CCJSqlParserUtil/parse query))</pre></td></tr><tr><td class="docs"><p>Given a SQL query, apply the given table, column, and schema renames.</p>
@@ -3153,6 +3177,14 @@ the query'; this function doesn't do additional inference work to find out a tab
   (testing &quot;table alias present&quot;
     (is (= #{{:column &quot;id&quot; :table &quot;orders&quot; :schema &quot;public&quot;}}
            (columns &quot;SELECT o.id FROM public.orders o&quot;)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(deftest infer-test
+  (testing &quot;We can first column through a few hoops&quot;
+    (is (= #{{:column &quot;amount&quot; :table &quot;orders&quot;}}
+           (columns &quot;SELECT amount FROM (SELECT amount FROM orders)&quot;)))
+    (is (= #{{:column &quot;amount&quot; :alias &quot;cost&quot; :table &quot;orders&quot;}
+             ;; FIXME: we need to figure out that `cost` is an alias from subquery
+             {:column &quot;cost&quot;, :table &quot;orders&quot;}}
+           (columns &quot;SELECT cost FROM (SELECT amount AS cost FROM orders)&quot;)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest mutation-test
   (is (= #{&quot;alter-sequence&quot;}
          (mutations &quot;ALTER SEQUENCE serial RESTART WITH 42&quot;)))
