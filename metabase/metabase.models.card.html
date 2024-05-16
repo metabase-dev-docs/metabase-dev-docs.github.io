@@ -2900,6 +2900,7 @@ is a historical name, but is the same thing; both terms are used interchangeably
    [metabase.models.revision :as revision]
    [metabase.models.serialization :as serdes]
    [metabase.moderation :as moderation]
+   [metabase.native-query-analyzer :as query-analyzer]
    [metabase.public-settings :as public-settings]
    [metabase.public-settings.premium-features
     :as premium-features
@@ -3625,7 +3626,55 @@ included, otherwise the metadata will be saved to the database asynchronously.</
   ;; `:dataset_query` key entirely if it is empty, as it is in a lot of tests.
   (let [card (cond-&gt; card
                (map? (:dataset_query card)) (update :dataset_query dissoc :lib/metadata))]
-    (next-method card json-generator)))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------- Serialization --------------------------------------------------</p>
+    (next-method card json-generator)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- replaced-inner-query-for-native-card
+  [query {:keys [fields tables] :as _replacement-ids}]
+  (let [keyvals-set         #(set/union (into #{} (keys %))
+                                        (into #{} (vals %)))
+        id-&gt;field           (if (empty? fields)
+                              {}
+                              (m/index-by :id
+                                          (t2/query {:select [[:f.id :id]
+                                                              [:f.name :column]
+                                                              [:t.name :table]
+                                                              [:t.schema :schema]]
+                                                     :from   [[:metabase_field :f]]
+                                                     :join   [[:metabase_table :t] [:= :f.table_id :t.id]]
+                                                     :where  [:in :f.id (keyvals-set fields)]})))
+        id-&gt;table           (if (empty? tables)
+                              {}
+                              (m/index-by :id
+                                          (t2/query {:select [[:t.id :id]
+                                                              [:t.name :table]
+                                                              [:t.schema :schema]]
+                                                     :from   [[:metabase_table :t]]
+                                                     :where  [:in :t.id (keyvals-set tables)]})))
+        remove-id           #(select-keys % [:column :table :schema])
+        get-or-throw-from   (fn [m] (fn [k] (if (contains? m k)
+                                              (remove-id (get m k))
+                                              (throw (ex-info &quot;ID not found&quot; {:id k :available m})))))
+        update-keyvals      (fn [m f] (-&gt; m
+                                          (update-keys f)
+                                          (update-vals f)))
+        column-replacements (update-keyvals fields (get-or-throw-from id-&gt;field))
+        table-replacements  (update-keyvals tables (get-or-throw-from id-&gt;table))]
+    (query-analyzer/replace-names query {:columns column-replacements
+                                         :tables  table-replacements})))</pre></td></tr><tr><td class="docs"><p>Given a card and a map of the form</p>
+
+<p>{:fields {1 2, 3 4}
+ :tables {100 101}}</p>
+
+<p>Update the card so that its references to the Field with ID 1 is replaced by Field 2, etc.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn replace-fields-and-tables!
+  [{q :dataset_query :as card} replacements]
+  (if (= :native (:type q))
+    (let [new-query (assoc-in q [:native :query]
+                              (replaced-inner-query-for-native-card q replacements))]
+      (update-card! {:card-before-update card
+                     :card-updates       {:dataset_query new-query}
+                     :actor              api/*current-user*}))
+    (throw (ex-info &quot;We don't (yet) support replacing field and table refs in cards with MBQL queries&quot;
+                    {:card card :replacements replacements}))))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------- Serialization --------------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/extract-query &quot;Card&quot; [_ opts]
   (serdes/extract-query-collections Card opts))</pre></td></tr><tr><td class="docs">
