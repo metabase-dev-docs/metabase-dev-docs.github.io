@@ -2865,217 +2865,172 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.lib.util.match" name="metabase.lib.util.match"><h1 class="project-name">metabase.lib.util.match</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Internal implementation of the MBQL <code>match</code> and <code>replace</code> macros. Don't use these directly.</p>
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.lib.util.match
-  (:refer-clojure :exclude [replace])
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.query-processor.pivot.postprocess" name="metabase.query-processor.pivot.postprocess"><h1 class="project-name">metabase.query-processor.pivot.postprocess</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Post-process utils for pivot exports</p>
+
+<p>The shape returned by the pivot qp is not the same visually as what a pivot table looks like in the app.
+It's all of the same data, but some post-processing logic needs to run on the rows to be able to present them
+visually in the same way as in the app.</p>
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.query-processor.pivot.postprocess
   (:require
-   [clojure.core.match]
-   [clojure.walk :as walk]
-   [metabase.lib.util.match.impl]
-   [net.cgrand.macrovich :as macros]))</pre></td></tr><tr><td class="docs"><p>Generate a single approprate pattern for use with core.match based on the <code>pattern</code> input passed into <code>match</code> or
-<code>replace</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- generate-pattern
-  [pattern]
-  (cond
-    (keyword? pattern)
-    [[pattern '&amp; '_]]
-    (and (set? pattern) (every? keyword? pattern))
-    [[`(:or ~@pattern) '&amp; '_]]
-    ;; special case for `_`, we'll let you match anything with that
-    (= pattern '_)
-    [pattern]
-    (symbol? pattern)
-    `[(~'_ :guard (metabase.lib.util.match.impl/match-with-pred-or-class ~pattern))]
-    :else
-    [pattern]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- recur-form? [form]
-  (and (seq? form)
-       (= 'recur (first form))))</pre></td></tr><tr><td class="docs"><p>Replace any <code>recur</code> forms with ones that include the implicit <code>&amp;parents</code> arg.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- rewrite-recurs
-  [fn-name result-form]
-  (walk/postwalk
-   (fn [form]
-     (if (recur-form? form)
-       ;; we *could* use plain `recur` here, but `core.match` cannot apply code size optimizations if a `recur` form
-       ;; is present. Instead, just do a non-tail-call-optimized call to the pattern fn so `core.match` can generate
-       ;; efficient code.
-       ;;
-       ;; (recur [:new-clause ...]) ; -&gt; (match-123456 &amp;parents [:new-clause ...])
-       `(~fn-name ~'&amp;parents ~@(rest form))
-       form))
-   result-form))</pre></td></tr><tr><td class="docs"><p>Generate the <code>core.match</code> patterns and results given the input to our macros.</p>
+   [clojure.math.combinatorics :as math.combo]
+   [clojure.set :as set]
+   [metabase.util.malli :as mu]
+   [metabase.util.malli.registry :as mr]))</pre></td></tr><tr><td class="docs"><p>I'll do my best to concisely explain what's happening here. Some terms:
+ - raw pivot rows -> the rows returned by the above 'pivot query processor machinery'.
+ - pivot-cols/pivot-rows -> vectors of indices into the raw pivot rows where the final pivot row/col values come from
+   the values from these indices are what make up the header row and header column labels
+ - pivot-measures -> vector of indices into raw pivot rows where the aggregated value comes from. This
+   the values from these indices (often just 1 idx) are what end up in the table's 'cells' (the stuff making up the bulk of the table)</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>an example of what a raw pivot row might look like, with header shown for clarity:
+{:Cat A "AA", :Cat B "BA", :Cat C "CA", :Cat D "DA", :pivot-grouping 0, :Sum of Measure 1}
+[Cat A Cat B Cat C Cat D pivot-grouping Sum of Measure]
+[ "AA"  "BA"  "CA"  "DA"              0              1]</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>The 'pivot-grouping' is the giveaway. If you ever see that column, you know you're dealing with raw pivot rows.</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Most of the post processing functions use a 'pivot-spec' map.</p>
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::pivot-spec
+  [:map
+   [:column-titles  [:sequential [:string]]]
+   [:pivot-rows     [:sequential [:int {:min 0}]]]
+   [:pivot-cols     [:sequential [:int {:min 0}]]]
+   [:pivot-measures {:optional true}
+    [:sequential [:int {:min 0}]]]])</pre></td></tr><tr><td class="docs"><p>Get all possible values for pivot-col/row 'k'.
+<code>rows</code> are the raw pivot rows, <code>idx</code> is the column index to get values from.
+<code>include-nil?</code> controls whether an extra <code>nil</code> value is added to the returned values.
+This extra nil is needed for some combinations later on, but not others, hence the switch.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- all-values-for
+  [rows idx include-nil?]
+  (let [all-vals (distinct (mapv #(get % idx) rows))]
+    (concat (vec (remove nil? all-vals)) (when include-nil? [nil]))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private pivot-row-titles
+  [{:keys [column-titles pivot-rows]} :- ::pivot-spec]
+  (mapv #(get column-titles %) pivot-rows))</pre></td></tr><tr><td class="docs"><p>Construct the export-style pivot headers from the raw pivot rows, according to the indices specified in <code>pivot-spec</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private header-builder
+  [rows {:keys [pivot-cols] :as pivot-spec} :- ::pivot-spec]
+  (let [row-titles       (pivot-row-titles pivot-spec)
+        ;; For each pivot column, get the possible values for that column
+        ;; Then, get the cartesian product of each to for all of the value groups
+        ;; Each group will have (count pivot-cols) entries and the values
+        ;; will be from the columns in the same order as presented in pivot-cols.
+        ;; So, if pivot-cols is [0 1], the first col-value-group will have [first-value-from-first-col first-value-from-second-col]
+        col-value-groups (apply math.combo/cartesian-product (map (fn [col-k]
+                                                                    (all-values-for rows col-k false))
+                                                                  pivot-cols))]
+    ;; Each Header (1 header row per pivot-col) will first start with the Pivot Row Titles. There will be (count pivot-rows) entries.
+    ;; Then, Get all of the nth entries in the col-value-gropus for the nth header, and then append &quot;Row Totals&quot; label.
+    (mapv
+     (fn [col-idx]
+       (vec (concat
+             row-titles
+             (map #(nth % col-idx) col-value-groups)
+             [&quot;Row totals&quot;])))
+     (range (count pivot-cols)))))</pre></td></tr><tr><td class="docs"><p>Map of raw pivot rows keyed by [pivot-cols]. Use it per row-group.
+This constructs a map where you can use a pivot-cols-value tuple to find the row-builder
+That is, suppose we have 2 pivot-cols, and valid values might be 'AA' and 'BA'. To get the
+raw pivot row where each of those values matches, you can run this function to get <code>m</code> and then
+use <code>(get m ['AA' 'BA'])</code> to get the row.</p>
 
-<p><code>wrap-result-forms?</code> will wrap the results parts of the pairs in a vector, so we do something like <code>(reduce concat)</code>
-on all of the results to return a sequence of matches for <code>match</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- generate-patterns-and-results
-  [fn-name patterns-and-results &amp; {:keys [wrap-result-forms?]}]
-  (mapcat (fn [[pattern result]]
-            [(generate-pattern pattern) (let [result (rewrite-recurs fn-name result)]
-                                          (if (or (not wrap-result-forms?)
-                                                  (and (seq? result)
-                                                       (= fn-name (first result))))
-                                            result
-                                            [result]))])
-          (partition 2 2 ['&amp;match] patterns-and-results)))</pre></td></tr><tr><td class="docs"><p>If the last pattern passed in was <code>_</code>, we can skip generating the default <code>:else</code> clause, because it will never
-match.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- skip-else-clause?
-  ;; TODO - why don't we just let people pass their own `:else` clause instead?
-  [patterns-and-results]
-  (= '_ (second (reverse patterns-and-results))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod clojure.core.match/emit-pattern-for-syntax [:isa? :default]
-  [[_ parent]] {:clojure.core.match/tag ::isa? :parent parent})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod clojure.core.match/to-source ::isa?
-  [{parent :parent} ocr]
-  `(isa? ~ocr ~parent))</pre></td></tr><tr><td class="docs"><p>Internal impl for <code>match</code> and <code>replace</code> macros.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro match**
-  [&amp; args]
-  (macros/case
-    :clj  `(clojure.core.match/match ~@args)
-    :cljs `(cljs.core.match/match ~@args)))</pre></td></tr><tr><td class="docs"><p>Internal impl for <code>match</code>. Generate a pattern-matching function using <code>core.match</code>, and call it with <code>form</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro match*
-  [form patterns-and-results]
-  (let [match-fn-symb (gensym &quot;match-&quot;)]
-    `(seq
-      (filter
-       some?
-       ((fn ~match-fn-symb [~'&amp;parents ~'&amp;match]
-          (match** [~'&amp;match]
-                   ~@(generate-patterns-and-results match-fn-symb patterns-and-results, :wrap-result-forms? true)
-                   ~@(when-not (skip-else-clause? patterns-and-results)
-                       [:else `(metabase.lib.util.match.impl/match-in-collection ~match-fn-symb ~'&amp;parents ~'&amp;match)])))
-        []
-        ~form)))))</pre></td></tr><tr><td class="docs"><p>Return a sequence of things that match a <code>pattern</code> or <code>patterns</code> inside <code>x</code>, presumably a query, returning <code>nil</code> if
-there are no matches. Recurses through maps and sequences. <code>pattern</code> can be one of several things:</p>
+<p>This is used inside <code>row-grouper</code> on a subset of the total list of raw pivot rows.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private col-grouper
+  [rows {:keys [pivot-cols]} :- ::pivot-spec]
+  (let [cols-groups (group-by (apply juxt (map (fn [k] #(get % k)) pivot-cols)) rows)]
+    cols-groups))</pre></td></tr><tr><td class="docs"><p>Map of raw pivot rows keyed by [pivot-rows]. The logic for how the map is initially constructed is the same
+as in <code>col-grouper</code>. Then, each map entry value (which is a subset of rows) is updated by running the <code>sub-rows-fn</code> on the subset.
+This sub-rows-fn does the following:
+ - group the sub rows with <code>col-grouper</code>
+ - create the list of all possible pivot column value combinations and manually concat the 'nils group' too
+ - using the <code>cols-groups</code> map, get the <code>padded-sub-rows</code>
+ - Now, since we only need the values in the <code>pivot-measures</code> indices, transform the sub-rows by getting just those indices
+Thus, the output of the <code>row-grouper</code> is a nested map allowing you to get a raw pivot row corresponding to any combination
+of pivot-row values and pivot-col values by doing something like this:</p>
 
-<ul>
-<li>Keyword name of an MBQL clause</li>
-<li>Set of keyword names of MBQL clauses. Matches any clauses with those names</li>
-<li>A <code>core.match</code> pattern</li>
-<li>A symbol naming a class.</li>
-<li>A symbol naming a predicate function</li>
-<li><code>_</code>, which will match anything</li>
-</ul>
+<p><code>(get-in m [[row-idx1 row-idx2] [col-idx1 col-idx2]])</code></p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private row-grouper
+  [rows {:keys [pivot-rows pivot-cols pivot-measures] :as pivot-spec} :- ::pivot-spec]
+  (let [rows-groups (group-by (apply juxt (map (fn [k] #(get % k)) pivot-rows)) rows)
+        sub-rows-fn (fn [sub-rows]
+                      (let [cols-groups     (col-grouper sub-rows pivot-spec)
+                            padded-sub-rows (vec
+                                             (mapcat
+                                              ;; if the particular values combination is not found, we want to pad that with nil
+                                              ;; so that subsequent cells are rendered in the correct place
+                                              ;; in other words, each padded-sub-row must be the same length
+                                              #(get cols-groups (vec %) [nil])
+                                              ;; this is a list of all possible pivot col value combinations. eg. ['AA' 'BA']
+                                              ;; concat the nils so that the [nil nil] combination shows up once, which is
+                                              ;; necessary to include the row totals and grand totals
+                                              (concat
+                                               (apply math.combo/cartesian-product (map #(all-values-for rows % false) pivot-cols))
+                                               [(vec (repeat (count pivot-cols) nil))])))]
+                        (vec (mapcat (fn [row]
+                                       (mapv #(get row %) pivot-measures))
+                                     padded-sub-rows))))]
+    (-&gt; rows-groups
+        (update-vals sub-rows-fn))))</pre></td></tr><tr><td class="docs"><p>Given a work in progress pivot export row (NOT a raw pivot row), add Totals labels if appropriate.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private totals-row-fn
+  [export-style-row {:keys [pivot-rows]} :- ::pivot-spec]
+  (let [n-row-cols       (count pivot-rows)
+        row-indices      (range n-row-cols)
+        row-vals         (take n-row-cols export-style-row)
+        totals-for-value (fn [idx v]
+                           (if (and ((set row-indices) idx)
+                                    (some? v))
+                             (format &quot;Totals for %s&quot; v)
+                             v))]
+    (cond
+      (every? nil? row-vals)
+      (assoc export-style-row 0 &quot;Grand Totals&quot;)
+      (some nil? row-vals)
+      (vec (map-indexed totals-for-value export-style-row))
+      :else
+      export-style-row)))</pre></td></tr><tr><td class="docs"><p>Get the index into the raw pivot rows for the 'pivot-grouping' column.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- pivot-grouping-key
+  [column-titles]
+  ;; a vector is kinda sorta a map of indices-&gt;values, so
+  ;; we can use map-invert to create the map
+  (get (set/map-invert (vec column-titles)) &quot;pivot-grouping&quot;))</pre></td></tr><tr><td class="docs"><p>Get the indices into the raw pivot rows corresponding to the pivot table's measure.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private pivot-measures
+  [{:keys [pivot-rows pivot-cols column-titles]} :- ::pivot-spec]
+  (-&gt; (set/difference
+       ;; every possible idx is just the range over the count of cols
+       (set (range (count column-titles)))
+       ;; we exclude indices already used in pivot rows and cols, and the pivot-grouping key
+       ;; recall that a raw pivot row will always contain this 'pivot-grouping' column, which we don't actually need to use.
+       (set (concat pivot-rows pivot-cols [(pivot-grouping-key column-titles)])))
+      sort
+      vec))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private add-pivot-measures :- ::pivot-spec
+  [pivot-spec :- ::pivot-spec]
+  (assoc pivot-spec :pivot-measures (pivot-measures pivot-spec)))</pre></td></tr><tr><td class="docs"><p>Construct the export-style pivot rows from the raw pivot rows, according to the indices specified in <code>pivot-spec</code>.</p>
 
-<p>Examples:</p>
-
-<p>  ;; keyword pattern
-  (match {:fields [[:field 10 nil]]} :field) ; -> [[:field 10 nil]]</p>
-
-<p>  ;; set of keywords
-  (match some-query #{:field :expression}) ; -> [[:field 10 nil], [:expression "wow"], ...]</p>
-
-<p>  ;; <code>core.match</code> patterns:
-  ;; match any <code>:field</code> clause with two args (which should be all of them)
-  (match some-query [:field _ _])
-  ;; match any <code>:field</code> clause with integer ID > 100
-  (match some-query [:field (_ :guard (every-pred integer? #(> % 100)))]) ; -> [[:field 200 nil], ...]</p>
-
-<p>  ;; symbol naming a Class
-  ;; match anything that is an instance of that class
-  (match some-query java.util.Date) ; -> [[#inst "2018-10-08", ...]</p>
-
-<p>  ;; symbol naming a predicate function
-  ;; match anything that satisfies that predicate
-  (match some-query (every-pred integer? even?)) ; -> [2 4 6 8]</p>
-
-<p>  ;; match anything with <code>_</code>
-  (match 100 <code>_</code>) ; -> 100</p>
-
-<h3>Using `core.match` patterns</h3>
-
-<p>See <a href="code>https://github.com/clojure/core.match/wiki</code"><code>core.match</code> documentation</a> for more details.</p>
-
-<p>Pattern-matching works almost exactly the way it does when using <code>core.match**</code> directly, with a few
-differences:</p>
-
-<ul>
-<li><p><code>mbql.util/match</code> returns a sequence of everything that matches, rather than the first match it finds</p></li>
-<li><p>patterns are automatically wrapped in vectors for you when appropriate</p></li>
-<li><p>things like keywords and classes are automatically converted to appropriate patterns for you</p></li>
-<li><p>this macro automatically recurses through sequences and maps as a final <code>:else</code> clause. If you don't want to
-automatically recurse, use a catch-all pattern (such as <code>_</code>). Our macro implementation will optimize out this
-<code>:else</code> clause if the last pattern is <code>_</code></p></li>
-</ul>
-
-<h3>Returing something other than the exact match with result body</h3>
-
-<p>By default, <code>match</code> returns whatever matches the pattern you pass in. But what if you only want to return part of
-the match? You can, using <code>core.match</code> binding facilities. Bind relevant things in your pattern and pass in the
-optional result body. Whatever result body returns will be returned by <code>match</code>:</p>
-
-<p>   ;; just return the IDs of Field ID clauses
-   (match some-query [:field (id :guard integer?) _] id) ; -> [1 2 3]</p>
-
-<p>You can also use result body to filter results; any <code>nil</code> values will be skipped:</p>
-
-<p>  (match some-query [:field (id :guard integer?) _]
-    (when (even? id)
-      id))
-  ;; -> [2 4 6 8]</p>
-
-<p>Of course, it's more efficient to let <code>core.match</code> compile an efficient matching function, so prefer using
-patterns with <code>:guard</code> where possible.</p>
-
-<p>You can also call <code>recur</code> inside result bodies, to use the same matching logic against a different value.</p>
-
-<h3>`&match` and `&parents` anaphors</h3>
-
-<p>For more advanced matches, like finding a <code>:field</code> clauses nested anywhere inside another clause, <code>match</code> binds a
-pair of anaphors inside the result body for your convenience. <code>&amp;match</code> is bound to the entire match, regardless of
-how you may have destructured it; <code>&amp;parents</code> is bound to a sequence of keywords naming the parent top-level keys and
-clauses of the match.</p>
-
-<p>  (lib.util.match/match {:filter [:time-interval [:field 1 nil] :current :month]} :field
-    ;; &amp;parents will be [:filter :time-interval]
-    (when (contains? (set &amp;parents) :time-interval)
-      &amp;match))
-  ;; -> [[:field 1 nil]]</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro match
-  {:style/indent 1}
-  [x &amp; patterns-and-results]
-  ;; Actual implementation of these macros is in `mbql.util.match`. They're in a seperate namespace because they have
-  ;; lots of other functions and macros they use for their implementation (which means they have to be public) that we
-  ;; would like to discourage you from using directly.
-  `(match* ~x ~patterns-and-results))</pre></td></tr><tr><td class="docs"><p>Like <code>match</code> but returns a single match rather than a sequence of matches.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro match-one
-  {:style/indent 1}
-  [x &amp; patterns-and-results]
-  `(first (match* ~x ~patterns-and-results)))</pre></td></tr><tr><td class="docs"><p>TODO - it would be ultra handy to have a <code>match-all</code> function that could handle clauses with recursive matches,
-e.g. with a query like</p>
-
-<p>   {:query {:source-table 1, :joins [{:source-table 2, ...}]}}</p>
-
-<p>it would be useful to be able to do</p>
-
-<p>   ;; get <em>all</em> the source tables
-   (lib.util.match/match-all query
-     (&amp;match :guard (every-pred map? :source-table))
-     (:source-table &amp;match))</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Internal implementation for <code>replace</code>. Generate a pattern-matching function with <code>core.match</code>, and use it to replace
-matching values in <code>form</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro replace*
-  [form patterns-and-results]
-  (let [replace-fn-symb (gensym &quot;replace-&quot;)]
-    `((fn ~replace-fn-symb [~'&amp;parents ~'&amp;match]
-        (match** [~'&amp;match]
-                 ~@(generate-patterns-and-results replace-fn-symb patterns-and-results, :wrap-result-forms? false)
-                 ~@(when-not (skip-else-clause? patterns-and-results)
-                     [:else `(metabase.lib.util.match.impl/replace-in-collection ~replace-fn-symb ~'&amp;parents ~'&amp;match)])))
-      []
-      ~form)))</pre></td></tr><tr><td class="docs"><p>Like <code>match</code>, but replace matches in <code>x</code> with the results of result body. The same pattern options are supported,
-and <code>&amp;parents</code> and <code>&amp;match</code> anaphors are available in the same way. (<code>&amp;match</code> is particularly useful here if you
-want to use keywords or sets of keywords as patterns.)</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro replace
-  {:style/indent 1}
-  [x &amp; patterns-and-results]
-  ;; as with `match` actual impl is in `match` namespace to discourage you from using the constituent functions and
-  ;; macros that power this macro directly
-  `(replace* ~x ~patterns-and-results))</pre></td></tr><tr><td class="docs"><p>Like <code>replace</code>, but only replaces things in the part of <code>x</code> in the keypath <code>ks</code> (i.e. the way to <code>update-in</code> works.)</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro replace-in
-  {:style/indent 2}
-  [x ks &amp; patterns-and-results]
-  `(metabase.lib.util.match.impl/update-in-unless-empty ~x ~ks (fn [x#] (replace* x# ~patterns-and-results))))</pre></td></tr><tr><td class="docs"><p>TODO - it would be useful to have something like a <code>replace-all</code> function as well</p>
-</td><td class="codes"></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+<p>This function:
+ - creates the row-groups map using <code>row-grouper</code>. This already has the nearly complete rows.
+ - create the list of pivot row value combinations. We don't need the nils group this time; it would result in
+   a doubling of the Grand totals row
+   We DO want to generate tuples that can have 'nil' (eg. ['CA' nil]) so that Row totals rows will be grabbed from the map too.
+ - construct each row by concatenating the row values, since they're the labels for each pivot-row. Handily, the <code>ks</code> are exactly
+   these values, so we can just concat each k to its <code>row-groups</code> entry
+ - Run the <code>totals-row-fn</code> to add the Row totals and Grand totals labels in the right spots.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private row-builder
+  [rows {:keys [pivot-rows] :as pivot-spec} :- ::pivot-spec]
+  (let [row-groups (row-grouper rows pivot-spec)
+        ks         (mapv vec (concat
+                              (apply math.combo/cartesian-product (map #(all-values-for rows % true) pivot-rows))))]
+    (-&gt;&gt; (map (fn [k] (vec (concat k (get row-groups k)))) ks)
+         (filter #(&lt; (count pivot-rows) (count %)))
+         (map #(totals-row-fn % pivot-spec)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- clean-row
+  [row]
+  (mapv #(if (=  %)
+           nil
+           %)
+        row))</pre></td></tr><tr><td class="docs"><p>Create the rows for a pivot export from raw pivot rows <code>rows</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn pivot-builder
+  [rows pivot-spec :- ::pivot-spec]
+  (let [rows       (mapv clean-row rows)
+        pivot-spec (add-pivot-measures pivot-spec)]
+    (vec (concat
+          (header-builder rows pivot-spec)
+          (row-builder rows pivot-spec)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

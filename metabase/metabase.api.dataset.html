@@ -2911,7 +2911,7 @@ well.</p>
     source-card-id))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private run-streaming-query :- (ms/InstanceOfClass metabase.async.streaming_response.StreamingResponse)
   [{:keys [database], :as query}
-   &amp; {:keys [context export-format]
+   &amp; {:keys [context export-format was-pivot]
       :or   {context       :ad-hoc
              export-format :api}}]
   (span/with-span!
@@ -2938,7 +2938,12 @@ well.</p>
                            (assoc :metadata/model-metadata (:result_metadata source-card)))]
       (binding [qp.perms/*card-id* source-card-id]
         (qp.streaming/streaming-response [rff export-format]
-          (qp/process-query (update query :info merge info) rff))))))</pre></td></tr><tr><td class="docs"><p>/</p>
+          (if was-pivot
+            (qp.pivot/run-pivot-query (-&gt; query
+                                          (assoc :constraints (qp.constraints/default-query-constraints))
+                                          (update :info merge info))
+                                      rff)
+            (qp/process-query (update query :info merge info) rff)))))))</pre></td></tr><tr><td class="docs"><p>/</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint POST 
   &quot;Execute a query and retrieve the results in the usual format. The query will not use the cache.&quot;
   [:as {{:keys [database] :as query} :body}]
@@ -2978,22 +2983,24 @@ keywords, but leaves column references as strings.</p>
    visualization_settings ms/JSONString
    format_rows            [:maybe :boolean]
    export-format          (into [:enum] export-formats)}
-  (let [query        (json/parse-string query keyword)
-        viz-settings (-&gt; (json/parse-string visualization_settings viz-setting-key-fn)
-                         (update :table.columns mbql.normalize/normalize)
-                         mb.viz/db-&gt;norm)
-        query        (-&gt; query
-                         (assoc :viz-settings viz-settings)
-                         (dissoc :constraints)
-                         (update :middleware #(-&gt; %
-                                                  (dissoc :add-default-userland-constraints? :js-int-to-string?)
-                                                  (assoc :process-viz-settings? true
-                                                         :skip-results-metadata? true
-                                                         :format-rows? format_rows))))]
+  (let [{:keys [was-pivot] :as query} (json/parse-string query keyword)
+        query                         (dissoc query :was-pivot)
+        viz-settings                  (-&gt; (json/parse-string visualization_settings viz-setting-key-fn)
+                                          (update :table.columns mbql.normalize/normalize)
+                                          mb.viz/db-&gt;norm)
+        query                         (-&gt; query
+                                          (assoc :viz-settings viz-settings)
+                                          (dissoc :constraints)
+                                          (update :middleware #(-&gt; %
+                                                                   (dissoc :add-default-userland-constraints? :js-int-to-string?)
+                                                                   (assoc :process-viz-settings? true
+                                                                          :skip-results-metadata? true
+                                                                          :format-rows? format_rows))))]
     (run-streaming-query
      (qp/userland-query query)
      :export-format export-format
-     :context       (export-format-&gt;context export-format))))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------ Other Endpoints -------------------------------------------------</p>
+     :context      (export-format-&gt;context export-format)
+     :was-pivot    was-pivot)))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------ Other Endpoints -------------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>/native</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint POST 
   &quot;Fetch a native version of an MBQL query.&quot;
@@ -3020,7 +3027,8 @@ keywords, but leaves column references as strings.</p>
       (qp.pivot/run-pivot-query (assoc query
                                        :constraints (qp.constraints/default-query-constraints)
                                        :info        info)
-                                rff))))</pre></td></tr><tr><td class="docs">
+                                rff)
+      query)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- parameter-field-values
   [field-ids query]
   (when-not (seq field-ids)
