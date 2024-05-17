@@ -2904,7 +2904,32 @@ permissions for these objects.
    {:error/message (str &quot;an instance of the root Collection&quot;)}
    #'collection.root/is-root-collection?])</pre></td></tr><tr><td class="docs"><p>Maximum number of characters allowed in a Collection <code>slug</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private ^:const collection-slug-max-length
-  510)</pre></td></tr><tr><td class="docs"><p>Used to be the toucan1 model name defined using [[toucan.models/defmodel]], no2 it's a reference to the toucan2 model name.
+  510)</pre></td></tr><tr><td class="docs"><p>The value of the <code>:type</code> field for the Trash collection that holds archived items.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:constant trash-collection-type
+  &quot;trash&quot;)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- trash-collection* []
+  (t2/select-one :model/Collection :type trash-collection-type))</pre></td></tr><tr><td class="docs"><p>Memoized copy of the Trash collection from the DB.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^{:arglists '([])} trash-collection
+  (mdb/memoize-for-application-db
+   (fn []
+     (u/prog1 (trash-collection*)
+       (when-not &lt;&gt;
+         (throw (ex-info &quot;Fatal error: Trash collection is missing&quot; {})))))))</pre></td></tr><tr><td class="docs"><p>The ID representing the Trash collection.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn trash-collection-id
+  [] (u/the-id (trash-collection)))</pre></td></tr><tr><td class="docs"><p>The fixed location path for the trash collection.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn trash-path
+  []
+  (format &quot;/%s/&quot; (trash-collection-id)))</pre></td></tr><tr><td class="docs"><p>Is this the trash collection?</p>
+</td><td class="codes"><pre class="brush: clojure">(defn is-trash?
+  [collection]
+  ;; in some circumstances we don't have a `:type` on the collection (e.g. search or collection items lists, where we
+  ;; select a subset of columns). Use the type if it's there, but fall back to the ID to be sure.
+  ;; We can't *only* use the id because getting that requires selecting a collection :sweat-smile:
+  (or (= (:type collection) trash-collection-type)
+      (= (:id collection) (trash-collection-id))))</pre></td></tr><tr><td class="docs"><p>Is this the trash collection, or a descendant of it?</p>
+</td><td class="codes"><pre class="brush: clojure">(defn is-trash-or-descendant?
+  [collection]
+  (str/starts-with? (:location collection) (trash-path)))</pre></td></tr><tr><td class="docs"><p>Used to be the toucan1 model name defined using [[toucan.models/defmodel]], no2 it's a reference to the toucan2 model name.
 We'll keep this till we replace all the Card symbol in our codebase.</p>
 </td><td class="codes"><pre class="brush: clojure">(def Collection
   :model/Collection)</pre></td></tr><tr><td class="docs">
@@ -2912,9 +2937,18 @@ We'll keep this till we replace all the Card symbol in our codebase.</p>
 </td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/model-for-automagic-hydration [#_model :default #_k :collection]
   [_original-model _k]
   :model/Collection)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/model-for-automagic-hydration [:default :trashed_from_collection] [_original-model _k] :model/Collection)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(t2/deftransforms :model/Collection
   {:namespace       mi/transform-keyword
-   :authority_level mi/transform-keyword})</pre></td></tr><tr><td class="docs">
+   :authority_level mi/transform-keyword})</pre></td></tr><tr><td class="docs"><p>If the collection is the Trash, translate the <code>name</code>. This is a public function because we can't rely on
+<code>define-after-select</code> in all circumstances, e.g. when searching or listing collection items (where we do a direct DB
+query without <code>:model/Collection</code>).</p>
+</td><td class="codes"><pre class="brush: clojure">(defn maybe-localize-trash-name
+  [collection]
+  (cond-&gt; collection
+    (is-trash? collection) (assoc :name (tru &quot;Trash&quot;))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(t2/define-after-select :model/Collection [collection]
+  (maybe-localize-trash-name collection))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(doto Collection
   (derive :metabase/model)
   (derive :hook/entity-id)
@@ -3056,9 +3090,12 @@ Collection.</p>
     [:id       ms/PositiveInt]]])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private parent :- CollectionWithLocationAndIDOrRoot
   &quot;Fetch the parent Collection of `collection`, or the Root Collection special placeholder object if this is a
-  top-level Collection.&quot;
+  top-level Collection. Note that the `parent` of a `collection` that's in the trash is the collection it was trashed
+  *from*.&quot;
   [collection :- CollectionWithLocationOrRoot]
-  (if-let [new-parent-id (location-path-&gt;parent-id (:location collection))]
+  (if-let [new-parent-id (location-path-&gt;parent-id (or (when (:archived collection)
+                                                         (:trashed_from_location collection))
+                                                       (:location collection)))]
     (t2/select-one Collection :id new-parent-id)
     root-collection))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
 |                                 Nested Collections: "Effective" Location Paths                                 |
@@ -3114,7 +3151,7 @@ function, including <code>:all</code> and <code>nil</code> Collection IDs (for t
 </td><td class="codes"><pre class="brush: clojure">(mu/defn visible-collection-ids-&gt;honeysql-filter-clause
   ([collection-ids :- VisibleCollections]
    (visible-collection-ids-&gt;honeysql-filter-clause :collection_id collection-ids))
-  ([collection-id-field :- :keyword
+  ([collection-id-field :- [:or [:tuple [:= :coalesce] :keyword :keyword] :keyword] ;; `[:vector :keyword]` allows `[:coalesce :option-1 :option-2]`
     collection-ids      :- VisibleCollections]
    (if (= collection-ids :all)
      true
@@ -3210,6 +3247,14 @@ This property is being a descendant of a visible collection other than A. Used f
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private parent-id* :- [:maybe ms/PositiveInt]
   [{:keys [location]} :- CollectionWithLocationOrRoot]
   (some-&gt; location location-path-&gt;parent-id))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private trashed-from-parent-id* :- [:maybe ms/PositiveInt]
+  [{:keys [trashed_from_location]} :- CollectionWithLocationOrRoot]
+  (some-&gt; trashed_from_location location-path-&gt;parent-id))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/simple-hydrate [:default :trashed_from_parent_id]
+  &quot;Get the immediate parent `collection` id this collection was *trashed* from, if set.&quot;
+  [_model k collection]
+  (cond-&gt; collection
+    (:archived collection) (assoc k (trashed-from-parent-id* collection))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/simple-hydrate [:default :parent_id]
   &quot;Get the immediate parent `collection` id, if set.&quot;
   [_model k collection]
@@ -3387,54 +3432,88 @@ This property is being a descendant of a visible collection other than A. Used f
     (throw (Exception. (tru &quot;You cannot move a Collection into itself or into one of its descendants.&quot;))))
   (set
    (cons (perms/collection-readwrite-path new-parent)
-         (perms-for-archiving collection))))</pre></td></tr><tr><td class="docs"><p>Move a Collection and all its descendant Collections from its current <code>location</code> to a <code>new-location</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn move-collection!
-  [collection :- CollectionWithLocationAndIDOrRoot, new-location :- LocationPath]
-  (let [orig-children-location (children-location collection)
-        new-children-location  (children-location (assoc collection :location new-location))]
-    ;; first move this Collection
-    (log/infof &quot;Moving Collection %s and its descendants from %s to %s&quot;
-               (u/the-id collection) (:location collection) new-location)
-    ;; moving the collection triggers the touch event:
-    (events/publish-event! :event/collection-touch {:collection-id (:id collection) :user-id api/*current-user-id*})
-    (t2/with-transaction [_conn]
-      (t2/update! Collection (u/the-id collection) {:location new-location})
-      ;; we need to update all the descendant collections as well...
-      (t2/query-one
-       {:update :collection
-        :set    {:location [:replace :location orig-children-location new-children-location]}
-        :where  [:like :location (str orig-children-location &quot;%&quot;)]}))))</pre></td></tr><tr><td class="docs">
+         (perms-for-archiving collection))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private collection-&gt;descendant-ids :- [:maybe [:set ms/PositiveInt]]
   [collection :- CollectionWithLocationAndIDOrRoot, &amp; additional-conditions]
   (apply t2/select-pks-set Collection
          :location [:like (str (children-location collection) &quot;%&quot;)]
-         additional-conditions))</pre></td></tr><tr><td class="docs"><p>Archive a Collection and its descendant Collections and their Cards, Dashboards, and Pulses.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private archive-collection!
-  [collection :- CollectionWithLocationAndIDOrRoot]
-  (let [affected-collection-ids (cons (u/the-id collection)
-                                      (collection-&gt;descendant-ids collection, :archived false))]
+         additional-conditions))</pre></td></tr><tr><td class="docs"><p>Archive or un-archive a collection, moving it to the trash if necessary. Note that namespaced collections are never
+moved to the trash.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn archive-or-unarchive-collection!
+  [collection :- CollectionWithLocationAndIDOrRoot
+   ;; `updates` is a map *possibly* containing `parent_id`. This allows us to distinguish
+   ;; between specifying a `nil` parent_id (move to the root) and not specifying a parent_id.
+   updates :- [:map [:parent_id {:optional true} [:maybe ms/PositiveInt]
+                     :archived :boolean]]]
+  (let [namespaced?   (some? (:namespace collection))
+        archived? (:archived updates)
+        new-parent-id (cond
+                        ;; don't move namespaced collections.
+                        namespaced? (location-path-&gt;parent-id
+                                     (:location collection))
+                        ;; move archived things to the trash, no matter what.
+                        archived? (trash-collection-id)
+                        (contains? updates :parent_id)
+                        (:parent_id updates)
+                        (and (= (:location collection) (trash-path))
+                             (:trashed_from_location collection))
+                        (location-path-&gt;parent-id
+                         (:trashed_from_location collection))
+                        :else (throw (ex-info (tru &quot;You must specify a new `parent_id` to un-trash to.&quot;)
+                                              {:status-code 400})))
+        new-parent              (if new-parent-id
+                                  (t2/select-one :model/Collection :id new-parent-id)
+                                  root-collection)
+        new-location            (children-location new-parent)
+        orig-children-location  (children-location collection)
+        new-children-location   (children-location (assoc collection :location new-location))
+        affected-collection-ids (cons (u/the-id collection)
+                                      (collection-&gt;descendant-ids collection))]
+    (api/check-403
+     (perms/set-has-full-permissions-for-set?
+      @api/*current-user-permissions-set*
+      (perms-for-moving collection new-parent)))
+    (api/check-400
+     ;; we can never move a collection to a trashed collection. (the Trash itself isn't archived)
+     (and (some? new-parent) (not (:archived new-parent))))
     (t2/with-transaction [_conn]
-      (t2/update! (t2/table-name Collection)
-                  {:id       [:in affected-collection-ids]
-                   :archived false}
-                  {:archived true})
-     (doseq [model '[Card Dashboard NativeQuerySnippet Pulse]]
-       (t2/update! model {:collection_id [:in affected-collection-ids]
-                           :archived      false}
-                    {:archived true})))))</pre></td></tr><tr><td class="docs"><p>Unarchive a Collection and its descendant Collections and their Cards, Dashboards, and Pulses.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private unarchive-collection!
-  [collection :- CollectionWithLocationAndIDOrRoot]
-  (let [affected-collection-ids (cons (u/the-id collection)
-                                      (collection-&gt;descendant-ids collection, :archived true))]
+      (t2/update! :model/Collection (u/the-id collection)
+                  {:location              new-location
+                   :trashed_from_location (when archived? (:location collection))
+                   :archived              archived?})
+      (t2/query-one
+       {:update :collection
+        :set    {:location              [:replace :location orig-children-location new-children-location]
+                 :trashed_from_location nil
+                 :archived              archived?}
+        :where  [:like :location (str orig-children-location &quot;%&quot;)]})
+      (doseq [model [:model/Card
+                     :model/Dashboard
+                     :model/NativeQuerySnippet
+                     :model/Pulse
+                     :model/Timeline]]
+        (t2/update! model {:collection_id [:in affected-collection-ids]}
+                    {:archived archived?})))))</pre></td></tr><tr><td class="docs"><p>Move a Collection and all its descendant Collections from its current <code>location</code> to a <code>new-location</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn move-collection!
+  [collection :- CollectionWithLocationAndIDOrRoot, new-location :- LocationPath]
+  (let [orig-children-location (children-location collection)
+        new-children-location  (children-location (assoc collection :location new-location))
+        will-be-trashed? (str/starts-with? new-location (trash-path))]
+    (when will-be-trashed?
+      (throw (ex-info &quot;Cannot `move-collection!` into the Trash. Call `archive-collection!` instead.&quot;
+                      {:collection collection :new-location new-location})))
+    ;; first move this Collection
+    (log/infof &quot;Moving Collection %s and its descendants from %s to %s&quot;
+               (u/the-id collection) (:location collection) new-location)
+    (events/publish-event! :event/collection-touch {:collection-id (:id collection) :user-id api/*current-user-id*})
     (t2/with-transaction [_conn]
-      (t2/update! (t2/table-name Collection)
-               {:id       [:in affected-collection-ids]
-                :archived true}
-               {:archived false})
-      (doseq [model '[Card Dashboard NativeQuerySnippet Pulse]]
-        (t2/update! model {:collection_id [:in affected-collection-ids]
-                           :archived      true}
-                   {:archived false})))))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
+      (t2/update! Collection (u/the-id collection)
+                  {:location new-location})
+      ;; we need to update all the descendant collections as well...
+      (t2/query-one
+       {:update :collection
+        :set    {:location [:replace :location orig-children-location new-children-location]}
+        :where  [:like :location (str orig-children-location &quot;%&quot;)]}))))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
 |                                       Toucan IModel &amp; Perms Method Impls                                       |
 +----------------------------------------------------------------------------------------------------------------+</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Schema for a Collection instance that has a valid <code>:location</code>, and a <code>:personal_owner_id</code> key <em>present</em> (but not
@@ -3450,11 +3529,15 @@ neccesarily non-nil).</p>
    (or
     ;; If collection has an owner ID we're already done here, we know it's a Personal Collection
     (:personal_owner_id collection)
-    ;; Otherwise try to get the ID of its highest-level ancestor, e.g. if `location` is `/1/2/3/` we would get `1`.
-    ;; Then see if the root-level ancestor is a Personal Collection (Personal Collections can only got in the Root
-    ;; Collection.)
+    ;; Try to get the ID of its highest-level ancestor, e.g. if `location` is `/1/2/3/` we would get `1`. Then see if
+    ;; the root-level ancestor is a Personal Collection (Personal Collections can only exist in the Root Collection.)
+    ;; Note that if the collection is archived, we check this against the `trashed_from_location`.
     (t2/exists? Collection
-                :id                (first (location-path-&gt;ids (:location collection)))
+                :id                (first (location-path-&gt;ids
+                                           (or
+                                            (when (:archived collection)
+                                              (:trashed_from_location collection))
+                                            (:location collection))))
                 :personal_owner_id [:not= nil]))))</pre></td></tr><tr><td class="docs"><p>----------------------------------------------------- INSERT -----------------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(t2/define-before-insert :model/Collection
@@ -3493,7 +3576,8 @@ application database.</p>
 <p>For newly created Collections at the root-level, copy the existing permissions for the Root Collection.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- copy-parent-permissions!
   [{:keys [location id], collection-namespace :namespace, :as collection}]
-  (when-not (is-personal-collection-or-descendant-of-one? collection)
+  (when-not (or (is-personal-collection-or-descendant-of-one? collection)
+                (is-trash-or-descendant? collection))
     (let [parent-collection-id (location-path-&gt;parent-id location)]
       (copy-collection-permissions! (or parent-collection-id (assoc root-collection :namespace collection-namespace))
                                     [id]))))</pre></td></tr><tr><td class="docs">
@@ -3520,21 +3604,7 @@ have lots of restrictions -- you can't archive them, for example, nor can you tr
                                       (api/column-will-change? k collection-before-updates collection-updates)))
                             first)]
       (throw
-       (ex-info msg {:status-code 400 :errors {k msg}})))))</pre></td></tr><tr><td class="docs"><p>If <code>:archived</code> specified in the updates map, archive/unarchive as needed.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private maybe-archive-or-unarchive!
-  [collection-before-updates :- CollectionWithLocationAndIDOrRoot
-   collection-updates        :- :map]
-  ;; If the updates map contains a value for `:archived`, see if it's actually something different than current value
-  (when (api/column-will-change? :archived collection-before-updates collection-updates)
-    ;; check to make sure we're not trying to change location at the same time
-    (when (api/column-will-change? :location collection-before-updates collection-updates)
-      (throw (ex-info (tru &quot;You cannot move a Collection and archive it at the same time.&quot;)
-               {:status-code 400
-                :errors      {:archived (tru &quot;You cannot move a Collection and archive it at the same time.&quot;)}})))
-    ;; ok, go ahead and do the archive/unarchive operation
-    ((if (:archived collection-updates)
-       archive-collection!
-       unarchive-collection!) collection-before-updates)))</pre></td></tr><tr><td class="docs"><p>MOVING COLLECTIONS ACROSS "PERSONAL" BOUNDARIES</p>
+       (ex-info msg {:status-code 400 :errors {k msg}})))))</pre></td></tr><tr><td class="docs"><p>MOVING COLLECTIONS ACROSS "PERSONAL" BOUNDARIES</p>
 
 <p>As mentioned elsewhere, Permissions for Collections are handled in two different, incompatible, ways, depending on
 whether or not the Collection is a descendant of a Personal Collection:</p>
@@ -3623,9 +3693,7 @@ attempt to quote it as a column name instead of a string value (and the update s
     (when (api/column-will-change? :location collection-before-updates collection-updates)
       (update-perms-when-moving-across-personal-boundry! collection-before-updates collection-updates))
     ;; OK, AT THIS POINT THE CHANGES ARE VALIDATED. NOW START ISSUING UPDATES
-    ;; (1) archive or unarchive as appropriate
-    (maybe-archive-or-unarchive! collection-before-updates collection-updates)
-    ;; (2) slugify the collection name in case it's changed in the output; the results of this will get passed along
+    ;; slugify the collection name in case it's changed in the output; the results of this will get passed along
     ;; to Toucan's `update!` impl
     (cond-&gt; collection-updates
       collection-name (assoc :slug (slugify collection-name)))))</pre></td></tr><tr><td class="docs"><p>----------------------------------------------------- DELETE -----------------------------------------------------</p>
@@ -3638,8 +3706,19 @@ macros.)</p>
   false)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(t2/define-before-delete :model/Collection
   [collection]
+  ;; This should never happen, but just to make sure...
+  (when (= (u/the-id collection) (trash-collection-id))
+    (throw (ex-info &quot;Fatal error: the trash collection cannot be trashed&quot; {})))
   ;; Delete all the Children of this Collection
   (t2/delete! Collection :location (children-location collection))
+  (let [affected-collection-ids (cons (u/the-id collection) (collection-&gt;descendant-ids collection))]
+    (doseq [model [:model/Card
+                   :model/Dashboard
+                   :model/NativeQuerySnippet
+                   :model/Pulse
+                   :model/Timeline]]
+      (t2/delete! model :collection_id [:in affected-collection-ids])))
+
   ;; You can't delete a Personal Collection! Unless we enable it because we are simultaneously deleting the User
   (when-not *allow-deleting-personal-collections*
     (when (:personal_owner_id collection)
@@ -3670,6 +3749,7 @@ macros.)</p>
   (let [maybe-alias #(h2x/identifier :field (some-&gt; table-alias name) %)]
     [:and
      [:not= (maybe-alias :type) [:inline instance-analytics-collection-type]]
+     [:not= (maybe-alias :type) [:inline trash-collection-type]]
      [:not (maybe-alias :is_sample)]]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- parent-identity-hash [coll]
   (let [parent-id (-&gt; coll
@@ -3692,52 +3772,69 @@ macros.)</p>
   ;; Also transform :personal_owner_id from a database ID to the email string, if it's defined.
   ;; Use the :slug as the human-readable label.
   [_model-name _opts coll]
-  (let [fetch-collection (fn [id]
-                           (t2/select-one Collection :id id))
-        parent           (some-&gt; coll
-                                 :id
-                                 fetch-collection
-                                 (t2/hydrate :parent_id)
-                                 :parent_id
-                                 fetch-collection)
-        parent-id        (when parent
-                           (or (:entity_id parent) (serdes/identity-hash parent)))
-        owner-email      (when (:personal_owner_id coll)
-                           (t2/select-one-fn :email 'User :id (:personal_owner_id coll)))]
+  (let [fetch-collection       (fn [id]
+                                 (t2/select-one Collection :id id))
+        {:keys [trashed_from_parent_id
+                parent_id]}    (some-&gt; coll :id fetch-collection (t2/hydrate :parent_id :trashed_from_parent_id))
+        parent                 (some-&gt; parent_id fetch-collection)
+        trashed-from-parent    (some-&gt; trashed_from_parent_id fetch-collection)
+        parent-id              (when parent
+                                 (or (:entity_id parent) (serdes/identity-hash parent)))
+        trashed-from-parent-id (when trashed-from-parent
+                                 (or (:entity_id trashed-from-parent) (serdes/identity-hash trashed-from-parent)))
+        owner-email            (when (:personal_owner_id coll)
+                                 (t2/select-one-fn :email 'User :id (:personal_owner_id coll)))]
     (-&gt; (serdes/extract-one-basics &quot;Collection&quot; coll)
         (dissoc :location)
-        (assoc :parent_id parent-id :personal_owner_id owner-email)
+        (assoc :parent_id parent-id
+               :personal_owner_id owner-email
+               :trashed_from_parent_id trashed-from-parent-id)
         (assoc-in [:serdes/meta 0 :label] (:slug coll)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/load-xform &quot;Collection&quot; [{:keys [parent_id] :as contents}]
-  (let [loc        (if parent_id
-                     (let [{:keys [id location]} (serdes/lookup-by-id Collection parent_id)]
-                       (str location id &quot;/&quot;))
-                     &quot;/&quot;)]
+</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/load-xform &quot;Collection&quot; [{:keys [parent_id trashed_from_parent_id archived] :as contents}]
+  (let [loc (fn [col-id]
+              (if col-id
+                (let [{:keys [id location]} (serdes/lookup-by-id Collection col-id)]
+                  (str location id &quot;/&quot;))
+                &quot;/&quot;))]
     (-&gt; contents
         (dissoc :parent_id)
-        (assoc :location loc)
+        (dissoc :trashed_from_parent_id)
+        (assoc :location (loc parent_id)
+               :trashed_from_location (when archived (loc trashed_from_parent_id)))
         (update :personal_owner_id serdes/*import-user*)
         serdes/load-xform-basics)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/dependencies &quot;Collection&quot;
-  [{:keys [parent_id]}]
-  (if parent_id
-    [[{:model &quot;Collection&quot; :id parent_id}]]
-    []))</pre></td></tr><tr><td class="docs">
+  [{:keys [parent_id trashed_from_parent_id]}]
+  (set/union (when parent_id
+                   #{[{:model &quot;Collection&quot; :id parent_id}]})
+             (when trashed_from_parent_id
+               #{[{:model &quot;Collection&quot; :id trashed_from_parent_id}]})))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/generate-path &quot;Collection&quot; [_ coll]
   (serdes/maybe-labeled &quot;Collection&quot; coll :slug))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/ascendants &quot;Collection&quot; [_ id]
-  (let [location (t2/select-one-fn :location Collection :id id)]
+  (let [{:keys [location trashed_from_location]} (t2/select-one :model/Collection :id id)]
     ;; it would work returning just one, but why not return all if it's cheap
-    (set (map vector (repeat &quot;Collection&quot;) (location-path-&gt;ids location)))))</pre></td></tr><tr><td class="docs">
+    (set (concat (map vector (repeat &quot;Collection&quot;) (location-path-&gt;ids location))
+                 (when trashed_from_location
+                   (map vector (repeat &quot;Collection&quot;) (location-path-&gt;ids trashed_from_location)))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/descendants &quot;Collection&quot; [_model-name id]
-  (let [location    (t2/select-one-fn :location Collection :id id)
-        child-colls (set (for [child-id (t2/select-pks-set Collection {:where [:like :location (str location id &quot;/%&quot;)]})]
-                           [&quot;Collection&quot; child-id]))
-        dashboards  (set (for [dash-id (t2/select-pks-set 'Dashboard :collection_id id)]
-                           [&quot;Dashboard&quot; dash-id]))
-        cards       (set (for [card-id (t2/select-pks-set 'Card      :collection_id id)]
-                           [&quot;Card&quot; card-id]))]
-    (set/union child-colls dashboards cards)))</pre></td></tr><tr><td class="docs">
+  ;; the Trash collection has no descendants, for our purposes. This allows us to only include trashed items that were
+  ;; explicitly included in the export.
+  (when-not (is-trash? (t2/select-one :model/Collection :id id))
+    (let [location    (t2/select-one-fn :location Collection :id id)
+          child-colls (set (for [child-id (t2/select-pks-set :model/Collection {:where [:or
+                                                                                        [:like :location (str location id &quot;/%&quot;)]
+                                                                                        [:like :trashed_from_location (str location id &quot;/%&quot;)]]})]
+                             [&quot;Collection&quot; child-id]))
+          dashboards  (set (for [dash-id (t2/select-pks-set :model/Dashboard {:where [:or
+                                                                                      [:= :collection_id id]
+                                                                                      [:= :trashed_from_collection_id id]]})]
+                             [&quot;Dashboard&quot; dash-id]))
+          cards       (set (for [card-id (t2/select-pks-set :model/Card {:where [:or
+                                                                                 [:= :collection_id id]
+                                                                                 [:= :trashed_from_collection_id id]]})]
+                             [&quot;Card&quot; card-id]))]
+      (set/union child-colls dashboards cards))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/storage-path &quot;Collection&quot; [coll {:keys [collections]}]
   (let [parental (get collections (:entity_id coll))]
     (concat [&quot;collections&quot;] parental [(last parental)])))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
@@ -3774,7 +3871,10 @@ as the original, this check is a no-op.</p>
     ;; check that we're allowed to modify the old Collection
     (check-write-perms-for-collection (:collection_id object-before-update))
     ;; check that we're allowed to modify the new Collection
-    (check-write-perms-for-collection (:collection_id object-updates))))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
+    (check-write-perms-for-collection (:collection_id object-updates))
+    ;; check that the new location is not archived. the root can't be archived.
+    (when-let [collection-id (:collection_id object-updates)]
+      (api/check-400 (t2/exists? :model/Collection :id collection-id :archived false)))))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
 |                                              Personal Collections                                              |
 +----------------------------------------------------------------------------------------------------------------+</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
@@ -4010,7 +4110,70 @@ objects of that type.</p>
                         ;; coll-type is `nil` or &quot;instance-analytics&quot;
                         ;; nil sorts first, so we get instance-analytics at the end, which is what we want
                         (original-position coll-id))))))
-     (annotate-collections child-type-&gt;parent-ids collections))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+     (annotate-collections child-type-&gt;parent-ids collections))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mi/define-batched-hydration-method can-restore
+  :can_restore
+  &quot;Efficiently hydrate the `:can_restore` of a sequence of items with a `trashed_from_collection_id`.&quot;
+  [items]
+  (for [{trashed-from-coll :trashed_from_collection
+         :as item*} (t2/hydrate items :trashed_from_collection)
+        :let [item (dissoc item* :trashed_from_collection)]]
+    (cond-&gt; item
+      (:archived item)
+      (assoc :can_restore (and
+                           ;; the item is directly in the trash (it was moved to the trash independently, not as
+                           ;; part of a collection)
+                           (= (:collection_id item) (trash-collection-id))
+                           ;; EITHER:
+                           (or
+                            ;; the item was trashed from the root collection
+                            (nil? (:trashed_from_collection_id item))
+                            ;; or the collection we'll restore to actually exists.
+                            (some? trashed-from-coll))
+                           ;; the collection we'll restore to is not archived
+                           (not (:archived trashed-from-coll))
+                           ;; we have perms on the collection
+                           (mi/can-write? (or trashed-from-coll root-collection)))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mi/define-batched-hydration-method collection-can-restore
+  :collection/can_restore
+  &quot;Collections have a `trashed_from_location` rather than a `trashed_from_collection_id`. Efficiently hydrate the
+  `:can_restore` property of a sequence of Collections.&quot;
+  [colls]
+  (when (seq colls)
+    (let [;; skip any collections that aren't archived, or are the root collection
+          ids-to-fetch      (-&gt;&gt; colls
+                                 (remove collection.root/is-root-collection?)
+                                 (filter :archived)
+                                 (map u/the-id))
+          coll-id-&gt;restore-coll* (if (seq ids-to-fetch)
+                                   (into {}
+                                         (map (juxt :unarchiving_coll_id identity))
+                                         (t2/select :model/Collection
+                                                    {:select    [:trashed_from_coll.*
+                                                                 [:coll.id :unarchiving_coll_id]
+                                                                 [:coll.trashed_from_location :unarchiving_trashed_from_location]]
+                                                     :from      [[:collection :coll]]
+                                                     :left-join [[:collection :trashed_from_coll] [:=
+                                                                                                   [:concat :trashed_from_coll.location :trashed_from_coll.id &quot;/&quot;]
+                                                                                                   :coll.trashed_from_location]]
+                                                     :where     [:in :coll.id (into #{} ids-to-fetch)]}))
+                                   {})
+          ;; given a collection, return the collection we will be restoring TO.
+          coll-&gt;restore-coll  (fn [coll]
+                                (when (not (or (collection.root/is-root-collection? coll)
+                                               (not (:archived coll))))
+                                  (let [restore-destination (coll-id-&gt;restore-coll* (u/the-id coll))]
+                                    (cond
+                                      (:id restore-destination) restore-destination
+                                      (= &quot;/&quot; (:unarchiving_trashed_from_location restore-destination)) collection.root/root-collection
+                                      :else nil))))]
+      (for [coll colls]
+        (cond-&gt; coll
+          (:archived coll) (assoc :can_restore (if-let [restore-destination (coll-&gt;restore-coll coll)]
+                                                 (perms/set-has-full-permissions-for-set?
+                                                  @api/*current-user-permissions-set*
+                                                  (perms-for-moving coll restore-destination))
+                                                 false)))))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

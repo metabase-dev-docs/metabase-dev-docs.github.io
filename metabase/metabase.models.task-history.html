@@ -2874,7 +2874,6 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.models.permissions :as perms]
    [metabase.public-settings.premium-features :as premium-features]
    [metabase.util :as u]
-   [metabase.util.log :as log]
    [metabase.util.malli :as mu]
    [metabase.util.malli.schema :as ms]
    [methodical.core :as methodical]
@@ -2907,8 +2906,21 @@ This is intended for a quick cleanup of old rows. Returns <code>true</code> if s
                                                                         :offset   num-rows-to-keep
                                                                         :order-by [[:ended_at :desc]]})]
     (t2/delete! (t2/table-name TaskHistory) :ended_at [:&lt;= clean-before-date])))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private task-history-status #{:started :success :failed})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- assert-task-history-status
+  [status]
+  (assert (task-history-status (keyword status)) &quot;Invalid task history status&quot;))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(t2/define-after-insert :model/TaskHistory
+  [task-history]
+  (assert-task-history-status (:status task-history))
+  task-history)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(t2/define-before-update :model/TaskHistory
+  [task-history]
+  (assert-task-history-status (:status task-history))
+  task-history)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(t2/deftransforms :model/TaskHistory
-  {:task_details mi/transform-json})</pre></td></tr><tr><td class="docs"><p>Return all TaskHistory entries, applying <code>limit</code> and <code>offset</code> if not nil</p>
+  {:task_details mi/transform-json
+   :status       mi/transform-keyword})</pre></td></tr><tr><td class="docs"><p>Return all TaskHistory entries, applying <code>limit</code> and <code>offset</code> if not nil</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn all
   [limit  :- [:maybe ms/PositiveInt]
    offset :- [:maybe ms/IntGreaterThanOrEqualToZero]]
@@ -2922,39 +2934,47 @@ This is intended for a quick cleanup of old rows. Returns <code>true</code> if s
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Schema for <code>info</code> passed to the <code>with-task-history</code> macro.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private TaskHistoryInfo
   [:map {:closed true}
-   [:task                          ms/NonBlankString] ; task name, i.e. `send-pulses`. Conventionally lisp-cased
-   [:db_id        {:optional true} [:maybe :int]]     ; DB involved, for sync operations or other tasks where this is applicable.
-   [:task_details {:optional true} [:maybe :map]]])   ; additional map of details to include in the recorded row</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- save-task-history! [start-time-ms info]
-  (let [end-time-ms (System/currentTimeMillis)
-        duration-ms (- end-time-ms start-time-ms)]
-    (try
-      (first (t2/insert-returning-instances! TaskHistory
-                                             (assoc info
-                                                    :started_at (t/instant start-time-ms)
-                                                    :ended_at   (t/instant end-time-ms)
-                                                    :duration   duration-ms)))
-      (catch Throwable e
-        (log/warn e &quot;Error saving task history&quot;)))))</pre></td></tr><tr><td class="docs"><p>Impl for <code>with-task-history</code> macro; see documentation below.</p>
+   [:task                             ms/NonBlankString] ; task name, i.e. `send-pulses`. Conventionally lisp-cased
+   [:db_id           {:optional true} [:maybe :int]]     ; DB involved, for sync operations or other tasks where this is applicable.
+   ;; a function that takes the result of the task and returns a map of additional info to update task history when the task succeeds
+   [:on-success-info {:optional true} [:maybe [:=&gt; [:cat :any] :map]]]
+   [:task_details    {:optional true} [:maybe :map]]])   ; additional map of details to include in the recorded row</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ns-&gt;ms #(int (/ % 1e6)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- update-task-history!
+  [th-id startime-ns info]
+  (let [updated-info (merge {:ended_at (t/instant)
+                             :duration (ns-&gt;ms (- (System/nanoTime) startime-ns))}
+                            info)]
+    (t2/update! :model/TaskHistory th-id updated-info)))</pre></td></tr><tr><td class="docs"><p>Impl for <code>with-task-history</code> macro; see documentation below.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn do-with-task-history
   [info :- TaskHistoryInfo f]
-  (let [start-time-ms (System/currentTimeMillis)]
+  (let [on-success-info (:on-success-info info)
+        info            (dissoc info :on-success-info)
+        start-time-ns   (System/nanoTime)
+        th-id           (t2/insert-returning-pk! :model/TaskHistory
+                                                 (assoc info
+                                                        :status     :started
+                                                        :started_at (t/instant)))]
     (try
       (u/prog1 (f)
-        (save-task-history! start-time-ms info))
+        (update-task-history! th-id start-time-ns (cond-&gt; {:status :success}
+                                                    (some? on-success-info)
+                                                    (merge (on-success-info &lt;&gt;)))))
       (catch Throwable e
-        (let [info (assoc info :task_details {:status        :failed
-                                              :exception     (class e)
-                                              :message       (.getMessage e)
-                                              :stacktrace    (u/filtered-stacktrace e)
-                                              :ex-data       (ex-data e)
-                                              :original-info (:task_details info)})]
-          (save-task-history! start-time-ms info))
-        (throw e)))))</pre></td></tr><tr><td class="docs"><p>Execute <code>body</code>, recording a TaskHistory entry when the task completes; if it failed to complete, records an entry
-containing information about the Exception. <code>info</code> should contain at least a name for the task (conventionally
+        (update-task-history! th-id start-time-ns {:task_details {:status        :failed
+                                                                  :exception     (class e)
+                                                                  :message       (.getMessage e)
+                                                                  :stacktrace    (u/filtered-stacktrace e)
+                                                                  :ex-data       (ex-data e)
+                                                                  :original-info (:task_details info)}
+                                                   :status       :failed})
+        (throw e)))))</pre></td></tr><tr><td class="docs"><p>Record a TaskHistory before executing the body, updating TaskHistory accordingly when the body completes.
+<code>info</code> should contain at least a name for the task (conventionally
 lisp-cased) as <code>:task</code>; see the <code>TaskHistoryInfo</code> schema in this namespace for other optional keys.</p>
 
-<p>  (with-task-history {:task "send-pulses"}
+<p>  (with-task-history {:task "send-pulses"
+                      :db_id 1
+                      :on-success-info (fn [thunk-result] {:status :failed})}
     ...)</p>
 </td><td class="codes"><pre class="brush: clojure">(defmacro with-task-history
   {:style/indent 1}

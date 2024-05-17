@@ -2877,7 +2877,7 @@ as logging start/end messages.</p>
    [metabase.driver.util :as driver.u]
    [metabase.events :as events]
    [metabase.models.interface :as mi]
-   [metabase.models.task-history :refer [TaskHistory]]
+   [metabase.models.task-history :as task-history]
    [metabase.query-processor.interface :as qp.i]
    [metabase.sync.interface :as i]
    [metabase.util :as u]
@@ -3184,13 +3184,13 @@ of various objects.</p>
   (u/format-nanoseconds (.toNanos (t/duration begin-time end-time))))</pre></td></tr><tr><td class="docs"><p>Metadata common to both sync steps and an entire sync/analyze operation run</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private TimedSyncMetadata
   [:map
-   [:start-time (ms/InstanceOfClass Temporal)]
-   [:end-time   (ms/InstanceOfClass Temporal)]])</pre></td></tr><tr><td class="docs">
+   [:start-time                  (ms/InstanceOfClass Temporal)]
+   [:end-time   {:optional true} (ms/InstanceOfClass Temporal)]])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::StepRunMetadata
   [:merge
    TimedSyncMetadata
    [:map
-    [:log-summary-fn [:maybe [:=&gt; [:cat :string] [:ref ::StepRunMetadata]]]]]])</pre></td></tr><tr><td class="docs"><p>Map with metadata about the step. Contains both generic information like <code>start-time</code> and <code>end-time</code> and step
+    [:log-summary-fn [:maybe [:=&gt; [:cat [:ref ::StepRunMetadata]] :string]]]]])</pre></td></tr><tr><td class="docs"><p>Map with metadata about the step. Contains both generic information like <code>start-time</code> and <code>end-time</code> and step
 specific information</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private StepRunMetadata
   [:ref ::StepRunMetadata])</pre></td></tr><tr><td class="docs">
@@ -3208,7 +3208,7 @@ specific information</p>
    [:map
     [:steps [:maybe [:sequential StepNameWithMetadata]]]]])</pre></td></tr><tr><td class="docs"><p>A log summary function takes a <code>StepRunMetadata</code> and returns a string with a step-specific log message</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private LogSummaryFunction
-  [:=&gt; [:cat :string] StepRunMetadata])</pre></td></tr><tr><td class="docs"><p>Defines a step. <code>:sync-fn</code> runs the step, returns a map that contains step specific metadata. <code>log-summary-fn</code>
+  [:=&gt; [:cat StepRunMetadata] :string])</pre></td></tr><tr><td class="docs"><p>Defines a step. <code>:sync-fn</code> runs the step, returns a map that contains step specific metadata. <code>log-summary-fn</code>
 takes that metadata and turns it into a string for logging</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private StepDefinition
   [:map
@@ -3223,7 +3223,7 @@ takes that metadata and turns it into a string for logging</p>
     :step-name      step-name
     :log-summary-fn (when log-summary-fn
                       (comp str log-summary-fn))}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn run-step-with-metadata :- StepNameWithMetadata
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private run-step-with-metadata :- StepNameWithMetadata
   &quot;Runs `step` on `database` returning metadata from the run&quot;
   [database :- i/DatabaseInstance
    {:keys [step-name sync-fn log-summary-fn] :as _step} :- StepDefinition]
@@ -3233,12 +3233,16 @@ takes that metadata and turns it into a string for logging</p>
                                                                 (name-for-logging database))
                      (fn [&amp; args]
                        (try
-                         (apply sync-fn database args)
+                         (task-history/with-task-history {:task            step-name
+                                                          :db_id           (u/the-id database)
+                                                          :on-success-info (fn [result]
+                                                                             {:task_details (dissoc result :start-time :end-time :log-summary-fn)})}
+                           (apply sync-fn database args))
                          (catch Throwable e
                            (if *log-exceptions-and-continue?*
                              (do
-                               (log/warn e (format &quot;Error running step ''%s'' for %s&quot; step-name (name-for-logging database)))
-                               {:throwable e})
+                              (log/warn e (format &quot;Error running step ''%s'' for %s&quot; step-name (name-for-logging database)))
+                              {:throwable e})
                              (throw e))))))
         end-time   (t/zoned-date-time)]
     [step-name (assoc results
@@ -3274,45 +3278,13 @@ this function unless the logging level is at debug (or higher).</p>
                         (format &quot;End: %s&quot; (u.date/format end-time))
                         (format &quot;Duration: %s&quot; (calculate-duration-str start-time end-time))])))
    &quot;#################################################################\n&quot;))</pre></td></tr><tr><td class="docs"><p>Log a sync/analyze summary message with info from each step</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private  log-sync-summary
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private log-sync-summary
   [operation :- :string
    database :- i/DatabaseInstance
    sync-metadata :- SyncOperationMetadata]
   ;; Note this needs to either stay nested in the `debug` macro call or be guarded by an log/enabled?
   ;; call. Constructing the log below requires some work, no need to incur that cost debug logging isn't enabled
   (log/debug (make-log-sync-summary-str operation database sync-metadata)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private SyncOperationOrStepRunMetadata
-  [:multi
-   {:dispatch
-    #(contains? % :steps)}
-   [true  SyncOperationMetadata]
-   [false StepRunMetadata]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private create-task-history
-  [task-name :- ms/NonBlankString
-   database  :- i/DatabaseInstance
-   {:keys [start-time end-time]} :- SyncOperationOrStepRunMetadata]
-  {:task       task-name
-   :db_id      (u/the-id database)
-   :started_at start-time
-   :ended_at   end-time
-   :duration   (.toMillis (t/duration start-time end-time))})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private store-sync-summary!
-  [operation :- :string
-   database  :- i/DatabaseInstance
-   {:keys [steps] :as sync-md} :- SyncOperationMetadata]
-  (try
-    (-&gt;&gt; (for [[step-name step-info] steps
-               :let                  [task-details (dissoc step-info :start-time :end-time :log-summary-fn)]]
-           (assoc (create-task-history step-name database step-info)
-                  :task_details (when (seq task-details)
-                                  task-details)))
-         (cons (create-task-history operation database sync-md))
-         ;; can't do `(t2/insert-returning-instances!)` with a seq because of this bug https://github.com/camsaul/toucan2/issues/130
-         (map #(t2/insert-returning-pks! TaskHistory %))
-         (map first)
-         doall)
-    (catch Throwable e
-      (log/warn e  &quot;Error saving task history&quot;))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- do-not-retry-exception? [e]
   (or (isa? (class e) ::exception-class-not-to-retry)
       (some-&gt; (ex-cause e) recur)))</pre></td></tr><tr><td class="docs"><p>Given the results of a sync step, returns truthy if a non-recoverable exception occurred</p>
@@ -3324,21 +3296,22 @@ this function unless the logging level is at debug (or higher).</p>
   [operation :- :string
    database :- i/DatabaseInstance
    sync-steps :- [:maybe [:sequential StepDefinition]]]
-  (let [start-time    (t/zoned-date-time)
-        step-metadata (loop [[step-defn &amp; rest-defns] sync-steps
-                             result                   []]
-                        (let [[step-name r] (run-step-with-metadata database step-defn)
-                              new-result    (conj result [step-name r])]
-                          (cond (abandon-sync? r) new-result
-                                (not (seq rest-defns)) new-result
-                                :else (recur rest-defns new-result))))
-        end-time      (t/zoned-date-time)
-        sync-metadata {:start-time start-time
-                       :end-time   end-time
-                       :steps      step-metadata}]
-    (store-sync-summary! operation database sync-metadata)
-    (log-sync-summary operation database sync-metadata)
-    sync-metadata))</pre></td></tr><tr><td class="docs"><p>Similar to a 2-arg call to <code>map</code>, but will add all numbers that result from the invocations of <code>f</code>. Used mainly for
+  (task-history/with-task-history {:task  operation
+                                   :db_id (u/the-id database)}
+    (let [start-time    (t/zoned-date-time)
+          step-metadata (loop [[step-defn &amp; rest-defns] sync-steps
+                               result                   []]
+                          (let [[step-name r] (run-step-with-metadata database step-defn)
+                                new-result    (conj result [step-name r])]
+                            (cond (abandon-sync? r) new-result
+                                  (not (seq rest-defns)) new-result
+                                  :else (recur rest-defns new-result))))
+          end-time      (t/zoned-date-time)
+          sync-metadata {:start-time start-time
+                         :end-time   end-time
+                         :steps      step-metadata}]
+      (log-sync-summary operation database sync-metadata)
+      sync-metadata)))</pre></td></tr><tr><td class="docs"><p>Similar to a 2-arg call to <code>map</code>, but will add all numbers that result from the invocations of <code>f</code>. Used mainly for
 logging purposes, such as to count and log the number of Fields updated by a sync operation. See also
 <code>sum-for</code>, a <code>for</code>-style macro version.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn sum-numbers

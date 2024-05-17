@@ -2964,22 +2964,38 @@ net.brehaut.ClojureTools = (function (SH) {
        :from   (from-clause-for-model model)}
       (search.filter/build-filters model context)))</pre></td></tr><tr><td class="docs"><p>Add a <code>WHERE</code> clause to the query to only return Collections the Current User has access to; join against Collection
 so we can return its <code>:name</code>.</p>
+
+<p>A brief note here on <code>collection-join-id</code> and <code>collection-permission-id</code>. What the heck do these represent?</p>
+
+<p>Permissions on Trashed items work differently than normal permissions. If something is in the trash, you can only
+see it if you have the relevant permissions on the <em>original</em> collection the item was trashed from. This is set as
+<code>trashed_from_collection_id</code>.</p>
+
+<p>However, the item is actually <em>in</em> the Trash, and we want to show that to the frontend. Therefore, we need two
+different collection IDs. One, the ID we should be checking permissions on, and two, the ID we should be joining to
+Collections on.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn add-collection-join-and-where-clauses
   [honeysql-query                                :- ms/Map
-   collection-id-column                          :- keyword?
+   model                                         :- :string
    {:keys [current-user-perms
            filter-items-in-personal-collection]} :- SearchContext]
   (let [visible-collections      (collection/permissions-set-&gt;visible-collection-ids current-user-perms)
+        collection-join-id       (if (= model &quot;collection&quot;)
+                                   :collection.id
+                                   :collection_id)
+        collection-permission-id (if (= model &quot;collection&quot;)
+                                   :collection.id
+                                   (mi/parent-collection-id-column-for-perms (:db-model (search.config/model-to-db-model model))))
         collection-filter-clause (collection/visible-collection-ids-&gt;honeysql-filter-clause
-                                  collection-id-column
+                                  collection-permission-id
                                   visible-collections)]
     (cond-&gt; honeysql-query
       true
       (sql.helpers/where collection-filter-clause (perms/audit-namespace-clause :collection.namespace nil))
       ;; add a JOIN against Collection *unless* the source table is already Collection
-      (not= collection-id-column :collection.id)
+      (not= model &quot;collection&quot;)
       (sql.helpers/left-join [:collection :collection]
-                             [:= collection-id-column :collection.id])
+                             [:= collection-join-id :collection.id])
       (some? filter-items-in-personal-collection)
       (sql.helpers/where
        (case filter-items-in-personal-collection
@@ -2998,7 +3014,7 @@ so we can return its <code>:name</code>.</p>
                 [:and [:= :collection.personal_owner_id nil]]
                 (for [id (t2/select-pks-set :model/Collection :personal_owner_id [:not= nil])]
                   [:not-like :collection.location (format &quot;/%d/%%&quot; id)]))
-               [:= collection-id-column nil]))))))</pre></td></tr><tr><td class="docs"><p>Add a WHERE clause to only return tables with the given DB id.
+               [:= collection-join-id nil]))))))</pre></td></tr><tr><td class="docs"><p>Add a WHERE clause to only return tables with the given DB id.
 Used in data picker for joins because we can't join across DB's.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private add-table-db-id-clause
   [query :- ms/Map id :- [:maybe ms/PositiveInt]]
@@ -3067,7 +3083,7 @@ Used in data picker for joins because we can't join across DB's.</p>
                              [:and
                               [:= :bookmark.card_id :card.id]
                               [:= :bookmark.user_id api/*current-user-id*]])
-      (add-collection-join-and-where-clauses :card.collection_id search-ctx)
+      (add-collection-join-and-where-clauses model search-ctx)
       (add-card-db-id-clause (:table-db-id search-ctx))
       (with-last-editing-info model)
       (with-moderated-status model)))</pre></td></tr><tr><td class="docs">
@@ -3078,7 +3094,8 @@ Used in data picker for joins because we can't join across DB's.</p>
                              [:= :model.id :action.model_id])
       (sql.helpers/left-join :query_action
                              [:= :query_action.action_id :action.id])
-      (add-collection-join-and-where-clauses :model.collection_id search-ctx)))</pre></td></tr><tr><td class="docs">
+      (add-collection-join-and-where-clauses model
+                                             search-ctx)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod search-query-for-model &quot;card&quot;
   [_model search-ctx]
   (shared-card-impl &quot;card&quot; search-ctx))</pre></td></tr><tr><td class="docs">
@@ -3088,13 +3105,13 @@ Used in data picker for joins because we can't join across DB's.</p>
       (update :select (fn [columns]
                         (cons [(h2x/literal &quot;dataset&quot;) :model] (rest columns))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod search-query-for-model &quot;collection&quot;
-  [_model search-ctx]
+  [model search-ctx]
   (-&gt; (base-query-for-model &quot;collection&quot; search-ctx)
       (sql.helpers/left-join [:collection_bookmark :bookmark]
                              [:and
                               [:= :bookmark.collection_id :collection.id]
                               [:= :bookmark.user_id api/*current-user-id*]])
-      (add-collection-join-and-where-clauses :collection.id search-ctx)))</pre></td></tr><tr><td class="docs">
+      (add-collection-join-and-where-clauses model search-ctx)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod search-query-for-model &quot;database&quot;
   [model search-ctx]
   (base-query-for-model model search-ctx))</pre></td></tr><tr><td class="docs">
@@ -3105,7 +3122,7 @@ Used in data picker for joins because we can't join across DB's.</p>
                              [:and
                               [:= :bookmark.dashboard_id :dashboard.id]
                               [:= :bookmark.user_id api/*current-user-id*]])
-      (add-collection-join-and-where-clauses :dashboard.collection_id search-ctx)
+      (add-collection-join-and-where-clauses model search-ctx)
       (with-last-editing-info model)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod search-query-for-model &quot;metric&quot;
   [model search-ctx]
@@ -3123,14 +3140,15 @@ Used in data picker for joins because we can't join across DB's.</p>
       (let [has-root-access?
             (or (contains? current-user-perms &quot;/collection/root/&quot;)
                 (contains? current-user-perms &quot;/collection/root/read/&quot;))
+            collection-id [:coalesce :model.trashed_from_collection_id :collection_id]
             collection-perm-clause
             [:or
-             (when has-root-access? [:= :model.collection_id nil])
+             (when has-root-access? [:= collection-id nil])
              [:and
-              [:not= :model.collection_id nil]
+              [:not= collection-id nil]
               [:or
-               (has-perm-clause &quot;/collection/&quot; :model.collection_id &quot;/&quot;)
-               (has-perm-clause &quot;/collection/&quot; :model.collection_id &quot;/read/&quot;)]]]]
+               (has-perm-clause &quot;/collection/&quot; collection-id &quot;/&quot;)
+               (has-perm-clause &quot;/collection/&quot; collection-id &quot;/read/&quot;)]]]]
         (sql.helpers/where
          query
          collection-perm-clause)))))</pre></td></tr><tr><td class="docs">
@@ -3272,7 +3290,11 @@ one model without errors. Therefore we degenerate it down for it</p>
                                (for [item search-results
                                      :when (= (:model item) &quot;dataset&quot;)]
                                  [(:collection_id item)
-                                  {:name (:collection_name item)
+                                  {:name (-&gt; {:name (:collection_name item)
+                                              :id (:collection_id item)
+                                              :type (:collection_type item)}
+                                             collection/maybe-localize-trash-name
+                                             :name)
                                    :effective_location (result-&gt;loc item)}]))
         ;; the set of all collection IDs where we *don't* know the collection name. For example, if `col-id-&gt;name&amp;loc`
         ;; contained `{1 {:effective_location &quot;/2/&quot; :name &quot;Foo&quot;}}`, we need to look up the name of collection `2`.
@@ -3318,6 +3340,7 @@ one model without errors. Therefore we degenerate it down for it</p>
                             (map #(if (t2/instance-of? :model/Collection %)
                                     (t2/hydrate % :effective_location)
                                     (assoc % :effective_location nil)))
+                            (map #(cond-&gt; % (t2/instance-of? :model/Collection %) collection/maybe-localize-trash-name))
                             (filter (partial check-permissions-for-model (:archived? search-ctx)))
                             ;; MySQL returns `:bookmark` and `:archived` as `1` or `0` so convert those to boolean as
                             ;; needed
