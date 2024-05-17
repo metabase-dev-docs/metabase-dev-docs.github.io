@@ -2941,7 +2941,8 @@ same unique alias.</p>
   []
   (let [unique-name-fn (lib.util/unique-name-generator (qp.store/metadata-provider))]
     (fn unique-alias-fn [position original-alias]
-      {:pre (string? original-alias)}
+      (assert (string? original-alias)
+              (format &quot;unique-alias-fn expected string, got: %s&quot; (pr-str original-alias)))
       (unique-name-fn position (driver/escape-alias driver/*driver* original-alias)))))</pre></td></tr><tr><td class="docs"><p>TODO -- this should probably limit the resulting alias, and suffix a short hash as well if it gets too long. See also
 [[unique-alias-fn]] below.</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
@@ -3219,6 +3220,24 @@ it around instead of recalculating it a bunch of times.</p>
            (when-let [position (clause-&gt;position inner-query field-clause)]
              {::desired-alias (unique-alias-fn position (field-desired-alias inner-query field-clause expensive-info))
               ::position      position}))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmulti ^:private aggregation-name
+  {:arglists '([mbql-clause])}
+  (fn [x]
+    (when (mbql.u/mbql-clause? x)
+      (first x))))</pre></td></tr><tr><td class="docs"><p>make sure we have an <code>:aggregation-options</code> or other fully-preprocessed aggregation clause (i.e., <code>:offset</code>) like we
+expect. This is mostly a precondition check since we should never be running this code on not-preprocessed queries,
+so it's not i18n'ed</p>
+</td><td class="codes"><pre class="brush: clojure">(defmethod aggregation-name :default
+  [ag-clause]
+  (throw (ex-info (format &quot;Expected :aggregation-options or other fully-preprocessed aggregation, got %s.&quot;
+                          (pr-str ag-clause))
+                  {:clause ag-clause})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defmethod aggregation-name :aggregation-options :- :string
+  [[_aggregation-options _wrapped-ag opts]]
+  (:name opts))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defmethod aggregation-name :offset :- :string
+  [[_offset opts _expr _n]]
+  (:name opts))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod clause-alias-info :aggregation
   [{aggregations :aggregation, :as inner-query} unique-alias-fn [_ index _opts :as ag-ref-clause]]
   (let [position (clause-&gt;position inner-query ag-ref-clause)]
@@ -3229,13 +3248,7 @@ it around instead of recalculating it a bunch of times.</p>
                       {:type   qp.error-type/invalid-query
                        :clause ag-ref-clause
                        :query  inner-query})))
-    (let [[_ _ {ag-name :name} :as matching-ag] (nth aggregations index)]
-      ;; make sure we have an `:aggregation-options` clause like we expect. This is mostly a precondition check
-      ;; since we should never be running this code on not-preprocessed queries, so it's not i18n'ed
-      (when-not (mbql.u/is-clause? :aggregation-options matching-ag)
-        (throw (ex-info (format &quot;Expected :aggregation-options, got %s. (Query must be fully preprocessed.)&quot;
-                                (pr-str matching-ag))
-                        {:clause ag-ref-clause, :query inner-query})))
+    (let [ag-name (aggregation-name (nth aggregations index))]
       {::desired-alias (unique-alias-fn position ag-name)
        ::position      position})))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod clause-alias-info :expression
