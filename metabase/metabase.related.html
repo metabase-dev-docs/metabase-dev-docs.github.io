@@ -2900,15 +2900,15 @@ especially context-bearing forms.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti definition
   {:arglists '([instance])}
   mi/model)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod definition :model/LegacyMetric
+  [metric]
+  (-&gt; metric :definition ((juxt :aggregation :filter))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod definition :model/Card
   [card]
   (-&gt; card
       :dataset_query
       :query
       ((juxt :breakout :aggregation :expressions :fields))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod definition :model/LegacyMetric
-  [metric]
-  (-&gt; metric :definition ((juxt :aggregation :filter))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod definition :model/Segment
   [segment]
   (-&gt; segment :definition :filter))</pre></td></tr><tr><td class="docs">
@@ -2924,9 +2924,11 @@ especially context-bearing forms.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- similarity
   [a b]
   (let [context-a (-&gt; a definition collect-context-bearing-forms)
-        context-b (-&gt; b definition collect-context-bearing-forms)]
-    (/ (count (set/intersection context-a context-b))
-       (max (min (count context-a) (count context-b)) 1))))</pre></td></tr><tr><td class="docs">
+        context-b (-&gt; b definition collect-context-bearing-forms)
+        overlap (set/intersection context-a context-b)
+        min-overlap (min (count context-a) (count context-b))]
+    (/ (count overlap)
+       (max min-overlap 1))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- rank-by-similarity
   [reference entities]
   (-&gt;&gt; entities
@@ -2948,6 +2950,12 @@ especially context-bearing forms.</p>
                          (not= active false)
                          (mi/can-read? instance)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- metrics-for-table
+  [table]
+  (filter-visible (t2/select :model/Card
+                    :table_id (:id table)
+                    :type :metric
+                    :archived false)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- legacy-metrics-for-table
   [table]
   (filter-visible (t2/select :model/LegacyMetric
                     :table_id (:id table)
@@ -2996,19 +3004,20 @@ especially context-bearing forms.</p>
   [card]
   (-&gt;&gt; (t2/select :model/Card
          :table_id (:table_id card)
+         :type [:in [:model :question]]
          :archived false)
        filter-visible
        (rank-by-similarity card)
        (filter (comp pos? :similarity))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- canonical-metric
+</td><td class="codes"><pre class="brush: clojure">(defn- similar-metrics
   [card]
-  (-&gt;&gt; (t2/select :model/LegacyMetric
+  (-&gt;&gt; (t2/select :model/Card
          :table_id (:table_id card)
+         :type :metric
          :archived false)
        filter-visible
-       (m/find-first (comp #{(-&gt; card :dataset_query :query :aggregation)}
-                           :aggregation
-                           :definition))))</pre></td></tr><tr><td class="docs">
+       (rank-by-similarity card)
+       (filter (comp pos? :similarity))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- recently-modified-dashboards
   []
   (when-let [dashboard-ids (not-empty (t2/select-fn-set :model_id :model/Revision
@@ -3050,19 +3059,17 @@ especially context-bearing forms.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmethod related :model/Card
   [card]
   (let [table             (t2/select-one :model/Table :id (:table_id card))
-        similar-questions (similar-questions card)]
+        similar-questions (similar-questions card)
+        similar-metrics   (similar-metrics card)]
     {:table             table
-     :metrics           (-&gt;&gt; table
-                             metrics-for-table
-                             (rank-by-similarity card)
-                             interesting-mix)
+     :metrics           (interesting-mix similar-metrics)
      :segments          (-&gt;&gt; table
                              segments-for-table
                              (rank-by-similarity card)
                              interesting-mix)
      :dashboard-mates   (cards-sharing-dashboard card)
      :similar-questions (interesting-mix similar-questions)
-     :canonical-metric  (canonical-metric card)
+     :canonical-metric  (first similar-metrics)
      :dashboards        (recommended-dashboards similar-questions)
      :collections       (recommended-collections similar-questions)}))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod related :model/Query
@@ -3073,7 +3080,7 @@ especially context-bearing forms.</p>
   (let [table (t2/select-one :model/Table :id (:table_id metric))]
     {:table    table
      :metrics  (-&gt;&gt; table
-                    metrics-for-table
+                    legacy-metrics-for-table
                     (rank-by-similarity metric)
                     interesting-mix)
      :segments (-&gt;&gt; table
@@ -3084,10 +3091,7 @@ especially context-bearing forms.</p>
   [segment]
   (let [table (t2/select-one :model/Table :id (:table_id segment))]
     {:table       table
-     :metrics     (-&gt;&gt; table
-                       metrics-for-table
-                       (rank-by-similarity segment)
-                       interesting-mix)
+     :metrics     (metrics-for-table table)
      :segments    (-&gt;&gt; table
                        segments-for-table
                        (rank-by-similarity segment)

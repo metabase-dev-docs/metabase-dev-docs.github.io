@@ -2881,22 +2881,19 @@ expression. Can be passed into the <code>:aggregation</code>s list.</p>
    [metabase.lib.schema.metadata :as lib.schema.metadata]
    [metabase.lib.util :as lib.util]
    [metabase.shared.util.i18n :as i18n]
-   [metabase.util.malli :as mu]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- resolve-metric [query metric-id]
+   [metabase.util.malli :as mu]))</pre></td></tr><tr><td class="docs"><p>Replaced by metrics v2</p>
+</td><td class="codes"><pre class="brush: clojure">#_
+(defn- resolve-metric [query metric-id]
   (when (integer? metric-id)
-    (lib.metadata/legacy-metric query metric-id)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private metric-definition :- [:maybe ::lib.schema/stage.mbql]
+    (lib.metadata/legacy-metric query metric-id)))
+(mu/defn ^:private metric-definition :- [:maybe ::lib.schema/stage.mbql]
   [{:keys [definition], :as _metric-metadata} :- ::lib.schema.metadata/legacy-metric]
   (when definition
-    (if (:mbql/type definition)
-      definition
-      ;; legacy; needs conversion
-      (-&gt;
-        ;; database-id cannot be nil, but gets thrown out
-        (lib.convert/legacy-query-from-inner-query #?(:clj Integer/MAX_VALUE :cljs js/Number.MAX_SAFE_INTEGER) definition)
-        mbql.normalize/normalize
-        lib.convert/-&gt;pMBQL
-        (lib.util/query-stage -1)))))</pre></td></tr><tr><td class="docs">
+    (let [normalized-definition (cond-&gt; definition
+                                  (not (contains? definition :lib/type))
+                                  ;; legacy; needs conversion
+                                  (-&gt; mbql.normalize/normalize lib.convert/-&gt;pMBQL))]
+      (lib.util/query-stage normalized-definition -1))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod lib.ref/ref-method :metadata/legacy-metric
   [{:keys [id], :as metric-metadata}]
   (let [effective-type (or (:effective-type metric-metadata)
@@ -2913,41 +2910,47 @@ expression. Can be passed into the <code>:aggregation</code>s list.</p>
   (or
    (when-let [[aggregation] (not-empty (:aggregation (metric-definition metric-metadata)))]
      (lib.metadata.calculation/type-of query stage-number aggregation))
-   :type/*))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/type-of-method :metric
+   :type/*))</pre></td></tr><tr><td class="docs"><p>Replaced by metrics v2</p>
+</td><td class="codes"><pre class="brush: clojure">#_
+(defmethod lib.metadata.calculation/type-of-method :metric
   [query stage-number [_tag _opts metric-id-or-name]]
   (or (when-let [metric-metadata (resolve-metric query metric-id-or-name)]
         (lib.metadata.calculation/type-of query stage-number metric-metadata))
-      :type/*))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- fallback-display-name []
+      :type/*))
+(defn- fallback-display-name []
   (i18n/tru &quot;[Unknown Metric]&quot;))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/display-name-method :metadata/legacy-metric
   [_query _stage-number metric-metadata _style]
   (or ((some-fn :display-name :name) metric-metadata)
-      (fallback-display-name)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/display-name-method :metric
+      (fallback-display-name)))</pre></td></tr><tr><td class="docs"><p>Replaced by metrics v2</p>
+</td><td class="codes"><pre class="brush: clojure">#_
+(defmethod lib.metadata.calculation/display-name-method :metric
   [query stage-number [_tag _opts metric-id-or-name] style]
   (or (when-let [metric-metadata (resolve-metric query metric-id-or-name)]
         (lib.metadata.calculation/display-name query stage-number metric-metadata style))
-      (fallback-display-name)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/display-info-method :metadata/legacy-metric
+      (fallback-display-name)))
+
+(defmethod lib.metadata.calculation/display-info-method :metadata/legacy-metric
   [query stage-number metric-metadata]
   (merge
    ((get-method lib.metadata.calculation/display-info-method :default) query stage-number metric-metadata)
-   (select-keys metric-metadata [:description :aggregation-position])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/display-info-method :metric
+   (select-keys metric-metadata [:description :aggregation-position])))</pre></td></tr><tr><td class="docs"><p>Replaced by metrics v2</p>
+</td><td class="codes"><pre class="brush: clojure">#_
+(defmethod lib.metadata.calculation/display-info-method :metric
   [query stage-number [_tag _opts metric-id-or-name]]
   (if-let [metric-metadata (resolve-metric query metric-id-or-name)]
     (lib.metadata.calculation/display-info query stage-number metric-metadata)
     {:effective-type    :type/*
      :display-name      (fallback-display-name)
-     :long-display-name (fallback-display-name)}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/column-name-method :metric
+     :long-display-name (fallback-display-name)}))
+;; Replaced by metrics v2
+#_
+(defmethod lib.metadata.calculation/column-name-method :metric
   [query stage-number [_tag _opts metric-id-or-name]]
   (or (when-let [metric-metadata (resolve-metric query metric-id-or-name)]
         (lib.metadata.calculation/column-name query stage-number metric-metadata))
-      &quot;metric&quot;))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn available-legacy-metrics :- [:maybe [:sequential {:min 1} ::lib.schema.metadata/legacy-metric]]
+      &quot;metric&quot;))
+(mu/defn available-legacy-metrics :- [:maybe [:sequential {:min 1} ::lib.schema.metadata/legacy-metric]]
   &quot;Get a list of Metrics that you may consider using as aggregations for a query. Only Metrics that have the same
   `table-id` as the `source-table` for this query will be suggested.&quot;
   ([query]

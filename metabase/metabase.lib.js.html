@@ -2945,7 +2945,9 @@ easy for the FE to consume queries, columns, aggregations, etc. and render them 
    [metabase.lib.metadata :as lib.metadata]
    [metabase.lib.metadata.calculation :as lib.metadata.calculation]
    [metabase.lib.metadata.protocols :as lib.metadata.protocols]
+   [metabase.lib.normalize :as lib.normalize]
    [metabase.lib.order-by :as lib.order-by]
+   [metabase.lib.query :as lib.query]
    [metabase.lib.stage :as lib.stage]
    [metabase.lib.types.isa :as lib.types.isa]
    [metabase.lib.util :as lib.util]
@@ -3074,7 +3076,8 @@ a utility namespace. Better would be to "upstream" them into <code>metabase.util
 </blockquote>
 </td><td class="codes"><pre class="brush: clojure">(defn ^:export legacy-query
   [query-map]
-  (-&gt; query-map lib.convert/-&gt;legacy-MBQL fix-namespaced-values (clj-&gt;js :keyword-fn u/qualified-name)))</pre></td></tr><tr><td class="docs"><p>Adds a new, blank <em>stage</em> to the provided <code>query</code>.</p>
+  (-&gt; (lib.query/-&gt;legacy-MBQL query-map)
+      fix-namespaced-values (clj-&gt;js :keyword-fn u/qualified-name)))</pre></td></tr><tr><td class="docs"><p>Adds a new, blank <em>stage</em> to the provided <code>query</code>.</p>
 
 <blockquote>
   <p><strong>Code health:</strong> Healthy</p>
@@ -3482,16 +3485,31 @@ unchanged.</p>
   (lib.core/swap-clauses
    a-query stage-number
    (lib.core/normalize (js-&gt;clj source-clause :keywordize-keys true))
-   (lib.core/normalize (js-&gt;clj target-clause :keywordize-keys true))))</pre></td></tr><tr><td class="docs"><h1>Comparing queries</h1>
+   (lib.core/normalize (js-&gt;clj target-clause :keywordize-keys true))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- unwrap [a-query]
+  (let [a-query (mbql.js/unwrap a-query)]
+    (cond-&gt; a-query
+      (map? a-query) (:dataset_query a-query))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- normalize-to-clj
+  [a-query]
+  (let [normalize-fn (fn [q]
+                       (if (= (lib.util/normalized-query-type q) :mbql/query)
+                         (lib.normalize/normalize q)
+                         (mbql.normalize/normalize q)))]
+    (-&gt; a-query (js-&gt;clj :keywordize-keys true) unwrap normalize-fn)))</pre></td></tr><tr><td class="docs"><p>Normalize the MBQL or pMBQL query <code>a-query</code>.</p>
+
+<p>Returns the JS form of the normalized query.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn ^:export normalize
+  [a-query]
+  (-&gt; a-query normalize-to-clj (clj-&gt;js :keyword-fn u/qualified-name)))</pre></td></tr><tr><td class="docs"><h1>Comparing queries</h1>
 
 <p>There are a few places in the FE where we need to compare two queries, typically to check whether the current
 question has been changed and needs to be saved.</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p><strong>This currently only works for legacy queries in JSON form.</strong> At some point MLv2 queries will become the source of
 truth, and the format used on the wire. At that point, we'll want a similar comparison for MLv2 queries.</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- prep-query-for-equals [a-query field-ids]
+</td><td class="codes"><pre class="brush: clojure">(defn- prep-query-for-equals-legacy [a-query field-ids]
   (-&gt; a-query
-      mbql.js/normalize-cljs
       ;; If `:native` exists, but it doesn't have `:template-tags`, add it.
       (m/update-existing :native #(merge {:template-tags {}} %))
       (m/update-existing :query (fn [inner-query]
@@ -3501,30 +3519,47 @@ truth, and the format used on the wire. At that point, we'll want a similar comp
                                     ;; We ignore the order of the fields in the lists, but need to make sure any dupes
                                     ;; match up. Therefore de-dupe with `frequencies` rather than simply `set`.
                                     (assoc inner-query :fields (frequencies fields)))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- compare-legacy-field-refs
+</td><td class="codes"><pre class="brush: clojure">(defn- prep-query-for-equals-pMBQL
+  [a-query field-ids]
+  (let [fields (or (some-&gt;&gt; (lib.core/fields a-query)
+                            (map #(assoc % 1 {})))
+                   (mapv (fn [id] [:field {} id]) field-ids))]
+    (lib.util/update-query-stage a-query -1 assoc :fields (frequencies fields))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- prep-query-for-equals [a-query field-ids]
+  (when-let [normalized-query (some-&gt; a-query normalize-to-clj)]
+    (if (contains? normalized-query :lib/type)
+      (prep-query-for-equals-pMBQL normalized-query field-ids)
+      (prep-query-for-equals-legacy normalized-query field-ids))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- compare-field-refs
   [[key1 id1 opts1]
    [key2 id2 opts2]]
   ;; A mismatch of `:base-type` or `:effective-type` when both x and y have values for it is a failure.
   ;; If either ref does not have the `:base-type` or `:effective-type` set, that key is ignored.
   (letfn [(clean-opts [o1 o2]
             (not-empty
-              (cond-&gt; o1
-                (not (:base-type o2))      (dissoc :base-type)
-                (not (:effective-type o2)) (dissoc :effective-type))))]
-    (= [key1 id1 (clean-opts opts1 opts2)]
-       [key2 id2 (clean-opts opts2 opts1)])))</pre></td></tr><tr><td class="docs">
+             (cond-&gt; o1
+               (not (:base-type o2))      (dissoc :base-type)
+               (not (:effective-type o2)) (dissoc :effective-type))))]
+    (if (map? id1)
+      (= [key1 (clean-opts id1 id2) opts1]
+         [key2 (clean-opts id2 id1) opts2])
+      (= [key1 id1 (clean-opts opts1 opts2)]
+         [key2 id2 (clean-opts opts2 opts1)]))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- query=* [x y]
   (cond
     (and (vector? x)
          (vector? y)
          (= (first x) (first y) :field))
-    (compare-legacy-field-refs x y)
-    ;; Otherwise this is a duplicate of clojure.core/=.
+    (compare-field-refs x y)
+    ;; Otherwise this is a duplicate of clojure.core/= except :lib/uuid values don't
+    ;; have to match.
     (and (map? x) (map? y))
-    (and (= (set (keys x)) (set (keys y)))
-         (every? (fn [[k v]]
-                   (query=* v (get y k)))
-                 x))
+    (let [x (dissoc x :lib/uuid)
+          y (dissoc y :lib/uuid)]
+      (and (= (set (keys x)) (set (keys y)))
+           (every? (fn [[k v]]
+                     (query=* v (get y k)))
+                   x)))
     (and (sequential? x) (sequential? y))
     (and (= (count x) (count y))
          (every? true? (map query=* x y)))
@@ -4482,34 +4517,23 @@ removed from the product in 2024.</p>
 </blockquote>
 </td><td class="codes"><pre class="brush: clojure">(defn ^:export available-segments
   [a-query stage-number]
-  (to-array (lib.core/available-segments a-query stage-number)))</pre></td></tr><tr><td class="docs"><p>Return the opaque metadata value for the legacy Metric with <code>metric-id</code>, if it can be found.</p>
-
-<p><code>metadata-providerable</code> is anything that can provide metadata - it can be JS <code>Metadata</code> itself, but more commonly it
-will be a query.</p>
-
-<blockquote>
-  <p><strong>Code health:</strong> Legacy, Single use, Deprecated. No new calls; this is only for legacy Metrics and will be removed
-  when they are.</p>
-</blockquote>
-
-<h1>Legacy Metrics</h1>
-
-<p>Legacy metrics are reusable query fragments, but are being completely overhauled by a major new effort on Metrics v2.</p>
-
-<p>These functions still work, but no new calls should be added. They will be removed when legacy Metrics are removed
-in 2024.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ^:export legacy-metric-metadata
-  [metadata-providerable metric-id]
-  (lib.metadata/legacy-metric metadata-providerable metric-id))</pre></td></tr><tr><td class="docs"><p>Returns a JS array of opaque metadata values for those legacy Metrics that could be used as aggregations on
+  (to-array (lib.core/available-segments a-query stage-number)))</pre></td></tr><tr><td class="docs"><p>Returns a JS array of opaque metadata values for those Metrics that could be used as aggregations on
 <code>a-query</code>.</p>
 
 <blockquote>
-  <p><strong>Code health:</strong> Legacy, Single use, Deprecated. No new calls; this is only for legacy Metrics and will be removed
-  when they are.</p>
+  <p><strong>Code health:</strong> Healthy.</p>
 </blockquote>
-</td><td class="codes"><pre class="brush: clojure">(defn ^:export available-legacy-metrics
+</td><td class="codes"><pre class="brush: clojure">(defn ^:export available-metrics
   [a-query stage-number]
-  (to-array (lib.core/available-legacy-metrics a-query stage-number)))</pre></td></tr><tr><td class="docs"><p>TODO: Move all the join logic into one block - it's scattered all through the lower half of this namespace.</p>
+  (to-array (lib.core/available-metrics a-query stage-number)))</pre></td></tr><tr><td class="docs"><p>Given <code>a-query</code>, returns true if it is based on metrics. That means the main data source is a metric and so are all
+joins (if any).</p>
+
+<blockquote>
+  <p><strong>Code health:</strong> Healthy.</p>
+</blockquote>
+</td><td class="codes"><pre class="brush: clojure">(defn ^:export metric-based?
+  [a-query stage-number]
+  (lib.core/metric-based? a-query stage-number))</pre></td></tr><tr><td class="docs"><p>TODO: Move all the join logic into one block - it's scattered all through the lower half of this namespace.</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Returns a JS array of columns that are available when joining <code>join-or-joinable</code> into <code>a-query</code>.</p>
 
 <p><code>join-or-joinable</code> can be a join clause, or something joinable (a table, card, model, etc.).</p>
@@ -4986,7 +5010,9 @@ points (see [[metabase.lib.filter.update/temporal-filter-min-num-points]]), move
 </blockquote>
 </td><td class="codes"><pre class="brush: clojure">(defn ^:export valid-filter-for?
   [src-column dst-column]
-  (lib.types.isa/valid-filter-for? src-column dst-column))</pre></td></tr><tr><td class="docs"><p>Return a JS array of entities which <code>a-query</code> requires to be loaded.</p>
+  (lib.types.isa/valid-filter-for? src-column dst-column))</pre></td></tr><tr><td class="docs"><p>Return a JS array of entities which <code>a-query</code> requires to be loaded. <code>card-id</code> is provided
+when editing the card with that ID and in this case <code>a-query</code> is its definition (i.e., the
+dataset-query). <code>card-type</code> specifies the type of the card being created or edited.</p>
 
 <p>Required entities are all tables and cards which are used as sources or joined in, etc.</p>
 
@@ -4996,8 +5022,18 @@ points (see [[metabase.lib.filter.update/temporal-filter-min-num-points]]), move
   <p><strong>Code health:</strong> Healthy</p>
 </blockquote>
 </td><td class="codes"><pre class="brush: clojure">(defn ^:export dependent-metadata
-  [a-query]
-  (to-array (map clj-&gt;js (lib.core/dependent-metadata a-query))))</pre></td></tr><tr><td class="docs"><p>Returns true if the query is runnable.</p>
+  [a-query card-id card-type]
+  (to-array (map clj-&gt;js (lib.core/dependent-metadata a-query card-id (keyword card-type)))))</pre></td></tr><tr><td class="docs"><p>Return a JS array of entities which are needed upfront to create a new query based on a table/card.</p>
+
+<p>Each entity is returned as a JS map <code>{type: "database"|"schema"|"table"|"field", id: number}</code>.</p>
+
+<blockquote>
+  <p><strong>Code health:</strong> Healthy</p>
+</blockquote>
+</td><td class="codes"><pre class="brush: clojure">(defn ^:export table-or-card-dependent-metadata
+  [metadata-providerable table-id]
+  (to-array (map clj-&gt;js (lib.core/table-or-card-dependent-metadata metadata-providerable table-id))))</pre></td></tr><tr><td class="docs"><p>Returns true if the query is runnable.
+<code>card-type</code> is optional and defaults to "question".</p>
 
 <p>MBQL queries are always runnable. Native queries can run when:</p>
 
@@ -5010,11 +5046,13 @@ points (see [[metabase.lib.filter.update/temporal-filter-min-num-points]]), move
   <p><strong>Code health:</strong> Healthy</p>
 </blockquote>
 </td><td class="codes"><pre class="brush: clojure">(defn ^:export can-run
-  [a-query]
-  (lib.cache/side-channel-cache
-    :can-run a-query
+  ([a-query]
+   (can-run a-query &quot;question&quot;))
+  ([a-query card-type]
+   (lib.cache/side-channel-cache
+    (keyword &quot;can-run&quot; card-type) a-query
     (fn [_]
-      (lib.core/can-run a-query))))</pre></td></tr><tr><td class="docs"><p>Returns true if the query is previewable.</p>
+      (lib.core/can-run a-query (keyword card-type))))))</pre></td></tr><tr><td class="docs"><p>Returns true if the query is previewable.</p>
 
 <p>This is a stronger condition than [[can-run]] - there are some cases where we want to be stricter about previews than
 about regular save and run. For example, an <code>:offset</code> expression requires a sort order but sorting comes later in the
@@ -5031,7 +5069,8 @@ sort order (so the QP can return a good error message), but [[can-preview]] can 
   (lib.cache/side-channel-cache
     :can-preview a-query
     (fn [_]
-      (lib.core/can-preview a-query))))</pre></td></tr><tr><td class="docs"><p>Returns true if the query can be saved.</p>
+      (lib.core/can-preview a-query))))</pre></td></tr><tr><td class="docs"><p>Returns true if the query can be saved.
+<code>card-type</code> is optional and defaults to "question".</p>
 
 <p>A query can be saved when:</p>
 
@@ -5044,11 +5083,13 @@ sort order (so the QP can return a good error message), but [[can-preview]] can 
   <p><strong>Code health:</strong> Healthy</p>
 </blockquote>
 </td><td class="codes"><pre class="brush: clojure">(defn ^:export can-save
-  [a-query]
-  (lib.cache/side-channel-cache
-   :can-save a-query
-   (fn [_]
-     (lib.core/can-save a-query))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+  ([a-query]
+   (can-save a-query &quot;question&quot;))
+  ([a-query card-type]
+   (lib.cache/side-channel-cache
+    (keyword &quot;can-save&quot; card-type) a-query
+    (fn [_]
+      (lib.core/can-save a-query (keyword card-type))))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

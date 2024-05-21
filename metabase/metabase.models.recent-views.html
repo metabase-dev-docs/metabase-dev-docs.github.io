@@ -2986,7 +2986,7 @@ model type in [[models-of-interest]].</p>
     [:id [:int {:min 1}]]
     [:name :string]
     [:description [:maybe :string]]
-    [:model [:enum :dataset :card :dashboard :collection :table]]
+    [:model [:enum :dataset :card :metric :dashboard :collection :table]]
     [:can_write :boolean]
     [:timestamp :string]]
    [:multi {:dispatch :model}
@@ -2997,6 +2997,10 @@ model type in [[models-of-interest]].</p>
     [:dataset [:map
                [:parent_collection ::pc]
                [:moderated_status [:enum &quot;verified&quot; nil]]]]
+    [:metric [:map
+              [:parent_collection ::pc]
+              [:display :string]
+              [:moderated_status [:enum &quot;verified&quot; nil]]]]
     [:dashboard [:map [:parent_collection ::pc]]]
     [:table [:map
              [:display_name :string]
@@ -3011,7 +3015,7 @@ model type in [[models-of-interest]].</p>
 code (e.g. a collection's parent collection.)</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti fill-recent-view-info
   (fn [{:keys [model #_model_id #_timestamp card_type]}]
-    (or (get {&quot;model&quot; :dataset &quot;question&quot; :card} card_type)
+    (or (get {&quot;model&quot; :dataset &quot;question&quot; :card &quot;metric&quot; :metric} card_type)
         (keyword model))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod fill-recent-view-info :default [m] (throw (ex-info &quot;Unknown model&quot; {:model m})))</pre></td></tr><tr><td class="docs"><p>Returns the model when it's not archived.
 We use this to ensure that archived models are not returned in the recent views.</p>
@@ -3082,6 +3086,40 @@ We use this to ensure that archived models are not returned in the recent views.
                           {:id (:collection-id dataset)
                            :name (:collection-name dataset)
                            :authority_level (:collection-authority-level dataset)}
+                          (root-coll))}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod fill-recent-view-info :metric [{:keys [_model model_id timestamp model_object]}]
+  (when-let [metric (and
+                     (mi/can-read? model_object)
+                     (ellide-archived model_object))]
+    {:id model_id
+     :name (:name metric)
+     :description (:description metric)
+     :display (some-&gt; metric :display name)
+     :model :metric
+     :can_write (mi/can-write? metric)
+     :timestamp (str timestamp)
+     :moderated_status (:moderated-status metric)
+     :parent_collection (if (:collection-id metric)
+                          {:id (:collection-id metric)
+                           :name (:collection-name metric)
+                           :authority_level (:collection-authority-level metric)}
+                          (root-coll))}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod fill-recent-view-info :metric [{:keys [_model model_id timestamp model_object]}]
+  (when-let [metric (and
+                     (mi/can-read? model_object)
+                     (ellide-archived model_object))]
+    {:id model_id
+     :name (:name metric)
+     :description (:description metric)
+     :display (some-&gt; metric :display name)
+     :model :metric
+     :can_write (mi/can-write? metric)
+     :timestamp (str timestamp)
+     :moderated_status (:moderated-status metric)
+     :parent_collection (if (:collection-id metric)
+                          {:id (:collection-id metric)
+                           :name (:collection-name metric)
+                           :authority_level (:collection-authority-level metric)}
                           (root-coll))}))</pre></td></tr><tr><td class="docs"><p>== Recent Dashboards ==</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Query to select recent dashboard data</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- dashboard-recents
@@ -3160,7 +3198,12 @@ We use this to ensure that archived models are not returned in the recent views.
                        [:db.name :database-name]
                        [:db.initial_sync_status :initial-sync-status]]
               :from [[:metabase_table :t]]
-              :where (if (seq table-ids) [:in :t.id table-ids] [])
+              :where (let [base-condition [:or
+                                           [:= :visibility_type nil]
+                                           [:!= :visibility_type &quot;hidden&quot;]]]
+                       (if (seq table-ids)
+                         [:and base-condition [:in :t.id table-ids]]
+                         base-condition))
               :left-join [[:metabase_database :db]
                           [:= :db.id :t.db_id]]}))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod fill-recent-view-info :table [{:keys [_model model_id timestamp model_object]}]
@@ -3214,9 +3257,7 @@ We use this to ensure that archived models are not returned in the recent views.
   [user-id]
   (if-let [views (not-empty (do-query user-id))]
     (let [entity-&gt;id-&gt;data (get-entity-&gt;id-&gt;data views)]
-      (-&gt;&gt; views
-           (map (partial post-process entity-&gt;id-&gt;data))
-           (remove nil?)))
+      (keep (partial post-process entity-&gt;id-&gt;data) views))
     []))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 

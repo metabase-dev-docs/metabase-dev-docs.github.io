@@ -2878,11 +2878,12 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.api.common.validation :as validation]
    [metabase.api.dataset :as api.dataset]
    [metabase.api.field :as api.field]
+   [metabase.compatibility :as compatibility]
    [metabase.driver :as driver]
    [metabase.events :as events]
-   [metabase.legacy-mbql.normalize :as mbql.normalize]
    [metabase.lib.convert :as lib.convert]
    [metabase.lib.core :as lib]
+   [metabase.lib.metadata.jvm :as lib.metadata.jvm]
    [metabase.lib.types.isa :as lib.types.isa]
    [metabase.lib.util.match :as lib.util.match]
    [metabase.models :refer [Card CardBookmark Collection Database PersistedInfo Table]]
@@ -2965,7 +2966,7 @@ net.brehaut.ClojureTools = (function (SH) {
                  (when-let [query (some-&gt; card :dataset_query lib.convert/-&gt;pMBQL)]
                    (case model-type
                      :segment (lib/uses-segment? query model-id)
-                     :metric  (lib/uses-legacy-metric? query model-id)))))))</pre></td></tr><tr><td class="docs">
+                     :metric  (lib/uses-metric? query model-id)))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod cards-for-filter-option* :using_metric
   [_filter-option model-id]
   (cards-for-segment-or-metric :metric model-id))</pre></td></tr><tr><td class="docs">
@@ -3226,7 +3227,16 @@ with queries they wouldn't be allowed to run!</p>
                         required-perms))))))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------- Creating Cards -------------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::card-type
-  (into [:enum {:decode/json keyword}] (mapcat (juxt identity u/qualified-name)) card/card-types))</pre></td></tr><tr><td class="docs"><p>/</p>
+  (into [:enum {:decode/json keyword}] (mapcat (juxt identity u/qualified-name)) card/card-types))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- check-if-card-can-be-saved
+  [dataset-query card-type]
+  (when (and dataset-query (= card-type :metric))
+    (let [pMBQL-query (-&gt; dataset-query compatibility/normalize-dataset-query lib.convert/-&gt;pMBQL)
+          metadata-provider (lib.metadata.jvm/application-database-metadata-provider (:database pMBQL-query))]
+      (when-not (lib/can-save (lib/query metadata-provider pMBQL-query) card-type)
+        (throw (ex-info (tru &quot;Card of type {0} is invalid, cannot be saved.&quot; (clojure.core/name card-type))
+                        {:type        card-type
+                         :status-code 400}))))))</pre></td></tr><tr><td class="docs"><p>/</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint POST 
   &quot;Create a new `Card`.&quot;
   [:as {{:keys [collection_id collection_position dataset_query description display name
@@ -3243,6 +3253,7 @@ with queries they wouldn't be allowed to run!</p>
    collection_position    [:maybe ms/PositiveInt]
    result_metadata        [:maybe qr/ResultsMetadata]
    cache_ttl              [:maybe ms/PositiveInt]}
+  (check-if-card-can-be-saved dataset_query type)
   ;; check that we have permissions to run the query that we're trying to save
   (check-data-permissions-for-query dataset_query)
   ;; check that we have permissions for the collection we're trying to save this card to, if applicable
@@ -3265,7 +3276,7 @@ with queries they wouldn't be allowed to run!</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>If the query is being modified, check that we have data permissions to run the query.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- check-allowed-to-modify-query
   [card-before-updates card-updates]
-  (let [card-updates (m/update-existing card-updates :dataset_query mbql.normalize/normalize)]
+  (let [card-updates (m/update-existing card-updates :dataset_query compatibility/normalize-dataset-query)]
     (when (api/column-will-change? :dataset_query card-before-updates card-updates)
       (check-data-permissions-for-query (:dataset_query card-updates)))))</pre></td></tr><tr><td class="docs"><p>You must be a superuser to change the value of <code>enable_embedding</code> or <code>embedding_params</code>. Embedding must be
 enabled.</p>
@@ -3297,6 +3308,7 @@ enabled.</p>
    result_metadata        [:maybe qr/ResultsMetadata]
    cache_ttl              [:maybe ms/PositiveInt]
    collection_preview     [:maybe :boolean]}
+  (check-if-card-can-be-saved dataset_query type)
   (let [card-before-update     (t2/hydrate (api/write-check Card id)
                                            [:moderation_reviews :moderator_details])
         card-updates           (api/move-on-archive-or-unarchive card-before-update card-updates (collection/trash-collection-id))

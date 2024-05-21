@@ -3057,8 +3057,12 @@ This will select only collections where <code>personal_owner_id</code> is not <c
     (if shallow
       (shallow-tree-from-collection-id collections)
       (let [collection-type-ids (reduce (fn [acc {collection-id :collection_id, card-type :type, :as _card}]
-                                          (update acc (if (= (keyword card-type) :model) :dataset :card) conj collection-id))
+                                          (update acc (case (keyword card-type)
+                                                       :model :dataset
+                                                       :metric :metric
+                                                       :card) conj collection-id))
                                         {:dataset #{}
+                                         :metric  #{}
                                          :card    #{}}
                                         (t2/reducible-query {:select-distinct [:collection_id :type]
                                                              :from            [:report_card]
@@ -3070,6 +3074,7 @@ This will select only collections where <code>personal_owner_id</code> is not <c
 </td><td class="codes"><pre class="brush: clojure">(def ^:private valid-model-param-values
   #{&quot;card&quot;       ; SavedQuestion
     &quot;dataset&quot;    ; Model. TODO : update this
+    &quot;metric&quot;
     &quot;collection&quot;
     &quot;dashboard&quot;
     &quot;pulse&quot;      ; I think the only kinds of Pulses we still have are Alerts?
@@ -3197,13 +3202,17 @@ collections are an EE feature.</p>
             :description :collection_position :display :authority_level
             :moderated_status :icon :personal_owner_id :collection_preview
             :dataset_query :table_id :query_type :is_upload)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- card-query [dataset? collection {:keys [archived? pinned-state]}]
+</td><td class="codes"><pre class="brush: clojure">(defn- card-query [card-type collection {:keys [archived? pinned-state]}]
   (-&gt; {:select    (cond-&gt;
                     [:c.id :c.name :c.description :c.entity_id :c.collection_position :c.display :c.collection_preview
                      :c.trashed_from_collection_id
                      :c.archived
                      :c.dataset_query
-                     [(h2x/literal (if dataset? &quot;dataset&quot; &quot;card&quot;)) :model]
+                     [(h2x/literal (case card-type
+                                     :model &quot;dataset&quot;
+                                     :metric  &quot;metric&quot;
+                                     &quot;card&quot;))
+                      :model]
                      [:u.id :last_edit_user]
                      [:u.email :last_edit_email]
                      [:u.first_name :last_edit_first_name]
@@ -3220,7 +3229,7 @@ collections are an EE feature.</p>
                        :order-by [[:id :desc]]
                        :limit    1}
                       :moderated_status]]
-                    dataset?
+                    (= :model card-type)
                     (conj :c.database_id))
        :from      [[:report_card :c]]
        :left-join [[:revision :r] [:and
@@ -3231,14 +3240,25 @@ collections are an EE feature.</p>
        :where     [:and
                    [:= :collection_id (:id collection)]
                    [:= :archived (boolean archived?)]
-                   [:= :c.type (h2x/literal (if dataset? &quot;model&quot; &quot;question&quot;))]]}
-      (cond-&gt; dataset?
+                   (case card-type
+                     :model
+                     [:= :c.type (h2x/literal &quot;model&quot;)]
+                     :metric
+                     [:= :c.type (h2x/literal &quot;metric&quot;)]
+                     [:= :c.type (h2x/literal &quot;question&quot;)])]}
+      (cond-&gt; (= :model card-type)
         (-&gt; (sql.helpers/select :c.table_id :t.is_upload :c.query_type)
             (sql.helpers/left-join [:metabase_table :t] [:= :t.id :c.table_id])))
       (sql.helpers/where (pinned-state-&gt;clause pinned-state))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod collection-children-query :dataset
   [_ collection options]
-  (card-query true collection options))</pre></td></tr><tr><td class="docs">
+  (card-query :model collection options))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod collection-children-query :metric
+  [_ collection options]
+  (card-query :metric collection options))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod collection-children-query :card
+  [_ collection options]
+  (card-query :question collection options))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod post-process-collection-children :dataset
   [_ collection rows]
   (let [queries-before (map :dataset_query rows)
@@ -3247,10 +3267,7 @@ collections are an EE feature.</p>
     (-&gt;&gt; (map #(assoc %2 :dataset_query %1) queries-parsed rows)
          upload/model-hydrate-based-on-upload
          (map #(assoc %2 :dataset_query %1) queries-before)
-         (post-process-collection-children :card collection))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod collection-children-query :card
-  [_ collection options]
-  (card-query false collection options))</pre></td></tr><tr><td class="docs"><p>Decide if <code>text</code>, usually (a part of) a query, is fully parameterized given the parameter types
+         (post-process-collection-children :card collection))))</pre></td></tr><tr><td class="docs"><p>Decide if <code>text</code>, usually (a part of) a query, is fully parameterized given the parameter types
 described by <code>template-tags</code> (usually the template tags of a native query).</p>
 
 <p>The rules to consider a piece of text fully parameterized is as follows:</p>
@@ -3286,7 +3303,10 @@ seem to be useful any way, but if the user said it is required, we honor this fl
       ;; true so that we still can try to generate a preview for the query and display an error.
       false)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- fully-parameterized-query? [row]
-  (let [native-query (-&gt; row :dataset_query json/parse-string mbql.normalize/normalize :native)]
+  (let [parsed-query (-&gt; row :dataset_query json/parse-string)
+        ;; TODO TB handle pMBQL native queries
+        native-query (when (contains? parsed-query &quot;native&quot;)
+                       (-&gt; parsed-query mbql.normalize/normalize :native))]
     (if-let [template-tags (:template-tags native-query)]
       (fully-parameterized-text? (:query native-query) template-tags)
       true)))</pre></td></tr><tr><td class="docs">
@@ -3298,6 +3318,9 @@ seem to be useful any way, but if the user said it is required, we honor this fl
       (dissoc :authority_level :icon :personal_owner_id :dataset_query :table_id :query_type :is_upload)
       (assoc :fully_parameterized (fully-parameterized-query? row))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod post-process-collection-children :card
+  [_ _ rows]
+  (map post-process-card-row rows))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod post-process-collection-children :metric
   [_ _ rows]
   (map post-process-card-row rows))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- dashboard-query [collection {:keys [archived? pinned-state]}]
@@ -3375,8 +3398,12 @@ snippet-collections. EE implementation returns <code>nil</code>, so as to not fi
         descendant-collection-ids (map u/the-id descendant-collections)
         child-type-&gt;coll-id-set
         (reduce (fn [acc {collection-id :collection_id, card-type :type, :as _card}]
-                  (update acc (if (= (keyword card-type) :model) :dataset :card) conj collection-id))
+                  (update acc (case (keyword card-type)
+                               :model :dataset
+                               :metric :metric
+                               :card) conj collection-id))
                 {:dataset #{}
+                 :metric  #{}
                  :card    #{}}
                 (t2/reducible-query {:select-distinct [:collection_id :type]
                                      :from            [:report_card]
@@ -3449,6 +3476,7 @@ snippet-collections. EE implementation returns <code>nil</code>, so as to not fi
     :collection :model/Collection
     :card       :model/Card
     :dataset    :model/Card
+    :metric     :model/Card
     :dashboard  :model/Dashboard
     :pulse      :model/Pulse
     :snippet    :model/NativeQuerySnippet
@@ -3518,17 +3546,18 @@ the correct column type.</p>
   (let [rankings {:dashboard  1
                   :pulse      2
                   :dataset    3
-                  :card       4
-                  :snippet    5
-                  :collection 6
-                  :timeline   7}]
+                  :metric     4
+                  :card       5
+                  :snippet    6
+                  :collection 7
+                  :timeline   8}]
     (conj select-clause [[:inline (get rankings model 100)]
                          :model_ranking])))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(comment
   ;; generate the set of columns across all child queries. Remember to add type info if not a text column
   (into []
         (comp cat (map select-name) (distinct))
-        (for [model [:card :dashboard :snippet :pulse :collection :timeline]]
+        (for [model [:card :metric :dataset :dashboard :snippet :pulse :collection :timeline]]
           (:select (collection-children-query model {:id 1 :location &quot;/&quot;} nil)))))</pre></td></tr><tr><td class="docs"><p>Given the client side sort-info, return sort clause to effect this. <code>db-type</code> is necessary due to complications from
 treatment of nulls in the different app db types.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn children-sort-clause
@@ -3619,7 +3648,7 @@ treatment of nulls in the different app db types.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private collection-children
   [{collection-namespace :namespace, :as collection} :- collection/CollectionWithLocationAndIDOrRoot
    {:keys [models], :as options}                     :- CollectionChildrenOptions]
-  (let [valid-models (for [model-kw [:collection :dataset :card :dashboard :pulse :snippet :timeline]
+  (let [valid-models (for [model-kw [:collection :dataset :metric :card :dashboard :pulse :snippet :timeline]
                            ;; only fetch models that are specified by the `model` param; or everything if it's empty
                            :when    (or (empty? models) (contains? models model-kw))
                            :let     [toucan-model       (model-name-&gt;toucan-model model-kw)

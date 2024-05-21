@@ -3271,13 +3271,27 @@ key <code>_card</code> (not sure why), but if it is just unwrap it and then pars
       (catch js/Error e
         (log/errorf e &quot;Error parsing %s objects: %s&quot; object-type (ex-message e))
         nil))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- metric-cards
+  [delayed-cards]
+  (when-let [cards @delayed-cards]
+    (into {}
+          (keep (fn [[id card]]
+                  (when (and card (= (:type @card) :metric))
+                    (let [card @card]
+                      [id (-&gt; card
+                              (select-keys [:id :table-id :name :description :archived])
+                              (assoc :definition (:dataset-query card)
+                                     :lib/type :metadata/metric)
+                              delay)]))))
+          cards)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- parse-metadata [metadata]
-  {:databases (parse-objects-delay :database metadata)
-   :tables    (parse-objects-delay :table    metadata)
-   :fields    (parse-objects-delay :field    metadata)
-   :cards     (parse-objects-delay :card     metadata)
-   :metrics   (parse-objects-delay :metric   metadata)
-   :segments  (parse-objects-delay :segment  metadata)})</pre></td></tr><tr><td class="docs">
+  (let [delayed-cards (parse-objects-delay :card metadata)]
+    {:databases (parse-objects-delay :database metadata)
+     :tables    (parse-objects-delay :table    metadata)
+     :fields    (parse-objects-delay :field    metadata)
+     :cards     delayed-cards
+     :metrics   (delay (metric-cards delayed-cards))
+     :segments  (parse-objects-delay :segment  metadata)}))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- database [metadata database-id]
   (some-&gt; metadata :databases deref (get database-id) deref))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- metadatas [metadata metadata-type ids]
@@ -3303,7 +3317,8 @@ key <code>_card</code> (not sure why), but if it is just unwrap it and then pars
   [metadata metadata-type table-id]
   (let [k (case metadata-type
             :metadata/column        :fields
-            :metadata/legacy-metric :metrics
+            :metadata/metric        :metrics
+            :metadata/legacy-metric :legacy-metrics
             :metadata/segment       :segments)]
     (into []
           (keep (fn [[_id dlay]]
