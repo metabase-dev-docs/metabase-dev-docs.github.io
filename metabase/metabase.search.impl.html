@@ -2865,147 +2865,586 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.models.model-index" name="metabase.models.model-index"><h1 class="project-name">metabase.models.model-index</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.models.model-index
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.search.impl" name="metabase.search.impl"><h1 class="project-name">metabase.search.impl</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.search.impl
   (:require
-   [clojure.set :as set]
-   [clojure.string :as str]
-   [metabase.legacy-mbql.normalize :as mbql.normalize]
-   [metabase.legacy-mbql.schema :as mbql.s]
-   [metabase.models.card :refer [Card]]
+   [cheshire.core :as json]
+   [honey.sql.helpers :as sql.helpers]
+   [medley.core :as m]
+   [metabase.db :as mdb]
+   [metabase.db.query :as mdb.query]
+   [metabase.models.collection :as collection]
+   [metabase.models.data-permissions :as data-perms]
+   [metabase.models.database :as database]
    [metabase.models.interface :as mi]
-   [metabase.query-processor :as qp]
-   [metabase.sync.schedules :as sync.schedules]
-   [metabase.util.cron :as u.cron]
+   [metabase.models.permissions :as perms]
+   [metabase.permissions.util :as perms.u]
+   [metabase.public-settings.premium-features :as premium-features]
+   [metabase.search.config :as search.config :refer [SearchableModel SearchContext]]
+   [metabase.search.filter :as search.filter]
+   [metabase.search.scoring :as scoring]
+   [metabase.search.util :as search.util]
+   [metabase.util :as u]
+   [metabase.util.honey-sql-2 :as h2x]
+   [metabase.util.i18n :refer [deferred-tru]]
    [metabase.util.log :as log]
    [metabase.util.malli :as mu]
-   [methodical.core :as methodical]
-   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs"><p>model lifecycle ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Used to be the toucan1 model name defined using [[toucan.models/defmodel]], not it's a reference to the toucan2 model name.
-We'll keep this till we replace all the ModelIndex symbol in our codebase.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ModelIndex
-  :model/ModelIndex)</pre></td></tr><tr><td class="docs"><p>Used to be the toucan1 model name defined using [[toucan.models/defmodel]], not it's a reference to the toucan2 model name.
-We'll keep this till we replace all the ModelIndexValue symbol in our codebase.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ModelIndexValue
-  :model/ModelIndexValue)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/table-name :model/ModelIndex [_model] :model_index)
-(methodical/defmethod t2/table-name :model/ModelIndexValue [_model] :model_index_value)
-(derive :model/ModelIndex :metabase/model)
-(derive :model/ModelIndexValue :metabase/model)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :model/ModelIndex :hook/created-at-timestamped?)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(t2/deftransforms ModelIndex
-  {:pk_ref    mi/transform-field-ref
-   :value_ref mi/transform-field-ref})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(t2/define-before-delete ModelIndex
-  [model-index]
-  (let [remove-refresh-job (requiring-resolve 'metabase.task.index-values/remove-indexing-job)]
-    (remove-refresh-job model-index)))</pre></td></tr><tr><td class="docs"><p>Maximum number of values we will index. Actually take one more than this to test if there are more than the
-threshold.</p>
-</td><td class="codes"><pre class="brush: clojure">(def max-indexed-values
-  25000)</pre></td></tr><tr><td class="docs"><p>indexing functions</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Filter function for valid tuples for indexing: an id and a value.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn valid-tuples?
-  [[id v]] (and id v))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private fix-expression-refs :- mbql.s/Field
-  &quot;Convert expression ref into a field ref.
-Expression refs (`[:expression \&quot;full-name\&quot;]`) are how the _query_ refers to a custom column. But nested queries
-don't, (and shouldn't) care that those are expressions. They are just another field. The field type is always
-`:type/Text` enforced by the endpoint to create model indexes.&quot;
-  [field-ref :- mbql.s/Field base-type]
-  (case (first field-ref)
-    :field field-ref
-    :expression (let [[_ expression-name] field-ref]
-                  ;; api validated that this is a text field when the model-index was created. When selecting the
-                  ;; expression we treat it as a field.
-                  [:field expression-name {:base-type base-type}])
-    (throw (ex-info (format &quot;Invalid field ref for indexing: %s&quot; field-ref)
-                    {:field-ref field-ref
-                     :valid-clauses [:field :expression]}))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- fetch-values
-  [model-index]
-  (let [model     (t2/select-one Card :id (:model_id model-index))
-        fix       (fn [field-ref base-type] (-&gt; field-ref mbql.normalize/normalize-field-ref (fix-expression-refs base-type)))
-        ;; :type/Text and :type/Integer are ensured at creation time on the api.
-        value-ref (-&gt; model-index :value_ref (fix :type/Text))
-        pk-ref    (-&gt; model-index :pk_ref (fix :type/Integer))]
-    (try
-      [nil (-&gt;&gt; (qp/process-query
-                 {:database (:database_id model)
-                  :type     :query
-                  :query    {:source-table (format &quot;card__%d&quot; (:id model))
-                             :breakout     [pk-ref value-ref]
-                             :limit        (inc max-indexed-values)}})
-                :data :rows (filter valid-tuples?))]
-      (catch Exception e
-        (log/warnf e &quot;Error fetching indexed values for model %s&quot; (:id model))
-        [(ex-message e) []]))))</pre></td></tr><tr><td class="docs"><p>Find additions and deletions in indexed values. <code>source-values</code> are from the db, <code>indexed-values</code> are what we
-currently have indexed.</p>
+   [metabase.util.malli.registry :as mr]
+   [metabase.util.malli.schema :as ms]
+   [toucan2.core :as t2]
+   [toucan2.instance :as t2.instance]
+   [toucan2.jdbc.options :as t2.jdbc.options]
+   [toucan2.realize :as t2.realize]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private HoneySQLColumn
+  [:or
+   :keyword
+   [:tuple :any :keyword]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private -&gt;column-alias :- keyword?
+  &quot;Returns the column name. If the column is aliased, i.e. [`:original_name` `:aliased_name`], return the aliased
+  column name&quot;
+  [column-or-aliased :- HoneySQLColumn]
+  (if (sequential? column-or-aliased)
+    (second column-or-aliased)
+    column-or-aliased))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private canonical-columns :- [:sequential HoneySQLColumn]
+  &quot;Returns a seq of canonicalized list of columns for the search query with the given `model` Will return column names
+  prefixed with the `model` name so that it can be used in criteria. Projects a `nil` for columns the `model` doesn't
+  have and doesn't modify aliases.&quot;
+  [model :- SearchableModel, col-alias-&gt;honeysql-clause :- [:map-of :keyword HoneySQLColumn]]
+  (for [[search-col col-type] search.config/all-search-columns
+        :let                  [maybe-aliased-col (get col-alias-&gt;honeysql-clause search-col)]]
+    (cond
+      (= search-col :model)
+      [(h2x/literal model) :model]
+      ;; This is an aliased column, no need to include the table alias
+      (sequential? maybe-aliased-col)
+      maybe-aliased-col
+      ;; This is a column reference, need to add the table alias to the column
+      maybe-aliased-col
+      (search.config/column-with-model-alias model maybe-aliased-col)
+      ;; This entity is missing the column, project a null for that column value. For Postgres and H2, cast it to the
+      ;; correct type, e.g.
+      ;;
+      ;;    SELECT cast(NULL AS integer)
+      ;;
+      ;; For MySQL, this is not needed.
+      :else
+      [(when-not (= (mdb/db-type) :mysql)
+         [:cast nil col-type])
+       search-col])))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private select-clause-for-model :- [:sequential HoneySQLColumn]
+  &quot;The search query uses a `union-all` which requires that there be the same number of columns in each of the segments
+  of the query. This function will take the columns for `model` and will inject constant `nil` values for any column
+  missing from `entity-columns` but found in `search.config/all-search-columns`.&quot;
+  [model :- SearchableModel]
+  (let [entity-columns                (search.config/columns-for-model model)
+        column-alias-&gt;honeysql-clause (m/index-by -&gt;column-alias entity-columns)
+        cols-or-nils                  (canonical-columns model column-alias-&gt;honeysql-clause)]
+    cols-or-nils))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private from-clause-for-model :- [:tuple [:tuple :keyword :keyword]]
+  [model :- SearchableModel]
+  (let [{:keys [db-model alias]} (get search.config/model-to-db-model model)]
+    [[(t2/table-name db-model) alias]]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private base-query-for-model :- [:map {:closed true}
+                                            [:select :any]
+                                            [:from :any]
+                                            [:where :any]
+                                            [:join {:optional true} :any]
+                                            [:left-join {:optional true} :any]]
+  &quot;Create a HoneySQL query map with `:select`, `:from`, and `:where` clauses for `model`, suitable for the `UNION ALL`
+  used in search.&quot;
+  [model :- SearchableModel context :- SearchContext]
+  (-&gt; {:select (select-clause-for-model model)
+       :from   (from-clause-for-model model)}
+      (search.filter/build-filters model context)))</pre></td></tr><tr><td class="docs"><p>Add a <code>WHERE</code> clause to the query to only return Collections the Current User has access to; join against Collection
+so we can return its <code>:name</code>.</p>
 
-<p>We have to identity values no longer in the set, values that must be added to the index, and primary keys which now
-have a different value. Updates will come out as a deletion and an addition. In the future we could make these an
-update if desired.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn find-changes
-  [{:keys [current-index source-values]}]
-  (let [current (set current-index)
-        ;; into {} to ensure that each id appears only once. Later values &quot;win&quot;.
-        source  (set (into {} source-values))]
-    {:additions (set/difference source current)
-     :deletions (set/difference current source)}))</pre></td></tr><tr><td class="docs"><p>Add indexed values to the model<em>index</em>value table.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn add-values!
-  [model-index]
-  (let [[error-message values-to-index] (fetch-values model-index)
-        current-index-values            (into #{}
-                                              (map (juxt :model_pk :name))
-                                              (t2/select ModelIndexValue
-                                                         :model_index_id (:id model-index)))]
-    (if-not (str/blank? error-message)
-      (t2/update! ModelIndex (:id model-index) {:state      &quot;error&quot;
-                                                :error      error-message
-                                                :indexed_at :%now})
-      (try
-        (t2/with-transaction [_conn]
-          (let [{:keys [additions deletions]} (find-changes {:current-index current-index-values
-                                                             :source-values values-to-index})]
-            (when (seq deletions)
-              (doseq [deletions-part (partition-all 10000 deletions)]
-                (t2/delete! ModelIndexValue
-                            :model_index_id (:id model-index)
-                            :model_pk [:in (-&gt;&gt; deletions-part (map first))])))
-            (when (seq additions)
-              (doseq [additions-part (partition-all 10000 additions)]
-                (t2/insert! ModelIndexValue
-                            (map (fn [[id v]]
-                                   {:name           v
-                                    :model_pk       id
-                                    :model_index_id (:id model-index)})
-                                 additions-part)))))
-          (t2/update! ModelIndex (:id model-index)
-                      {:indexed_at :%now
-                       :error      nil
-                       :state      (if (&gt; (count values-to-index) max-indexed-values)
-                                     &quot;overflow&quot;
-                                     &quot;indexed&quot;)}))
-        (catch Exception e
-          (log/errorf e &quot;Error saving model-index values for model-index: %d, model: %d&quot;
-                      (:id model-index) (:model-id model-index))
-          (t2/update! ModelIndex (:id model-index)
-                      {:state      &quot;error&quot;
-                       :error      (ex-message e)
-                       :indexed_at :%now}))))))</pre></td></tr><tr><td class="docs"><p>creation</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Default sync schedule for indexed values. Defaults to randomly once a day.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn default-schedule
+<p>A brief note here on <code>collection-join-id</code> and <code>collection-permission-id</code>. What the heck do these represent?</p>
+
+<p>Permissions on Trashed items work differently than normal permissions. If something is in the trash, you can only
+see it if you have the relevant permissions on the <em>original</em> collection the item was trashed from. This is set as
+<code>trashed_from_collection_id</code>.</p>
+
+<p>However, the item is actually <em>in</em> the Trash, and we want to show that to the frontend. Therefore, we need two
+different collection IDs. One, the ID we should be checking permissions on, and two, the ID we should be joining to
+Collections on.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn add-collection-join-and-where-clauses
+  [honeysql-query                                :- ms/Map
+   model                                         :- :string
+   {:keys [current-user-perms
+           filter-items-in-personal-collection]} :- SearchContext]
+  (let [visible-collections      (collection/permissions-set-&gt;visible-collection-ids current-user-perms)
+        collection-join-id       (if (= model &quot;collection&quot;)
+                                   :collection.id
+                                   :collection_id)
+        collection-permission-id (if (= model &quot;collection&quot;)
+                                   :collection.id
+                                   (mi/parent-collection-id-column-for-perms (:db-model (search.config/model-to-db-model model))))
+        collection-filter-clause (collection/visible-collection-ids-&gt;honeysql-filter-clause
+                                  collection-permission-id
+                                  visible-collections)]
+    (cond-&gt; honeysql-query
+      true
+      (sql.helpers/where collection-filter-clause (perms/audit-namespace-clause :collection.namespace nil))
+      ;; add a JOIN against Collection *unless* the source table is already Collection
+      (not= model &quot;collection&quot;)
+      (sql.helpers/left-join [:collection :collection]
+                             [:= collection-join-id :collection.id])
+      (some? filter-items-in-personal-collection)
+      (sql.helpers/where
+       (case filter-items-in-personal-collection
+         &quot;only&quot;
+         (concat [:or]
+                 ;; sub personal collections
+                 (for [id (t2/select-pks-set :model/Collection :personal_owner_id [:not= nil])]
+                   [:like :collection.location (format &quot;/%d/%%&quot; id)])
+                 ;; top level personal collections
+                 [[:and
+                   [:= :collection.location &quot;/&quot;]
+                   [:not= :collection.personal_owner_id nil]]])
+         &quot;exclude&quot;
+         (conj [:or]
+               (into
+                [:and [:= :collection.personal_owner_id nil]]
+                (for [id (t2/select-pks-set :model/Collection :personal_owner_id [:not= nil])]
+                  [:not-like :collection.location (format &quot;/%d/%%&quot; id)]))
+               [:= collection-join-id nil]))))))</pre></td></tr><tr><td class="docs"><p>Add a WHERE clause to only return tables with the given DB id.
+Used in data picker for joins because we can't join across DB's.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private add-table-db-id-clause
+  [query :- ms/Map id :- [:maybe ms/PositiveInt]]
+  (if (some? id)
+    (sql.helpers/where query [:= id :db_id])
+    query))</pre></td></tr><tr><td class="docs"><p>Add a WHERE clause to only return cards with the given DB id.
+Used in data picker for joins because we can't join across DB's.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private add-card-db-id-clause
+  [query :- ms/Map id :- [:maybe ms/PositiveInt]]
+  (if (some? id)
+    (sql.helpers/where query [:= id :database_id])
+    query))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private replace-select :- :map
+  &quot;Replace a select from query that has alias is `target-alias` with [`with` `target-alias`] column, throw an error if
+  can't find the target select.
+  This works with the assumption that `query` contains a list of select from [[select-clause-for-model]],
+  and some of them are dummy column casted to the correct type.
+  This function then will replace the dummy column with alias is `target-alias` with the `with` column.&quot;
+  [query        :- :map
+   target-alias :- :keyword
+   with         :- :keyword]
+  (let [selects     (:select query)
+        idx         (first (keep-indexed (fn [index item]
+                                           (when (and (coll? item)
+                                                      (= (last item) target-alias))
+                                             index))
+                                         selects))
+        with-select [with target-alias]]
+    (if (some? idx)
+      (assoc query :select (m/replace-nth idx with-select selects))
+      (throw (ex-info &quot;Failed to replace selector&quot; {:status-code  400
+                                                    :target-alias target-alias
+                                                    :with         with})))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private with-last-editing-info :- :map
+  [query :- :map
+   model :- [:enum &quot;card&quot; &quot;dashboard&quot;]]
+  (-&gt; query
+      (replace-select :last_editor_id :r.user_id)
+      (replace-select :last_edited_at :r.timestamp)
+      (sql.helpers/left-join [:revision :r]
+                             [:and [:= :r.model_id (search.config/column-with-model-alias model :id)]
+                              [:= :r.most_recent true]
+                              [:= :r.model (search.config/search-model-&gt;revision-model model)]])))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private with-moderated-status :- :map
+  [query :- :map
+   model :- [:enum &quot;card&quot; &quot;dataset&quot;]]
+  (-&gt; query
+      (replace-select :moderated_status :mr.status)
+      (sql.helpers/left-join [:moderation_review :mr]
+                             [:and
+                              [:= :mr.moderated_item_type &quot;card&quot;]
+                              [:= :mr.moderated_item_id (search.config/column-with-model-alias model :id)]
+                              [:= :mr.most_recent true]])))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmulti ^:private search-query-for-model
+  {:arglists '([model search-context])}
+  (fn [model _] model))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private shared-card-impl
+  [model      :- :metabase.models.card/type
+   search-ctx :- SearchContext]
+  (-&gt; (base-query-for-model &quot;card&quot; search-ctx)
+      (sql.helpers/where [:= :card.type (name model)])
+      (sql.helpers/left-join [:card_bookmark :bookmark]
+                             [:and
+                              [:= :bookmark.card_id :card.id]
+                              [:= :bookmark.user_id (:current-user-id search-ctx)]])
+      (add-collection-join-and-where-clauses &quot;card&quot; search-ctx)
+      (add-card-db-id-clause (:table-db-id search-ctx))
+      (with-last-editing-info &quot;card&quot;)
+      (with-moderated-status &quot;card&quot;)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search-query-for-model &quot;action&quot;
+  [model search-ctx]
+  (-&gt; (base-query-for-model model search-ctx)
+      (sql.helpers/left-join [:report_card :model]
+                             [:= :model.id :action.model_id])
+      (sql.helpers/left-join :query_action
+                             [:= :query_action.action_id :action.id])
+      (add-collection-join-and-where-clauses model
+                                             search-ctx)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search-query-for-model &quot;card&quot;
+  [_model search-ctx]
+  (shared-card-impl :question search-ctx))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search-query-for-model &quot;dataset&quot;
+  [_model search-ctx]
+  (-&gt; (shared-card-impl :model search-ctx)
+      (update :select (fn [columns]
+                        (cons [(h2x/literal &quot;dataset&quot;) :model] (rest columns))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search-query-for-model &quot;metric&quot;
+  [_model search-ctx]
+  (-&gt; (shared-card-impl :metric search-ctx)
+      (update :select (fn [columns]
+                        (cons [(h2x/literal &quot;metric&quot;) :model] (rest columns))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search-query-for-model &quot;collection&quot;
+  [model search-ctx]
+  (-&gt; (base-query-for-model &quot;collection&quot; search-ctx)
+      (sql.helpers/left-join [:collection_bookmark :bookmark]
+                             [:and
+                              [:= :bookmark.collection_id :collection.id]
+                              [:= :bookmark.user_id (:current-user-id search-ctx)]])
+      (add-collection-join-and-where-clauses model search-ctx)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search-query-for-model &quot;database&quot;
+  [model search-ctx]
+  (base-query-for-model model search-ctx))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search-query-for-model &quot;dashboard&quot;
+  [model search-ctx]
+  (-&gt; (base-query-for-model model search-ctx)
+      (sql.helpers/left-join [:dashboard_bookmark :bookmark]
+                             [:and
+                              [:= :bookmark.dashboard_id :dashboard.id]
+                              [:= :bookmark.user_id (:current-user-id search-ctx)]])
+      (add-collection-join-and-where-clauses model search-ctx)
+      (with-last-editing-info &quot;dashboard&quot;)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- add-model-index-permissions-clause
+  [query current-user-perms]
+  (let [build-path (fn [x y z] (h2x/concat (h2x/literal x) y (h2x/literal z)))
+        has-perm-clause (fn [x y z] [:in (build-path x y z) current-user-perms])]
+    (if (contains? current-user-perms &quot;/&quot;)
+      query
+      ;; User has /collection/:id/ or /collection/:id/read/ for the collection the model is in. We will check
+      ;; permissions on the database after the query is complete, in `check-permissions-for-model`
+      (let [has-root-access?
+            (or (contains? current-user-perms &quot;/collection/root/&quot;)
+                (contains? current-user-perms &quot;/collection/root/read/&quot;))
+            collection-id [:coalesce :model.trashed_from_collection_id :collection_id]
+            collection-perm-clause
+            [:or
+             (when has-root-access? [:= collection-id nil])
+             [:and
+              [:not= collection-id nil]
+              [:or
+               (has-perm-clause &quot;/collection/&quot; collection-id &quot;/&quot;)
+               (has-perm-clause &quot;/collection/&quot; collection-id &quot;/read/&quot;)]]]]
+        (sql.helpers/where
+         query
+         collection-perm-clause)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search-query-for-model &quot;indexed-entity&quot;
+  [model {:keys [current-user-perms] :as search-ctx}]
+  (-&gt; (base-query-for-model model search-ctx)
+      (sql.helpers/left-join [:model_index :model-index]
+                             [:= :model-index.id :model-index-value.model_index_id])
+      (sql.helpers/left-join [:report_card :model] [:= :model-index.model_id :model.id])
+      (sql.helpers/left-join [:collection :collection] [:= :model.collection_id :collection.id])
+      (add-model-index-permissions-clause current-user-perms)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search-query-for-model &quot;segment&quot;
+  [model search-ctx]
+  (-&gt; (base-query-for-model model search-ctx)
+      (sql.helpers/left-join [:metabase_table :table] [:= :segment.table_id :table.id])))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search-query-for-model &quot;table&quot;
+  [model {:keys [current-user-perms table-db-id], :as search-ctx}]
+  (when (seq current-user-perms)
+
+    (-&gt; (base-query-for-model model search-ctx)
+        (add-table-db-id-clause table-db-id)
+        (sql.helpers/left-join :metabase_database [:= :table.db_id :metabase_database.id]))))</pre></td></tr><tr><td class="docs"><p>CASE expression that lets the results be ordered by whether they're an exact (non-fuzzy) match or not</p>
+</td><td class="codes"><pre class="brush: clojure">(defn order-clause
+  [query]
+  (let [match             (search.util/wildcard-match (search.util/normalize query))
+        columns-to-search (-&gt;&gt; search.config/all-search-columns
+                               (filter (fn [[_k v]] (= v :text)))
+                               (map first)
+                               (remove #{:collection_authority_level :moderated_status
+                                         :initial_sync_status :pk_ref :location
+                                         :collection_location}))
+        case-clauses      (as-&gt; columns-to-search &lt;&gt;
+                            (map (fn [col] [:like [:lower col] match]) &lt;&gt;)
+                            (interleave &lt;&gt; (repeat [:inline 0]))
+                            (concat &lt;&gt; [:else [:inline 1]]))]
+    [(into [:case] case-clauses)]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmulti ^:private check-permissions-for-model
+  {:arglists '([search-ctx search-result])}
+  (fn [_search-ctx search-result] ((comp keyword :model) search-result)))</pre></td></tr><tr><td class="docs"><p>TODO FIXME -- search actually currently still requires [[metabase.api.common/<em>current-user-permissions-set</em>]] to be
+bound (since [[mi/can-write?]] and [[mi/can-read?]] depend on it) despite search context requiring
+<code>:current-user-perms</code> to be passed in. We should fix things so search works independently of API-specific dynamic
+variables. This might require updating <code>can-read?</code> and <code>can-write?</code> to take explicit perms sets instead of relying
+on dynamic variables.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- assert-current-user-perms-set-is-bound
   []
-  (u.cron/schedule-map-&gt;cron-string (sync.schedules/randomly-once-a-day)))</pre></td></tr><tr><td class="docs"><p>Create a model index</p>
-</td><td class="codes"><pre class="brush: clojure">(defn create
-  [{:keys [model-id pk-ref value-ref creator-id]}]
-  (first (t2/insert-returning-instances! ModelIndex
-                                         [{:model_id   model-id
-                                           ;; todo: sanitize these?
-                                           :pk_ref     pk-ref
-                                           :value_ref  value-ref
-                                           :schedule   (default-schedule)
-                                           :state      &quot;initial&quot;
-                                           :creator_id creator-id}])))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+  (assert (seq @@(requiring-resolve 'metabase.api.common/*current-user-permissions-set*))
+          &quot;metabase.api.common/*current-user-permissions-set* must be bound in order to check search permissions&quot;))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- can-write? [instance]
+  (assert-current-user-perms-set-is-bound)
+  (mi/can-write? instance))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- can-read? [instance]
+  (assert-current-user-perms-set-is-bound)
+  (mi/can-read? instance))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod check-permissions-for-model :default
+  [search-ctx instance]
+  (if (:archived? search-ctx)
+    (can-write? instance)
+    ;; We filter what we can (ie. everything that is in a collection) out already when querying
+    true))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod check-permissions-for-model :table
+  [search-ctx instance]
+  ;; we've already filtered out tables w/o collection permissions in the query itself.
+  (and
+   (data-perms/user-has-permission-for-table?
+    (:current-user-id search-ctx)
+    :perms/view-data
+    :unrestricted
+    (database/table-id-&gt;database-id (:id instance))
+    (:id instance))
+   (data-perms/user-has-permission-for-table?
+    (:current-user-id search-ctx)
+    :perms/create-queries
+    :query-builder
+    (database/table-id-&gt;database-id (:id instance))
+    (:id instance))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod check-permissions-for-model :indexed-entity
+  [search-ctx instance]
+  (and
+   (= :query-builder-and-native
+      (data-perms/full-db-permission-for-user (:current-user-id search-ctx) :perms/create-queries (:database_id instance)))
+   (= :unrestricted
+      (data-perms/full-db-permission-for-user (:current-user-id search-ctx) :perms/view-data (:database_id instance)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod check-permissions-for-model :metric
+  [search-ctx instance]
+  (if (:archived? search-ctx)
+    (can-write? instance)
+    (can-read? instance)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod check-permissions-for-model :segment
+  [search-ctx instance]
+  (if (:archived? search-ctx)
+    (can-write? instance)
+    (can-read? instance)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod check-permissions-for-model :database
+  [search-ctx instance]
+  (if (:archived? search-ctx)
+    (can-write? instance)
+    (can-read? instance)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn query-model-set :- [:set SearchableModel]
+  &quot;Queries all models with respect to query for one result to see if we get a result or not&quot;
+  [search-ctx :- SearchContext]
+  (let [model-queries (for [model (search.filter/search-context-&gt;applicable-models
+                                   (assoc search-ctx :models search.config/all-models))]
+                        {:nest (sql.helpers/limit (search-query-for-model model search-ctx) 1)})
+        query         (when (pos-int? (count model-queries))
+                        {:select [:*]
+                         :from   [[{:union-all model-queries} :dummy_alias]]})]
+    (set (some-&gt;&gt; query
+                  mdb.query/query
+                  (map :model)
+                  set))))</pre></td></tr><tr><td class="docs"><p>Postgres 9 is not happy with the type munging it needs to do to make the union-all degenerate down to trivial case of
+one model without errors. Therefore we degenerate it down for it</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private full-search-query
+  [search-ctx :- SearchContext]
+  (let [models       (:models search-ctx)
+        order-clause [((fnil order-clause &quot;&quot;) (:search-string search-ctx))]]
+    (cond
+      (= (count models) 0)
+      {:select [nil]}
+      (= (count models) 1)
+      (search-query-for-model (first models) search-ctx)
+      :else
+      {:select   [:*]
+       :from     [[{:union-all (vec (for [model models
+                                          :let  [query (search-query-for-model model search-ctx)]
+                                          :when (seq query)]
+                                      query))} :alias_is_required_by_sql_but_not_needed_here]]
+       :order-by order-clause})))</pre></td></tr><tr><td class="docs"><p>Hydrate common-name for last<em>edited</em>by and created_by from result.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- hydrate-user-metadata
+  [results]
+  (let [user-ids             (set (flatten (for [result results]
+                                             (remove nil? ((juxt :last_editor_id :creator_id) result)))))
+        user-id-&gt;common-name (if (pos? (count user-ids))
+                               (t2/select-pk-&gt;fn :common_name [:model/User :id :first_name :last_name :email] :id [:in user-ids])
+                               {})]
+    (mapv (fn [{:keys [creator_id last_editor_id] :as result}]
+            (assoc result
+                   :creator_common_name (get user-id-&gt;common-name creator_id)
+                   :last_editor_common_name (get user-id-&gt;common-name last_editor_id)))
+          results)))</pre></td></tr><tr><td class="docs"><p>Adds <code>collection_effective_ancestors</code> to <em>datasets</em> in the search results.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn add-dataset-collection-hierarchy
+  [search-results]
+  (let [;; this helper function takes a search result (with `collection_id` and `collection_location`) and returns the
+        ;; effective location of the result.
+        result-&gt;loc  (fn [{:keys [collection_id collection_location]}]
+                        (:effective_location
+                         (t2/hydrate
+                          (if (nil? collection_id)
+                            collection/root-collection
+                            {:location collection_location})
+                          :effective_location)))
+        ;; a map of collection-ids to collection info
+        col-id-&gt;info (into {}
+                           (for [item  search-results
+                                 :when (= (:model item) &quot;dataset&quot;)]
+                              [(:collection_id item)
+                               {:id                 (:collection_id item)
+                                :name               (-&gt; {:name (:collection_name item)
+                                                         :id   (:collection_id item)
+                                                         :type (:collection_type item)}
+                                                        collection/maybe-localize-trash-name
+                                                        :name)
+                                :type               (:collection_type item)
+                                :effective_location (result-&gt;loc item)}]))
+        ;; the set of all collection IDs where we *don't* know the collection name. For example, if `col-id-&gt;info`
+        ;; contained `{1 {:effective_location &quot;/2/&quot; :name &quot;Foo&quot;}}`, we need to look up the name of collection `2`.
+        to-fetch     (into #{} (comp (keep :effective_location)
+                                      (mapcat collection/location-path-&gt;ids)
+                                      ;; already have these names
+                                      (remove col-id-&gt;info))
+                            (vals col-id-&gt;info))
+        ;; the now COMPLETE map of collection IDs to info
+        col-id-&gt;info (merge (if (seq to-fetch)
+                              (t2/select-pk-&gt;fn #(select-keys % [:name :type :id]) :model/Collection :id [:in to-fetch])
+                              {})
+                            (update-vals col-id-&gt;info #(dissoc % :effective_location)))
+        annotate     (fn [x]
+                        (cond-&gt; x
+                          (= (:model x) &quot;dataset&quot;)
+                          (assoc :collection_effective_ancestors
+                                 (if-let [loc (result-&gt;loc x)]
+                                   (-&gt;&gt; (collection/location-path-&gt;ids loc)
+                                        (map col-id-&gt;info))
+                                   []))))]
+    (map annotate search-results)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- add-can-write [row]
+  (if (some #(mi/instance-of? % row) [:model/Dashboard :model/Card])
+    (assoc row :can_write (can-write? row))
+    row))</pre></td></tr><tr><td class="docs"><p>Coerce a bit returned by some MySQL/MariaDB versions in some situations to Boolean.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- bit-&gt;boolean
+  [v]
+  (if (number? v)
+    (not (zero? v))
+    v))</pre></td></tr><tr><td class="docs"><p>Builds a search query that includes all the searchable entities and runs it</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn search
+  [search-ctx :- SearchContext]
+  (let [search-query       (full-search-query search-ctx)
+        _                  (log/tracef &quot;Searching with query:\n%s\n%s&quot;
+                                       (u/pprint-to-str search-query)
+                                       (mdb.query/format-sql (first (mdb.query/compile search-query))))
+        to-toucan-instance (fn [row]
+                             (let [model (-&gt; row :model search.config/model-to-db-model :db-model)]
+                               (t2.instance/instance model row)))
+        reducible-results  (reify clojure.lang.IReduceInit
+                             (reduce [_this rf init]
+                               (binding [t2.jdbc.options/*options* (assoc t2.jdbc.options/*options* :max-rows search.config/*db-max-results*)]
+                                 (reduce rf init (t2/reducible-query search-query)))))
+        xf                 (comp
+                            (map t2.realize/realize)
+                            (map to-toucan-instance)
+                            (map #(if (t2/instance-of? :model/Collection %)
+                                    (t2/hydrate % :effective_location)
+                                    (assoc % :effective_location nil)))
+                            (map #(cond-&gt; %
+                                    (t2/instance-of? :model/Collection %) (assoc :type (:collection_type %))))
+                            (map #(cond-&gt; % (t2/instance-of? :model/Collection %) collection/maybe-localize-trash-name))
+                            ;; MySQL returns `:bookmark` and `:archived` as `1` or `0` so convert those to boolean as
+                            ;; needed
+                            (map #(update % :bookmark bit-&gt;boolean))
+                            (map #(update % :archived bit-&gt;boolean))
+                            (filter (partial check-permissions-for-model search-ctx))
+                            (map #(update % :pk_ref json/parse-string))
+                            (map add-can-write)
+                            (map (partial scoring/score-and-result (:search-string search-ctx)))
+                            (filter #(pos? (:score %))))
+        total-results       (cond-&gt;&gt; (scoring/top-results reducible-results search.config/max-filtered-results xf)
+                              true hydrate-user-metadata
+                              (:model-ancestors? search-ctx) (add-dataset-collection-hierarchy)
+                              true (map scoring/serialize))
+        add-perms-for-col  (fn [item]
+                             (cond-&gt; item
+                               (mi/instance-of? :model/Collection item)
+                               (assoc :can_write (can-write? item))))]
+    ;; We get to do this slicing and dicing with the result data because
+    ;; the pagination of search is for UI improvement, not for performance.
+    ;; We intend for the cardinality of the search results to be below the default max before this slicing occurs
+    {:available_models (query-model-set search-ctx)
+     :data             (cond-&gt;&gt; total-results
+                         (some? (:offset-int search-ctx)) (drop (:offset-int search-ctx))
+                         (some? (:limit-int search-ctx)) (take (:limit-int search-ctx))
+                         true (map add-perms-for-col))
+     :limit            (:limit-int search-ctx)
+     :models           (:models search-ctx)
+     :offset           (:offset-int search-ctx)
+     :table_db_id      (:table-db-id search-ctx)
+     :total            (count total-results)}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::search-context.input
+  [:map {:closed true}
+   [:search-string                                        [:maybe ms/NonBlankString]]
+   [:models                                               [:maybe [:set SearchableModel]]]
+   [:current-user-id                                      pos-int?]
+   [:current-user-perms                                   [:set perms.u/PathSchema]]
+   [:archived                            {:optional true} [:maybe :boolean]]
+   [:created-at                          {:optional true} [:maybe ms/NonBlankString]]
+   [:created-by                          {:optional true} [:maybe [:set ms/PositiveInt]]]
+   [:filter-items-in-personal-collection {:optional true} [:maybe [:enum &quot;only&quot; &quot;exclude&quot;]]]
+   [:last-edited-at                      {:optional true} [:maybe ms/NonBlankString]]
+   [:last-edited-by                      {:optional true} [:maybe [:set ms/PositiveInt]]]
+   [:limit                               {:optional true} [:maybe ms/Int]]
+   [:offset                              {:optional true} [:maybe ms/Int]]
+   [:table-db-id                         {:optional true} [:maybe ms/PositiveInt]]
+   [:search-native-query                 {:optional true} [:maybe boolean?]]
+   [:model-ancestors?                    {:optional true} [:maybe boolean?]]
+   [:verified                            {:optional true} [:maybe true?]]])</pre></td></tr><tr><td class="docs"><p>Create a new search context that you can pass to other functions like [[search]].</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn search-context
+  [{:keys [archived
+           created-at
+           created-by
+           current-user-id
+           current-user-perms
+           last-edited-at
+           last-edited-by
+           limit
+           models
+           filter-items-in-personal-collection
+           offset
+           search-string
+           model-ancestors?
+           table-db-id
+           search-native-query
+           verified]}      :- ::search-context.input] :- SearchContext
+  ;; for prod where Malli is disabled
+  {:pre [(pos-int? current-user-id) (set? current-user-perms)]}
+  (when (some? verified)
+    (premium-features/assert-has-any-features
+     [:content-verification :official-collections]
+     (deferred-tru &quot;Content Management or Official Collections&quot;)))
+  (let [models (if (string? models) [models] models)
+        ctx    (cond-&gt; {:archived?          (boolean archived)
+                        :current-user-id current-user-id
+                        :current-user-perms current-user-perms
+                        :model-ancestors?   (boolean model-ancestors?)
+                        :models             models
+                        :search-string      search-string}
+                 (some? created-at)                          (assoc :created-at created-at)
+                 (seq created-by)                            (assoc :created-by created-by)
+                 (some? filter-items-in-personal-collection) (assoc :filter-items-in-personal-collection filter-items-in-personal-collection)
+                 (some? last-edited-at)                     (assoc :last-edited-at last-edited-at)
+                 (seq last-edited-by)                       (assoc :last-edited-by last-edited-by)
+                 (some? table-db-id)                        (assoc :table-db-id table-db-id)
+                 (some? limit)                              (assoc :limit-int limit)
+                 (some? offset)                             (assoc :offset-int offset)
+                 (some? search-native-query)                (assoc :search-native-query search-native-query)
+                 (some? verified)                           (assoc :verified verified))]
+    (assoc ctx :models (search.filter/search-context-&gt;applicable-models ctx))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

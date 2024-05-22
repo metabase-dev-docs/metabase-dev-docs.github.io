@@ -2881,10 +2881,16 @@ both a Category and a <code>list</code> Field.</p>
    [metabase.analyze.fingerprint.schema :as fingerprint.schema]
    [metabase.analyze.schema :as analyze.schema]
    [metabase.lib.schema.metadata :as lib.schema.metadata]
-   [metabase.models.field-values :as field-values]
    [metabase.sync.util :as sync-util]
    [metabase.util.log :as log]
-   [metabase.util.malli :as mu]))</pre></td></tr><tr><td class="docs">
+   [metabase.util.malli :as mu]))</pre></td></tr><tr><td class="docs"><p>Fields with less than this many distinct values should automatically be given a semantic type of <code>:type/Category</code>.
+This no longer has any meaning whatsoever as far as the backend code is concerned; it is used purely to inform
+frontend behavior such as widget choices.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^Long category-cardinality-threshold
+  30)</pre></td></tr><tr><td class="docs"><p>Fields with less than this many distincy values should be given a <code>has_field_values</code> value of <code>list</code>, which means
+the Field should have FieldValues.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^Long auto-list-cardinality-threshold
+  1000)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- cannot-be-category-or-list?
   [{base-type :base_type, semantic-type :semantic_type}]
   (or (isa? base-type :type/Temporal)
@@ -2903,11 +2909,11 @@ both a Category and a <code>list</code> Field.</p>
     (when (and (nil? (:semantic_type field))
                (or (some-&gt; nil% (&lt; 1))
                    (isa? (:base_type field) :type/Boolean))
-               (some-&gt; distinct-count (&lt;= field-values/category-cardinality-threshold)))
+               (some-&gt; distinct-count (&lt;= category-cardinality-threshold)))
       (log/debugf &quot;%s has %d distinct values. Since that is less than %d, we're marking it as a category.&quot;
                   (sync-util/name-for-logging field)
                   distinct-count
-                  field-values/category-cardinality-threshold)
+                  category-cardinality-threshold)
       true)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private field-should-be-auto-list? :- [:maybe :boolean]
   &quot;Based on `distinct-count`, should we mark this `field` as `has-field-values` = `auto-list`?&quot;
@@ -2917,11 +2923,11 @@ both a Category and a <code>list</code> Field.</p>
   ;; manually by an admin, and we don't want to stomp over their choices.
   (let [distinct-count (get-in fingerprint [:global :distinct-count])]
     (when (and (nil? (:has-field-values field))
-               (some-&gt; distinct-count (&lt;= field-values/auto-list-cardinality-threshold)))
+               (some-&gt; distinct-count (&lt;= auto-list-cardinality-threshold)))
       (log/debugf &quot;%s has %d distinct values. Since that is less than %d, it should have cached FieldValues.&quot;
                   (sync-util/name-for-logging field)
                   distinct-count
-                  field-values/auto-list-cardinality-threshold)
+                  auto-list-cardinality-threshold)
       true)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn infer-is-category-or-list :- [:maybe analyze.schema/Field]
   &quot;Classifier that attempts to determine whether `field` ought to be marked as a Category based on its distinct count.&quot;

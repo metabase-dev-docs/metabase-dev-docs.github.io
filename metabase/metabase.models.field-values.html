@@ -2896,6 +2896,7 @@ for [[metabase.models.params.chain-filter]] and [[metabase.query-processor.middl
    [java-time.api :as t]
    [malli.core :as mc]
    [medley.core :as m]
+   [metabase.analyze :as analyze]
    [metabase.db.metadata-queries :as metadata-queries]
    [metabase.db.query :as mdb.query]
    [metabase.models.interface :as mi]
@@ -2907,18 +2908,11 @@ for [[metabase.models.params.chain-filter]] and [[metabase.query-processor.middl
    [metabase.util.log :as log]
    [metabase.util.malli.schema :as ms]
    [methodical.core :as methodical]
-   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs"><p>Fields with less than this many distinct values should automatically be given a semantic type of <code>:type/Category</code>.
-This no longer has any meaning whatsoever as far as the backend code is concerned; it is used purely to inform
-frontend behavior such as widget choices.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^Long category-cardinality-threshold
-  30)</pre></td></tr><tr><td class="docs"><p>Fields with less than this many distincy values should be given a <code>has_field_values</code> value of <code>list</code>, which means
-the Field should have FieldValues.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^Long auto-list-cardinality-threshold
-  1000)</pre></td></tr><tr><td class="docs"><p>The maximum character length for a stored FieldValues entry.</p>
+   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs"><p>The maximum character length for a stored FieldValues entry.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private ^Long entry-max-length
   100)</pre></td></tr><tr><td class="docs"><p>Maximum total length for a FieldValues entry (combined length of all values for the field).</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:dynamic ^Long *total-max-length*
-  (long (* auto-list-cardinality-threshold entry-max-length)))</pre></td></tr><tr><td class="docs"><p>Age of an advanced FieldValues in days.
+  (long (* analyze/auto-list-cardinality-threshold entry-max-length)))</pre></td></tr><tr><td class="docs"><p>Age of an advanced FieldValues in days.
 After this time, these field values should be deleted by the <code>delete-expired-advanced-field-values</code> job.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^java.time.Period advanced-field-values-max-age
   (t/days 30))</pre></td></tr><tr><td class="docs"><p>How many days until a FieldValues is considered inactive. Inactive FieldValues will not be synced until
@@ -3197,7 +3191,7 @@ In order to mitigate the impact of duplicates, we return the most recently updat
         field-name                (or (:name field) (:id field))]
     (cond
       ;; If this Field is marked `auto-list`, and the number of values in now over
-      ;; the [[auto-list-cardinality-threshold]] or the accumulated length of all values exceeded
+      ;; the [[analyze/auto-list-cardinality-threshold]] or the accumulated length of all values exceeded
       ;; the [[*total-max-length*]] threshold we need to unmark it as `auto-list`. Switch it to `has_field_values` =
       ;; `nil` and delete the FieldValues; this will result in it getting a Search Widget in the UI when
       ;; `has_field_values` is automatically inferred by the [[metabase.models.field/infer-has-field-values]] hydration
@@ -3208,7 +3202,7 @@ In order to mitigate the impact of duplicates, we return the most recently updat
       ;; way that could make this work. Thus, we are stuck doing it here :(
       (and (= :auto-list (keyword (:has_field_values field)))
            (or has_more_values
-               (&gt; (count values) auto-list-cardinality-threshold)))
+               (&gt; (count values) analyze/auto-list-cardinality-threshold)))
       (do
         (log/infof
          (str &quot;Field %s was previously automatically set to show a list widget, but now has %s values.&quot;
