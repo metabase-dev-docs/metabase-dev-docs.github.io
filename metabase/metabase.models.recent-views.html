@@ -2886,14 +2886,20 @@ one(s) will be deleted, so that the count stays at least 20.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.models.recent-views
   (:require
    [clojure.set :as set]
+   [colorize.core :as colorize]
    [java-time.api :as t]
+   [malli.core :as mc]
+   [malli.error :as me]
    [medley.core :as m]
+   [metabase.config :as config]
    [metabase.models.collection :as collection]
    [metabase.models.collection.root :as root]
    [metabase.models.interface :as mi]
    [metabase.util :as u]
    [metabase.util.honey-sql-2 :as h2x]
+   [metabase.util.log :as log]
    [metabase.util.malli :as mu]
+   [metabase.util.malli.registry :as mr]
    [metabase.util.malli.schema :as ms]
    [methodical.core :as methodical]
    [steffan-westcott.clj-otel.api.trace.span :as span]
@@ -2981,7 +2987,7 @@ model type in [[models-of-interest]].</p>
   [:and {:registry {::pc [:map
                           [:id [:or [:int {:min 1}] [:= &quot;root&quot;]]]
                           [:name :string]
-                          [:authority_level [:enum :official &quot;official&quot; nil]]]}}
+                          [:authority_level [:enum &quot;official&quot; nil]]]}}
    [:map
     [:id [:int {:min 1}]]
     [:name :string]
@@ -3009,10 +3015,13 @@ model type in [[models-of-interest]].</p>
                          [:name :string]]]]]
     [:collection [:map
                   [:parent_collection ::pc]
-                  [:authority_level [:enum :official &quot;official&quot; nil]]]]]])</pre></td></tr><tr><td class="docs"><p>Fills in additional information for a recent view, such as the display name of the object.</p>
+                  [:authority_level [:enum &quot;official&quot; nil]]]]]])</pre></td></tr><tr><td class="docs"><p>Fills in additional information for a recent view, such as the display name of the object, returns [[Item]].</p>
 
-<p>For most items, we gather information from the db in a single query, but certain things are more prudent to check with
-code (e.g. a collection's parent collection.)</p>
+<p>For most items, we gather information from the db in a single query, but certain things are more prudent to check
+with code (e.g. a collection's parent collection.)</p>
+
+<p>Sometimes we get an invalid or inconsistent recent view record. (E.g. the parent collection for an item no longer
+exists). In these cases we simply do not include the value in the recent views response.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti fill-recent-view-info
   (fn [{:keys [model #_model_id #_timestamp card_type]}]
     (or (get {&quot;model&quot; :dataset &quot;question&quot; :card &quot;metric&quot; :metric} card_type)
@@ -3025,37 +3034,52 @@ We use this to ensure that archived models are not returned in the recent views.
 </td><td class="codes"><pre class="brush: clojure">(defn- root-coll []
   (select-keys
    (into {} (root/root-collection-with-ui-details {}))
-   [:id :name :authority_level]))</pre></td></tr><tr><td class="docs"><p>== Recent Cards ==</p>
+   [:id :name :authority_level]))</pre></td></tr><tr><td class="docs"><p>================== Recent Cards ==================</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Query to select card data</p>
 </td><td class="codes"><pre class="brush: clojure">(defn card-recents
   [card-ids]
   (if-not (seq card-ids)
     []
     (t2/select :model/Card
-               {:select [:report_card.name
-                         :report_card.description
-                         :report_card.archived
-                         :report_card.collection_id
-                         :report_card.trashed_from_collection_id
-                         :report_card.id
-                         :report_card.display
+               {:select [:card.name
+                         :card.description
+                         :card.archived
+                         :card.id
+                         :card.display
+                         :card.trashed_from_collection_id
+                         [:card.collection_id :entity-coll-id]
                          [:mr.status :moderated-status]
-                         [:c.id :collection-id]
-                         [:c.name :collection-name]
-                         [:c.authority_level :collection-authority-level]]
-                :where [:in :report_card.id card-ids]
+                         [:collection.id :collection_id]
+                         [:collection.name :collection_name]
+                         [:collection.authority_level :collection_authority_level]]
+                :from [[:report_card :card]]
+                :where [:in :card.id card-ids]
                 :left-join [[:moderation_review :mr]
                             [:and
                              [:= :mr.moderated_item_type &quot;card&quot;]
                              [:= :mr.most_recent true]
                              [:in :mr.moderated_item_id card-ids]]
-                            [:collection :c]
+                            [:collection]
                             [:and
-                             [:= :c.id :report_card.collection_id]
-                             [:= :c.archived false]]]})))</pre></td></tr><tr><td class="docs">
+                             [:= :collection.id :card.collection_id]
+                             [:= :collection.archived false]]]})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- fill-parent-coll [model-object]
+  (if (:collection_id model-object)
+    {:id (:collection_id model-object)
+     :name (:collection_name model-object)
+     :authority_level (some-&gt; (:collection_authority_level model-object) name)}
+    (root-coll)))</pre></td></tr><tr><td class="docs"><p>Returns true when a parent collection actually exists for this item.</p>
+
+<p>Careful: the root collection will have a nil <code>colelction_id</code> and a nil <code>collection_name</code>. We return false when the
+collection has a <code>collection_id</code>, and a nil <code>collection_name</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- parent-collection-valid?
+  [{:keys [collection_id entity-coll-id]}]
+  (not (and entity-coll-id (nil? collection_id))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod fill-recent-view-info :card [{:keys [_model model_id timestamp model_object]}]
   (when-let [card (and
                    (mi/can-read? model_object)
+                   ;; The parent collection exists:
+                   (parent-collection-valid? model_object)
                    (ellide-archived model_object))]
     {:id model_id
      :name (:name card)
@@ -3065,14 +3089,12 @@ We use this to ensure that archived models are not returned in the recent views.
      :can_write (mi/can-write? card)
      :timestamp (str timestamp)
      :moderated_status (:moderated-status card)
-     :parent_collection (if (:collection-id card)
-                          {:id (:collection-id card)
-                           :name (:collection-name card)
-                           :authority_level (:collection-authority-level card)}
-                          (root-coll))}))</pre></td></tr><tr><td class="docs">
+     :parent_collection (fill-parent-coll card)}))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod fill-recent-view-info :dataset [{:keys [_model model_id timestamp model_object]}]
   (when-let [dataset (and
                       (mi/can-read? model_object)
+                      ;; If the parent collection no longer exists, there won't be a name.
+                      (parent-collection-valid? model_object)
                       (ellide-archived model_object))]
     {:id model_id
      :name (:name dataset)
@@ -3082,14 +3104,11 @@ We use this to ensure that archived models are not returned in the recent views.
      :timestamp (str timestamp)
      ;; another table that doesn't differentiate between card and dataset :cry:
      :moderated_status (:moderated-status dataset)
-     :parent_collection (if (:collection-id dataset)
-                          {:id (:collection-id dataset)
-                           :name (:collection-name dataset)
-                           :authority_level (:collection-authority-level dataset)}
-                          (root-coll))}))</pre></td></tr><tr><td class="docs">
+     :parent_collection (fill-parent-coll dataset)}))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod fill-recent-view-info :metric [{:keys [_model model_id timestamp model_object]}]
   (when-let [metric (and
                      (mi/can-read? model_object)
+                     (parent-collection-valid? model_object)
                      (ellide-archived model_object))]
     {:id model_id
      :name (:name metric)
@@ -3103,24 +3122,7 @@ We use this to ensure that archived models are not returned in the recent views.
                           {:id (:collection-id metric)
                            :name (:collection-name metric)
                            :authority_level (:collection-authority-level metric)}
-                          (root-coll))}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod fill-recent-view-info :metric [{:keys [_model model_id timestamp model_object]}]
-  (when-let [metric (and
-                     (mi/can-read? model_object)
-                     (ellide-archived model_object))]
-    {:id model_id
-     :name (:name metric)
-     :description (:description metric)
-     :display (some-&gt; metric :display name)
-     :model :metric
-     :can_write (mi/can-write? metric)
-     :timestamp (str timestamp)
-     :moderated_status (:moderated-status metric)
-     :parent_collection (if (:collection-id metric)
-                          {:id (:collection-id metric)
-                           :name (:collection-name metric)
-                           :authority_level (:collection-authority-level metric)}
-                          (root-coll))}))</pre></td></tr><tr><td class="docs"><p>== Recent Dashboards ==</p>
+                          (root-coll))}))</pre></td></tr><tr><td class="docs"><p>================== Recent Dashboards ==================</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Query to select recent dashboard data</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- dashboard-recents
   [dashboard-ids]
@@ -3131,11 +3133,11 @@ We use this to ensure that archived models are not returned in the recent views.
                          :dash.name
                          :dash.description
                          :dash.archived
-                         :dash.collection_id
                          :dash.trashed_from_collection_id
-                         [:c.id :collection-id]
-                         [:c.name :collection-name]
-                         [:c.authority_level :collection-authority-level]]
+                         [:dash.collection_id :entity-coll-id]
+                         [:c.id :collection_id]
+                         [:c.name :collection_name]
+                         [:c.authority_level :collection_authority_level]]
                 :from [[:report_dashboard :dash]]
                 :where [:in :dash.id dashboard-ids]
                 :left-join [[:collection :c]
@@ -3144,6 +3146,7 @@ We use this to ensure that archived models are not returned in the recent views.
                              [:= :c.archived false]]]})))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod fill-recent-view-info :dashboard [{:keys [_model model_id timestamp model_object]}]
   (when-let [dashboard (and (mi/can-read? model_object)
+                            (parent-collection-valid? model_object)
                             (ellide-archived model_object))]
     {:id model_id
      :name (:name dashboard)
@@ -3151,11 +3154,7 @@ We use this to ensure that archived models are not returned in the recent views.
      :model :dashboard
      :can_write (mi/can-write? dashboard)
      :timestamp (str timestamp)
-     :parent_collection (if (:collection_id dashboard)
-                          {:id (:collection_id dashboard)
-                           :name (:collection-name dashboard)
-                           :authority_level (:collection-authority-level dashboard)}
-                          (root-coll))}))</pre></td></tr><tr><td class="docs"><p>== Recent Collections ==</p>
+     :parent_collection (fill-parent-coll dashboard)}))</pre></td></tr><tr><td class="docs"><p>================== Recent Collections ==================</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Query to select recent collection data</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- collection-recents
   [collection-ids]
@@ -3163,7 +3162,8 @@ We use this to ensure that archived models are not returned in the recent views.
     []
     (let [ ;; these have their parent collection id in effective_location, but we need the id, name, and authority_level.
           collections (t2/select :model/Collection
-                                 {:select [:id :name :description :authority_level :archived :location]
+                                 {:select [:id :name :description :authority_level
+                                           :archived :location :trashed_from_location]
                                   :where [:and
                                           [:in :id collection-ids]
                                           [:= :archived false]]})
@@ -3188,14 +3188,16 @@ We use this to ensure that archived models are not returned in the recent views.
      :model :collection
      :can_write (mi/can-write? collection)
      :timestamp (str timestamp)
-     :authority_level (:authority_level collection)
-     :parent_collection (or (:effective_parent collection) (root-coll))}))</pre></td></tr><tr><td class="docs"><p>== Recent Tables ==</p>
+     :authority_level (some-&gt; (:authority_level collection) name)
+     :parent_collection (or (:effective_parent collection) (root-coll))}))</pre></td></tr><tr><td class="docs"><p>================== Recent Tables ==================</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Query to select recent table data</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- table-recents
   [table-ids]
   (t2/select :model/Table
-             {:select [:t.id :t.name :t.description :t.display_name :t.active :t.db_id
+             {:select [:t.id :t.name :t.description
+                       :t.display_name :t.active :t.visibility_type
                        [:db.name :database-name]
+                       [:db.id :database-id]
                        [:db.initial_sync_status :initial-sync-status]]
               :from [[:metabase_table :t]]
               :where (let [base-condition [:or
@@ -3208,7 +3210,10 @@ We use this to ensure that archived models are not returned in the recent views.
                           [:= :db.id :t.db_id]]}))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod fill-recent-view-info :table [{:keys [_model model_id timestamp model_object]}]
   (let [table model_object]
-    (when (and (mi/can-read? table) (true? (:active table)))
+    (when (and (not= &quot;hidden&quot; (:visibility_type table))
+               (:database-name table)
+               (:active table)
+               (mi/can-read? table))
       {:id model_id
        :name (:name table)
        :description (:description table)
@@ -3216,18 +3221,19 @@ We use this to ensure that archived models are not returned in the recent views.
        :display_name (:display_name table)
        :can_write (mi/can-write? table)
        :timestamp (str timestamp)
-       :database {:id (:db_id table)
+       :database {:id (:database-id table)
                   :name (:database-name table)
                   :initial_sync_status (:initial-sync-status table)}})))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn ^:private do-query [user-id]  (t2/select :model/RecentViews {:select [:rv.* [:rc.type :card_type]]
-                                                                   :from [[:recent_views :rv]]
-                                                                   :where [:and [:= :rv.user_id user-id]]
-                                                                   :left-join [[:report_card :rc]
-                                                                               [:and
-                                                                                ;; only want to join on card_type if it's a card
-                                                                                [:= :rv.model &quot;card&quot;]
-                                                                                [:= :rc.id :rv.model_id]]]
-                                                                   :order-by [[:rv.timestamp :desc]]}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn ^:private do-query [user-id]
+  (t2/select :model/RecentViews {:select [:rv.* [:rc.type :card_type]]
+                                 :from [[:recent_views :rv]]
+                                 :where [:and [:= :rv.user_id user-id]]
+                                 :left-join [[:report_card :rc]
+                                             [:and
+                                              ;; only want to join on card_type if it's a card
+                                              [:= :rv.model &quot;card&quot;]
+                                              [:= :rc.id :rv.model_id]]]
+                                 :order-by [[:rv.timestamp :desc]]}))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private model-&gt;return-model [model :- :keyword]
   (if (= :question model) :card model))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- post-process [entity-&gt;id-&gt;data recent-view]
@@ -3250,14 +3256,31 @@ We use this to ensure that archived models are not returned in the recent views.
      :dashboard  (m/index-by :id (dashboard-recents dashboard-ids))
      :collection (m/index-by :id (collection-recents collection-ids))
      :table      (m/index-by :id (table-recents table-ids))}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn get-list :- [:sequential Item]
-  &quot;Gets all recent views for a given user. Returns a list of at most 20 [[Item]]s per [[models-of-interest]].
-  [[do-query]] can return nils, and we remove them here becuase models can be deleted, and we don't want to show those
-  in the recent views.&quot;
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ItemValidator (mc/validator Item))</pre></td></tr><tr><td class="docs"><p>The underlying data model here can become inconsistent, and it's better to return the recents data that we know is
+correct than throw an error. So, in prod, we silently filter out known-bad recent views.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn error-avoider
+  [item]
+  (if (and item (ItemValidator item))
+    item
+    (when-not config/is-prod?
+      (log/errorf (colorize/red &quot;Invalid recent view item: %s reason: %s&quot;)
+                  (pr-str item)
+                  (me/humanize (mr/explain Item item))))))</pre></td></tr><tr><td class="docs"><p>Gets all recent views for a given user. Returns a list of at most 20 [[Item]]s per [[models-of-interest]].</p>
+
+<p>[[do-query]] can return nils, and we remove them here becuase models can be deleted, and we don't want to show those
+in the recent views.</p>
+
+<p>Returns a sequence of [[Item]]s. The reason this isn't a <code>mu/defn</code>, is that error-avoider validates each Item in the
+sequence, so there's no need to do it twice.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn get-list
   [user-id]
   (if-let [views (not-empty (do-query user-id))]
     (let [entity-&gt;id-&gt;data (get-entity-&gt;id-&gt;data views)]
-      (keep (partial post-process entity-&gt;id-&gt;data) views))
+      (into []
+            (comp
+             (map (partial post-process entity-&gt;id-&gt;data))
+             (keep error-avoider))
+            views))
     []))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
