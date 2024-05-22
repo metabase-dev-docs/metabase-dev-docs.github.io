@@ -2871,7 +2871,10 @@ net.brehaut.ClojureTools = (function (SH) {
    [clojure.string :as str]
    [macaw.core :as macaw]
    [metabase.driver.common.parameters :as params]
-   [metabase.driver.common.parameters.parse :as params.parse]))</pre></td></tr><tr><td class="docs">
+   [metabase.driver.common.parameters.parse :as params.parse]
+   [metabase.driver.common.parameters.values :as params.values]
+   [metabase.query-processor.setup :as qp.setup]
+   [metabase.query-processor.store :as qp.store]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- first-unique
   [raw-query f]
   (first (filter #(not (str/includes? raw-query %))
@@ -2879,12 +2882,15 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defn- gensymed-string
   []
   (format &quot;'%s'&quot; (gensym &quot;metabase_sentinel_&quot;)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- sentinel-variable
+</td><td class="codes"><pre class="brush: clojure">(defn- gen-variable-sentinel
   [raw-query]
   (first-unique raw-query gensymed-string))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- sentinel-field-filter
+</td><td class="codes"><pre class="brush: clojure">(defn- gen-field-filter-sentinel
   [raw-query]
   (first-unique raw-query #(apply format &quot;(%s = %s)&quot; (repeat 2 (gensymed-string)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- gen-table-sentinel
+  [raw-query]
+  (first-unique raw-query #(str (gensym &quot;metabase_sentinel_table_&quot;))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- braceify
   [s]
   (format &quot;{{%s}}&quot; s))</pre></td></tr><tr><td class="docs">
@@ -2892,7 +2898,7 @@ net.brehaut.ClojureTools = (function (SH) {
   [all-subs new-sub token]
   (assoc all-subs new-sub (braceify (:k token))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- parse-tree-&gt;clean-query
-  [raw-query tokens]
+  [raw-query tokens param-&gt;value]
   (loop
       [[token &amp; rest] tokens
        query-so-far   
@@ -2903,19 +2909,30 @@ net.brehaut.ClojureTools = (function (SH) {
        :substitutions substitutions}
       (string? token)
       (recur rest (str query-so-far token) substitutions)
-      (params/Param? token)
-      (let [sub (sentinel-variable raw-query)]
-        (recur rest
-               (str query-so-far sub)
-               (add-tag substitutions sub token)))
-      (params/FieldFilter? token)
-      (let [sub (sentinel-field-filter raw-query)]
-        (recur rest
-               (str query-so-far sub)
-               (add-tag substitutions sub token)))
       :else
-      ;; will be addressed by #42582, etc.
-      (throw (ex-info &quot;Unsupported token in native query&quot; {:token token})))))</pre></td></tr><tr><td class="docs"><p>Return <code>the-string</code> with all the keys of <code>replacements</code> replaced by their values.</p>
+      (let [v         (param-&gt;value (:k token))
+            card-ref? (params/ReferencedCardQuery? v)]
+        (cond
+          card-ref?
+          (let [sub (gen-table-sentinel raw-query)]
+            (recur rest
+                   (str query-so-far sub)
+                   (add-tag substitutions sub token)))
+          ;; Plain variable
+          (and (params/Param? token)
+               (not card-ref?))
+          (let [sub (gen-variable-sentinel raw-query)]
+            (recur rest
+                   (str query-so-far sub)
+                   (add-tag substitutions sub token)))
+          (params/FieldFilter? token)
+          (let [sub (gen-field-filter-sentinel raw-query)]
+            (recur rest
+                   (str query-so-far sub)
+                   (add-tag substitutions sub token)))
+          :else
+          ;; will be addressed by #42582, etc.
+          (throw (ex-info &quot;Unsupported token in native query&quot; {:token token})))))))</pre></td></tr><tr><td class="docs"><p>Return <code>the-string</code> with all the keys of <code>replacements</code> replaced by their values.</p>
 
 <p>(replace-all "foo bar baz" {"foo" "quux"
                               "ba"  "xx"})
@@ -2936,15 +2953,22 @@ net.brehaut.ClojureTools = (function (SH) {
                   (update-vals clean-column))
      :tables  (-&gt; tables
                   (update-keys clean-table)
-                  (update-vals clean-table))}))</pre></td></tr><tr><td class="docs"><p>Given a dataset_query and a map of renames (with keys <code>:tables</code> and <code>:columns</code>, as in Macaw), return a new inner query
+                  (update-vals clean-table))}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- param-values
+  [query]
+  (if (qp.store/initialized?)
+    (params.values/query-&gt;params-map (:native query))
+    (qp.setup/with-qp-setup [q query]
+      (params.values/query-&gt;params-map (:native q)))))</pre></td></tr><tr><td class="docs"><p>Given a dataset_query and a map of renames (with keys <code>:tables</code> and <code>:columns</code>, as in Macaw), return a new inner query
 with the appropriate replacements made.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn replace-names
   [query renames]
-  (let [raw-query    (get-in query [:native :query])
-        parsed-query (params.parse/parse raw-query)
+  (let [raw-query                    (get-in query [:native :query])
+        parsed-query                 (params.parse/parse raw-query)
+        param-&gt;value                 (param-values query)
         {clean-query :query
-         tt-subs     :substitutions} (parse-tree-&gt;clean-query raw-query parsed-query)
-        renamed-query (macaw/replace-names clean-query (clean-renames-macaw-issue-32 renames))]
+         tt-subs     :substitutions} (parse-tree-&gt;clean-query raw-query parsed-query param-&gt;value)
+        renamed-query                (macaw/replace-names clean-query (clean-renames-macaw-issue-32 renames))]
     (replace-all renamed-query tt-subs)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
