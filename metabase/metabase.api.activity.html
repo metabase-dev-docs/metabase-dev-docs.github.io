@@ -2871,7 +2871,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [clojure.string :as str]
    [compojure.core :refer [GET]]
    [medley.core :as m]
-   [metabase.api.common :as api :refer [*current-user-id* define-routes]]
+   [metabase.api.common :as api :refer [*current-user-id*]]
    [metabase.db.query :as mdb.query]
    [metabase.models.card :refer [Card]]
    [metabase.models.dashboard :refer [Dashboard]]
@@ -2879,7 +2879,6 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.models.query-execution :refer [QueryExecution]]
    [metabase.models.recent-views :as recent-views]
    [metabase.models.table :refer [Table]]
-   [metabase.models.view-log :refer [ViewLog]]
    [metabase.util.honey-sql-2 :as h2x]
    [metabase.util.malli :as mu]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
@@ -2936,26 +2935,26 @@ viewed then hydrate the basic details of the model. Bookmarked cards and dashboa
 from the query_execution table. The query context is always a <code>:question</code>. The results are normalized and concatenated to the
 query results for dashboard and table views.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- views-and-runs
-  [views-limit card-runs-limit all-users?]
-  ;; TODO update to use RecentViews instead of ViewLog
-  (let [dashboard-and-table-views (t2/select [ViewLog
-                                              [[:min :view_log.user_id] :user_id]
+  [views-limit card-runs-limit]
+  (let [dashboard-and-table-views (t2/select [:model/RecentViews
+                                              [[:min :recent_views.user_id] :user_id]
                                               :model
                                               :model_id
-                                              [:%count.* :cnt]
+                                              [[:max [:coalesce :d.view_count :t.view_count]] :cnt]
                                               [:%max.timestamp :max_ts]]
                                              {:group-by  [:model :model_id]
                                               :where     [:and
-                                                          (when-not all-users? [:= (mdb.query/qualify ViewLog :user_id) *current-user-id*])
-                                                          [:in :model #{&quot;dashboard&quot; &quot;table&quot;}]
-                                                          [:= :bm.id nil]]
+                                                          [:in :model #{&quot;dashboard&quot; &quot;table&quot;}]]
                                               :order-by  [[:max_ts :desc] [:model :desc]]
                                               :limit     views-limit
-                                              :left-join [[:dashboard_bookmark :bm]
+                                              :left-join [[:report_dashboard :d]
                                                           [:and
                                                            [:= :model &quot;dashboard&quot;]
-                                                           [:= :bm.user_id *current-user-id*]
-                                                           [:= :model_id :bm.dashboard_id]]]})
+                                                           [:= :d.id :model_id]]
+                                                          [:metabase_table :t]
+                                                          [:and
+                                                           [:= :model &quot;table&quot;]
+                                                           [:= :t.id :model_id]]]})
         card-runs                 (-&gt;&gt; (t2/select [QueryExecution
                                                    [:%min.executor_id :user_id]
                                                    [(mdb.query/qualify QueryExecution :card_id) :model_id]
@@ -2963,15 +2962,9 @@ query results for dashboard and table views.</p>
                                                    [:%max.started_at :max_ts]]
                                                   {:group-by [(mdb.query/qualify QueryExecution :card_id) :context]
                                                    :where    [:and
-                                                              (when-not all-users? [:= :executor_id *current-user-id*])
-                                                              [:= :context (h2x/literal :question)]
-                                                              [:= :bm.id nil]]
+                                                              [:= :context (h2x/literal :question)]]
                                                    :order-by [[:max_ts :desc]]
-                                                   :limit    card-runs-limit
-                                                   :left-join [[:card_bookmark :bm]
-                                                               [:and
-                                                                [:= :bm.user_id *current-user-id*]
-                                                                [:= (mdb.query/qualify QueryExecution :card_id) :bm.card_id]]]})
+                                                   :limit    card-runs-limit})
                                        (map #(dissoc % :row_count))
                                        (map #(assoc % :model &quot;card&quot;)))]
     (-&gt;&gt; (concat card-runs dashboard-and-table-views)
@@ -3043,22 +3036,22 @@ if the item can be placed in a collection.</p>
   ;; - total count -&gt; higher = higher score
   ;; - recently viewed -&gt; more recent = higher score
   ;; - official/verified -&gt; yes = higher score
-  (let [views (views-and-runs views-limit card-runs-limit true)
+  (let [views            (views-and-runs views-limit card-runs-limit)
         model-&gt;id-&gt;items (models-for-views views)
-        filtered-views (for [{:keys [model model_id] :as view-log} views
-                             :let [model-object (-&gt; (get-in model-&gt;id-&gt;items [model model_id])
-                                                    (dissoc :dataset_query))]
-                             :when (and model-object
-                                        (mi/can-read? model-object)
-                                        ;; hidden tables, archived cards/dashboards
-                                        (not (or (:archived model-object)
-                                                 (= (:visibility_type model-object) :hidden))))
-                             :let [is-dataset? (= (keyword (:type model-object)) :model)
-                                   is-metric? (= (keyword (:type model-object)) :metric)]]
-                         (cond-&gt; (assoc view-log :model_object model-object)
-                           is-dataset? (assoc :model &quot;dataset&quot;)
-                           is-metric? (assoc :model &quot;metric&quot;)))
-        scored-views (score-items filtered-views)]
+        filtered-views   (for [{:keys [model model_id] :as view-log} views
+                               :let [model-object (-&gt; (get-in model-&gt;id-&gt;items [model model_id])
+                                                      (dissoc :dataset_query))]
+                               :when (and model-object
+                                          (mi/can-read? model-object)
+                                          ;; hidden tables, archived cards/dashboards
+                                          (not (or (:archived model-object)
+                                                   (= (:visibility_type model-object) :hidden))))
+                               :let [is-dataset? (= (keyword (:type model-object)) :model)
+                                     is-metric? (= (keyword (:type model-object)) :metric)]]
+                           (cond-&gt; (assoc view-log :model_object model-object)
+                             is-dataset? (assoc :model &quot;dataset&quot;)
+                             is-metric? (assoc :model &quot;metric&quot;)))
+        scored-views     (score-items filtered-views)]
     (-&gt;&gt; scored-views
          (sort-by
           ;; sort by model first, and then score when they are the same model
@@ -3068,15 +3061,11 @@ if the item can be placed in a collection.</p>
                    (assoc :timestamp (:max_ts % &quot;&quot;))
                    recent-views/fill-recent-view-info)))))</pre></td></tr><tr><td class="docs"><p>/popular_items</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
-  &quot;Get the list of 5 popular things for the current user. Query takes 8 and limits to 5 so that if it
-  finds anything archived, deleted, etc it can usually still get 5.&quot;
+  &quot;Get the list of 5 popular things on the instance. Query takes 8 and limits to 5 so that if it finds anything
+  archived, deleted, etc it can usually still get 5. &quot;
   []
-  ;; we can do a weighted score which incorporates:
-  ;; total count -&gt; higher = higher score
-  ;; recently viewed -&gt; more recent = higher score
-  ;; official/verified -&gt; yes = higher score
   {:popular_items (get-popular-items-model-and-id)})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(define-routes)</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+</td><td class="codes"><pre class="brush: clojure">(api/define-routes)</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

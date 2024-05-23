@@ -2866,16 +2866,14 @@ net.brehaut.ClojureTools = (function (SH) {
   };
 })(SyntaxHighlighter);
 </script><title>Macaw -- Marginalia</title></head><body><table><tr><td class="docs"><div class="header"><h1 class="project-name">Macaw</h1><h2 class="project-version">0.0.1-SNAPSHOT</h2><br /><p>A Clojure wrapper for JSqlParser 🦜</p>
-</div></td><td class="codes" style="text-align: center; vertical-align: middle;color: #666;padding-right:20px"><br /><br /><br />(this space intentionally left almost blank)</td></tr><tr><td class="docs"><div class="toc"><a name="toc"><h3>namespaces</h3></a><ul><li><a href="#macaw.core">macaw.core</a></li><li><a href="#macaw.rewrite">macaw.rewrite</a></li><li><a href="#macaw.util">macaw.util</a></li><li><a href="#macaw.walk">macaw.walk</a></li><li><a href="#macaw.core-test">macaw.core-test</a></li></ul></div></td><td class="codes">&nbsp;</td></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.core" name="macaw.core"><h1 class="project-name">macaw.core</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns macaw.core
+</div></td><td class="codes" style="text-align: center; vertical-align: middle;color: #666;padding-right:20px"><br /><br /><br />(this space intentionally left almost blank)</td></tr><tr><td class="docs"><div class="toc"><a name="toc"><h3>namespaces</h3></a><ul><li><a href="#macaw.collect">macaw.collect</a></li><li><a href="#macaw.core">macaw.core</a></li><li><a href="#macaw.rewrite">macaw.rewrite</a></li><li><a href="#macaw.util">macaw.util</a></li><li><a href="#macaw.walk">macaw.walk</a></li><li><a href="#macaw.core-test">macaw.core-test</a></li><li><a href="#macaw.test.util">macaw.test.util</a></li><li><a href="#macaw.test.util-test">macaw.test.util-test</a></li><li><a href="#macaw.util-test">macaw.util-test</a></li></ul></div></td><td class="codes">&nbsp;</td></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.collect" name="macaw.collect"><h1 class="project-name">macaw.collect</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns macaw.collect
   (:require
-   [macaw.rewrite :as rewrite]
    [macaw.util :as u]
    [macaw.walk :as mw])
   (:import
    (com.metabase.macaw AstWalker$QueueItem)
    (net.sf.jsqlparser.expression Alias)
-   (net.sf.jsqlparser.parser CCJSqlParserUtil)
    (net.sf.jsqlparser.schema Column Table)
    (net.sf.jsqlparser.statement Statement)
    (net.sf.jsqlparser.statement.select AllTableColumns)))</pre></td></tr><tr><td class="docs">
@@ -2891,52 +2889,67 @@ net.brehaut.ClojureTools = (function (SH) {
                                                    [(keyword (.getKey x)) (.getValue x)])
                                                  context)}))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- query-&gt;raw-components
-  [^Statement parsed-query]
-  (mw/fold-query parsed-query
-                 {:column         (conj-to :columns)
-                  :mutation       (conj-to :mutation-commands)
-                  :wildcard       (conj-to :has-wildcard? (constantly true))
-                  :table          (conj-to :tables)
-                  :table-wildcard (conj-to :table-wildcards)}
+  [^Statement parsed-ast]
+  (mw/fold-query parsed-ast
+                 {:column           (conj-to :columns)
+                  :column-qualifier (conj-to :qualifiers)
+                  :mutation         (conj-to :mutation-commands)
+                  :wildcard         (conj-to :has-wildcard? (constantly true))
+                  :table            (conj-to :tables)
+                  :table-wildcard   (conj-to :table-wildcards)}
                  {:columns           #{}
                   :has-wildcard?     #{}
                   :mutation-commands #{}
                   :tables            #{}
                   :table-wildcards   #{}}))</pre></td></tr><tr><td class="docs"><p>tables</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- make-table [^Table t _ctx]
-  (merge
-    {:table (.getName t)}
-    (when-let [s (.getSchemaName t)]
-      {:schema s})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- find-table [{:keys [alias-&gt;table name-&gt;table]} ^Table t]
+  (let [n      (.getName t)
+        schema (.getSchemaName t)]
+    (or (get alias-&gt;table n)
+        (:component (get name-&gt;table {:table n :schema schema}))
+        (:component (get name-&gt;table {:table n :schema nil}))
+        (:component (last (u/seek #(= n (:table (key %))) name-&gt;table))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- find-qualifier-table [opts ^Table q _ctx]
+  (when-let [table (find-table opts q)]
+    (cond-&gt; table
+      (:with-instance opts) (assoc :instances [q]))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- make-table [{:keys [with-instance qualifier? alias-&gt;table]} ^Table t _ctx]
+  (if (and qualifier?
+           (get alias-&gt;table (.getName t)))
+    (get alias-&gt;table (.getName t))
+    (merge
+     {:table (.getName t)}
+     (when-let [s (.getSchemaName t)]
+       {:schema s})
+     (when with-instance
+       {:instances [t]}))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- alias-mapping
-  [^Table table ctx]
+  [opts ^Table table ctx]
   (when-let [^Alias table-alias (.getAlias table)]
-    [(.getName table-alias) (make-table table ctx)]))</pre></td></tr><tr><td class="docs"><p>JSQLParser can't tell whether the <code>f</code> in <code>select f.*</code> refers to a real table or an alias. Therefore, we have to
+    [(.getName table-alias) (make-table opts table ctx)]))</pre></td></tr><tr><td class="docs"><p>JSQLParser can't tell whether the <code>f</code> in <code>select f.*</code> refers to a real table or an alias. Therefore, we have to
 disambiguate them based on our own map of aliases->table names. So this function will return the real name of the table
 referenced in a table-wildcard (as far as can be determined from the query).</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- resolve-table-name
-  [{:keys [alias-&gt;table name-&gt;table]} ^AllTableColumns atc _ctx]
-  (let [table-name (-&gt; atc .getTable .getName)]
-    (or (alias-&gt;table table-name)
-        (name-&gt;table table-name))))</pre></td></tr><tr><td class="docs"><p>columns</p>
+  [opts ^AllTableColumns atc _ctx]
+  (find-table opts (.getTable atc)))</pre></td></tr><tr><td class="docs"><p>columns</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- maybe-column-alias [[maybe-alias :as _ctx]]
   (when (= (first maybe-alias) :alias)
     {:alias (second maybe-alias)}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- maybe-column-table [{:keys [alias-&gt;table name-&gt;table]} ^Column c]
+</td><td class="codes"><pre class="brush: clojure">(defn- maybe-column-table [{:keys [name-&gt;table] :as opts} ^Column c]
   (if-let [t (.getTable c)]
-    (or
-      (get alias-&gt;table (.getName t))
-      (:component (get name-&gt;table (.getName t))))
+    (find-table opts t)
     ;; if we see only a single table, we can safely say it's the table of that column
     (when (= (count name-&gt;table) 1)
       (:component (val (first name-&gt;table))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- make-column [data ^Column c ctx]
   (merge
-    {:column (.getColumnName c)}
-    (maybe-column-alias ctx)
-    (maybe-column-table data c)))</pre></td></tr><tr><td class="docs"><p>get them together</p>
+   {:column (.getColumnName c)}
+   (maybe-column-alias ctx)
+   (maybe-column-table data c)
+   (when (:with-instance data)
+     {:instances [c]})))</pre></td></tr><tr><td class="docs"><p>get them together</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- only-query-context [ctx]
   (into [] (comp (filter #(= (first %) :query))
@@ -2947,36 +2960,63 @@ referenced in a table-wildcard (as far as can be determined from the query).</p>
   (map #(-&gt; %
             (update :component f (:context %))
             (update :context only-query-context))
-    components))</pre></td></tr><tr><td class="docs"><p>Given a parsed query (i.e., a [subclass of] <code>Statement</code>) return a map with the elements found within it.</p>
+       components))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- merge-with-instances [a b]
+  (cond-&gt; (merge a b)
+    ;; collect all instances so we can refer back to maps
+    (or (-&gt; a :component :instances)
+        (-&gt; b :component :instances))
+    (update-in [:component :instances] concat (-&gt; a :component :instances))))</pre></td></tr><tr><td class="docs"><p>See macaw.core/query->components doc.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn query-&gt;components
+  [^Statement parsed-ast &amp; [opts]]
+  (let [{:keys [columns
+                qualifiers
+                has-wildcard?
+                mutation-commands
+                tables
+                table-wildcards]} (query-&gt;raw-components parsed-ast)
+        alias-map                 (into {} (map #(-&gt; % :component ((partial alias-mapping opts) (:context %))) tables))
+        ;; we're parsing qualifiers here only for a single purpose - rewrite uses instances to find tables for
+        ;; renaming
+        table-map                 (-&gt;&gt; (update-components (partial make-table opts) tables)
+                                       (u/group-with #(select-keys (:component %) [:schema :table])
+                                                     merge-with-instances))
+        ;; we need both aliases and tables for columns
+        opts                      (assoc opts
+                                         :alias-&gt;table alias-map
+                                         :name-&gt;table table-map)
+        qualifier-map             (-&gt;&gt; (update-components (partial find-qualifier-table opts) qualifiers)
+                                       (u/group-with #(select-keys (:component %) [:schema :table])
+                                                     merge-with-instances))
+        table-map                 (merge-with merge-with-instances qualifier-map table-map)]
+    {:columns           (into #{} (update-components (partial make-column opts) columns))
+     :has-wildcard?     (into #{} (update-components (fn [x &amp; _args] x) has-wildcard?))
+     :mutation-commands (into #{} mutation-commands)
+     :tables            (into #{} (vals table-map))
+     :table-wildcards   (into #{} (update-components (partial resolve-table-name opts) table-wildcards))}))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.core" name="macaw.core"><h1 class="project-name">macaw.core</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns macaw.core
+  (:require
+   [macaw.collect :as collect]
+   [macaw.rewrite :as rewrite])
+  (:import
+   (net.sf.jsqlparser.parser CCJSqlParserUtil)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Main entry point: takes a string query and returns a <code>Statement</code> object that can be handled by the other functions.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn parsed-query
+  [^String query]
+  (CCJSqlParserUtil/parse query))</pre></td></tr><tr><td class="docs"><p>Given a parsed query (i.e., a [subclass of] <code>Statement</code>) return a map with the elements found within it.</p>
 
 <p>(Specifically, it returns their fully-qualified names as strings, where 'fully-qualified' means 'as referred to in
 the query'; this function doesn't do additional inference work to find out a table's schema.)</p>
 </td><td class="codes"><pre class="brush: clojure">(defn query-&gt;components
-  [^Statement parsed-query]
-  (let [{:keys [columns
-                has-wildcard?
-                mutation-commands
-                tables
-                table-wildcards]} (query-&gt;raw-components parsed-query)
-        alias-map                 (into {} (map #(-&gt; % :component (alias-mapping (:context %))) tables))
-        table-map                 (-&gt;&gt; (update-components make-table tables)
-                                              (u/group-with #(-&gt; % :component :table)
-                                                (fn [a b] (if (:schema a) a b))))
-        data                      {:alias-&gt;table alias-map
-                                   :name-&gt;table  table-map}]
-    {:columns           (into #{} (update-components (partial make-column data) columns))
-     :has-wildcard?     (into #{} (update-components (fn [x &amp; _args] x) has-wildcard?))
-     :mutation-commands (into #{} mutation-commands)
-     :tables            (into #{} (vals table-map))
-     :table-wildcards   (into #{} (update-components (partial resolve-table-name data) table-wildcards))}))</pre></td></tr><tr><td class="docs"><p>Main entry point: takes a string query and returns a <code>Statement</code> object that can be handled by the other functions.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn parsed-query
-  [^String query]
-  (CCJSqlParserUtil/parse query))</pre></td></tr><tr><td class="docs"><p>Given a SQL query, apply the given table, column, and schema renames.</p>
+  [statement]
+  (collect/query-&gt;components statement))</pre></td></tr><tr><td class="docs"><p>Given a SQL query, apply the given table, column, and schema renames.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn replace-names
   [sql renames]
   (rewrite/replace-names sql (parsed-query sql) renames))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.rewrite" name="macaw.rewrite"><h1 class="project-name">macaw.rewrite</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns macaw.rewrite
   (:require
+   [macaw.collect :as collect]
+   [macaw.util :as u]
    [macaw.walk :as mw])
   (:import
    (net.sf.jsqlparser.parser ASTNodeAccess SimpleNode)
@@ -3019,13 +3059,14 @@ the query'; this function doesn't do additional inference work to find out a tab
             (recur (inc ^long last-idx) rst))))
     (str sb)))</pre></td></tr><tr><td class="docs"><p>Emit a SQL string for an updated AST, preserving the comments and whitespace from the original SQL.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- update-query
-  [updated-ast updated-node? sql]
-  (let [replacement  (fn [-&gt;text visitable]
-                       (let [ast-node  (.getASTNode ^ASTNodeAccess visitable)
-                             idx-range (node-&gt;idx-range ast-node sql)
-                             node-text (-&gt;text visitable)]
+  [updated-ast updated-nodes sql]
+  (let [updated-node? (set (map first updated-nodes))
+        replacement   (fn [-&gt;text visitable]
+                        (let [ast-node  (.getASTNode ^ASTNodeAccess visitable)
+                              idx-range (node-&gt;idx-range ast-node sql)
+                              node-text (-&gt;text visitable)]
                          [idx-range node-text]))
-        replace-name (fn [-&gt;text]
+        replace-name  (fn [-&gt;text]
                        (fn [acc visitable _ctx]
                          (cond-&gt; acc
                            (updated-node? visitable)
@@ -3038,28 +3079,47 @@ the query'; this function doesn't do additional inference work to find out a tab
        :column (replace-name #(.getFullyQualifiedName ^Column %))}
       []))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- rename-table
-  [updated-nodes table-renames schema-renames ^Table table _ctx]
-  (when-let [name' (get table-renames (.getName table))]
-    (vswap! updated-nodes conj table)
-    (.setName table name'))
-  (when-let [new-schema-name (get schema-renames (.getSchemaName table))]
-    (.setSchemaName table new-schema-name)))</pre></td></tr><tr><td class="docs">
+  [updated-nodes table-renames schema-renames known-tables ^Table t _ctx]
+  (when-let [rename (u/find-relevant table-renames (get known-tables t) [:table :schema])]
+    (vswap! updated-nodes conj [t rename])
+    (.setName t (val rename)))
+  (when-let [schema-rename (find schema-renames (.getSchemaName t))]
+    (vswap! updated-nodes conj [(.getSchemaName t) schema-rename])
+    (.setSchemaName t (val schema-rename))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- rename-column
-  [updated-nodes column-renames ^Column column _ctx]
-  (when-let [name' (get column-renames (.getColumnName column))]
-    (vswap! updated-nodes conj column)
-    (.setColumnName column name')))</pre></td></tr><tr><td class="docs"><p>Given a SQL query and its corresponding (untransformed) AST, apply the given table and column renames.</p>
+  [updated-nodes column-renames known-columns ^Column c _ctx]
+  (when-let [rename (u/find-relevant column-renames (get known-columns c) [:column :table :schema])]
+    (vswap! updated-nodes conj [c rename])
+    (.setColumnName c (val rename))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- alert-unused! [updated-nodes renames]
+  (let [known-rename? (set (map second updated-nodes))]
+    (doseq [[k items] renames]
+      (when-let [unknown (first (remove known-rename? items))]
+        (throw (ex-info (str &quot;Unknown rename: &quot; unknown) {:type k
+                                                          :rename unknown}))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- index-by-instances [xs]
+  (into {} (for [x xs
+                 :let [c (:component x)]
+                 i (:instances c)]
+             [i c])))</pre></td></tr><tr><td class="docs"><p>Given a SQL query and its corresponding (untransformed) AST, apply the given table and column renames.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn replace-names
   [sql parsed-ast {schema-renames :schemas
                    table-renames  :tables
-                   column-renames :columns}]
-  (let [updated-nodes (volatile! #{})]
-    (-&gt; parsed-ast
-        (mw/walk-query
-         {:table            (partial rename-table updated-nodes table-renames schema-renames)
-          :column-qualifier (partial rename-table updated-nodes table-renames schema-renames)
-          :column           (partial rename-column updated-nodes column-renames)})
-        (update-query @updated-nodes sql))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.util" name="macaw.util"><h1 class="project-name">macaw.util</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+                   column-renames :columns
+                   :as renames}]
+  (let [comps          (collect/query-&gt;components parsed-ast {:with-instance true})
+        columns        (index-by-instances (:columns comps))
+        tables         (index-by-instances (:tables comps))
+        ;; execute rename
+        updated-nodes  (volatile! [])
+        res            (-&gt; parsed-ast
+                           (mw/walk-query
+                            {:table            (partial rename-table updated-nodes table-renames schema-renames tables)
+                             :column-qualifier (partial rename-table updated-nodes table-renames schema-renames tables)
+                             :column           (partial rename-column updated-nodes column-renames columns)})
+                           (update-query @updated-nodes sql))]
+    (alert-unused! @updated-nodes renames)
+    res))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.util" name="macaw.util"><h1 class="project-name">macaw.util</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns macaw.util)</pre></td></tr><tr><td class="docs"><p>Generalized <code>group-by</code>, where you can supply your own reducing function (instead of usual <code>conj</code>).</p>
 
 <p>https://ask.clojure.org/index.php/12319/can-group-by-be-generalized</p>
@@ -3071,7 +3131,29 @@ the query'; this function doesn't do additional inference work to find out a tab
         (let [k (kf x)]
           (assoc! ret k (rf (get ret k) x))))
       (transient {})
-      coll)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.walk" name="macaw.walk"><h1 class="project-name">macaw.walk</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+      coll)))</pre></td></tr><tr><td class="docs"><p>Like (first (filter ... )), but doesn't realize chunks of the sequence. Returns the first item in <code>coll</code> for which
+<code>pred</code> returns a truthy value, or <code>nil</code> if no such item is found.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn seek
+  [pred coll]
+  (reduce
+   (fn [acc x] (if (pred x) (reduced x) acc))
+   nil
+   coll))</pre></td></tr><tr><td class="docs"><p>Search the given map for the entry corresponding to [[map-key]], considering only the relevant keys.
+The relevant keys are obtained by ignoring any suffix of [[ks]] for which [[map-key]] has nil or missing values.
+We require that there is at least one relevant key to find a match.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn find-relevant
+  [m map-key ks]
+  (when map-key
+    (if (every? map-key ks)
+      (find m (select-keys map-key ks))
+      ;; Strip off keys from right-to-left where they are nil, and relax search to only consider these keys.
+      ;; We need at least one non-generate key to remain for the search.
+      (when-let [ks-prefix (-&gt;&gt; ks reverse (drop-while (comp nil? map-key)) reverse seq)]
+        (when (not= ks ks-prefix)
+          (seek (comp #{(select-keys map-key ks-prefix)}
+                      #(select-keys % ks-prefix)
+                      key)
+                m))))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.walk" name="macaw.walk"><h1 class="project-name">macaw.walk</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns macaw.walk
   (:import
    (com.metabase.macaw AstWalker AstWalker$CallbackKey)))</pre></td></tr><tr><td class="docs">
@@ -3110,8 +3192,9 @@ the query'; this function doesn't do additional inference work to find out a tab
     (.fold (AstWalker. callbacks init-val) parsed-query)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.core-test" name="macaw.core-test"><h1 class="project-name">macaw.core-test</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns ^:parallel macaw.core-test
   (:require
-   [clojure.test :refer [deftest testing is]]
+   [clojure.test :refer [deftest is testing]]
    [macaw.core :as m]
+   [macaw.test.util :refer [ws=]]
    [macaw.walk :as mw])
   (:import
    (net.sf.jsqlparser.schema Table)))</pre></td></tr><tr><td class="docs">
@@ -3139,7 +3222,10 @@ the query'; this function doesn't do additional inference work to find out a tab
            (tables &quot;SELECT id, email FROM core_user;&quot;))))
   (testing &quot;With a schema (Postgres)&quot; ;; TODO: only run this against supported DBs
     (is (= #{{:table &quot;core_user&quot; :schema &quot;the_schema_name&quot;}}
-           (tables &quot;SELECT * FROM the_schema_name.core_user;&quot;))))
+           (tables &quot;SELECT * FROM the_schema_name.core_user;&quot;)))
+    (is (= #{{:table &quot;orders&quot; :schema &quot;public&quot;}
+             {:table &quot;orders&quot; :schema &quot;private&quot;}}
+           (tables &quot;SELECT a.x FROM public.orders a, private.orders&quot;))))
   (testing &quot;Sub-selects&quot;
     (is (= #{{:table &quot;core_user&quot;}}
            (tables &quot;SELECT * FROM (SELECT DISTINCT email FROM core_user) q;&quot;)))))</pre></td></tr><tr><td class="docs">
@@ -3176,7 +3262,10 @@ the query'; this function doesn't do additional inference work to find out a tab
            (columns &quot;SELECT id FROM orders GROUP BY user_id&quot;))))
   (testing &quot;table alias present&quot;
     (is (= #{{:column &quot;id&quot; :table &quot;orders&quot; :schema &quot;public&quot;}}
-           (columns &quot;SELECT o.id FROM public.orders o&quot;)))))</pre></td></tr><tr><td class="docs">
+           (columns &quot;SELECT o.id FROM public.orders o&quot;))))
+  (testing &quot;schema is determined correctly&quot;
+    (is (= #{{:column &quot;x&quot; :table &quot;orders&quot; :schema &quot;public&quot;}}
+           (columns &quot;SELECT public.orders.x FROM public.orders, private.orders&quot;)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest infer-test
   (testing &quot;We can first column through a few hoops&quot;
     (is (= #{{:column &quot;amount&quot; :table &quot;orders&quot;}}
@@ -3254,9 +3343,9 @@ the query'; this function doesn't do additional inference work to find out a tab
   (is (true? (has-wildcard? &quot;SELECT * FROM orders&quot;)))
   (is (true? (has-wildcard? &quot;SELECT id, * FROM orders JOIN foo ON orders.id = foo.order_id&quot;))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest table-wildcard-test-without-aliases
-  (is (= #{{:component {:table &quot;orders&quot;} :context [&quot;FROM&quot; &quot;SELECT&quot;]}}
+  (is (= #{{:table &quot;orders&quot;}}
          (table-wcs &quot;SELECT orders.* FROM orders JOIN foo ON orders.id = foo.order_id&quot;)))
-  (is (= #{{:component {:table &quot;foo&quot; :schema &quot;public&quot;} :context [&quot;FROM&quot; &quot;JOIN&quot; &quot;SELECT&quot;]}}
+  (is (= #{{:table &quot;foo&quot; :schema &quot;public&quot;}}
          (table-wcs &quot;SELECT foo.* FROM orders JOIN public.foo f ON orders.id = foo.order_id&quot;))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest table-star-test-with-aliases
   (is (= #{{:table &quot;orders&quot;}}
@@ -3302,37 +3391,120 @@ the query'; this function doesn't do additional inference work to find out a tab
                                  {:component {:table &quot;orders&quot;}, :context [&quot;FROM&quot; &quot;SELECT&quot;]}},
             :table-wildcards   #{{:component {:table &quot;orders&quot;}, :context [&quot;SELECT&quot;]}}}
          (components &quot;SELECT o.* FROM orders o JOIN foo ON orders.id = foo.order_id&quot;)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn test-replacement [before replacements after]
-  (is (= after (m/replace-names before replacements))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest replace-names-test
-  (test-replacement &quot;SELECT a.x, b.y FROM a, b;&quot;
-                    {:tables {&quot;a&quot; &quot;aa&quot;}
-                     :columns  {&quot;x&quot; &quot;xx&quot;}}
-                    &quot;SELECT aa.xx, b.y FROM aa, b;&quot;)
-  (test-replacement
-   &quot;SELECT *, boink
-  , yoink AS oink
- FROM /* /* lore */
-    core_user,
-  bore_user,  /* more */ snore_user ;&quot;
-   {:tables  {&quot;core_user&quot;  &quot;floor_muser&quot;
-              &quot;bore_user&quot;  &quot;user&quot;
-              &quot;snore_user&quot; &quot;vigilant_user&quot;
-              &quot;cruft&quot;      &quot;tuft&quot;}
-    :columns {&quot;boink&quot; &quot;sturmunddrang&quot;
-              &quot;yoink&quot; &quot;oink&quot;
-              &quot;hoi&quot;   &quot;polloi&quot;}}
-   &quot;SELECT *, sturmunddrang
-  , oink AS oink
- FROM /* /* lore */
-    floor_muser,
-  user,  /* more */ vigilant_user ;&quot;))</pre></td></tr><tr><td class="docs">
+  (is (= &quot;SELECT aa.xx, b.x, b.y FROM aa, b;&quot;
+         (m/replace-names  &quot;SELECT a.x, b.x, b.y FROM a, b;&quot;
+                           {:tables  {{:schema &quot;public&quot; :table &quot;a&quot;} &quot;aa&quot;}
+                            :columns {{:schema &quot;public&quot; :table &quot;a&quot; :column &quot;x&quot;} &quot;xx&quot;}})))
+  (is (= &quot;SELECT qwe FROM orders&quot;
+         (m/replace-names &quot;SELECT id FROM orders&quot;
+                          {:columns {{:schema &quot;public&quot; :table &quot;orders&quot; :column &quot;id&quot;} &quot;qwe&quot;}})))
+  (is (= &quot;SELECT p.id, q.id FROM public.whatever p join private.orders q&quot;
+         (m/replace-names &quot;SELECT p.id, q.id FROM public.orders p join private.orders q&quot;
+                          {:tables {{:schema &quot;public&quot; :table &quot;orders&quot;} &quot;whatever&quot;}})))
+  (is (ws= &quot;SELECT SUM(public.orders.total) AS s,
+            MAX(orders.total) AS max,
+            MIN(total) AS min
+            FROM public.orders&quot;
+           (m/replace-names
+            &quot;SELECT SUM(public.orders.amount) AS s,
+             MAX(orders.amount) AS max,
+             MIN(amount) AS min
+             FROM public.orders&quot;
+            {:columns {{:schema &quot;public&quot; :table &quot;orders&quot; :column &quot;amount&quot;} &quot;total&quot;}})))
+  (is (ws= &quot;SELECT *, sturmunddrang
+                    , oink AS oink
+            FROM /* /* lore */
+                 floor_muser,
+                 user,  /* more */ vigilant_user ;&quot;
+           (m/replace-names
+            &quot;SELECT *, boink
+                     , yoink AS oink
+             FROM /* /* lore */
+                  core_user,
+                  bore_user,  /* more */ snore_user ;&quot;
+            {:tables  {{:schema &quot;public&quot; :table &quot;core_user&quot;}  &quot;floor_muser&quot;
+                       {:schema &quot;public&quot; :table &quot;bore_user&quot;}  &quot;user&quot;
+                       {:schema &quot;public&quot; :table &quot;snore_user&quot;} &quot;vigilant_user&quot;}
+             :columns {{:schema &quot;public&quot; :table &quot;core_user&quot; :column &quot;boink&quot;}  &quot;sturmunddrang&quot;
+                       {:schema &quot;public&quot; :table &quot;snore_user&quot; :column &quot;yoink&quot;} &quot;oink&quot;}})))
+  (is (thrown? Exception #&quot;Unknown rename&quot;
+               (m/replace-names &quot;SELECT 1&quot; {:tables {{:schema &quot;public&quot; :table &quot;a&quot;} &quot;aa&quot;}}))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest replace-schema-test
-  (test-replacement &quot;SELECT public.orders.x FROM public.orders&quot;
-                    {:schemas {&quot;public&quot; &quot;totally_private&quot;}
-                     :tables  {&quot;orders&quot; &quot;purchases&quot;}
-                     :columns {&quot;x&quot; &quot;xx&quot;}}
-                    &quot;SELECT totally_private.purchases.xx FROM totally_private.purchases&quot;))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a><div id="floating-toc"><ul><li class="floating-toc-li" id="floating-toc_macaw.core">macaw.core</li><li class="floating-toc-li" id="floating-toc_macaw.rewrite">macaw.rewrite</li><li class="floating-toc-li" id="floating-toc_macaw.util">macaw.util</li><li class="floating-toc-li" id="floating-toc_macaw.walk">macaw.walk</li><li class="floating-toc-li" id="floating-toc_macaw.core-test">macaw.core-test</li></ul></div></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+  (is (= &quot;SELECT totally_private.purchases.xx FROM totally_private.purchases, private.orders WHERE xx = 1&quot;
+         (m/replace-names &quot;SELECT public.orders.x FROM public.orders, private.orders WHERE x = 1&quot;
+                          {:schemas {&quot;public&quot; &quot;totally_private&quot;}
+                           :tables  {{:schema &quot;public&quot; :table &quot;orders&quot;} &quot;purchases&quot;}
+                           :columns {{:schema &quot;public&quot; :table &quot;orders&quot; :column &quot;x&quot;} &quot;xx&quot;}}))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.test.util" name="macaw.test.util"><h1 class="project-name">macaw.test.util</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns macaw.test.util
+  (:require
+   [clojure.string :as str]
+   [clojure.test :refer :all]
+   [clojure.walk :as walk]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- indentation [s]
+  (count (re-find #&quot;^\s*&quot; s)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- trim-indent* [margin s]
+  (if (&lt; (count s) margin)
+    (subs s margin)))</pre></td></tr><tr><td class="docs"><p>Given a multi-line string, remove the common margin from the remaining lines.
+Used so that strings with significant whitespace may be visually aligned.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn trim-indent
+  [s]
+  (let [lines  (str/split-lines s)
+        margin (-&gt;&gt; (rest lines)
+                    (remove str/blank?)
+                    (transduce (map indentation) min Integer/MAX_VALUE))]
+    (str/join &quot;\n&quot; (cons (first lines) (map (partial trim-indent* margin) (rest lines))))))</pre></td></tr><tr><td class="docs"><p>Trim the extra indentation from all string literals before evaluation a given equality form.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro ws=
+  [&amp; xs]
+  `(= ~@(walk/postwalk #(cond-&gt; % (string? %) trim-indent) xs)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.test.util-test" name="macaw.test.util-test"><h1 class="project-name">macaw.test.util-test</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns macaw.test.util-test
+  (:require
+   [clojure.string :as str]
+   [clojure.test :refer :all]
+   [macaw.test.util :refer [ws=]]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(deftest ^:parallel ws=-test
+  (testing &quot;Code indentation is ignored&quot;
+    (is (ws= &quot;ABC
+                DEF
+              XXX&quot;
+             (str/replace &quot;ABC
+                             DEF
+                           GHI&quot;
+                          &quot;GHI&quot; &quot;XXX&quot;))))
+  (testing &quot;Comparison is still whitespace sensitive&quot;
+    (is (not (ws= &quot;A    B&quot; &quot;A B&quot;)))
+    (is (not (ws= &quot;A
+                   B
+                   C&quot;
+                  &quot;A
+                    B
+                   C&quot;)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.util-test" name="macaw.util-test"><h1 class="project-name">macaw.util-test</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns macaw.util-test
+  (:require
+   [clojure.test :refer :all]
+   [macaw.util :as u]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private haystack
+  {{:a 3 :b 2 :c 1}   2
+   {:a 3 :b nil :c 1} 3
+   {:a 1 :b 2 :c 3}   1})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(deftest ^:parallel relevant-find-test
+  (testing &quot;We ignore any suffix of degenerate keys&quot;
+    (doseq [x [{:a 1}
+               {:a 1 :b nil}
+               {:a 1 :b 2}
+               {:a 1 :b 2 :c nil}
+               {:a 1 :b 2 :c 3}
+               {:a 1 :b 2 :c 3 :d 4}]]
+      (is (= [{:a 1 :b 2 :c 3} 1]
+             (u/find-relevant haystack x [:a :b :c])))))
+  (testing &quot;We need at least one non-degenerate key&quot;
+    (is (nil? (u/find-relevant haystack {} [:a :b :c]))))
+  (testing &quot;We don't ignore non-suffix degenerate keys&quot;
+    (doseq [x [{:a nil :b 2}
+               {:a 1 :b nil :c 3}
+               {:a nil :b 2 :c 3}]]
+      (is (nil?
+           (u/find-relevant haystack x [:a :b :c]))))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a><div id="floating-toc"><ul><li class="floating-toc-li" id="floating-toc_macaw.collect">macaw.collect</li><li class="floating-toc-li" id="floating-toc_macaw.core">macaw.core</li><li class="floating-toc-li" id="floating-toc_macaw.rewrite">macaw.rewrite</li><li class="floating-toc-li" id="floating-toc_macaw.util">macaw.util</li><li class="floating-toc-li" id="floating-toc_macaw.walk">macaw.walk</li><li class="floating-toc-li" id="floating-toc_macaw.core-test">macaw.core-test</li><li class="floating-toc-li" id="floating-toc_macaw.test.util">macaw.test.util</li><li class="floating-toc-li" id="floating-toc_macaw.test.util-test">macaw.test.util-test</li><li class="floating-toc-li" id="floating-toc_macaw.util-test">macaw.util-test</li></ul></div></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
