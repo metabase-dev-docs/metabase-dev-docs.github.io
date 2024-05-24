@@ -2866,7 +2866,7 @@ net.brehaut.ClojureTools = (function (SH) {
   };
 })(SyntaxHighlighter);
 </script><title>Marginalia -- Marginalia</title></head><body><table><tr><td class="docs"><div class="header"><h1 class="project-name">Marginalia</h1><h2 class="project-version">0.0.1-SNAPSHOT</h2><br />
-</div></td><td class="codes" style="text-align: center; vertical-align: middle;color: #666;padding-right:20px"><br /><br /><br />(this space intentionally left almost blank)</td></tr><tr><td class="docs"><div class="toc"><a name="toc"><h3>namespaces</h3></a><ul><li><a href="#marginalia.core">marginalia.core</a></li><li><a href="#marginalia.hiccup">marginalia.hiccup</a></li><li><a href="#marginalia.html">marginalia.html</a></li><li><a href="#marginalia.latex">marginalia.latex</a></li><li><a href="#marginalia.main">marginalia.main</a></li><li><a href="#marginalia.parser">marginalia.parser</a></li><li><a href="#problem-cases.general">problem-cases.general</a></li><li><a href="#marginalia.core-test">marginalia.core-test</a></li><li><a href="#marginalia.multidoc-test">marginalia.multidoc-test</a></li><li><a href="#marginalia.parse-test">marginalia.parse-test</a></li><li><a href="#marginalia.test.helpers">marginalia.test.helpers</a></li><li><a href="#marginalia.uberdoc-test">marginalia.uberdoc-test</a></li></ul></div></td><td class="codes">&nbsp;</td></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#marginalia.core" name="marginalia.core"><h1 class="project-name">marginalia.core</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><h2>A new way to think about programs</h2>
+</div></td><td class="codes" style="text-align: center; vertical-align: middle;color: #666;padding-right:20px"><br /><br /><br />(this space intentionally left almost blank)</td></tr><tr><td class="docs"><div class="toc"><a name="toc"><h3>namespaces</h3></a><ul><li><a href="#marginalia.core">marginalia.core</a></li><li><a href="#marginalia.hiccup">marginalia.hiccup</a></li><li><a href="#marginalia.html">marginalia.html</a></li><li><a href="#marginalia.latex">marginalia.latex</a></li><li><a href="#marginalia.log">marginalia.log</a></li><li><a href="#marginalia.main">marginalia.main</a></li><li><a href="#marginalia.parser">marginalia.parser</a></li><li><a href="#problem-cases.general">problem-cases.general</a></li><li><a href="#marginalia.core-test">marginalia.core-test</a></li><li><a href="#marginalia.multidoc-test">marginalia.multidoc-test</a></li><li><a href="#marginalia.parse-test">marginalia.parse-test</a></li><li><a href="#marginalia.test.helpers">marginalia.test.helpers</a></li><li><a href="#marginalia.uberdoc-test">marginalia.uberdoc-test</a></li><li><a href="#multi-def-project.clj">multi-def-project.clj</a></li></ul></div></td><td class="codes">&nbsp;</td></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#marginalia.core" name="marginalia.core"><h1 class="project-name">marginalia.core</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><h2>A new way to think about programs</h2>
 
 <p>What if your code and its documentation were one and the same?</p>
 
@@ -2902,14 +2902,19 @@ provides a virtuous circle spiraling inward toward maximal code quality.</p>
 </ol>
 </td><td class="codes"><pre class="brush: clojure">(ns marginalia.core
   (:require
+   [clojure.edn :as edn]
    [clojure.java.io :as io]
    [clojure.string  :as str]
    [clojure.tools.cli :as cli]
    [marginalia.html :as html]
+   [marginalia.log :as log]
    [marginalia.parser :as parser])
   (:import
    (java.io File FileReader)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><h2>File System Utilities</h2>
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>What to use as the base directory. This is used in tests and is unlikely to be useful otherwise.
+Defaults to <code>nil</code>, which will result in the normal working directory being used.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *working-directory*
+  nil)</pre></td></tr><tr><td class="docs"><h2>File System Utilities</h2>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Performs roughly the same task as the UNIX <code>ls</code>.  That is, returns a seq of the filenames
  at a given directory.  If a path to a file is supplied, then the seq contains only the
  original path given.</p>
@@ -2947,7 +2952,7 @@ namespace.</p>
        (sort-by parser/parse-ns)
        (map #(.getCanonicalPath ^File %))))</pre></td></tr><tr><td class="docs"><h2>Project Info Parsing</h2>
 
-<p>Marginalia will parse info out of your project.clj to display in
+<p>Marginalia will parse info out of your <code>project.clj</code> to display in
 the generated html file's header.</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Parses a project.clj file and returns a map in the following form</p>
 
@@ -2969,20 +2974,34 @@ forms (<code>:dependencies</code>, etc)</p>
 </td><td class="codes"><pre class="brush: clojure">(defn parse-project-file
   ([] (parse-project-file &quot;./project.clj&quot;))
   ([path]
+   (try
+     (let [rdr (clojure.lang.LineNumberingPushbackReader.
+                (FileReader.
+                 (io/file path)))]
+       (loop [line (read rdr)]
+         (let [found-project? (= 'defproject (first line))]
+           (if found-project?
+             (parse-project-form line)
+             (recur (read rdr))))))
+     (catch Exception _
+       (throw (Exception.
+               (str
+                &quot;There was a problem reading the project definition from &quot;
+                path)))))))</pre></td></tr><tr><td class="docs"><h2>Config dir</h2>
+
+<p>Marginalia will also look in <code>.marginalia/config.edn</code> for config</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Where Marginalia keeps project-specific config</p>
+</td><td class="codes"><pre class="brush: clojure">(def cfg-dir  &quot;.marginalia&quot;)</pre></td></tr><tr><td class="docs"><p>Returns any config that could be read from the config file (c.f. <code>cfg-dir</code>).</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- config-from-file
+  []
+  (let [f (io/file *working-directory* cfg-dir &quot;config.edn&quot;)]
+    (if (.exists f)
       (try
-        (let [rdr (clojure.lang.LineNumberingPushbackReader.
-                    (FileReader.
-                     (io/file path)))]
-          (loop [line (read rdr)]
-            (let [found-project? (= 'defproject (first line))]
-              (if found-project?
-                (parse-project-form line)
-                (recur (read rdr))))))
-	(catch Exception _
-          (throw (Exception.
-                  (str
-                   &quot;There was a problem reading the project definition from &quot;
-                   path)))))))</pre></td></tr><tr><td class="docs"><h2>Output Generation</h2>
+        (edn/read-string (slurp f))
+        (catch Exception e
+          (log/error &quot;Could not read config file: %s&quot; (.getMessage e))
+          {}))
+      {})))</pre></td></tr><tr><td class="docs"><h2>Output Generation</h2>
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- path-to-doc [filename]
   {:ns     (parser/parse-ns (io/file filename))
@@ -3022,7 +3041,7 @@ users.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn format-sources
   [sources]
   (if (nil? sources)
-    (find-processable-file-paths &quot;./src&quot; file-extensions)
+    (find-processable-file-paths (.getAbsolutePath (io/file *working-directory* &quot;src&quot;)) file-extensions)
     (-&gt;&gt; sources
          (mapcat #(if (dir? %)
                     (find-processable-file-paths % file-extensions)
@@ -3041,7 +3060,88 @@ users.</p>
                       false)
                    (-&gt; opts :marginalia :exclude)))
     true
-    false))</pre></td></tr><tr><td class="docs"><p>Default generation: given a collection of filepaths in a project, find the .clj
+    false))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private cli-flags
+  ;; If these are modified, update the README and the `select-keys` allowlist in `resolved-opts+sources` as well
+  [[&quot;-d&quot; &quot;--dir&quot;
+    &quot;Directory into which the documentation will be written&quot; :default &quot;./docs&quot;]
+   [&quot;-f&quot; &quot;--file&quot;
+    &quot;File into which the documentation will be written&quot; :default &quot;uberdoc.html&quot;]
+   [&quot;-n&quot; &quot;--name&quot;
+    &quot;Project name - if not given will be taken from project.clj&quot;]
+   [&quot;-v&quot; &quot;--version&quot;
+    &quot;Project version - if not given will be taken from project.clj&quot;]
+   [&quot;-D&quot; &quot;--desc&quot;
+    &quot;Project description - if not given will be taken from project.clj&quot;]
+   [&quot;-a&quot; &quot;--deps&quot;
+    &quot;Project dependencies in the form &lt;group1&gt;:&lt;artifact1&gt;:&lt;version1&gt;;&lt;group2&gt;...
+                 If not given will be taken from project.clj&quot;]
+   [&quot;-c&quot; &quot;--css&quot;
+    &quot;Additional css resources &lt;resource1&gt;;&lt;resource2&gt;;...
+                 If not given will be taken from project.clj.&quot;]
+   [&quot;-j&quot; &quot;--js&quot;
+    &quot;Additional javascript resources &lt;resource1&gt;;&lt;resource2&gt;;...
+                 If not given will be taken from project.clj&quot;]
+   [&quot;-m&quot; &quot;--multi&quot;
+    &quot;Generate each namespace documentation as a separate file&quot; :flag true]
+   [&quot;-l&quot; &quot;--leiningen&quot;
+    &quot;Generate the documentation for a Leiningen project file.&quot;]
+   [&quot;-e&quot; &quot;--exclude&quot;
+    &quot;Exclude source file(s) from the document generation process &lt;file1&gt;;&lt;file2&gt;;...
+                 If not given will be taken from project.clj&quot;]
+   [&quot;-L&quot; &quot;--lift-inline-comments&quot;
+    &quot;Lift ;; inline comments to the top of the enclosing form.
+                 They will be treated as if they preceded the enclosing form.&quot; :flag true]
+   [&quot;-X&quot; &quot;--exclude-lifted-comments&quot;
+    &quot;If ;; inline comments are being lifted into documentation
+                 then also exclude them from the source code display.&quot; :flag true]])</pre></td></tr><tr><td class="docs"><p>Parse CLI args and incorporate them with additional options specified in <code>project.clj</code> and <code>.marginalia/config.edn</code>.</p>
+
+<p> Displays a help message and returns <code>nil</code> if the CLI args are invalid, otherwise returns a tuple of <code>[opts sources]</code>.</p>
+
+<p> The precedence is CLI > config.edn > project.clj.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn resolved-opts+sources
+  [args project]
+  (let [[cli-config files help]       (apply cli/cli args cli-flags)
+        choose                        #(or %1 %2)
+        {:keys        [css
+                       deps
+                       desc
+                       exclude
+                       js]
+         lein         :leiningen
+         ;; The precedence is CLI args &gt; config.edn &gt; project.clj
+         ;; CLI args and config.edn are handled here; project.clj is dealt with below
+         :as          cli+edn-config} (merge-with choose cli-config (config-from-file))
+        sources                       (cond-&gt;&gt; (distinct (format-sources (seq files)))
+                                        lein (cons lein))]
+    (if-not sources
+      (do (println &quot;Wrong number of arguments passed to Marginalia.&quot;)
+          (println help)
+          nil)                          ; be explicit about needing to return `nil` here
+      (let [project-clj      (or project
+                                 (let [proj (io/file *working-directory* &quot;project.clj&quot;)]
+                                   (when (.exists proj)
+                                     (parse-project-file (.getAbsolutePath proj)))))
+            marg-opts        (merge-with choose
+                                         {:css        (when css (str/split css #&quot;;&quot;))
+                                          :javascript (when js (str/split js #&quot;;&quot;))
+                                          :exclude    (when exclude (str/split exclude #&quot;;&quot;))
+                                          :leiningen  lein}
+                                         (:marginalia project-clj))
+            opts             (merge-with choose
+                                         ;; Config from the CLI/EDN file that we can pass on transparently
+                                         (select-keys cli+edn-config [:dir :file :name :version :multi :exclude
+                                                                      :lift-inline-comments :exclude-lifted-comments])
+                                         ;; Config from the CLI/EDN file with renames or processing
+                                         {:description  desc
+                                          :dependencies (split-deps deps)
+                                          :marginalia   marg-opts}
+                                         ;; project.clj has the lowest priority
+                                         project-clj)
+            included-sources (-&gt;&gt; sources
+                                  (filter #(not (source-excluded? % opts)))
+                                  (into []))]
+        [opts included-sources]))))</pre></td></tr><tr><td class="docs"><p>Default generation: given a collection of filepaths in a project, find the .clj
  files at these paths and, if Clojure source files are found:</p>
 
 <ol>
@@ -3054,83 +3154,21 @@ using the found source files and a project file expected to be in its default lo
 </ol>
 </td><td class="codes"><pre class="brush: clojure">(defn run-marginalia
   [args &amp; [project]]
-  (let [[{:keys [dir file version desc deps css js multi
-                 leiningen exclude
-                 lift-inline-comments exclude-lifted-comments]
-          project-name :name}
-         files help]
-        (cli/cli args
-                 [&quot;-d&quot; &quot;--dir&quot;
-                  &quot;Directory into which the documentation will be written&quot; :default &quot;./docs&quot;]
-                 [&quot;-f&quot; &quot;--file&quot;
-                  &quot;File into which the documentation will be written&quot; :default &quot;uberdoc.html&quot;]
-                 [&quot;-n&quot; &quot;--name&quot;
-                  &quot;Project name - if not given will be taken from project.clj&quot;]
-                 [&quot;-v&quot; &quot;--version&quot;
-                  &quot;Project version - if not given will be taken from project.clj&quot;]
-                 [&quot;-D&quot; &quot;--desc&quot;
-                  &quot;Project description - if not given will be taken from project.clj&quot;]
-                 [&quot;-a&quot; &quot;--deps&quot;
-                  &quot;Project dependencies in the form &lt;group1&gt;:&lt;artifact1&gt;:&lt;version1&gt;;&lt;group2&gt;...
-                 If not given will be taken from project.clj&quot;]
-                 [&quot;-c&quot; &quot;--css&quot;
-                  &quot;Additional css resources &lt;resource1&gt;;&lt;resource2&gt;;...
-                 If not given will be taken from project.clj.&quot;]
-                 [&quot;-j&quot; &quot;--js&quot;
-                  &quot;Additional javascript resources &lt;resource1&gt;;&lt;resource2&gt;;...
-                 If not given will be taken from project.clj&quot;]
-                 [&quot;-m&quot; &quot;--multi&quot;
-                  &quot;Generate each namespace documentation as a separate file&quot; :flag true]
-                 [&quot;-l&quot; &quot;--leiningen&quot;
-                  &quot;Generate the documentation for a Leiningen project file.&quot;]
-                 [&quot;-e&quot; &quot;--exclude&quot;
-                  &quot;Exclude source file(s) from the document generation process &lt;file1&gt;;&lt;file2&gt;;...
-                 If not given will be taken from project.clj&quot;]
-                 [&quot;-L&quot; &quot;--lift-inline-comments&quot;
-                  &quot;Lift ;; inline comments to the top of the enclosing form.
-                 They will be treated as if they preceded the enclosing form.&quot; :flag true]
-                 [&quot;-X&quot; &quot;--exclude-lifted-comments&quot;
-                  &quot;If ;; inline comments are being lifted into documentation
-                 then also exclude them from the source code display.&quot; :flag true])
-        sources (distinct (format-sources (seq files)))
-        sources (if leiningen (cons leiningen sources) sources)]
-    (if-not sources
-      (do
-        (println &quot;Wrong number of arguments passed to Marginalia.&quot;)
-        (println help))
+  (let [[{:keys [dir file lift-inline-comments exclude-lifted-comments] :as opts}
+         sources :as valid?] (resolved-opts+sources args project)]
+    (when valid?
       (binding [parser/*lift-inline-comments*   lift-inline-comments
                 parser/*delete-lifted-comments* exclude-lifted-comments]
-        (let [project-clj (or project
-                              (when (.exists (io/file &quot;project.clj&quot;))
-                                (parse-project-file)))
-              choose #(or %1 %2)
-              marg-opts (merge-with choose
-                                    {:css        (when css (str/split css #&quot;;&quot;))
-                                     :javascript (when js (str/split js #&quot;;&quot;))
-                                     :exclude    (when exclude (str/split exclude #&quot;;&quot;))
-                                     :leiningen  leiningen}
-                                    (:marginalia project-clj))
-              opts (merge-with choose
-                               {:name         project-name
-                                :version      version
-                                :description  desc
-                                :dependencies (split-deps deps)
-                                :multi        multi
-                                :marginalia   marg-opts}
-                               project-clj)
-              sources (-&gt;&gt; sources
-                           (filter #(not (source-excluded? % opts)))
-                           (into []))]
-          (println &quot;Generating Marginalia documentation for the following source files:&quot;)
-          (doseq [s sources]
-            (println &quot;  &quot; s))
-          (println)
-          (ensure-directory! dir)
-          (if multi
-            (multidoc! dir sources opts)
-            (uberdoc! (str dir &quot;/&quot; file) sources opts))
-          (println &quot;Done generating your documentation in&quot; dir)
-          (println &quot;&quot;))))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#marginalia.hiccup" name="marginalia.hiccup"><h1 class="project-name">marginalia.hiccup</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Library for rendering a tree of vectors into a string of HTML.
+        (println &quot;Generating Marginalia documentation for the following source files:&quot;)
+        (doseq [s sources]
+          (println &quot;  &quot; s))
+        (println)
+        (ensure-directory! dir)
+        (if (:multi opts)
+          (multidoc! dir sources opts)
+          (uberdoc! (str dir &quot;/&quot; file) sources opts))
+        (println &quot;Done generating your documentation in&quot; dir)
+        (println &quot;&quot;)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#marginalia.hiccup" name="marginalia.hiccup"><h1 class="project-name">marginalia.hiccup</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Library for rendering a tree of vectors into a string of HTML.
 Pre-compiles where possible for performance.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns marginalia.hiccup
   (:import
@@ -3571,14 +3609,14 @@ a reference to <code>toc.html</code> which might not even exist.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn link-to-toc
   [anchor?]
   (link-to-namespace &quot;toc&quot; anchor? {:class &quot;toc-link&quot;}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- toc-html [props docs]
+</td><td class="codes"><pre class="brush: clojure">(defn- toc-html [{:keys [uberdoc?] :as _props} docs]
   (html
    [:tr
     [:td {:class &quot;docs&quot;}
      [:div {:class &quot;toc&quot;}
       [:a {:name &quot;toc&quot;} [:h3 &quot;namespaces&quot;]]
       [:ul
-       (map #(vector :li (link-to-namespace (:ns %) (:uberdoc? props)))
+       (map #(vector :li (link-to-namespace (:ns %) uberdoc?))
             docs)]]]
     [:td {:class &quot;codes&quot;} &quot;&amp;nbsp;&quot;]]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- floating-toc-html [docs]
@@ -3590,18 +3628,18 @@ a reference to <code>toc.html</code> which might not even exist.</p>
          docs)]])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- groups-html [props doc]
   (html
-   [:tr
-    [:td {:class &quot;docs&quot;}
-     [:div {:class &quot;docs-header&quot;}
-      [:a {:class &quot;anchor&quot; :name (:ns doc) :href (str &quot;#&quot; (:ns doc))}
-       [:h1 {:class &quot;project-name&quot;}
-        (:ns doc)]
-       (link-to-toc (:uberdoc? props))]]]
-    [:td {:class &quot;codes&quot;}]]
-   (map section-to-html (:groups doc))
-   [:tr
-    [:td {:class &quot;spacer docs&quot;} &quot;&amp;nbsp;&quot;]
-    [:td {:class &quot;codes&quot;}]]))</pre></td></tr><tr><td class="docs">
+      [:tr
+       [:td {:class &quot;docs&quot;}
+        [:div {:class &quot;docs-header&quot;}
+         [:a {:class &quot;anchor&quot; :name (:ns doc) :href (str &quot;#&quot; (:ns doc))}
+          [:h1 {:class &quot;project-name&quot;}
+           (:ns doc)]
+          (link-to-toc (:uberdoc? props))]]]
+       [:td {:class &quot;codes&quot;}]]
+      (map section-to-html (:groups doc))
+      [:tr
+       [:td {:class &quot;spacer docs&quot;} &quot;&amp;nbsp;&quot;]
+       [:td {:class &quot;codes&quot;}]]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private reset-css
   (css [:html {:margin 0 :padding 0}]
        [:h1 {:margin 0 :padding 0}]
@@ -3875,7 +3913,13 @@ template. Before it needs to convert the data to the format expected
 for the template</p>
 </td><td class="codes"><pre class="brush: clojure">(defn uberdoc-latex
   [project-metadata docs]
-    (mustache/render template (as-data-for-template project-metadata docs)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#marginalia.main" name="marginalia.main"><h1 class="project-name">marginalia.main</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+    (mustache/render template (as-data-for-template project-metadata docs)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#marginalia.log" name="marginalia.log"><h1 class="project-name">marginalia.log</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Using a third-party logging library would be too much, but this namespace provides some lightweight functions to at
+least centralize where logging happens.</p>
+</td><td class="codes"><pre class="brush: clojure">(ns marginalia.log)</pre></td></tr><tr><td class="docs"><p>Print the message to stderr, substituting any provided <code>format-args</code> in (as in <code>format</code>).</p>
+</td><td class="codes"><pre class="brush: clojure">(defn error
+  [msg &amp; format-args]
+  (binding [*out* *err*]
+    (println (apply format msg format-args))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#marginalia.main" name="marginalia.main"><h1 class="project-name">marginalia.main</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns marginalia.main
   (:require
    [marginalia.core :as marginalia]
@@ -4477,11 +4521,33 @@ See <a href="https://github.com/clj-commons/marginalia/issues/4">https://github.
 (defmethod ns-kw-mm :foo [_] :foo)</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#marginalia.core-test" name="marginalia.core-test"><h1 class="project-name">marginalia.core-test</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns marginalia.core-test
   (:require
+   [clojure.java.io :as io]
    [clojure.test :refer :all]
-   [marginalia.core :as marginalia]))</pre></td></tr><tr><td class="docs">
+   [marginalia.core :as marginalia]
+   [marginalia.test.helpers :refer [in-project]]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest parse-project-file-simple
   (is (= &quot;project-name&quot;
-         (:name (marginalia/parse-project-file &quot;test/marginalia/resources/multi-def-project.clj.txt&quot;)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#marginalia.multidoc-test" name="marginalia.multidoc-test"><h1 class="project-name">marginalia.multidoc-test</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+         (:name (marginalia/parse-project-file &quot;test/marginalia/resources/multi-def-project.clj&quot;)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(deftest config-test
+  (let [expected-config {:description             &quot;Overridden description&quot; ; config.edn
+                         :marginalia              {:css        nil
+                                                   :javascript [&quot;http://example.com/magic.js&quot;] ; project.clj
+                                                   :exclude    nil
+                                                   :leiningen  nil}
+                         :dir                     &quot;./docs&quot;
+                         :name                    &quot;configurationpalooza&quot; ; project.clj
+                         :file                    &quot;uberdoc.html&quot;
+                         :lift-inline-comments    false ; config.edn
+                         :multi                   true ; CLI &gt; config.edn
+                         :version                 &quot;0.2.1-SNAPSHOT&quot; ; project.clj
+                         :dependencies            [['org.clojure/clojure &quot;1.11.1&quot;] ; project.clj
+                                                   ['org.markdownj/markdownj-core &quot;0.4&quot;]]
+                         :exclude-lifted-comments false}  ; default
+        expected-sources [(.getAbsolutePath (io/file &quot;test_projects&quot; &quot;highly_configured&quot; &quot;src&quot; &quot;core.clj&quot;))]]
+    (is (= [expected-config expected-sources]
+           (in-project &quot;highly_configured&quot;
+             (marginalia/resolved-opts+sources [&quot;--multi&quot;] nil))))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#marginalia.multidoc-test" name="marginalia.multidoc-test"><h1 class="project-name">marginalia.multidoc-test</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns marginalia.multidoc-test
   (:require
    [clojure.test :refer :all]
@@ -4802,7 +4868,9 @@ See <a href="https://github.com/clj-commons/marginalia/issues/4">https://github.
    [clojure.java.io :as io]
    [clojure.test :refer :all]
    [marginalia.core :as marginalia]
-   [marginalia.html :as html]))</pre></td></tr><tr><td class="docs">
+   [marginalia.html :as html])
+  (:import
+   [java.io File]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Delete file f. If it's a directory, recursively delete all its contents. Raise an exception if any deletion fails unless silently is true.</p>
 
 <p>copied from http://clojuredocs.org/clojure_contrib/clojure.contrib.io/delete-file-recursively
@@ -4820,29 +4888,36 @@ but that's a separate task.</p>
   (marginalia/find-processable-file-paths source-dir #(re-find #&quot;clj$&quot; %)))</pre></td></tr><tr><td class="docs"><p>A seq of <code>File</code>s in the <code>dir</code></p>
 </td><td class="codes"><pre class="brush: clojure">(defn files-in
   [dir]
-  (seq (.listFiles (io/file dir))))</pre></td></tr><tr><td class="docs"><p>Runs assertions in the context of a project set up for testing in the <code>test_projects</code> directory.
- Provides the following variables to the assertion context:</p>
+  (seq (.listFiles (io/file dir))))</pre></td></tr><tr><td class="docs"><p>Returns a file object pointed at the given test project's directory</p>
+</td><td class="codes"><pre class="brush: clojure">(defn test-project
+  [project-name]
+  (io/file &quot;test_projects&quot; project-name))</pre></td></tr><tr><td class="docs"><p>Runs <code>body</code> in the context of the given test project</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro in-project
+  [project-name &amp; body]
+  `(binding [marginalia/*working-directory* ~(.getAbsolutePath ^File (test-project project-name))]
+     ~@body))</pre></td></tr><tr><td class="docs"><p>Runs assertions in the context of a project set up for testing in the <code>test_projects</code> directory.
+ Anaphorically provides the following variables to the assertion context:</p>
 
 <ul>
 <li><p><code>number-of-generated-pages</code> - result of running the <code>doc-generator</code>
 function (which should ultimately call one of the Marginalia's own
 functions.</p></li>
 <li><p><code>project-name</code> - the name of the project</p></li>
-<li><code>doc-generator</code> - function which invokes marginalia (actually produces
+<li><p><code>doc-generator</code> - function which invokes marginalia (actually produces
                  output). Function accepts three arguments: path to source files, path to
-                 output files and test project metadata</li>
-<li><code>tests</code> - assertions to be run after the output has been produced</li>
+                 output files and test project metadata</p></li>
+<li><p><code>tests</code> - assertions to be run after the output has been produced</p></li>
 </ul>
 </td><td class="codes"><pre class="brush: clojure">(defmacro with-project
   [project-name doc-generator &amp; tests]
-  (let [project             (io/file &quot;test_projects&quot; project-name)
+  (let [project             (test-project project-name)
         test-project-src    (str (io/file project &quot;src&quot;))
         test-project-target (str (io/file project &quot;docs&quot;))
-        test-metadata       {:dependencies [[&quot;some/dep&quot; &quot;0.0.1&quot;]]
-                             :description &quot;Test project&quot;
-                             :name &quot;test&quot;
+        test-metadata       {:dependencies     [[&quot;some/dep&quot; &quot;0.0.1&quot;]]
+                             :description      &quot;Test project&quot;
+                             :name             &quot;test&quot;
                              :dev-dependencies []
-                             :version &quot;0.0.1&quot;}]
+                             :version          &quot;0.0.1&quot;}]
     `(do
        (delete-file-recursively ~test-project-target true)
        (.mkdirs (io/file ~test-project-target))
@@ -4865,7 +4940,16 @@ functions.</p></li>
       (marginalia.core/uberdoc! (io/file output-dir &quot;index.html&quot;)
                                 (find-clojure-file-paths source-dir)
                                 metadata))
-    (is (= 1 number-of-generated-pages))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a><div id="floating-toc"><ul><li class="floating-toc-li" id="floating-toc_marginalia.core">marginalia.core</li><li class="floating-toc-li" id="floating-toc_marginalia.hiccup">marginalia.hiccup</li><li class="floating-toc-li" id="floating-toc_marginalia.html">marginalia.html</li><li class="floating-toc-li" id="floating-toc_marginalia.latex">marginalia.latex</li><li class="floating-toc-li" id="floating-toc_marginalia.main">marginalia.main</li><li class="floating-toc-li" id="floating-toc_marginalia.parser">marginalia.parser</li><li class="floating-toc-li" id="floating-toc_problem-cases.general">problem-cases.general</li><li class="floating-toc-li" id="floating-toc_marginalia.core-test">marginalia.core-test</li><li class="floating-toc-li" id="floating-toc_marginalia.multidoc-test">marginalia.multidoc-test</li><li class="floating-toc-li" id="floating-toc_marginalia.parse-test">marginalia.parse-test</li><li class="floating-toc-li" id="floating-toc_marginalia.test.helpers">marginalia.test.helpers</li><li class="floating-toc-li" id="floating-toc_marginalia.uberdoc-test">marginalia.uberdoc-test</li></ul></div></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+    (is (= 1 number-of-generated-pages))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#multi-def-project.clj" name="multi-def-project.clj"><h1 class="project-name">multi-def-project.clj</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>There was a bug where we didn't support forms before the <code>defproject</code></p>
+</td><td class="codes"><pre class="brush: clojure">(defn some-other-form
+  []
+  (= 1 1))</pre></td></tr><tr><td class="docs"><p>0.1.0-SNAPSHOT</p>
+</td><td class="codes"><pre class="brush: clojure">(defproject project-name 
+  :description &quot;FIXME: write description&quot;
+  :url &quot;http://example.com/FIXME&quot;
+  :license {:name &quot;Eclipse Public License&quot;
+            :url &quot;http://www.eclipse.org/legal/epl-v10.html&quot;}
+  :dependencies [[org.clojure/clojure &quot;1.6.0&quot;]])</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a><div id="floating-toc"><ul><li class="floating-toc-li" id="floating-toc_marginalia.core">marginalia.core</li><li class="floating-toc-li" id="floating-toc_marginalia.hiccup">marginalia.hiccup</li><li class="floating-toc-li" id="floating-toc_marginalia.html">marginalia.html</li><li class="floating-toc-li" id="floating-toc_marginalia.latex">marginalia.latex</li><li class="floating-toc-li" id="floating-toc_marginalia.log">marginalia.log</li><li class="floating-toc-li" id="floating-toc_marginalia.main">marginalia.main</li><li class="floating-toc-li" id="floating-toc_marginalia.parser">marginalia.parser</li><li class="floating-toc-li" id="floating-toc_problem-cases.general">problem-cases.general</li><li class="floating-toc-li" id="floating-toc_marginalia.core-test">marginalia.core-test</li><li class="floating-toc-li" id="floating-toc_marginalia.multidoc-test">marginalia.multidoc-test</li><li class="floating-toc-li" id="floating-toc_marginalia.parse-test">marginalia.parse-test</li><li class="floating-toc-li" id="floating-toc_marginalia.test.helpers">marginalia.test.helpers</li><li class="floating-toc-li" id="floating-toc_marginalia.uberdoc-test">marginalia.uberdoc-test</li><li class="floating-toc-li" id="floating-toc_multi-def-project.clj">multi-def-project.clj</li></ul></div></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
