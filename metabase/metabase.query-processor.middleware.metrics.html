@@ -2895,9 +2895,11 @@ net.brehaut.ClojureTools = (function (SH) {
                                           &amp;match))]
                       (update (lib.util/fresh-uuids replacement)
                               1
-                              merge
-                              {:name metric-name}
-                              (select-keys (get &amp;match 1) [:lib/uuid :name])))
+                              #(merge
+                                 %
+                                 {:name metric-name}
+                                 (select-keys % [:name :display-name])
+                                 (select-keys (get &amp;match 1) [:lib/uuid :name :display-name]))))
                     (throw (ex-info &quot;Incompatible metric&quot; {:match &amp;match :lookup lookup}))))))
     query))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- find-metric-ids
@@ -2912,14 +2914,17 @@ net.brehaut.ClojureTools = (function (SH) {
          (lib.metadata/bulk-metadata-or-throw query :metadata/card)
          (into {}
                (map (fn [card-metadata]
-                      (let [metric-query (lib.convert/-&gt;pMBQL
+                      (let [unprocessed-metric-query (lib/query query (:dataset-query card-metadata))
+                            [_ {aggregation-name :name}] (first (lib/aggregations unprocessed-metric-query))
+                            metric-query (lib.convert/-&gt;pMBQL
                                            ((requiring-resolve 'metabase.query-processor.preprocess/preprocess)
-                                            (lib/query query (:dataset-query card-metadata))))]
+                                            unprocessed-metric-query))
+                            metric-name (:name card-metadata)]
                         (if-let [aggregation (first (lib/aggregations metric-query))]
                           [(:id card-metadata)
                            {:query metric-query
-                            :aggregation aggregation
-                            :name (:name card-metadata)}]
+                            :aggregation (assoc-in aggregation [1 :name] (or aggregation-name metric-name))
+                            :name metric-name}]
                           (throw (ex-info &quot;Source metric missing aggregation&quot; {:source metric-query})))))))
          not-empty)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- expression-with-name-from-source
@@ -2945,7 +2950,7 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defn- temp-query-at-stage-path
   [query stage-path]
   (cond-&gt; query
-    stage-path (lib.walk/query-for-stage-at-path stage-path)
+    stage-path (lib.walk/query-for-path stage-path)
     stage-path :query))</pre></td></tr><tr><td class="docs"><p>Splices in metric definitions that are compatible with the query.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn splice-compatible-metrics
   [query path expanded-stages]
@@ -2963,7 +2968,7 @@ net.brehaut.ClojureTools = (function (SH) {
                           (let [metric-query (update-metric-query-expression-names metric-query unique-name-fn)]
                             (as-&gt; query $q
                               (reduce expression-with-name-from-source $q (lib/expressions metric-query 0))
-                              (reduce lib/filter $q (lib/filters metric-query 0))
+                              (reduce #(lib/filter %1 0 %2) $q (lib/filters metric-query 0))
                               (replace-metric-aggregation-refs $q 0 lookup)))
                           (throw (ex-info &quot;Incompatible metric&quot; {:query query
                                                                  :metric metric-query}))))
