@@ -2965,10 +2965,10 @@ net.brehaut.ClojureTools = (function (SH) {
       (database-type driver ::upload-types/varchar-255)))</pre></td></tr><tr><td class="docs"><p>Returns a map of column-name -> column-definition from a map of column-name -> upload-type.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- column-definitions
   [driver col-&gt;upload-type]
-  (update-vals col-&gt;upload-type (partial defaulting-database-type driver)))</pre></td></tr><tr><td class="docs"><p>The database being used for uploads (as per the <code>uploads-database-id</code> setting).</p>
+  (update-vals col-&gt;upload-type (partial defaulting-database-type driver)))</pre></td></tr><tr><td class="docs"><p>The database being used for uploads.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn current-database
   []
-  (t2/select-one Database :id (public-settings/uploads-database-id)))</pre></td></tr><tr><td class="docs"><p>Returns a string that can be used as a table identifier in SQL, including a schema if provided.</p>
+  (t2/select-one Database :uploads_enabled true))</pre></td></tr><tr><td class="docs"><p>Returns a string that can be used as a table identifier in SQL, including a schema if provided.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn table-identifier
   [{:keys [schema name] :as _table}
    :- [:map
@@ -3101,13 +3101,15 @@ Exclude separators which give incompatible column counts between the header and 
   (case *auxiliary-sync-steps*
     :asynchronous (future (sync/sync-table! table))
     :synchronous (sync/sync-table! table)
-    :never nil))</pre></td></tr><tr><td class="docs"><p>Returns an ExceptionInfo object if the user cannot upload to the given database for the subset of reasons common to all uploads
+    :never nil))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- uploads-enabled? []
+  (some? (:db_id (public-settings/uploads-settings))))</pre></td></tr><tr><td class="docs"><p>Returns an ExceptionInfo object if the user cannot upload to the given database for the subset of reasons common to all uploads
 entry points. Returns nil otherwise.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- can-use-uploads-error
   [db]
   (let [driver (driver.u/database-&gt;driver db)]
     (cond
-      (not (public-settings/uploads-enabled))
+      (not (uploads-enabled?))
       (ex-info (tru &quot;Uploads are not enabled.&quot;)
                {:status-code 422})
       (premium-features/sandboxed-user?)
@@ -3118,8 +3120,10 @@ entry points. Returns nil otherwise.</p>
                {:status-code 422}))))</pre></td></tr><tr><td class="docs"><p>Returns an ExceptionInfo object if the user cannot upload to the given database and schema. Returns nil otherwise.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- can-create-upload-error
   [db schema-name]
-  (or (can-use-uploads-error db)
-      (cond
+  (or (cond
+        (not (:uploads_enabled db))
+        (ex-info (tru &quot;Uploads are not enabled.&quot;)
+                 {:status-code 422})
         (and (str/blank? schema-name)
              (driver/database-supports? (driver.u/database-&gt;driver db) :schemas db))
         (ex-info (tru &quot;A schema has not been set.&quot;)
@@ -3141,7 +3145,8 @@ entry points. Returns nil otherwise.</p>
         (and (some? schema-name)
              (not (driver.s/include-schema? db schema-name)))
         (ex-info (tru &quot;The schema {0} is not syncable.&quot; schema-name)
-                 {:status-code 422}))))</pre></td></tr><tr><td class="docs"><p>Throws an error if the user cannot upload to the given database and schema.</p>
+                 {:status-code 422}))
+   (can-use-uploads-error db)))</pre></td></tr><tr><td class="docs"><p>Throws an error if the user cannot upload to the given database and schema.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- check-can-create-upload
   [db schema-name]
   (when-let [error (can-create-upload-error db schema-name)]
