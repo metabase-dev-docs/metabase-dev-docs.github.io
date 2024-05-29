@@ -2876,6 +2876,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.embed.settings :as embed.settings]
    [metabase.public-settings :as public-settings]
    [metabase.server.request.util :as req.util]
+   [metabase.util.log :as log]
    [ring.util.codec :refer [base64-encode]])
   (:import
    (java.security MessageDigest SecureRandom)))</pre></td></tr><tr><td class="docs">
@@ -2975,19 +2976,66 @@ the original request was HTTPS; if sent in response to an HTTP request, this is 
   [allow-iframes? nonce]
   (update (content-security-policy-header nonce)
           &quot;Content-Security-Policy&quot;
-          #(format &quot;%s frame-ancestors %s;&quot; % (if allow-iframes? &quot;*&quot; (or (embedding-app-origin) &quot;'none'&quot;)))))</pre></td></tr><tr><td class="docs">
+          #(format &quot;%s frame-ancestors %s;&quot; % (if allow-iframes? &quot;*&quot; (or (embedding-app-origin) &quot;'none'&quot;)))))</pre></td></tr><tr><td class="docs"><p>Returns an object with protocol, domain and port for the given url</p>
+</td><td class="codes"><pre class="brush: clojure">(defn parse-url
+  [url]
+  (if (= url &quot;*&quot;)
+    {:protocol nil :domain &quot;*&quot; :port &quot;*&quot;}
+    (let [pattern #&quot;^(?:(https?)://)?([^:/]+)(?::(\d+|\*))?$&quot;
+          matches (re-matches pattern url)]
+      (if-not matches
+        (do (log/errorf &quot;Invalid URL: %s&quot; url) nil)
+        (let [[_ protocol domain port] matches]
+          {:protocol protocol
+           :domain domain
+           :port port})))))</pre></td></tr><tr><td class="docs"><p>Checks if the domain is compatible with the reference one</p>
+</td><td class="codes"><pre class="brush: clojure">(defn approved-domain?
+  [domain reference-domain]
+  (or (= reference-domain &quot;*&quot;)
+      (if (str/starts-with? reference-domain &quot;*.&quot;)
+        (str/ends-with? domain (str/replace-first reference-domain &quot;*.&quot; &quot;.&quot;))
+        (= domain reference-domain))))</pre></td></tr><tr><td class="docs"><p>Checks if the protocol is compatible with the reference one</p>
+</td><td class="codes"><pre class="brush: clojure">(defn approved-protocol?
+  [protocol reference-protocol]
+  (or (nil? reference-protocol)
+      (= protocol reference-protocol)))</pre></td></tr><tr><td class="docs"><p>Checks if the port is compatible with the reference one</p>
+</td><td class="codes"><pre class="brush: clojure">(defn approved-port?
+  [port reference-port]
+  (or
+   (= reference-port &quot;*&quot;)
+   (= port reference-port)))</pre></td></tr><tr><td class="docs"><p>Parses the space separated string of approved origins</p>
+</td><td class="codes"><pre class="brush: clojure">(defn parse-approved-origins
+    [approved-origins-raw]
+    (let [urls (str/split approved-origins-raw #&quot; +&quot;)]
+     (keep parse-url urls)))</pre></td></tr><tr><td class="docs"><p>Returns true if <code>origin</code> should be allowed for CORS based on the <code>approved-origins</code></p>
+</td><td class="codes"><pre class="brush: clojure">(defn approved-origin?
+  [raw-origin approved-origins-raw]
+  (boolean
+   (when (and (seq raw-origin) (seq approved-origins-raw))
+     (let [approved-list (parse-approved-origins approved-origins-raw)
+           origin        (parse-url raw-origin)]
+       (some (fn [approved-origin]
+                           (and
+                            (approved-domain? (:domain origin) (:domain approved-origin))
+                            (approved-protocol? (:protocol origin) (:protocol approved-origin))
+                            (approved-port? (:port origin) (:port approved-origin))))
+                      approved-list)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- access-control-headers
-  []
-  {&quot;Access-Control-Allow-Origin&quot;    (embedding-app-origin)
-   &quot;Access-Control-Allow-Headers&quot;   &quot;*&quot;
-   &quot;Access-Control-Expose-Headers&quot;  &quot;X-Metabase-Anti-CSRF-Token&quot;})</pre></td></tr><tr><td class="docs"><p>Return only the first embedding app origin.</p>
+  [origin]
+  (merge
+   (when
+    (approved-origin? origin (embedding-app-origin))
+    {&quot;Access-Control-Allow-Origin&quot; origin
+     &quot;Vary&quot;                        &quot;Origin&quot;})
+   {&quot;Access-Control-Allow-Headers&quot;   &quot;*&quot;
+    &quot;Access-Control-Expose-Headers&quot;  &quot;X-Metabase-Anti-CSRF-Token&quot;}))</pre></td></tr><tr><td class="docs"><p>Return only the first embedding app origin.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- first-embedding-app-origin
   []
   (some-&gt; (embedding-app-origin)
           (str/split #&quot; &quot;)
           first))</pre></td></tr><tr><td class="docs"><p>Fetch a map of security headers that should be added to a response based on the passed options.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn security-headers
-  [&amp; {:keys [nonce allow-iframes? allow-cache?]
+  [&amp; {:keys [origin nonce allow-iframes? allow-cache?]
       :or   {allow-iframes? false, allow-cache? false}}]
   (merge
    (if allow-cache?
@@ -2995,7 +3043,7 @@ the original request was HTTPS; if sent in response to an HTTP request, this is 
      (cache-prevention-headers))
    strict-transport-security-header
    (content-security-policy-header-with-frame-ancestors allow-iframes? nonce)
-   (when (embedding-app-origin) (access-control-headers))
+   (when (embedding-app-origin) (access-control-headers origin))
    (when-not allow-iframes?
      ;; Tell browsers not to render our site as an iframe (prevent clickjacking)
      {&quot;X-Frame-Options&quot;                 (if (embedding-app-origin)
@@ -3010,6 +3058,7 @@ the original request was HTTPS; if sent in response to an HTTP request, this is 
 </td><td class="codes"><pre class="brush: clojure">(defn- add-security-headers* [request response]
   ;; merge is other way around so that handler can override headers
   (update response :headers #(merge %2 %1) (security-headers
+                                            :origin         ((:headers request) &quot;origin&quot;)
                                             :nonce          (:nonce request)
                                             :allow-iframes? ((some-fn req.util/public? req.util/embed?) request)
                                             :allow-cache?   (req.util/cacheable? request))))</pre></td></tr><tr><td class="docs"><p>Middleware that adds HTTP security and cache-busting headers.</p>
