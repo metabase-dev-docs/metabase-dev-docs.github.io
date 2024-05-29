@@ -3211,16 +3211,23 @@ any collection).</p>
 </td><td class="codes"><pre class="brush: clojure">(defn card-&gt;virtual-table
   [{:keys [database_id] :as card} &amp; {:keys [include-fields?]}]
   ;; if collection isn't already hydrated then do so
-  (let [card (t2/hydrate card :collection)]
+  (let [card (t2/hydrate card :collection)
+        card-type (:type card)
+        dataset-query (:dataset_query card)]
     (cond-&gt; {:id               (str &quot;card__&quot; (u/the-id card))
              :db_id            (:database_id card)
              :display_name     (:name card)
              :schema           (get-in card [:collection :name] (root-collection-schema-name))
              :moderated_status (:moderated_status card)
-             :description      (:description card)}
-      include-fields? (assoc :fields (card-result-metadata-&gt;virtual-fields (u/the-id card)
-                                                                           database_id
-                                                                           (:result_metadata card))))))</pre></td></tr><tr><td class="docs"><p>This method clears the semantic_type attribute for PK/FK fields of nested queries. Those fields having a semantic
+             :description      (:description card)
+             :type             card-type}
+      (and (= card-type :metric)
+           dataset-query)
+      (assoc :dataset_query dataset-query)
+      include-fields?
+      (assoc :fields (card-result-metadata-&gt;virtual-fields (u/the-id card)
+                                                           database_id
+                                                           (:result_metadata card))))))</pre></td></tr><tr><td class="docs"><p>This method clears the semantic_type attribute for PK/FK fields of nested queries. Those fields having a semantic
 type confuses the frontend and it can really used in the same way</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- remove-nested-pk-fk-semantic-types
   [{:keys [fields] :as metadata-response} {:keys [trust-semantic-keys?]}]
@@ -3239,7 +3246,7 @@ type confuses the frontend and it can really used in the same way</p>
   {id ms/PositiveInt}
   (let [{:keys [database_id] :as card} (api/check-404
                                         (t2/select-one [Card :id :dataset_query :result_metadata :name :description
-                                                        :collection_id :database_id :type]
+                                                        :collection_id :database_id :type :dataset_query]
                                                        :id id))
         moderated-status              (-&gt;&gt; (mdb.query/query {:select   [:status]
                                                              :from     [:moderation_review]
