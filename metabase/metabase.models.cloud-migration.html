@@ -2895,27 +2895,38 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/table-name :model/CloudMigration [_model] :cloud_migration)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(t2/deftransforms :model/CloudMigration
   {:state mi/transform-keyword})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defsetting migration-store-url
-  (deferred-tru &quot;Store URL for migrations. Internal test use only.&quot;)
+</td><td class="codes"><pre class="brush: clojure">(defsetting store-use-staging
+  (deferred-tru &quot;If staging store should be used instead of prod. True on dev.&quot;)
+  :type       :boolean
   :visibility :internal
-  :default    (if config/is-dev?
-               &quot;https://store-api.staging.metabase.com/api/v2/migration&quot;
-               &quot;https://store-api.metabase.com/api/v2/migration&quot;)
+  :default    config/is-dev?
+  :doc        false
+  :export?    false)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defsetting store-url
+  (deferred-tru &quot;Store URL.&quot;)
+  :visibility :admin ;; should be :internal, but FE doesn't get internal settings
+  :default    (str &quot;https://store&quot; (when (store-use-staging) &quot;.staging&quot;) &quot;.metabase.com&quot;)
+  :doc        false
+  :export?    false)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defsetting store-api-url
+  (deferred-tru &quot;Store API URL.&quot;)
+  :visibility :internal
+  :default    (str &quot;https://store-api&quot; (when (store-use-staging) &quot;.staging&quot;) &quot;.metabase.com&quot;)
   :doc        false
   :export?    false)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defsetting migration-dump-file
-  (deferred-tru &quot;Dump file for migrations. Internal test use only.&quot;)
+  (deferred-tru &quot;Dump file for migrations.&quot;)
   :visibility :internal
   :default    nil
   :doc        false
   :export?    false)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defsetting migration-dump-version
-  (deferred-tru &quot;Custom dump version for migrations. Internal test use only.&quot;)
+  (deferred-tru &quot;Custom dump version for migrations.&quot;)
   :visibility :internal
-  ;; Use a known and already released version override when in dev.
+  ;; Use a known version on staging when there's no real version.
   ;; This will cause the restore to fail on cloud unless you also set `migration-dump-file` to
   ;; a dump from that version, but it lets you test everything else up to that point works.
-  :default    (when config/is-dev? &quot;v0.49.7&quot;)
+  :default    (when (= (config/mb-version-info :tag) &quot;vLOCAL_DEV&quot;) &quot;v0.50.0-RC1&quot;)
   :doc        false
   :export?    false)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defsetting read-only-mode
@@ -2940,10 +2951,7 @@ net.brehaut.ClojureTools = (function (SH) {
        ;; These exceptions use table name instead of model name because you can actually bypass the model
        ;; and write toucan2 functions that interact with table directly.
        (map t2/table-name)
-       (into #{})))</pre></td></tr><tr><td class="docs"><p>Used during dump-to-h2, since rotate-encryption-key! over the dump will hit read-only-mode.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^:dynamic
-  *ignore-read-only-mode*
-  nil)</pre></td></tr><tr><td class="docs"><p>Block write calls to most tables in read-only mode.</p>
+       (into #{})))</pre></td></tr><tr><td class="docs"><p>Block write calls to most tables in read-only mode.</p>
 </td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2.pipeline/build :before [#_query-type     :toucan.statement-type/DML
                                                  #_model          :default
                                                  #_resolved-query :default]
@@ -2951,14 +2959,16 @@ net.brehaut.ClojureTools = (function (SH) {
   (let [table-name (t2/table-name model)]
     (when (and (read-only-mode)
                (read-only-mode-inclusions table-name)
-               (not (read-only-mode-exceptions table-name))
-               (not *ignore-read-only-mode*))
+               (not (read-only-mode-exceptions table-name)))
       (throw (ex-info (tru &quot;Metabase is in read-only-mode mode!&quot;)
                       {:status-code 403}))))
   resolved-query)</pre></td></tr><tr><td class="docs"><p>Helpers</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- migration-action-url [external-id path]
-  (str (migration-store-url) &quot;/&quot; external-id path))</pre></td></tr><tr><td class="docs"><p>Cloud migration states that are terminal.</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Store API URL for migrations.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn migration-url
+  ([]
+   (str (store-api-url) &quot;/api/v2/migration&quot;))
+  ([external-id path]
+   (str (migration-url) &quot;/&quot; external-id path)))</pre></td></tr><tr><td class="docs"><p>Cloud migration states that are terminal.</p>
 </td><td class="codes"><pre class="brush: clojure">(def terminal-states
   #{:done :error :cancelled})</pre></td></tr><tr><td class="docs"><p>EXPERIMENTAL Returns true if this metabase instance is part of a cluster.
 Works by checking how many Quartz nodes there are.
@@ -3036,7 +3046,7 @@ Returns a sub-stream that should be used inside with-open.</p>
                                vec
                                (conj file-length)))
             {:keys [multipart-upload-id multipart-urls]}
-            (-&gt; (http/put (migration-action-url external_id &quot;/multipart&quot;)
+            (-&gt; (http/put (migration-url external_id &quot;/multipart&quot;)
                           {:form-params  {:part_count (count parts)}
                            :content-type :json})
                 :body
@@ -3048,7 +3058,7 @@ Returns a sub-stream that should be used inside with-open.</p>
                                  [:headers &quot;ETag&quot;])])
                       parts multipart-urls)
                  (into {}))]
-        (http/put (migration-action-url external_id &quot;/multipart/complete&quot;)
+        (http/put (migration-url external_id &quot;/multipart/complete&quot;)
                   {:form-params  {:multipart_upload_id multipart-upload-id
                                   :multipart_etags     etags}
                    :content-type :json})))))</pre></td></tr><tr><td class="docs"><p>Migrate this instance to Metabase Cloud.
@@ -3057,8 +3067,10 @@ Should run in a separate thread since it can take a long time to complete.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn migrate!
   [{:keys [id external_id] :as migration} &amp; {:keys [retry?]}]
   ;; dump-to-h2 starts behaving oddly if you try to dump repeatly to the same file
-  ;; in the same process.
-  (let [dump-file (io/file (str &quot;cloud_migration_dump_&quot; (random-uuid) &quot;.mv.db&quot;))]
+  ;; in the same process, so use a random name.
+  ;; The docker image process runs in non-root, so write to a dir it can access.
+  (let [dump-file (io/file (System/getProperty &quot;java.io.tmpdir&quot;)
+                           (str &quot;cloud_migration_dump_&quot; (random-uuid) &quot;.mv.db&quot;))]
     (try
       (when retry?
         (t2/update! :model/CloudMigration :id id {:state :init}))
@@ -3070,8 +3082,7 @@ Should run in a separate thread since it can take a long time to complete.</p>
         (Thread/sleep (int (* 1.5 setting.cache/cache-update-check-interval-ms))))
       (log/info &quot;Dumping h2 backup to&quot; (.getAbsolutePath dump-file))
       (set-progress id :dump 20)
-      (binding [*ignore-read-only-mode* true]
-        (dump-to-h2/dump-to-h2! (.getAbsolutePath dump-file) {:dump-plaintext? true}))
+      (dump-to-h2/dump-to-h2! (.getAbsolutePath dump-file) {:dump-plaintext? true})
       (when-not (read-only-mode)
         (throw (ex-info &quot;Read-only mode disabled before h2 dump was completed, contents might not be self-consistent!&quot;
                         {:id id})))
@@ -3080,7 +3091,7 @@ Should run in a separate thread since it can take a long time to complete.</p>
       (set-progress id :upload 50)
       (upload migration dump-file)
       (log/info &quot;Notifying store that upload is done&quot;)
-      (http/put (migration-action-url external_id &quot;/uploaded&quot;))
+      (http/put (migration-url external_id &quot;/uploaded&quot;))
       (log/info &quot;Migration finished&quot;)
       (set-progress id :done 100)
       (catch Exception e
@@ -3096,7 +3107,7 @@ Should run in a separate thread since it can take a long time to complete.</p>
         (io/delete-file dump-file :silently)))))</pre></td></tr><tr><td class="docs"><p>Calls Store and returns {:external<em>id ,,, :upload</em>url ,,,}.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn get-store-migration
   []
-  (-&gt; (migration-store-url)
+  (-&gt; (migration-url)
       (http/post {:form-params  {:local_mb_version (or (migration-dump-version)
                                                        (config/mb-version-info :tag))}
                   :content-type :json})
@@ -3109,7 +3120,7 @@ Should run in a separate thread since it can take a long time to complete.</p>
   (read-only-mode)
   ;; test settings you might want to change manually
   ;; force prod if even in dev
-  #_(migration-store-url! &quot;https://store-api.metabase.com/api/v2/migration&quot;)
+  #_(migration-use-staging! false)
   ;; make sure to use a version that store supports, and a dump for that version.
   #_(migration-dump-version! &quot;v0.49.7&quot;)
   ;; make a new dump with any released metabase jar using the command below:
