@@ -2955,7 +2955,39 @@ net.brehaut.ClojureTools = (function (SH) {
                  (boolean
                    (or (seq (:order-by stage))
                        (not (lib.util.match/match-one (:expressions stage) :offset)))))
-               (:stages query))))</pre></td></tr><tr><td class="docs">
+               (:stages query))))</pre></td></tr><tr><td class="docs"><p>Add <code>:base-type</code> and <code>:effective-type</code> to options of fields in <code>x</code> using <code>metadata-provider</code>. Works on pmbql fields.
+<code>:effective-type</code> is required for coerced fields to pass schema checks.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn add-types-to-fields
+  [x metadata-provider]
+  (if-let [field-ids (lib.util.match/match x
+                       [:field
+                        (_options :guard (every-pred map? (complement (every-pred :base-type :effective-type))))
+                        (id :guard integer? pos?)]
+                       (when-not (some #{:mbql/stage-metadata} &amp;parents)
+                         id))]
+    ;; &quot;pre-warm&quot; the metadata provider
+    (do (lib.metadata/bulk-metadata metadata-provider :metadata/column field-ids)
+        (lib.util.match/replace
+         x
+         [:field
+          (options :guard (every-pred map? (complement (every-pred :base-type :effective-type))))
+          (id :guard integer? pos?)]
+         (if (some #{:mbql/stage-metadata} &amp;parents)
+           &amp;match
+           (update &amp;match 1 merge
+                   ;; TODO: For brush filters, query with different base type as in metadata is sent from FE. In that
+                   ;;       case no change is performed. Find a way how to handle this properly!
+                   (when-not (and (some? (:base-type options))
+                                  (not= (:base-type options)
+                                        (:base-type (lib.metadata/field metadata-provider id))))
+                     ;; Following key is used to track which base-types we added during `query` call. It is used in
+                     ;; [[metabase.lib.convert/options-&gt;legacy-MBQL]] to remove those, so query after conversion
+                     ;; as legacy -&gt; pmbql -&gt; legacy looks closer to the original.
+                     (merge (when-not (contains? options :base-type)
+                              {::transformation-added-base-type true})
+                            (-&gt; (lib.metadata/field metadata-provider id)
+                                (select-keys [:base-type :effective-type]))))))))
+    x))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn query-with-stages :- ::lib.schema/query
   &quot;Create a query from a sequence of stages.&quot;
   ([metadata-providerable stages]
@@ -2970,7 +3002,9 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defn- query-from-legacy-query
   [metadata-providerable legacy-query]
   (try
-    (let [pmbql-query (lib.convert/-&gt;pMBQL (mbql.normalize/normalize-or-throw legacy-query))]
+    (let [pmbql-query (-&gt; (binding [lib.schema.expression/*suppress-expression-type-check?* true]
+                            (lib.convert/-&gt;pMBQL (mbql.normalize/normalize-or-throw legacy-query)))
+                          (add-types-to-fields metadata-providerable))]
       (merge
        pmbql-query
        (query-with-stages metadata-providerable (:stages pmbql-query))))
@@ -3007,32 +3041,26 @@ net.brehaut.ClojureTools = (function (SH) {
     (cond-&gt; query
       converted?
       (assoc
-        :stages
-        (into []
-              (map (fn [[stage-number stage]]
-                     (lib.util.match/replace stage
-                       [:field
-                        (opts :guard (every-pred map? (complement (some-fn :base-type :effective-type))))
-                        (field-id :guard (every-pred number? pos?))]
-                       (let [found-ref (-&gt; (lib.metadata/field metadata-provider field-id)
-                                           (select-keys [:base-type :effective-type]))]
-                         ;; Fallback if metadata is missing
-                         [:field (merge found-ref opts) field-id])
-                       [:expression
-                        (opts :guard (every-pred map? (complement (some-fn :base-type :effective-type))))
-                        expression-name]
-                       (let [found-ref (try
-                                         (m/remove-vals
-                                           #(= :type/* %)
-                                           (-&gt; (lib.expression/expression-ref query stage-number expression-name)
-                                               second
-                                               (select-keys [:base-type :effective-type])))
-                                         (catch #?(:clj Exception :cljs :default) _
-                                           ;; This currently does not find expressions defined in join stages
-                                           nil))]
-                         ;; Fallback if metadata is missing
-                         [:expression (merge found-ref opts) expression-name]))))
-              (m/indexed stages))))))</pre></td></tr><tr><td class="docs">
+       :stages
+       (mapv (fn [[stage-number stage]]
+               (-&gt; stage
+                   (add-types-to-fields metadata-provider)
+                   (lib.util.match/replace
+                    [:expression
+                     (opts :guard (every-pred map? (complement (every-pred :base-type :effective-type))))
+                     expression-name]
+                    (let [found-ref (try
+                                      (m/remove-vals
+                                       #(= :type/* %)
+                                       (-&gt; (lib.expression/expression-ref query stage-number expression-name)
+                                           second
+                                           (select-keys [:base-type :effective-type])))
+                                      (catch #?(:clj Exception :cljs :default) _
+                                        ;; This currently does not find expressions defined in join stages
+                                        nil))]
+                      ;; Fallback if metadata is missing
+                      [:expression (merge found-ref opts) expression-name]))))
+             (m/indexed stages))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod query-method :metadata/table
   [metadata-providerable table-metadata]
   (query-with-stages metadata-providerable
