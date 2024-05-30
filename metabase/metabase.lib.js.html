@@ -5052,24 +5052,40 @@ dataset-query). <code>card-type</code> specifies the type of the card being crea
    (lib.cache/side-channel-cache
     (keyword &quot;can-run&quot; card-type) a-query
     (fn [_]
-      (lib.core/can-run a-query (keyword card-type))))))</pre></td></tr><tr><td class="docs"><p>Returns true if the query is previewable.</p>
+      (lib.core/can-run a-query (keyword card-type))))))</pre></td></tr><tr><td class="docs"><p><em>Truncates</em> a query for use in the Notebook editor's "preview" system.</p>
 
-<p>This is a stronger condition than [[can-run]] - there are some cases where we want to be stricter about previews than
-about regular save and run. For example, an <code>:offset</code> expression requires a sort order but sorting comes later in the
-query builder than the expression. So the partial query we would preview at the expression step is invalid and it
-fails <code>can-preview</code>. However, we don't currently have a good path for surfacing <em>reasons</em> a query can't be saved,
-previewed or run. So we want [[can-save]] and [[can-run]] to be true for a query with an <code>:offset</code> expression and no
-sort order (so the QP can return a good error message), but [[can-preview]] can be stricter.</p>
+<p>Takes <code>a-query</code> and <code>stage-index</code> as usual.</p>
+
+<ul>
+<li>Stages later than <code>stage-index</code> are dropped.</li>
+<li><code>clause-type</code> is an enum (see below); all clauses of <em>later</em> types are dropped.</li>
+<li><code>clause-index</code> is optional: if not provided then all clauses are kept; if it's a number than clauses
+<code>[0, clause-index]</code> are kept. (To keep no clauses, specify the earlier <code>clause-type</code>.)</li>
+</ul>
+
+<p>The <code>clause-type</code> enum represents the steps of the notebook editor, in the order they appear in the notebook:</p>
+
+<ul>
+<li><code>:data</code> - just the source data for the stage</li>
+<li><code>:joins</code></li>
+<li><code>:expressions</code></li>
+<li><code>:filters</code></li>
+<li><code>:aggregation</code></li>
+<li><code>:breakout</code></li>
+<li><code>:order-by</code></li>
+<li><code>:limit</code></li>
+</ul>
+
+<p>If the resulting query fails [[can-preview]], returns nil.</p>
 
 <blockquote>
   <p><strong>Code health:</strong> Healthy, Single use.</p>
 </blockquote>
-</td><td class="codes"><pre class="brush: clojure">(defn ^:export can-preview
-  [a-query]
-  (lib.cache/side-channel-cache
-    :can-preview a-query
-    (fn [_]
-      (lib.core/can-preview a-query))))</pre></td></tr><tr><td class="docs"><p>Returns true if the query can be saved.
+</td><td class="codes"><pre class="brush: clojure">(defn ^:export preview-query
+  [a-query stage-number clause-type clause-index]
+  (let [truncated-query (lib.core/preview-query a-query stage-number (keyword clause-type) clause-index)]
+    (when (lib.core/can-preview truncated-query)
+      truncated-query)))</pre></td></tr><tr><td class="docs"><p>Returns true if the query can be saved.
 <code>card-type</code> is optional and defaults to "question".</p>
 
 <p>A query can be saved when:</p>
