@@ -2913,15 +2913,17 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defn- strip-quotes [s]
   (subs s 1 (dec (count s))))</pre></td></tr><tr><td class="docs"><p>Normalize a schema, table, column, etc. references so that we can match them regardless of syntactic differences.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn normalize-reference
-  [s {:keys [case-insensitive? quotes-preserve-case?]}]
-  (when s
-    (let [quoted (quoted? s)
-          case-insensitive (and case-insensitive?
-                                (not (and quotes-preserve-case?
-                                          quoted)))]
-      (cond-&gt; s
-        quoted           strip-quotes
-        case-insensitive str/lower-case))))</pre></td></tr><tr><td class="docs">
+  [s {:keys [preserve-identifiers? case-insensitive? quotes-preserve-case?]}]
+  (if preserve-identifiers?
+    s
+    (when s
+      (let [quoted           (quoted? s)
+            case-insensitive (and case-insensitive?
+                                  (not (and quotes-preserve-case?
+                                            quoted)))]
+        (cond-&gt; s
+          quoted strip-quotes
+          case-insensitive str/lower-case)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- find-table [{:keys [alias-&gt;table name-&gt;table] :as opts} ^Table t]
   (let [n      (normalize-reference (.getName t) opts)
         schema (normalize-reference (.getSchemaName t) opts)]
@@ -2981,7 +2983,7 @@ referenced in a table-wildcard (as far as can be determined from the query).</p>
     (cond-&gt; (merge a b)
       cs-a (update-in [:component :instances] into cs-a))))</pre></td></tr><tr><td class="docs"><p>See macaw.core/query->components doc.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn query-&gt;components
-  [^Statement parsed-ast &amp; [opts]]
+  [^Statement parsed-ast &amp; {:as opts}]
   (let [{:keys [columns
                 qualifiers
                 has-wildcard?
@@ -3021,8 +3023,10 @@ referenced in a table-wildcard (as far as can be determined from the query).</p>
 <p>(Specifically, it returns their fully-qualified names as strings, where 'fully-qualified' means 'as referred to in
 the query'; this function doesn't do additional inference work to find out a table's schema.)</p>
 </td><td class="codes"><pre class="brush: clojure">(defn query-&gt;components
-  [statement]
-  (collect/query-&gt;components statement))</pre></td></tr><tr><td class="docs"><p>Given a SQL query, apply the given table, column, and schema renames.</p>
+  [statement &amp; {:as opts}]
+  ;; By default, we will preserve identifiers verbatim, to be agnostic of case and quote behaviour.
+  ;; This may result in duplicate components, which are left to the caller to deduplicate.
+  (collect/query-&gt;components statement (merge {:preserve-identifiers? true} opts)))</pre></td></tr><tr><td class="docs"><p>Given a SQL query, apply the given table, column, and schema renames.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn replace-names
   [sql renames &amp; {:as opts}]
   (rewrite/replace-names sql (parsed-query sql) renames opts))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.rewrite" name="macaw.rewrite"><h1 class="project-name">macaw.rewrite</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
@@ -3138,7 +3142,9 @@ the query'; this function doesn't do additional inference work to find out a tab
     (when-not (:allow-unused? opts)
       (alert-unused! @updated-nodes renames))
     res))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.util" name="macaw.util"><h1 class="project-name">macaw.util</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns macaw.util)</pre></td></tr><tr><td class="docs"><p>Generalized <code>group-by</code>, where you can supply your own reducing function (instead of usual <code>conj</code>).</p>
+</td><td class="codes"><pre class="brush: clojure">(ns macaw.util
+  (:require
+   [clojure.string :as str]))</pre></td></tr><tr><td class="docs"><p>Generalized <code>group-by</code>, where you can supply your own reducing function (instead of usual <code>conj</code>).</p>
 
 <p>https://ask.clojure.org/index.php/12319/can-group-by-be-generalized</p>
 </td><td class="codes"><pre class="brush: clojure">(defn group-with
@@ -3156,17 +3162,22 @@ the query'; this function doesn't do additional inference work to find out a tab
   (reduce
    (fn [acc x] (if (pred x) (reduced x) acc))
    nil
-   coll))</pre></td></tr><tr><td class="docs"><p>Search the given map for the entry corresponding to [[map-key]], considering only the relevant keys.
+   coll))</pre></td></tr><tr><td class="docs"><p>A hack around the fact that we don't (yet) track what columns are exposed by given sentinels.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn non-sentinel
+  [s]
+  (when s
+    (nil? (str/index-of s &quot;_sentinel_&quot;))))</pre></td></tr><tr><td class="docs"><p>Search the given map for the entry corresponding to [[map-key]], considering only the relevant keys.
 The relevant keys are obtained by ignoring any suffix of [[ks]] for which [[map-key]] has nil or missing values.
 We require that there is at least one relevant key to find a match.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn find-relevant
   [m map-key ks]
   (when map-key
-    (if (every? map-key ks)
+    (if (every? (comp non-sentinel map-key) ks)
       (find m (select-keys map-key ks))
       ;; Strip off keys from right-to-left where they are nil, and relax search to only consider these keys.
       ;; We need at least one non-generate key to remain for the search.
-      (when-let [ks-prefix (-&gt;&gt; ks reverse (drop-while (comp nil? map-key)) reverse seq)]
+      ;; NOTE: we could optimize away calling `non-sentinel` twice in this function, but for now just keeping it simple.
+      (when-let [ks-prefix (-&gt;&gt; ks reverse (drop-while (comp not non-sentinel map-key)) reverse seq)]
         (when (not= ks ks-prefix)
           (seek (comp #{(select-keys map-key ks-prefix)}
                       #(select-keys % ks-prefix)
@@ -3292,7 +3303,16 @@ We require that there is at least one relevant key to find a match.</p>
            (columns &quot;SELECT o.id FROM public.orders o&quot;))))
   (testing &quot;schema is determined correctly&quot;
     (is (= #{{:column &quot;x&quot; :table &quot;orders&quot; :schema &quot;public&quot;}}
-           (columns &quot;SELECT public.orders.x FROM public.orders, private.orders&quot;)))))</pre></td></tr><tr><td class="docs">
+           (columns &quot;SELECT public.orders.x FROM public.orders, private.orders&quot;))))
+  (testing &quot;quotes are retained&quot;
+    (is (= #{{:column &quot;`x`&quot; :table &quot;`orders`&quot; :schema &quot;`public`&quot;}}
+           (columns &quot;SELECT `public`.`orders`.`x` FROM `public`.`orders`, `private`.`orders`&quot;))))
+  (testing &quot;quotes and case are not interpreted&quot;
+    (is (= #{{:column &quot;x&quot; :table &quot;ORDERS&quot; :schema &quot;`public`&quot;}
+             {:column &quot;X&quot; :table &quot;ORDERS&quot; :schema &quot;`public`&quot;}
+             {:column &quot;`x`&quot; :table &quot;ORDERS&quot; :schema &quot;`public`&quot;}
+             {:column &quot;`X`&quot; :table &quot;ORDERS&quot; :schema &quot;`public`&quot;}}
+           (columns &quot;SELECT x, X, `x`, `X` FROM `public`.ORDERS&quot;)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private heavily-quoted-query
   &quot;SELECT raw, \&quot;foo\&quot;, \&quot;dong\&quot;.\&quot;bar\&quot;, `ding`.`dong`.`fee` FROM `ding`.dong&quot;)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private heavily-quoted-query-rewritten
@@ -3304,14 +3324,18 @@ We require that there is at least one relevant key to find a match.</p>
              {:schema &quot;ding&quot; :table &quot;dong&quot; :column &quot;fee&quot;} &quot;flee&quot;
              {:schema &quot;ding&quot; :table &quot;dong&quot; :column &quot;bar&quot;} &quot;lark&quot;
              {:schema &quot;ding&quot; :table &quot;dong&quot; :column &quot;foo&quot;} &quot;glue&quot;}})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn normalized-components [sql]
+  (m/query-&gt;components (m/parsed-query sql) {:preserve-identifiers? false}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def normalized-columns (comp raw-components :columns normalized-components))
+(def normalized-tables (comp raw-components :tables normalized-components))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest quotes-test
   (is (= #{{:column &quot;raw&quot;, :table &quot;dong&quot;, :schema &quot;ding&quot;}
            {:column &quot;foo&quot;, :table &quot;dong&quot;, :schema &quot;ding&quot;}
            {:column &quot;bar&quot;, :table &quot;dong&quot;, :schema &quot;ding&quot;}
            {:column &quot;fee&quot;, :table &quot;dong&quot;, :schema &quot;ding&quot;}}
-         (columns heavily-quoted-query)))
+         (normalized-columns heavily-quoted-query)))
   (is (= #{{:table &quot;dong&quot;, :schema &quot;ding&quot;}}
-         (tables heavily-quoted-query)))
+         (normalized-tables heavily-quoted-query)))
   (is (= heavily-quoted-query-rewritten
          (m/replace-names heavily-quoted-query heavily-quoted-query-rewrites))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest case-sensitive-test
@@ -3525,6 +3549,12 @@ We require that there is at least one relevant key to find a match.</p>
        (m/replace-names &quot;SELECT 1&quot; {:tables {{:schema &quot;public&quot; :table &quot;a&quot;} &quot;aa&quot;}})))
   (is (= &quot;SELECT 1&quot;
          (m/replace-names &quot;SELECT 1&quot; {:tables {{:schema &quot;public&quot; :table &quot;a&quot;} &quot;aa&quot;}}
+                          {:allow-unused? true}))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(deftest model-reference-test
+  (is (= &quot;SELECT subtotal FROM metabase_sentinel_table_154643 LIMIT 3&quot;
+         (m/replace-names &quot;SELECT total FROM metabase_sentinel_table_154643 LIMIT 3&quot;
+                          {:columns {{:table &quot;orders&quot; :column &quot;total&quot;} &quot;subtotal&quot;}
+                           :tables  {{:table &quot;orders&quot;} &quot;purchases&quot;}}
                           {:allow-unused? true}))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.test.util" name="macaw.test.util"><h1 class="project-name">macaw.test.util</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns macaw.test.util
   (:require

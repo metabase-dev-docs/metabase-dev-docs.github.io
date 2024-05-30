@@ -3629,8 +3629,8 @@ included, otherwise the metadata will be saved to the database asynchronously.</
     (next-method card json-generator)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- replaced-inner-query-for-native-card
   [query {:keys [fields tables] :as _replacement-ids}]
-  (let [keyvals-set         #(set/union (into #{} (keys %))
-                                        (into #{} (vals %)))
+  (let [keyvals-set         #(set/union (set (keys %))
+                                        (set (vals %)))
         id-&gt;field           (if (empty? fields)
                               {}
                               (m/index-by :id
@@ -3653,11 +3653,14 @@ included, otherwise the metadata will be saved to the database asynchronously.</
         get-or-throw-from   (fn [m] (fn [k] (if (contains? m k)
                                               (remove-id (get m k))
                                               (throw (ex-info &quot;ID not found&quot; {:id k :available m})))))
-        update-keyvals      (fn [m f] (-&gt; m
-                                          (update-keys f)
-                                          (update-vals f)))
-        column-replacements (update-keyvals fields (get-or-throw-from id-&gt;field))
-        table-replacements  (update-keyvals tables (get-or-throw-from id-&gt;table))]
+        ids-&gt;replacements   (fn [id-&gt;replacement-id id-&gt;row row-&gt;identifier]
+                              (-&gt; id-&gt;replacement-id
+                                  (u/update-keys-vals (get-or-throw-from id-&gt;row))
+                                  (update-vals row-&gt;identifier)))
+        ;; Note: we are naively providing unqualified new identifier names as the replacements.
+        ;; this will break if previously unambiguous identifiers become ambiguous due to the replacements
+        column-replacements (ids-&gt;replacements fields id-&gt;field :column)
+        table-replacements  (ids-&gt;replacements tables id-&gt;table :table)]
     (query-analyzer/replace-names query {:columns column-replacements
                                          :tables  table-replacements})))</pre></td></tr><tr><td class="docs"><p>Given a card and a map of the form</p>
 
