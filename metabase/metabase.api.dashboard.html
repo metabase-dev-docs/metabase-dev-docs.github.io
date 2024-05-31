@@ -2874,6 +2874,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [medley.core :as m]
    [metabase.actions.core :as actions]
    [metabase.analytics.snowplow :as snowplow]
+   [metabase.api.card :as api.card]
    [metabase.api.common :as api]
    [metabase.api.common.validation :as validation]
    [metabase.api.database :as api.database]
@@ -3631,11 +3632,33 @@ that subscriptions require). If so, delete the subscriptions and notify the dash
 </td><td class="codes"><pre class="brush: clojure">(defn- dashboard-metadata
   [dashboard]
   (let [dashcards (:dashcards dashboard)
-        cards (for [{:keys [card series]} dashcards
-                    :let [all (conj series card)]
-                    card all
-                    :when (:dataset_query card)]
-                card)
+        links (group-by :type (set (for [dashcard dashcards
+                                         :let [top-click-behavior (get-in dashcard [:visualization_settings :click_behavior])
+                                               col-click-behaviors (keep (comp :click_behavior val)
+                                                                         (get-in dashcard [:visualization_settings :column_settings]))]
+                                         {:keys [linkType type targetId]} (conj col-click-behaviors top-click-behavior)
+                                         :when (and (= type &quot;link&quot;)
+                                                    (contains? #{&quot;question&quot; &quot;dashboard&quot;} linkType))]
+                                     {:type (case linkType
+                                              &quot;question&quot; :card
+                                              &quot;dashboard&quot; :dashboard)
+                                      :id targetId})))
+        fetch-or-warn (fn [{entity-type :type entity-id :id} f &amp; f-args]
+                        (try
+                          (apply f entity-id f-args)
+                          (catch Exception e
+                            (log/warnf &quot;Error in dashboard metadata %s %s: %s&quot; entity-type entity-id (ex-message e)))))
+        link-cards (-&gt;&gt; (:card links)
+                        (sort-by :id)
+                        (into []
+                              (keep #(fetch-or-warn % api.card/get-card))))
+        cards (-&gt;&gt; (concat
+                     (for [{:keys [card series]} dashcards
+                           :let [all (conj series card)]
+                           card all]
+                       card)
+                     link-cards)
+                   (filter :dataset_query))
         database-ids (set (map :database_id cards))
         db-&gt;mp (into {} (map (juxt identity lib.metadata.jvm/application-database-metadata-provider)
                              database-ids))
@@ -3645,32 +3668,28 @@ that subscriptions require). If so, delete the subscriptions and notify the dash
                                                         query (lib/query mp (:dataset_query card))]
                                                     (lib/dependent-metadata query (:id card) (:type card)))) cards)))]
     {:tables (-&gt;&gt; (:table dependents)
-                  (sort-by (fn [{card-or-table-id :id}]
-                             (or (lib.util/legacy-string-table-id-&gt;card-id card-or-table-id) card-or-table-id)))
+                  ;; Can be int or &quot;card__&lt;id&gt;&quot;
+                  (sort-by (comp str :id))
                   (into []
-                        (keep (fn [{card-or-table-id :id}]
-                                (try
-                                  (if-let [card-id (lib.util/legacy-string-table-id-&gt;card-id card-or-table-id)]
-                                    (api.table/fetch-card-query-metadata card-id)
-                                    (api.table/fetch-table-query-metadata card-or-table-id {}))
-                                  (catch Exception e
-                                    (log/warnf &quot;Error in dashboard metadata %s %s: %s&quot; :table card-or-table-id (ex-message e))))))))
+                        (keep #(fetch-or-warn
+                                 %
+                                 (fn [card-or-table-id]
+                                   (if-let [card-id (lib.util/legacy-string-table-id-&gt;card-id card-or-table-id)]
+                                     (api.table/fetch-card-query-metadata card-id)
+                                     (api.table/fetch-table-query-metadata card-or-table-id {})))))))
      :databases (-&gt;&gt; (:database dependents)
                      (sort-by :id)
                      (into []
-                           (keep (fn [{database-id :id}]
-                                   (try
-                                     (api.database/get-database database-id {})
-                                     (catch Exception e
-                                       (log/warnf &quot;Error in dashboard metadata %s %s: %s&quot; :database database-id (ex-message e))))))))
+                           (keep #(fetch-or-warn % api.database/get-database {}))))
      :fields (-&gt;&gt; (:field dependents)
                   (sort-by :id)
                   (into []
-                        (keep (fn [{field-id :id}]
-                                (try
-                                  (api.field/get-field field-id {})
-                                  (catch Exception e
-                                    (log/warnf &quot;Error in dashboard metadata %s %s: %s&quot; :field field-id (ex-message e))))))))}))</pre></td></tr><tr><td class="docs"><p>/:id/query_metadata</p>
+                        (keep #(fetch-or-warn % api.field/get-field {}))))
+     :cards link-cards
+     :dashboards (-&gt;&gt; (:dashboard links)
+                      (sort-by :id)
+                      (into []
+                            (keep #(fetch-or-warn % get-dashboard))))}))</pre></td></tr><tr><td class="docs"><p>/:id/query_metadata</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
   &quot;Get all of the required query metadata for the cards on dashboard.&quot;
   [id]
