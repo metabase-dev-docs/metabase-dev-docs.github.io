@@ -2903,18 +2903,33 @@ This extra nil is needed for some combinations later on, but not others, hence t
     (concat (vec (remove nil? all-vals)) (when include-nil? [nil]))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private pivot-row-titles
   [{:keys [column-titles pivot-rows]} :- ::pivot-spec]
-  (mapv #(get column-titles %) pivot-rows))</pre></td></tr><tr><td class="docs"><p>Construct the export-style pivot headers from the raw pivot rows, according to the indices specified in <code>pivot-spec</code>.</p>
+  (mapv #(get column-titles %) pivot-rows))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private pivot-measure-titles
+  [{:keys [column-titles pivot-measures]} :- ::pivot-spec]
+  (mapv #(get column-titles %) pivot-measures))</pre></td></tr><tr><td class="docs"><p>Construct the export-style pivot headers from the raw pivot rows, according to the indices specified in <code>pivot-spec</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private header-builder
-  [rows {:keys [pivot-cols] :as pivot-spec} :- ::pivot-spec]
-  (let [row-titles       (pivot-row-titles pivot-spec)
+  [rows {:keys [pivot-cols pivot-measures] :as pivot-spec} :- ::pivot-spec]
+  (let [row-titles         (pivot-row-titles pivot-spec)
+        measure-titles     (pivot-measure-titles pivot-spec)
+        n-measures         (count pivot-measures)
+        multiple-measures? (&lt; 1 n-measures)
         ;; For each pivot column, get the possible values for that column
         ;; Then, get the cartesian product of each to for all of the value groups
         ;; Each group will have (count pivot-cols) entries and the values
         ;; will be from the columns in the same order as presented in pivot-cols.
         ;; So, if pivot-cols is [0 1], the first col-value-group will have [first-value-from-first-col first-value-from-second-col]
-        col-value-groups (apply math.combo/cartesian-product (map (fn [col-k]
-                                                                    (all-values-for rows col-k false))
-                                                                  pivot-cols))]
+        col-value-groups   (apply math.combo/cartesian-product (concat
+                                                                (map (fn [col-k]
+                                                                       (all-values-for rows col-k false))
+                                                                     pivot-cols)
+                                                                (when (seq measure-titles)
+                                                                  [measure-titles])))
+        header-indices     (if multiple-measures?
+                             ;; when there are more than 1 pivot-measures, we need to
+                             ;; add one more header row that holds the titles of the measure columns
+                             ;; and we know it's always just one more row, so we can inc the count.
+                             (range (inc (count pivot-cols)))
+                             (range (count pivot-cols)))]
     ;; Each Header (1 header row per pivot-col) will first start with the Pivot Row Titles. There will be (count pivot-rows) entries.
     ;; Then, Get all of the nth entries in the col-value-gropus for the nth header, and then append &quot;Row Totals&quot; label.
     (mapv
@@ -2922,8 +2937,12 @@ This extra nil is needed for some combinations later on, but not others, hence t
        (vec (concat
              row-titles
              (map #(nth % col-idx) col-value-groups)
-             [&quot;Row totals&quot;])))
-     (range (count pivot-cols)))))</pre></td></tr><tr><td class="docs"><p>Map of raw pivot rows keyed by [pivot-cols]. Use it per row-group.
+             (if (and
+                  multiple-measures?
+                  (= col-idx (last header-indices)))
+               measure-titles
+               (repeat (max 1 n-measures) &quot;Row totals&quot;)))))
+     header-indices)))</pre></td></tr><tr><td class="docs"><p>Map of raw pivot rows keyed by [pivot-cols]. Use it per row-group.
 This constructs a map where you can use a pivot-cols-value tuple to find the row-builder
 That is, suppose we have 2 pivot-cols, and valid values might be 'AA' and 'BA'. To get the
 raw pivot row where each of those values matches, you can run this function to get <code>m</code> and then
