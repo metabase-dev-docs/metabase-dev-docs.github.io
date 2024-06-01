@@ -2865,276 +2865,89 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.util.jvm" name="metabase.util.jvm"><h1 class="project-name">metabase.util.jvm</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>JVM-specific utilities and helpers.
-You don't want to import this namespace directly - these functions are re-exported by [[metabase.util]].</p>
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.util.jvm
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.api.query-metadata" name="metabase.api.query-metadata"><h1 class="project-name">metabase.api.query-metadata</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.api.query-metadata
   (:require
-   [clojure.java.classpath :as classpath]
-   [clojure.string :as str]
-   [clojure.tools.namespace.find :as ns.find]
-   [metabase.shared.util.i18n :refer [tru]]
-   [metabase.util.format :as u.format]
-   [metabase.util.log :as log]
-   [nano-id.core :as nano-id])
-  (:import
-   (java.net InetAddress InetSocketAddress Socket)
-   (java.util Base64 Base64$Decoder Base64$Encoder Locale PriorityQueue Random)
-   (java.util.concurrent TimeoutException)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Generates a random NanoID string. Usually these are used for the entity_id field of various models.
-If an argument is provided, it's taken to be an identity-hash string and used to seed the RNG,
-producing the same value every time.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn generate-nano-id
-  ([] (nano-id/nano-id))
-  ([seed-str]
-   (let [seed (Long/parseLong seed-str 16)
-         rnd  (Random. seed)
-         gen  (nano-id/custom
-               &quot;_-0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ&quot;
-               21
-               (fn [len]
-                 (let [ba (byte-array len)]
-                   (.nextBytes rnd ba)
-                   ba)))]
-     (gen))))</pre></td></tr><tr><td class="docs"><p>Make a properly-tagged Java interop varargs argument. This is basically the same as <code>into-array</code> but properly tags
-the result.</p>
-
-<p>  (u/varargs String)
-  (u/varargs String ["A" "B"])</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro varargs
-  {:style/indent 1, :arglists '([klass] [klass xs])}
-  [klass &amp; [objects]]
-  (vary-meta `(into-array ~klass ~objects)
-             assoc :tag (format &quot;[L%s;&quot; (.getTypeName ^Class (ns-resolve *ns* klass)))))</pre></td></tr><tr><td class="docs"><p>Timeout (in ms) for checking if a host is available with <code>host-up?</code> and <code>host-port-up?</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^:const host-up-timeout
-  5000)</pre></td></tr><tr><td class="docs"><p>Returns true if the port is active on a given host, false otherwise</p>
-</td><td class="codes"><pre class="brush: clojure">(defn host-port-up?
-  [^String hostname, ^Integer port]
+    [metabase.api.database :as api.database]
+    [metabase.api.field :as api.field]
+    [metabase.api.table :as api.table]
+    [metabase.lib.core :as lib]
+    [metabase.lib.metadata.jvm :as lib.metadata.jvm]
+    [metabase.lib.util :as lib.util]
+    [metabase.util.log :as log]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- fetch-or-warn
+  [{entity-type :type entity-id :id} f &amp; f-args]
   (try
-    (let [sock-addr (InetSocketAddress. hostname port)]
-      (with-open [sock (Socket.)]
-        (.connect sock sock-addr host-up-timeout)
-        true))
-    (catch Throwable _ false)))</pre></td></tr><tr><td class="docs"><p>Returns true if the host given by hostname is reachable, false otherwise </p>
-</td><td class="codes"><pre class="brush: clojure">(defn host-up?
-  [^String hostname]
-  (try
-    (let [host-addr (InetAddress/getByName hostname)]
-      (.isReachable host-addr host-up-timeout))
-    (catch Throwable _ false)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defprotocol ^:private IFilteredStacktrace
-  (filtered-stacktrace [this]
-    &quot;Get the stack trace associated with E and return it as a vector with non-metabase frames after the last Metabase
-    frame filtered out.&quot;))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(extend-protocol IFilteredStacktrace
-  nil
-  (filtered-stacktrace [_] nil)
-
-  Throwable
-  (filtered-stacktrace [^Throwable this]
-    (filtered-stacktrace (.getStackTrace this)))
-
-  Thread
-  (filtered-stacktrace [^Thread this]
-    (filtered-stacktrace (.getStackTrace this))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(extend (Class/forName &quot;[Ljava.lang.StackTraceElement;&quot;)
-  IFilteredStacktrace
-  {:filtered-stacktrace
-   (fn [this]
-     ;; keep all the frames before the last Metabase frame, but then filter out any other non-Metabase frames after
-     ;; that
-     (let [[frames-after-last-mb other-frames]     (split-with #(not (str/includes? % &quot;metabase&quot;))
-                                                               (seq this))
-           [last-mb-frame &amp; frames-before-last-mb] (for [frame other-frames
-                                                         :when (str/includes? frame &quot;metabase&quot;)]
-                                                     (str/replace frame #&quot;^metabase\.&quot; &quot;&quot;))]
-       (vec
-        (concat
-         (map str frames-after-last-mb)
-         ;; add a little arrow to the frame so it stands out more
-         (cons
-          (some-&gt;&gt; last-mb-frame (str &quot;--&gt; &quot;))
-          frames-before-last-mb)))))})</pre></td></tr><tr><td class="docs"><p>Whether string <code>s</code> is a valid IP (v4 or v6) address.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ip-address?
-  [s]
-  (and (string? s)
-       (.isValid (org.apache.commons.validator.routines.InetAddressValidator/getInstance) ^String s)))</pre></td></tr><tr><td class="docs"><p>A reducing function that maintains a queue of the largest items as determined by <code>kompare</code>. The queue is bounded
-in size by <code>size</code>. Useful if you are interested in the largest <code>size</code> number of items without keeping the entire
-collection in memory.</p>
-
-<p>In general,
-(=
-  (take-last 2 (sort-by identity kompare coll))
-  (transduce (map identity) (u/sorted-take 2 kompare) coll))
-But the entire collection is not in memory, just at most</p>
-</td><td class="codes"><pre class="brush: clojure">(defn sorted-take
-  [size kompare]
-  (fn bounded-heap-acc
-    ([] (PriorityQueue. size kompare))
-    ([^PriorityQueue q]
-     (loop [acc []]
-       (if-let [x (.poll q)]
-         (recur (conj acc x))
-         acc)))
-    ([^PriorityQueue q item]
-     (if (&gt;= (.size q) size)
-       (let [smallest (.peek q)]
-         (if (pos? (kompare item smallest))
-           (doto q
-             (.poll)
-             (.offer item))
-           q))
-       (doto q
-         (.offer item))))))</pre></td></tr><tr><td class="docs"><p>Gather the full exception chain into a sequence.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn full-exception-chain
-  [e]
-  (when (instance? Throwable e)
-    (take-while some? (iterate ex-cause e))))</pre></td></tr><tr><td class="docs"><p>Like <code>ex-data</code>, but merges <code>ex-data</code> from causes. If duplicate keys exist, the keys from the highest level are
-preferred.</p>
-
-<p>  (def e (ex-info "A" {:a true, :both "a"} (ex-info "B" {:b true, :both "A"})))</p>
-
-<p>  (ex-data e)
-  ;; -> {:a true, :both "a"}</p>
-
-<p>  (u.jvm/all-ex-data e)
-  ;; -> {:a true, :b true, :both "a"}</p>
-</td><td class="codes"><pre class="brush: clojure">(defn all-ex-data
-  [e]
-  (reduce
-   (fn [data e]
-     (merge (ex-data e) data))
-   nil
-   (full-exception-chain e)))</pre></td></tr><tr><td class="docs"><p>Execute <code>f</code>, a function that takes no arguments, and return the results.
- If <code>f</code> fails with an exception, retry <code>f</code> up to <code>num-retries</code> times until it succeeds.</p>
-
-<p> Consider using the <code>auto-retry</code> macro instead of calling this function directly.</p>
-
-<p> For implementing more fine grained retry policies like exponential backoff,
- consider using the <code>metabase.util.retry</code> namespace.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn do-with-auto-retries
-  {:style/indent 1}
-  [num-retries f]
-  (if (&lt;= num-retries 0)
-    (f)
-    (try
-      (f)
-      (catch Throwable e
-        (when (::no-auto-retry? (all-ex-data e))
-          (throw e))
-        (log/warn (u.format/format-color 'red &quot;auto-retry %s: %s&quot; f (.getMessage e)))
-        (do-with-auto-retries (dec num-retries) f)))))</pre></td></tr><tr><td class="docs"><p>Execute <code>body</code> and return the results. If <code>body</code> fails with an exception, retry execution up to <code>num-retries</code> times
-until it succeeds.</p>
-
-<p>You can disable auto-retries for a specific ExceptionInfo by including <code>{:metabase.util.jvm/no-auto-retry? true}</code> in
-its data (or the data of one of its causes.)</p>
-
-<p>For implementing more fine grained retry policies like exponential backoff,
-consider using the <code>metabase.util.retry</code> namespace.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro auto-retry
-  {:style/indent 1}
-  [num-retries &amp; body]
-  `(do-with-auto-retries ~num-retries
-     (fn [] ~@body)))</pre></td></tr><tr><td class="docs"><p>A shared Base64 decoder instance.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^Base64$Decoder base64-decoder
-  (Base64/getDecoder))</pre></td></tr><tr><td class="docs"><p>Decodes a Base64 string into bytes.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn decode-base64-to-bytes
-  ^bytes [^String string]
-  (.decode base64-decoder string))</pre></td></tr><tr><td class="docs"><p>Decodes the Base64 string <code>input</code> to a UTF-8 string.</p>
-
-<p>TODO -- this is only used [[metabase.analytics.snowplow-test]] these days</p>
-</td><td class="codes"><pre class="brush: clojure">(defn decode-base64
-  [input]
-  (new java.lang.String (decode-base64-to-bytes input) &quot;UTF-8&quot;))</pre></td></tr><tr><td class="docs"><p>A shared Base64 encoder instance.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^Base64$Encoder base64-encoder
-  (Base64/getEncoder))</pre></td></tr><tr><td class="docs"><p>Encodes the UTF-8 encoding of the string <code>input</code> to a Base64 string.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn encode-base64
-  ^String [^String input]
-  (.encodeToString base64-encoder (.getBytes input &quot;UTF-8&quot;)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private do-with-us-locale-lock (Object.))</pre></td></tr><tr><td class="docs"><p>Implementation for <code>with-us-locale</code> macro; see below.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn do-with-us-locale
-  [f]
-  ;; Since I'm 99% sure default Locale isn't thread-local we better put a lock in place here so we don't end up with
-  ;; the following race condition:
-  ;;
-  ;; Thread 1 ....*.............................*........................*...........*
-  ;;              ^getDefault() -&gt; Turkish      ^setDefault(US)          ^(f)        ^setDefault(Turkish)
-  ;; Thread 2 ....................................*....................*................*......*
-  ;;                                              ^getDefault() -&gt; US  ^setDefault(US)  ^(f)   ^setDefault(US)
-  (locking do-with-us-locale-lock
-    (let [original-locale (Locale/getDefault)]
-      (try
-        (Locale/setDefault Locale/US)
-        (f)
-        (finally
-          (Locale/setDefault original-locale))))))</pre></td></tr><tr><td class="docs"><p>Execute <code>body</code> with the default system locale temporarily set to <code>locale</code>. Why would you want to do this? Tons of
-code relies on <code>String/toUpperCase</code> which converts a string to uppercase based on the default locale. Normally, this
-does what you'd expect, but when the default locale is Turkish, all hell breaks loose:</p>
-
-<p>  ;; Locale is Turkish / -Duser.language=tr
-  (.toUpperCase "filename") ;; -> "FİLENAME"</p>
-
-<p>Rather than submit PRs to every library in the world to use <code>(.toUpperCase &lt;str&gt; Locale/US)</code>, it's simpler just to
-temporarily bind the default Locale to something predicatable (i.e. US English) when doing something important that
-tends to break like running Liquibase migrations.)</p>
-
-<p>Note that because <code>Locale/setDefault</code> and <code>Locale/getDefault</code> aren't thread-local (as far as I know) I've had to put
-a lock in place to prevent race conditions where threads simulataneously attempt to fetch and change the default
-Locale. Thus this macro should be used sparingly, and only in places that are already single-threaded (such as the
-launch code that runs Liquibase).</p>
-
-<p>DO NOT use this macro in API endpoints or other places that are multithreaded or performance will be negatively
-impacted. (You shouldn't have a good reason for using this there anyway. Rewrite your code to pass <code>Locale/US</code> when
-you call <code>.toUpperCase</code> or <code>str/upper-case</code>. Only use this macro if the calls in question are part of a 3rd-party
-library.)</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro with-us-locale
-  {:style/indent 0}
-  [&amp; body]
-  `(do-with-us-locale (fn [] ~@body)))</pre></td></tr><tr><td class="docs"><p>Vector of symbols of all Metabase namespaces, excluding test namespaces. This is intended
-for use by various routines that load related namespaces, such as task and events
-initialization.</p>
-
-<p>This is made <code>^:const</code> so it will get calculated when the uberjar is compiled. <code>find-namespaces</code> won't work if
-source is excluded; either way this takes a few seconds, so doing it at compile time speeds up launch as well.</p>
-</td><td class="codes"><pre class="brush: clojure">(defonce ^:const 
-  metabase-namespace-symbols
-  (vec (sort (for [ns-symb (ns.find/find-namespaces (classpath/system-classpath))
-                   :when   (and (str/starts-with? ns-symb &quot;metabase&quot;)
-                                (not (str/includes? ns-symb &quot;test&quot;)))]
-               ns-symb))))</pre></td></tr><tr><td class="docs"><p>Call <code>deref</code> on a something derefable (e.g. a future or promise), and throw an exception if it takes more than
-<code>timeout-ms</code>. If <code>ref</code> is a future it will attempt to cancel it as well.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn deref-with-timeout
-  [reff timeout-ms]
-  (let [result (deref reff timeout-ms ::timeout)]
-    (when (= result ::timeout)
-      (when (future? reff)
-        (future-cancel reff))
-      (throw (TimeoutException. (tru &quot;Timed out after {0}&quot; (u.format/format-milliseconds timeout-ms)))))
-    result))</pre></td></tr><tr><td class="docs"><p>Impl for <code>with-timeout</code> macro.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn do-with-timeout
-  [timeout-ms f]
-  (try
-    (deref-with-timeout (future-call f) timeout-ms)
-    (catch java.util.concurrent.ExecutionException e
-      (throw (.getCause e)))))</pre></td></tr><tr><td class="docs"><p>Run <code>body</code> in a <code>future</code> and throw an exception if it fails to complete after <code>timeout-ms</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro with-timeout
-  [timeout-ms &amp; body]
-  `(do-with-timeout ~timeout-ms (fn [] ~@body)))</pre></td></tr><tr><td class="docs"><p>Returns <code>(thunk)</code> if the result satisfies the <code>done?</code> predicate within the timeout and nil otherwise.
-The default timeout is 1000ms and the default interval is 100ms.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn poll
-  [{:keys [thunk done? timeout-ms interval-ms]
-    :or   {timeout-ms 1000 interval-ms 100}}]
-  (let [start-time (System/currentTimeMillis)]
-    (loop []
-      (let [response (thunk)]
-        (if (done? response)
-          response
-          (let [current-time (System/currentTimeMillis)
-                elapsed-time (- current-time start-time)]
-            (if (&gt;= elapsed-time timeout-ms)
-              nil ; timeout reached
-              (do
-                (Thread/sleep (long interval-ms))
-                (recur)))))))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+    (apply f entity-id f-args)
+    (catch Exception e
+      (log/warnf &quot;Error in dashboard metadata %s %s: %s&quot; entity-type entity-id (ex-message e)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- metadata-for-dependents [dependents]
+  {:tables (-&gt;&gt; (:table dependents)
+                ;; Can be int or &quot;card__&lt;id&gt;&quot;
+                (sort-by (comp str :id))
+                (into []
+                      (keep #(fetch-or-warn
+                               %
+                               (fn [card-or-table-id]
+                                 (if-let [card-id (lib.util/legacy-string-table-id-&gt;card-id card-or-table-id)]
+                                   (api.table/fetch-card-query-metadata card-id)
+                                   (api.table/fetch-table-query-metadata card-or-table-id {})))))))
+   :databases (-&gt;&gt; (:database dependents)
+                   (sort-by :id)
+                   (into []
+                         (keep #(fetch-or-warn % api.database/get-database {}))))
+   :fields (-&gt;&gt; (:field dependents)
+                (sort-by :id)
+                (into []
+                      (keep #(fetch-or-warn % api.field/get-field {}))))})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- dependents-for-cards [cards]
+  (let [database-ids (set (map :database_id cards))
+        db-&gt;mp (into {} (map (juxt identity lib.metadata.jvm/application-database-metadata-provider)
+                             database-ids))]
+    (group-by :type (set (mapcat (fn [{card-type :type card-id :id :keys [database_id dataset_query]}]
+                                   (let [mp (db-&gt;mp database_id)
+                                         query (lib/query mp dataset_query)]
+                                     (if (and (pos-int? card-id) (some? card-type))
+                                       (lib/dependent-metadata query card-id card-type)
+                                       ;; xray cards don't have real ids
+                                       (lib/dependent-metadata query nil :question)))) cards)))))</pre></td></tr><tr><td class="docs"><p>Fetches dependent query-metadata for a given dashboard</p>
+</td><td class="codes"><pre class="brush: clojure">(defn dashboard-metadata
+  [dashboard]
+  (let [dashcards (:dashcards dashboard)
+        links (group-by :type (set (for [dashcard dashcards
+                                         :let [top-click-behavior (get-in dashcard [:visualization_settings :click_behavior])
+                                               col-click-behaviors (keep (comp :click_behavior val)
+                                                                         (get-in dashcard [:visualization_settings :column_settings]))]
+                                         {:keys [linkType type targetId]} (conj col-click-behaviors top-click-behavior)
+                                         :when (and (= type &quot;link&quot;)
+                                                    (contains? #{&quot;question&quot; &quot;dashboard&quot;} linkType))]
+                                     {:type (case linkType
+                                              &quot;question&quot; :card
+                                              &quot;dashboard&quot; :dashboard)
+                                      :id targetId})))
+        link-cards (-&gt;&gt; (:card links)
+                        (sort-by :id)
+                        (into []
+                              (keep #(fetch-or-warn % (requiring-resolve 'metabase.api.card/get-card)))))
+        cards (-&gt;&gt; (concat
+                     (for [{:keys [card series]} dashcards
+                           :let [all (conj series card)]
+                           card all]
+                       card)
+                     link-cards)
+                   (filter :dataset_query)
+                   (into []))
+        dependents (dependents-for-cards cards)
+        dashboard-specific {:cards link-cards
+                            :dashboards (-&gt;&gt; (:dashboard links)
+                                             (sort-by :id)
+                                             (into []
+                                                   (keep #(fetch-or-warn % (requiring-resolve 'metabase.api.dashboard/get-dashboard)))))}]
+    (merge (metadata-for-dependents dependents)
+           dashboard-specific)))</pre></td></tr><tr><td class="docs"><p>Fetches dependent query-metadata for a given card.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn card-metadata
+  [card]
+  (metadata-for-dependents (dependents-for-cards [card])))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

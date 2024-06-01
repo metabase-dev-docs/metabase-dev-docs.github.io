@@ -2890,29 +2890,27 @@ net.brehaut.ClojureTools = (function (SH) {
   (span/with-span!
     {:name &quot;record-view!&quot;}
     (when (premium-features/log-enabled?)
-      (t2/insert! :model/ViewLog view-or-views))))</pre></td></tr><tr><td class="docs"><p>Generates a view, given an event map.</p>
+      (t2/insert! :model/ViewLog view-or-views))))</pre></td></tr><tr><td class="docs"><p>Generates a view, given an event map. The event map either has an <code>object</code> or a <code>model</code> and <code>object-id</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- generate-view
-  [{:keys [object user-id has-access]
-    :or   {has-access true}}]
-  {:model      (u/lower-case-en (audit-log/model-name object))
+  [&amp; {:keys [model object-id object user-id has-access context]
+      :or   {has-access true}}]
+  {:model      (u/lower-case-en (audit-log/model-name (or model object)))
    :user_id    (or user-id api/*current-user-id*)
-   :model_id   (u/id object)
-   :has_access has-access})</pre></td></tr><tr><td class="docs">
+   :model_id   (or object-id (u/id object))
+   :has_access has-access
+   :context    context})</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(derive ::card-read-event :metabase/event)
 (derive :event/card-read ::card-read-event)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(m/defmethod events/publish-event! ::card-read-event
   &quot;Handle processing for a generic read event notification&quot;
-  [topic {:keys [object user-id] :as event}]
+  [topic {:keys [object-id user-id] :as event}]
   (span/with-span!
-    {:name &quot;view-log-card-read&quot;
-     :topic topic
+    {:name    &quot;view-log-card-read&quot;
+     :topic   topic
      :user-id user-id}
     (try
-      (increment-view-counts! :model/Card (:id object))
-      (-&gt; event
-          generate-view
-          (assoc :context &quot;question&quot;)
-          record-views!)
+      (increment-view-counts! :model/Card object-id)
+      (record-views! (generate-view :model :model/Card event))
       (catch Throwable e
         (log/warnf e &quot;Failed to process view event. %s&quot; topic)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(derive ::collection-read-event :metabase/event)
@@ -2941,34 +2939,17 @@ net.brehaut.ClojureTools = (function (SH) {
     (catch Throwable e
       (log/warnf e &quot;Failed to process view event. %s&quot; topic))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(derive ::dashboard-read :metabase/event)
-(derive :event/dashboard-read ::dashboard-read)</pre></td></tr><tr><td class="docs"><p>Returns true if the dashcard's card was readable by the current user, and false otherwise. Unreadable cards are
-replaced with maps containing just the card's ID, so we can check for this to determine whether the card was readable</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- readable-dashcard?
-  [dashcard]
-  (let [card (:card dashcard)]
-    (not= (set (keys card)) #{:id})))</pre></td></tr><tr><td class="docs">
+(derive :event/dashboard-read ::dashboard-read)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(m/defmethod events/publish-event! ::dashboard-read
-  &quot;Handle processing for the dashboard read event. Logs the dashboard view as well as card views for each card on the
-  dashboard.&quot;
-  [topic {:keys [object user-id] :as event}]
+  &quot;Handle processing for the dashboard read event. Logs the dashboard view. Card views are logged separately.&quot;
+  [topic {:keys [object-id user-id] :as event}]
   (span/with-span!
     {:name &quot;view-log-dashboard-read&quot;
      :topic topic
      :user-id user-id}
     (try
-      (let [dashcards (filter :card_id (:dashcards object)) ;; filter out link/text cards wtih no card_id
-            user-id   (or user-id api/*current-user-id*)
-            views     (map (fn [dashcard]
-                             {:model      &quot;card&quot;
-                              :model_id   (u/id (:card_id dashcard))
-                              :user_id    user-id
-                              :has_access (readable-dashcard? dashcard)
-                              :context    &quot;dashboard&quot;})
-                           dashcards)
-            dash-view (generate-view event)]
-        (apply increment-view-counts! :model/Card (map :card_id dashcards))
-        (increment-view-counts! :model/Dashboard (:id object))
-        (record-views! (cons dash-view views)))
+      (increment-view-counts! :model/Dashboard object-id)
+      (record-views! (generate-view :model :model/Dashboard event))
       (catch Throwable e
         (log/warnf e &quot;Failed to process view event. %s&quot; topic)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(derive ::table-read :metabase/event)
