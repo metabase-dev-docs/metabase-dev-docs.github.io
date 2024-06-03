@@ -2899,6 +2899,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [toucan2.execute :as t2.execute])
   (:import
    (java.util Locale)
+   (javax.sql DataSource)
    (liquibase Scope)
    (liquibase.change Change)
    (liquibase.change.custom CustomTaskChange CustomTaskRollback)
@@ -3812,8 +3813,20 @@ For some reasons during data-migration [[metabase.models.setting/get]] return th
 </td><td class="codes"><pre class="brush: clojure">(define-reversible-migration UnifyTimeColumnsType
   (unify-time-column-type! :up)
   (unify-time-column-type! :down))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- mariadb?
+  [ds]
+  (with-open [conn (.getConnection ^DataSource ds)]
+    (= &quot;MariaDB&quot; (.getDatabaseProductName (.getMetaData conn)))))</pre></td></tr><tr><td class="docs"><p>Like [[metabase.connection/db-type]] but distinguishes between mysql and mariadb.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- db-type*
+  []
+  (let [db-type (mdb.connection/db-type)]
+    (if (= db-type :mysql)
+      (if (mariadb? (mdb.connection/data-source))
+        :mariadb
+        :mysql)
+      db-type)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(define-reversible-migration CardRevisionAddType
-  (case (mdb.connection/db-type)
+  (case (db-type*)
     :postgres
     ;; postgres doesn't allow `\u0000` in text when converting to jsonb, so we need to remove them before we can
     ;; parse the json. We use negative look behind to avoid matching `\\u0000` (metabase#40835)
@@ -3835,7 +3848,9 @@ For some reasons during data-migration [[metabase.models.setting/get]] return th
                        ELSE 'question'
                    END)
                WHERE model = 'Card' AND JSON_UNQUOTE(JSON_EXTRACT(object, '$.dataset')) IS NOT NULL;;&quot;])
-    :h2
+    ;; json_extract on mariadb throws an error if the json is more than 32 levels nested. See #41924
+    ;; So we do this in clojure land for mariadb
+    (:h2 :mariadb)
     (let [migrate! (fn [revision]
                      (let [object     (json/parse-string (:object revision) keyword)
                            new-object (assoc object :type (if (:dataset object)
@@ -3847,7 +3862,7 @@ For some reasons during data-migration [[metabase.models.setting/get]] return th
       (run! migrate! (t2/reducible-query {:select [:*]
                                           :from   [:revision]
                                           :where  [:= :model &quot;Card&quot;]}))))
-  (case (mdb.connection/db-type)
+  (case (db-type*)
     :postgres
     (t2/query [&quot;UPDATE revision
                 SET object = jsonb_set(
@@ -3860,7 +3875,7 @@ For some reasons during data-migration [[metabase.models.setting/get]] return th
                 WHERE model = 'Card' AND (object::jsonb-&gt;&gt;'type') IS NOT NULL;&quot;])
     :mysql
     (do
-      (t2/query [&quot;UPDATE revision
+     (t2/query [&quot;UPDATE revision
                  SET object = JSON_SET(
                      object,
                      '$.dataset',
@@ -3869,10 +3884,10 @@ For some reasons during data-migration [[metabase.models.setting/get]] return th
                          THEN true ELSE false
                      END)
                  WHERE model = 'Card' AND JSON_UNQUOTE(JSON_EXTRACT(object, '$.type')) IS NOT NULL;&quot;])
-      (t2/query [&quot;UPDATE revision
+     (t2/query [&quot;UPDATE revision
                  SET object = JSON_REMOVE(object, '$.type')
                  WHERE model = 'Card' AND JSON_UNQUOTE(JSON_EXTRACT(object, '$.type')) IS NOT NULL;&quot;]))
-    :h2
+    (:h2 :mariadb)
     (let [rollback! (fn [revision]
                       (let [object     (json/parse-string (:object revision) keyword)
                             new-object (-&gt; object
@@ -4101,7 +4116,7 @@ on the second migrate up.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- area-bar-stacked-viz-migration
   [{display :display viz :visualization_settings :as card}]
   (if (and (#{:area :bar &quot;area&quot; &quot;bar&quot;} display)
-             (:stackable.stack_type viz))
+           (:stackable.stack_type viz))
     (let [actual-display (or (:stackable.stack_display viz) display)
           new-viz        (m/update-existing viz :series_settings update-vals (fn [m] (dissoc m :display)))]
       (assoc card
