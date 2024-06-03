@@ -3209,7 +3209,34 @@ This property is being a descendant of a visible collection other than A. Used f
   ([collection]
    (effective-location-path* collection))
   ([real-location-path allowed-collection-ids]
-   (effective-location-path* real-location-path allowed-collection-ids)))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
+   (effective-location-path* real-location-path allowed-collection-ids)))</pre></td></tr><tr><td class="docs"><p>Fields that should be included when hydrating the <code>:effective_parent</code> of a collection. Used for displaying recent views
+and collection search results.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private effective-parent-fields
+  [:id :name :authority_level :type])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- effective-parent-root []
+  (select-keys
+   (collection.root/root-collection-with-ui-details {})
+   effective-parent-fields))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mi/define-batched-hydration-method effective-parent
+  :effective_parent
+  &quot;Given a seq of `collections`, batch hydrates them with their `:effective_parent`, their parent collection in their
+  effective location. (i.e. the most recent ancestor the current user has read access to). If :effective_location is not
+  present on any collections, it is hydrated as well, as it is needed to compute the effective parent.&quot;
+  [collections]
+  (let [collections     (map #(t2/hydrate % :effective_location) collections)
+        parent-ids      (-&gt;&gt; collections
+                             (map :effective_location)
+                             (keep location-path-&gt;parent-id))
+        id-&gt;parent-coll (merge {nil (effective-parent-root)}
+                               (when (seq parent-ids)
+                                 (t2/select-pk-&gt;fn identity :model/Collection
+                                                   {:select effective-parent-fields
+                                                    :where [:in :id parent-ids]})))]
+    (map
+     (fn [collection]
+       (let [parent-id (-&gt; collection :effective_location location-path-&gt;parent-id)]
+         (assoc collection :effective_parent (id-&gt;parent-coll parent-id))))
+     collections)))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
 |                          Nested Collections: Ancestors, Childrens, Child Collections                           |
 +----------------------------------------------------------------------------------------------------------------+</p>
 </td><td class="codes"></td></tr><tr><td class="docs">

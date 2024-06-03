@@ -2893,7 +2893,6 @@ one(s) will be deleted, so that the count stays at least 20.</p>
    [malli.error :as me]
    [medley.core :as m]
    [metabase.config :as config]
-   [metabase.models.collection :as collection]
    [metabase.models.collection.root :as root]
    [metabase.models.interface :as mi]
    [metabase.util :as u]
@@ -3035,7 +3034,7 @@ We use this to ensure that archived models are not returned in the recent views.
   (when (false? (:archived model)) model))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- root-coll []
   (select-keys
-   (into {} (root/root-collection-with-ui-details {}))
+   (root/root-collection-with-ui-details {})
    [:id :name :authority_level]))</pre></td></tr><tr><td class="docs"><p>================== Recent Cards ==================</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Query to select card data</p>
 </td><td class="codes"><pre class="brush: clojure">(defn card-recents
@@ -3072,7 +3071,7 @@ We use this to ensure that archived models are not returned in the recent views.
      :authority_level (some-&gt; (:collection_authority_level model-object) name)}
     (root-coll)))</pre></td></tr><tr><td class="docs"><p>Returns true when a parent collection actually exists for this item.</p>
 
-<p>Careful: the root collection will have a nil <code>colelction_id</code> and a nil <code>collection_name</code>. We return false when the
+<p>Careful: the root collection will have a nil <code>collection_id</code> and a nil <code>collection_name</code>. We return false when the
 collection has a <code>collection_id</code>, and a nil <code>collection_name</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- parent-collection-valid?
   [{:keys [collection_id entity-coll-id]}]
@@ -3168,22 +3167,9 @@ collection has a <code>collection_id</code>, and a nil <code>collection_name</co
                                            :archived :location :trashed_from_location]
                                   :where [:and
                                           [:in :id collection-ids]
-                                          [:= :archived false]]})
-          coll-&gt;parent-id (fn [c]
-                            (some-&gt; c collection/effective-location-path collection/location-path-&gt;ids last))
-          parent-ids (into #{} (keep coll-&gt;parent-id) collections)
-          id-&gt;parent-coll (merge {nil (root-coll)}
-                                 (when (seq parent-ids)
-                                   (t2/select-pk-&gt;fn identity :model/Collection
-                                                     {:select [:id :name :authority_level]
-                                                      :where [:in :id parent-ids]})))]
-      ;; replace the collection ids with their collection data:
-      (map
-       (fn effective-collection-assocer [c]
-         (assoc c
-                :effective_parent (-&gt;&gt; (coll-&gt;parent-id c) id-&gt;parent-coll)
-                :effective_location (collection/effective-location-path c)))
-       collections))))</pre></td></tr><tr><td class="docs">
+                                          [:= :archived false]]})]
+      (-&gt;&gt; (t2/hydrate collections :effective_parent)
+           (map #(m/dissoc-in % [:effective_parent :type]))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod fill-recent-view-info :collection [{:keys [_model model_id timestamp model_object]}]
   (when-let [collection (and
                          (mi/can-read? model_object)
