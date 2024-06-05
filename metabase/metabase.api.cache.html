@@ -2918,7 +2918,19 @@ the schema, so docs for enterprise version won't be correct until we figure out 
                                     &quot;database&quot;  :model/Database
                                     &quot;dashboard&quot; :model/Dashboard
                                     &quot;question&quot;  :model/Card)
-                                  :id [:in ids]))))</pre></td></tr><tr><td class="docs"><p>/</p>
+                                  :id [:in ids]))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- check-cache-access [model id]
+  (if (or (nil? id)
+          ;; sometimes its a sequence and we're going to check for settings access anyway
+          (not (number? id))
+          (zero? id))
+    ;; if you're not accessing a concrete entity, you should be able to access settings
+    (validation/check-has-application-permission :setting)
+    (api/write-check (case model
+                       &quot;database&quot; :model/Database
+                       &quot;dashboard&quot; :model/Dashboard
+                       &quot;question&quot; :model/Card)
+        id)))</pre></td></tr><tr><td class="docs"><p>/</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
   &quot;Return cache configuration.&quot;
   [:as {{:strs [model collection id]
@@ -2928,10 +2940,10 @@ the schema, so docs for enterprise version won't be correct until we figure out 
    ;; note that `nil` in `collection` means all configurations not scoped to any particular collection
    collection [:maybe ms/PositiveInt]
    id         [:maybe ms/PositiveInt]}
-  (validation/check-has-application-permission :setting)
   (when (and (not (premium-features/enable-cache-granular-controls?))
              (not= model [&quot;root&quot;]))
     (throw (premium-features/ee-feature-error (tru &quot;Granular Caching&quot;))))
+  (check-cache-access (first model) id)
   {:data (cache-config/get-list model collection id)})</pre></td></tr><tr><td class="docs"><p>/</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint PUT 
   &quot;Store cache configuration.&quot;
@@ -2941,6 +2953,7 @@ the schema, so docs for enterprise version won't be correct until we figure out 
    strategy (CacheStrategyAPI)}
   (validation/check-has-application-permission :setting)
   (assert-valid-models model [model_id] (premium-features/enable-cache-granular-controls?))
+  (check-cache-access model model_id)
   {:id (cache-config/store! api/*current-user-id* config)})</pre></td></tr><tr><td class="docs"><p>/</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint DELETE 
   &quot;Delete cache configurations.&quot;
@@ -2949,6 +2962,7 @@ the schema, so docs for enterprise version won't be correct until we figure out 
    model_id (ms/QueryVectorOf ms/IntGreaterThanOrEqualToZero)}
   (validation/check-has-application-permission :setting)
   (assert-valid-models model model_id (premium-features/enable-cache-granular-controls?))
+  (check-cache-access model model_id)
   (cache-config/delete! api/*current-user-id* model model_id)
   nil)</pre></td></tr><tr><td class="docs"><p>/invalidate</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint POST 
