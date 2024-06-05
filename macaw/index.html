@@ -2874,6 +2874,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [macaw.walk :as mw])
   (:import
    (com.metabase.macaw AstWalker$QueueItem)
+   (java.util.regex Pattern)
    (net.sf.jsqlparser.expression Alias)
    (net.sf.jsqlparser.schema Column Table)
    (net.sf.jsqlparser.statement Statement)
@@ -2911,19 +2912,25 @@ net.brehaut.ClojureTools = (function (SH) {
                (str/ends-with? s q)))
         quotes))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- strip-quotes [s]
-  (subs s 1 (dec (count s))))</pre></td></tr><tr><td class="docs"><p>Normalize a schema, table, column, etc. references so that we can match them regardless of syntactic differences.</p>
+  (subs s 1 (dec (count s))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- setting-&gt;relax-case [{:keys [case-insensitive]}]
+  (when case-insensitive
+    (case case-insensitive
+      :lower str/lower-case
+      :upper str/upper-case
+      ;; This will work for replace, but not for analyzing where we need a literal to accumulate
+      :agnostic (fn [s] (re-pattern (str &quot;(?i)&quot; (Pattern/quote s)))))))</pre></td></tr><tr><td class="docs"><p>Normalize a schema, table, column, etc. references so that we can match them regardless of syntactic differences.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn normalize-reference
-  [s {:keys [preserve-identifiers? case-insensitive? quotes-preserve-case?]}]
+  [s {:keys [preserve-identifiers? quotes-preserve-case?] :as opts}]
   (if preserve-identifiers?
     s
     (when s
-      (let [quoted           (quoted? s)
-            case-insensitive (and case-insensitive?
-                                  (not (and quotes-preserve-case?
-                                            quoted)))]
+      (let [quoted     (quoted? s)
+            relax-case (when-not (and quotes-preserve-case? quoted)
+                         (setting-&gt;relax-case opts))]
         (cond-&gt; s
-          quoted strip-quotes
-          case-insensitive str/lower-case)))))</pre></td></tr><tr><td class="docs">
+          quoted     strip-quotes
+          relax-case relax-case)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- find-table [{:keys [alias-&gt;table name-&gt;table] :as opts} ^Table t]
   (let [n      (normalize-reference (.getName t) opts)
         schema (normalize-reference (.getSchemaName t) opts)]
@@ -3026,10 +3033,25 @@ the query'; this function doesn't do additional inference work to find out a tab
   [statement &amp; {:as opts}]
   ;; By default, we will preserve identifiers verbatim, to be agnostic of case and quote behaviour.
   ;; This may result in duplicate components, which are left to the caller to deduplicate.
+  ;; In Metabase's case this is done during the stage where the database metadata is queried.
   (collect/query-&gt;components statement (merge {:preserve-identifiers? true} opts)))</pre></td></tr><tr><td class="docs"><p>Given a SQL query, apply the given table, column, and schema renames.</p>
+
+<p>Supported options:</p>
+
+<ul>
+<li><p>case-insensitive: whether to relax the comparison</p>
+
+<ul><li>:upper    - identifiers are implicitly case to uppercase, as per the SQL-92 standard.</li>
+<li>:lower    - identifiers are implicitly cast to lowercase, as per Postgres et al.</li>
+<li>:agnostic - case is ignored when comparing identifiers in code to replacement "from" strings.</li></ul></li>
+<li><p>quotes-preserve-case: whether quoted identifiers should override the previous option.</p></li>
+</ul>
 </td><td class="codes"><pre class="brush: clojure">(defn replace-names
   [sql renames &amp; {:as opts}]
-  (rewrite/replace-names sql (parsed-query sql) renames opts))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.rewrite" name="macaw.rewrite"><h1 class="project-name">macaw.rewrite</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+  (rewrite/replace-names sql
+                         (parsed-query sql)
+                         renames
+                         (select-keys opts [:case-insensitive :quotes-preserve-case? :allow-unused?])))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.rewrite" name="macaw.rewrite"><h1 class="project-name">macaw.rewrite</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns macaw.rewrite
   (:require
    [macaw.collect :as collect]
@@ -3102,7 +3124,7 @@ the query'; this function doesn't do additional inference work to find out a tab
     (.setName t (val rename)))
   (let [raw-schema-name (.getSchemaName t)
         schema-name     (collect/normalize-reference raw-schema-name opts)]
-    (when-let [schema-rename (find schema-renames schema-name)]
+    (when-let [schema-rename (u/seek (comp (partial u/match-component schema-name) key) schema-renames)]
       (vswap! updated-nodes conj [raw-schema-name schema-rename])
       (.setSchemaName t (val schema-rename)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- rename-column
@@ -3144,7 +3166,8 @@ the query'; this function doesn't do additional inference work to find out a tab
     res))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.util" name="macaw.util"><h1 class="project-name">macaw.util</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns macaw.util
   (:require
-   [clojure.string :as str]))</pre></td></tr><tr><td class="docs"><p>Generalized <code>group-by</code>, where you can supply your own reducing function (instead of usual <code>conj</code>).</p>
+   [clojure.string :as str])
+  (:import (java.util.regex Pattern)))</pre></td></tr><tr><td class="docs"><p>Generalized <code>group-by</code>, where you can supply your own reducing function (instead of usual <code>conj</code>).</p>
 
 <p>https://ask.clojure.org/index.php/12319/can-group-by-be-generalized</p>
 </td><td class="codes"><pre class="brush: clojure">(defn group-with
@@ -3166,23 +3189,27 @@ the query'; this function doesn't do additional inference work to find out a tab
 </td><td class="codes"><pre class="brush: clojure">(defn non-sentinel
   [s]
   (when s
-    (nil? (str/index-of s &quot;_sentinel_&quot;))))</pre></td></tr><tr><td class="docs"><p>Search the given map for the entry corresponding to [[map-key]], considering only the relevant keys.
-The relevant keys are obtained by ignoring any suffix of [[ks]] for which [[map-key]] has nil or missing values.
+    (nil? (str/index-of s &quot;_sentinel_&quot;))))</pre></td></tr><tr><td class="docs"><p>Check whether the given literal matches the expected literal or pattern.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn match-component
+  [expected actual]
+  (when expected
+    (if (instance? Pattern expected)
+      (boolean (re-find expected actual))
+      (= expected actual))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- match-prefix [element ks-prefix]
+  (let [expected (map element ks-prefix)]
+    (fn [entry]
+      (every? true? (map match-component expected (map (key entry) ks-prefix))))))</pre></td></tr><tr><td class="docs"><p>Search the given map for the entry corresponding to [[element]], considering only the relevant keys.
+The relevant keys are obtained by ignoring any suffix of [[ks]] for which [[element]] has nil or missing values.
 We require that there is at least one relevant key to find a match.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn find-relevant
-  [m map-key ks]
-  (when map-key
-    (if (every? (comp non-sentinel map-key) ks)
-      (find m (select-keys map-key ks))
-      ;; Strip off keys from right-to-left where they are nil, and relax search to only consider these keys.
-      ;; We need at least one non-generate key to remain for the search.
-      ;; NOTE: we could optimize away calling `non-sentinel` twice in this function, but for now just keeping it simple.
-      (when-let [ks-prefix (-&gt;&gt; ks reverse (drop-while (comp not non-sentinel map-key)) reverse seq)]
-        (when (not= ks ks-prefix)
-          (seek (comp #{(select-keys map-key ks-prefix)}
-                      #(select-keys % ks-prefix)
-                      key)
-                m))))))</pre></td></tr><tr><td class="docs">
+  [m element ks]
+  (when element
+    ;; Strip off keys from right-to-left where they are nil, and relax search to only consider these keys.
+    ;; We need at least one non-generate key to remain for the search.
+    ;; NOTE: we could optimize away calling `non-sentinel` twice in this function, but for now just keeping it simple.
+    (when-let [ks-prefix (-&gt;&gt; ks reverse (drop-while (comp not non-sentinel element)) reverse seq)]
+      (seek (match-prefix element ks-prefix) m))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private nil-val? (comp nil? val))</pre></td></tr><tr><td class="docs"><p>Remove any keys corresponding to nil values from the given map.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn strip-nils
   [m]
@@ -3235,6 +3262,7 @@ We require that there is at least one relevant key to find a match.</p>
    [macaw.test.util :refer [ws=]]
    [macaw.walk :as mw])
   (:import
+   (clojure.lang ExceptionInfo)
    (net.sf.jsqlparser.schema Table)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- and*
@@ -3353,13 +3381,20 @@ We require that there is at least one relevant key to find a match.</p>
          (m/replace-names &quot;SELECT DOGS.BaRk FROM dOGS&quot;
                           {:tables  {{:table &quot;dogs&quot;} &quot;cats&quot;}
                            :columns {{:table &quot;dogs&quot; :column &quot;bark&quot;} &quot;meow&quot;}}
-                          {:case-insensitive? true})))
+                          {:case-insensitive :lower})))
   (is (= &quot;SELECT meow FROM private.cats&quot;
          (m/replace-names &quot;SELECT bark FROM PUBLIC.dogs&quot;
                           {:schemas {&quot;public&quot; &quot;private&quot;}
                            :tables  {{:schema &quot;public&quot; :table &quot;dogs&quot;} &quot;cats&quot;}
                            :columns {{:schema &quot;public&quot; :table &quot;dogs&quot; :column &quot;bark&quot;} &quot;meow&quot;}}
-                          {:case-insensitive? true}))))</pre></td></tr><tr><td class="docs">
+                          {:case-insensitive :lower})))
+  (is (= &quot;SELECT id, meow FROM private.cats&quot;
+         (m/replace-names &quot;SELECT id, bark FROM PUBLIC.dogs&quot;
+                          {:schemas {&quot;public&quot; &quot;private&quot;}
+                           :tables  {{:schema &quot;public&quot; :table &quot;DOGS&quot;} &quot;cats&quot;}
+                           :columns {{:schema &quot;PUBLIC&quot; :table &quot;dogs&quot; :column &quot;bark&quot;} &quot;meow&quot;}}
+                          {:case-insensitive :agnostic
+                           :allow-unused?    true}))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private heavily-quoted-query-mixed-case
   &quot;SELECT RAW, \&quot;Foo\&quot;, \&quot;dong\&quot;.\&quot;bAr\&quot;, `ding`.`dong`.`feE` FROM `ding`.dong&quot;)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest case-and-quotes-test
@@ -3367,14 +3402,32 @@ We require that there is at least one relevant key to find a match.</p>
     (is (= heavily-quoted-query-rewritten
            (m/replace-names heavily-quoted-query-mixed-case
                             heavily-quoted-query-rewrites
-                            :case-insensitive? true))))
+                            :case-insensitive :lower))))
   (testing &quot;One can opt-into ignoring case only for unquoted references&quot;
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo
+    (is (thrown-with-msg? ExceptionInfo
                           #&quot;Unknown rename: .* \&quot;(bar)|(foo)|(fee)\
                           (m/replace-names heavily-quoted-query-mixed-case
                                            heavily-quoted-query-rewrites
-                                           :case-insensitive? true
+                                           :case-insensitive :lower
                                            :quotes-preserve-case? true)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ambiguous-case-replacements
+  {:columns {{:schema &quot;public&quot; :table &quot;DOGS&quot; :column &quot;BARK&quot;}  &quot;MEOW&quot;
+             {:schema &quot;public&quot; :table &quot;dogs&quot; :column &quot;bark&quot;}  &quot;meow&quot;
+             {:schema &quot;public&quot; :table &quot;dogs&quot; :column &quot;growl&quot;} &quot;purr&quot;
+             {:schema &quot;public&quot; :table &quot;dogs&quot; :column &quot;GROWL&quot;} &quot;PuRr&quot;
+             {:schema &quot;public&quot; :table &quot;DOGS&quot; :column &quot;GROWL&quot;} &quot;PURR&quot;}} )</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(deftest ambiguous-case-test
+  (testing &quot;Correctly handles flexibility around the case of the replacements&quot;
+    (doseq [[case-insensitive expected] {:lower    &quot;SELECT meow, PuRr FROM DOGS&quot;
+                                         :upper    &quot;SELECT MEOW, PURR FROM DOGS&quot;
+                                         ;; Not strictly deterministic, depends on map ordering.
+                                         :agnostic &quot;SELECT MEOW, PuRr FROM DOGS&quot;}]
+      (is (= expected
+             (m/replace-names &quot;SELECT bark, `GROWL` FROM DOGS&quot;
+                              ambiguous-case-replacements
+                              {:case-insensitive      case-insensitive
+                               :quotes-preserve-case? true
+                               :allow-unused?         true}))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest infer-test
   (testing &quot;We can first column through a few hoops&quot;
     (is (= #{{:column &quot;amount&quot; :table &quot;orders&quot;}}
