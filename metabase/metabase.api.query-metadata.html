@@ -2868,49 +2868,112 @@ net.brehaut.ClojureTools = (function (SH) {
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.api.query-metadata" name="metabase.api.query-metadata"><h1 class="project-name">metabase.api.query-metadata</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.api.query-metadata
   (:require
-    [metabase.api.database :as api.database]
-    [metabase.api.field :as api.field]
-    [metabase.api.table :as api.table]
-    [metabase.lib.core :as lib]
-    [metabase.lib.metadata.jvm :as lib.metadata.jvm]
-    [metabase.lib.util :as lib.util]
-    [metabase.util.log :as log]))</pre></td></tr><tr><td class="docs">
+   [medley.core :as m]
+   [metabase.api.database :as api.database]
+   [metabase.api.field :as api.field]
+   [metabase.api.table :as api.table]
+   [metabase.lib.core :as lib]
+   [metabase.lib.metadata.jvm :as lib.metadata.jvm]
+   [metabase.lib.metadata.protocols :as lib.metadata.protocols]
+   [metabase.lib.util :as lib.util]
+   [metabase.models.card :as card]
+   [metabase.models.collection.root :as collection.root]
+   [metabase.models.interface :as mi]
+   [metabase.models.revision.last-edit :as last-edit]
+   [metabase.util.log :as log]
+   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- fetch-or-warn
   [{entity-type :type entity-id :id} f &amp; f-args]
   (try
     (apply f entity-id f-args)
     (catch Exception e
       (log/warnf &quot;Error in dashboard metadata %s %s: %s&quot; entity-type entity-id (ex-message e)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- partition-table-ids
+  [ids]
+  {:card-ids  (keep lib.util/legacy-string-table-id-&gt;card-id ids)
+   :table-ids (remove lib.util/legacy-string-table-id-&gt;card-id ids)})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- metadata-for-table-dependents
+  [table-dependents]
+  (let [{:keys [card-ids table-ids]} (partition-table-ids (map :id table-dependents))
+        card-metadatas (api.table/batch-fetch-card-query-metadatas card-ids)
+        table-metadatas (api.table/batch-fetch-table-query-metadatas table-ids)
+        all-metadatas (-&gt; []
+                          (into (sort-by :id table-metadatas))
+                          (into (sort-by :id card-metadatas)))]
+    (when (&lt; (count all-metadatas) (count table-dependents))
+      (log/warn &quot;Some (possibly virtual) tables are not readable by the current user&quot;))
+    all-metadatas))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- metadata-for-field-dependents
+  [field-dependents]
+  (let [metadatas (api.field/get-fields (map :id field-dependents))]
+    (when (&lt; (count metadatas) (count field-dependents))
+      (log/warn &quot;Some fields are not readable by the current user&quot;))
+    (vec (sort-by :id metadatas))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- metadata-for-dependents [dependents]
   {:tables (-&gt;&gt; (:table dependents)
                 ;; Can be int or &quot;card__&lt;id&gt;&quot;
-                (sort-by (comp str :id))
-                (into []
-                      (keep #(fetch-or-warn
-                               %
-                               (fn [card-or-table-id]
-                                 (if-let [card-id (lib.util/legacy-string-table-id-&gt;card-id card-or-table-id)]
-                                   (api.table/fetch-card-query-metadata card-id)
-                                   (api.table/fetch-table-query-metadata card-or-table-id {})))))))
+                metadata-for-table-dependents)
    :databases (-&gt;&gt; (:database dependents)
                    (sort-by :id)
                    (into []
                          (keep #(fetch-or-warn % api.database/get-database {}))))
    :fields (-&gt;&gt; (:field dependents)
-                (sort-by :id)
-                (into []
-                      (keep #(fetch-or-warn % api.field/get-field {}))))})</pre></td></tr><tr><td class="docs">
+                metadata-for-field-dependents)})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- collect-source-tables
+  [query]
+  (let [from-joins (mapcat collect-source-tables (:joins query))]
+    (if-let [source-query (:source-query query)]
+      (concat (collect-source-tables source-query) from-joins)
+      (cond-&gt;&gt; from-joins
+        (:source-table query) (cons (:source-table query))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- dependents-for-cards [cards]
-  (let [database-ids (set (map :database_id cards))
+  (let [cards-by-db (group-by :database_id cards)
         db-&gt;mp (into {} (map (juxt identity lib.metadata.jvm/application-database-metadata-provider)
-                             database-ids))]
+                             (keys cards-by-db)))]
+    (doseq [[database-id cards] cards-by-db]
+      (let [{:keys [card-ids table-ids]}
+            (-&gt;&gt; cards
+                 (mapcat (comp collect-source-tables #(-&gt; % :dataset_query :query)))
+                 partition-table-ids)
+            real-card-ids (filter pos-int? (concat (map :id cards) card-ids)) ; xray cards don't have real ids
+            mp (db-&gt;mp database-id)]
+        (lib.metadata.protocols/metadatas mp :metadata/card real-card-ids)
+        (lib.metadata.protocols/metadatas mp :metadata/table table-ids)))
     (group-by :type (set (mapcat (fn [{card-type :type card-id :id :keys [database_id dataset_query]}]
                                    (let [mp (db-&gt;mp database_id)
                                          query (lib/query mp dataset_query)]
                                      (if (and (pos-int? card-id) (some? card-type))
                                        (lib/dependent-metadata query card-id card-type)
                                        ;; xray cards don't have real ids
-                                       (lib/dependent-metadata query nil :question)))) cards)))))</pre></td></tr><tr><td class="docs"><p>Fetches dependent query-metadata for a given dashboard</p>
+                                       (lib/dependent-metadata query nil :question)))) cards)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- hydrate-persisted-for-models
+  [cards]
+  (let [models (m/index-by :id (t2/hydrate (filter card/model? cards) :persisted))]
+    (map #(get models (:id %) %) cards)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- get-cards
+  [ids]
+  (when (seq ids)
+    (let [root-collection
+          (collection.root/hydrated-root-collection)
+          with-last-edit-info #(last-edit/with-last-edit-info % :card)
+          hydrate #(t2/hydrate %
+                               :based_on_upload
+                               :creator
+                               :dashboard_count
+                               :can_write
+                               :can_run_adhoc_query
+                               :average_query_time
+                               :last_query_start
+                               :parameter_usage_count
+                               :can_restore
+                               [:collection :is_personal]
+                               [:moderation_reviews :moderator_details])]
+      (-&gt;&gt; (t2/select :model/Card :id [:in ids])
+           (filter mi/can-read?)
+           hydrate
+           hydrate-persisted-for-models
+           with-last-edit-info
+           (map #(collection.root/hydrate-root-collection % root-collection))))))</pre></td></tr><tr><td class="docs"><p>Fetches dependent query-metadata for a given dashboard</p>
 </td><td class="codes"><pre class="brush: clojure">(defn dashboard-metadata
   [dashboard]
   (let [dashcards (:dashcards dashboard)
@@ -2926,15 +2989,16 @@ net.brehaut.ClojureTools = (function (SH) {
                                               &quot;dashboard&quot; :dashboard)
                                       :id targetId})))
         link-cards (-&gt;&gt; (:card links)
+                        (map :id)
+                        get-cards
                         (sort-by :id)
-                        (into []
-                              (keep #(fetch-or-warn % (requiring-resolve 'metabase.api.card/get-card)))))
+                        vec)
         cards (-&gt;&gt; (concat
-                     (for [{:keys [card series]} dashcards
-                           :let [all (conj series card)]
-                           card all]
-                       card)
-                     link-cards)
+                    (for [{:keys [card series]} dashcards
+                          :let [all (conj series card)]
+                          card all]
+                      card)
+                    link-cards)
                    (filter :dataset_query)
                    (into []))
         dependents (dependents-for-cards cards)
@@ -2947,7 +3011,13 @@ net.brehaut.ClojureTools = (function (SH) {
            dashboard-specific)))</pre></td></tr><tr><td class="docs"><p>Fetches dependent query-metadata for a given card.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn card-metadata
   [card]
-  (metadata-for-dependents (dependents-for-cards [card])))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+  (metadata-for-dependents (dependents-for-cards [card])))</pre></td></tr><tr><td class="docs"><p>Fetches dependent query-metadata for a given ad-hoc query.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn adhoc-query-metadata
+  [{:keys [database] :as dataset-query}]
+  (let [mp (lib.metadata.jvm/application-database-metadata-provider database)
+        query (lib/query mp dataset-query)
+        dependents (lib/dependent-metadata query nil :question)]
+    (metadata-for-dependents (group-by :type dependents))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

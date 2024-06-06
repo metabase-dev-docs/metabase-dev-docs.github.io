@@ -3257,6 +3257,8 @@ We require that there is at least one relevant key to find a match.</p>
     (.fold (AstWalker. callbacks init-val) parsed-query)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.core-test" name="macaw.core-test"><h1 class="project-name">macaw.core-test</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns ^:parallel macaw.core-test
   (:require
+   [clojure.java.io :as io]
+   [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
    [macaw.core :as m]
    [macaw.test.util :refer [ws=]]
@@ -3370,7 +3372,7 @@ We require that there is at least one relevant key to find a match.</p>
   (is (= &quot;SELECT X.Y, X.y, x.Z, x.z FROM X LEFT JOIN x ON X.Y=x.Z&quot;
          (m/replace-names &quot;SELECT a.b, a.B, A.b, A.B FROM a LEFT JOIN A ON a.b=A.b&quot;
                           {:tables  {{:table &quot;a&quot;} &quot;X&quot;
-                                    {:table &quot;A&quot;} &quot;x&quot;}
+                                     {:table &quot;A&quot;} &quot;x&quot;}
                            :columns {{:table &quot;a&quot; :column &quot;b&quot;} &quot;Y&quot;
                                      {:table &quot;a&quot; :column &quot;B&quot;} &quot;y&quot;
                                      {:table &quot;A&quot; :column &quot;b&quot;} &quot;Z&quot;
@@ -3415,7 +3417,7 @@ We require that there is at least one relevant key to find a match.</p>
              {:schema &quot;public&quot; :table &quot;dogs&quot; :column &quot;bark&quot;}  &quot;meow&quot;
              {:schema &quot;public&quot; :table &quot;dogs&quot; :column &quot;growl&quot;} &quot;purr&quot;
              {:schema &quot;public&quot; :table &quot;dogs&quot; :column &quot;GROWL&quot;} &quot;PuRr&quot;
-             {:schema &quot;public&quot; :table &quot;DOGS&quot; :column &quot;GROWL&quot;} &quot;PURR&quot;}} )</pre></td></tr><tr><td class="docs">
+             {:schema &quot;public&quot; :table &quot;DOGS&quot; :column &quot;GROWL&quot;} &quot;PURR&quot;}})</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest ambiguous-case-test
   (testing &quot;Correctly handles flexibility around the case of the replacements&quot;
     (doseq [[case-insensitive expected] {:lower    &quot;SELECT meow, PuRr FROM DOGS&quot;
@@ -3492,7 +3494,7 @@ We require that there is at least one relevant key to find a match.</p>
                        RETURNING *)
                      INSERT INTO order_log
                      SELECT * from outdated_orders;&quot;)))
-    (is (= #{ &quot;insert&quot;}
+  (is (= #{&quot;insert&quot;}
          (mutations &quot;WITH outdated_orders AS (
                        SELECT * from orders)
                      INSERT INTO order_log
@@ -3552,12 +3554,12 @@ We require that there is at least one relevant key to find a match.</p>
             :tables            #{{:component {:table &quot;foo&quot;}, :context [&quot;FROM&quot; &quot;JOIN&quot; &quot;SELECT&quot;]}
                                  {:component {:table &quot;orders&quot;}, :context [&quot;FROM&quot; &quot;SELECT&quot;]}},
             :table-wildcards   #{{:component {:table &quot;orders&quot;}, :context [&quot;SELECT&quot;]}}}
-         (components &quot;SELECT o.* FROM orders o JOIN foo ON orders.id = foo.order_id&quot;)))))</pre></td></tr><tr><td class="docs">
+           (components &quot;SELECT o.* FROM orders o JOIN foo ON orders.id = foo.order_id&quot;)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest replace-names-test
   (is (= &quot;SELECT aa.xx, b.x, b.y FROM aa, b;&quot;
-         (m/replace-names  &quot;SELECT a.x, b.x, b.y FROM a, b;&quot;
-                           {:tables  {{:schema &quot;public&quot; :table &quot;a&quot;} &quot;aa&quot;}
-                            :columns {{:schema &quot;public&quot; :table &quot;a&quot; :column &quot;x&quot;} &quot;xx&quot;}})))
+         (m/replace-names &quot;SELECT a.x, b.x, b.y FROM a, b;&quot;
+                          {:tables  {{:schema &quot;public&quot; :table &quot;a&quot;} &quot;aa&quot;}
+                           :columns {{:schema &quot;public&quot; :table &quot;a&quot; :column &quot;x&quot;} &quot;xx&quot;}})))
   (is (= &quot;SELECT qwe FROM orders&quot;
          (m/replace-names &quot;SELECT id FROM orders&quot;
                           {:columns {{:schema &quot;public&quot; :table &quot;orders&quot; :column &quot;id&quot;} &quot;qwe&quot;}})))
@@ -3608,7 +3610,44 @@ We require that there is at least one relevant key to find a match.</p>
          (m/replace-names &quot;SELECT total FROM metabase_sentinel_table_154643 LIMIT 3&quot;
                           {:columns {{:table &quot;orders&quot; :column &quot;total&quot;} &quot;subtotal&quot;}
                            :tables  {{:table &quot;orders&quot;} &quot;purchases&quot;}}
-                          {:allow-unused? true}))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.test.util" name="macaw.test.util"><h1 class="project-name">macaw.test.util</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+                          {:allow-unused? true}))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- name-seq [seq-type]
+  (let [prefix (str seq-type &quot;_&quot;)]
+    (rest (iterate (fn [_] (str (gensym prefix))) nil))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- fixture-&gt;filename [fixture]
+  (str (str/replace (name fixture) &quot;-&quot; &quot;_&quot;) &quot;.sql&quot;))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- query-fixture [fixture]
+  (slurp (io/resource (fixture-&gt;filename fixture))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- anonymize-query [query]
+  (let [m (components query)
+        ts (raw-components (:tables m))
+        cs (raw-components (:columns m))
+        ss (transduce (keep :schema) conj #{} (concat ts cs))]
+    (m/replace-names query
+                     {:schemas (zipmap ss (name-seq &quot;schema&quot;))
+                      :tables  (zipmap ts (name-seq &quot;table&quot;))
+                      :columns (zipmap cs (name-seq &quot;column&quot;))}
+                     ;; nothing should be unused... but we currently get some junk from analysis, sadly
+                     {:allow-unused? true})))</pre></td></tr><tr><td class="docs"><p>Read fixture, anonymize the identifiers, write it back out again.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- anonymize-fixture
+  [fixture]
+  (let [filename (fixture-&gt;filename fixture)]
+    (spit (str &quot;test/resources/&quot; filename)
+          (anonymize-query (query-fixture fixture)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(comment
+ (require 'virgil)
+ (require 'clojure.tools.namespace.repl)
+ (virgil/watch-and-recompile [&quot;java&quot;] :post-hook clojure.tools.namespace.repl/refresh-all)
+
+ (anonymize-query &quot;SELECT x FROM a&quot;)
+ (anonymize-fixture :snowflake)
+ (anonymize-fixture :snowflakelet)
+ )</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(deftest large-snowflake-test
+  ;; See https://metabase.zendesk.com/agent/tickets/27376
+  (testing &quot;We are able to parse a complex Snowflake queries&quot;
+    (components (query-fixture :snowflakelet))
+    (components (query-fixture :snowflake))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.test.util" name="macaw.test.util"><h1 class="project-name">macaw.test.util</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns macaw.test.util
   (:require
    [clojure.string :as str]

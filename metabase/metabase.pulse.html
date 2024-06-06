@@ -2885,8 +2885,6 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.pulse.parameters :as pulse-params]
    [metabase.pulse.render :as render]
    [metabase.pulse.util :as pu]
-   [metabase.query-processor :as qp]
-   [metabase.query-processor.dashboard :as qp.dashboard]
    [metabase.query-processor.timezone :as qp.timezone]
    [metabase.server.middleware.session :as mw.session]
    [metabase.shared.parameters.parameters :as shared.params]
@@ -2902,16 +2900,7 @@ net.brehaut.ClojureTools = (function (SH) {
   (:import
    (clojure.lang ExceptionInfo)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>------------------------------------------------- PULSE SENDING --------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Check if the card is empty</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- is-card-empty?
-  [card]
-  (if-let [result (:result card)]
-    (or (zero? (-&gt; result :row_count))
-        ;; Many aggregations result in [[nil]] if there are no rows to aggregate after filters
-        (= [[nil]]
-           (-&gt; result :data :rows)))
-    ;; Text cards have no result; treat as empty
-    true))</pre></td></tr><tr><td class="docs"><p>For the specific case of Dashboard Subscriptions we should use <code>:default</code> parameter values as the actual <code>:value</code> for
+</td><td class="codes"></td></tr><tr><td class="docs"><p>For the specific case of Dashboard Subscriptions we should use <code>:default</code> parameter values as the actual <code>:value</code> for
 the parameter if none is specified. Normally the FE client will take <code>:default</code> and pass it in as <code>:value</code> if it
 wants to use it (see #20503 for more details) but this obviously isn't an option for Dashboard Subscriptions... so
 go thru <code>parameters</code> and change <code>:default</code> to <code>:value</code> unless a <code>:value</code> is explicitly specified.</p>
@@ -2921,34 +2910,7 @@ go thru <code>parameters</code> and change <code>:default</code> to <code>:value
     (merge
      (when default-value
        {:value default-value})
-     (dissoc parameter :default))))</pre></td></tr><tr><td class="docs"><p>Returns subscription result for a card.</p>
-
-<p>This function should be executed under pulse's creator permissions.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- execute-dashboard-subscription-card
-  [dashboard dashcard card-or-id parameters]
-  (assert api/*current-user-id* &quot;Makes sure you wrapped this with a `with-current-user`.&quot;)
-  (try
-    (let [card-id (u/the-id card-or-id)
-          card    (t2/select-one :model/Card :id card-id)
-          result  (qp.dashboard/process-query-for-dashcard
-                   :dashboard-id  (u/the-id dashboard)
-                   :card-id       card-id
-                   :dashcard-id   (u/the-id dashcard)
-                   :context       :pulse ; TODO - we should support for `:dashboard-subscription` and use that to differentiate the two
-                   :export-format :api
-                   :parameters    parameters
-                   :middleware    {:process-viz-settings? true
-                                   :js-int-to-string?     false}
-                   :run           (^:once fn* [query info]
-                                   (qp/process-query
-                                    (qp/userland-query-with-default-constraints query info))))]
-      (when-not (and (get-in dashcard [:visualization_settings :card.hide_empty]) (is-card-empty? (assoc card :result result)))
-        {:card     card
-         :dashcard dashcard
-         :result   result
-         :type     :card}))
-    (catch Throwable e
-      (log/warnf e &quot;Error running query for Card %s&quot; card-or-id))))</pre></td></tr><tr><td class="docs"><p>Check if dashcard is a virtual with type <code>ttype</code>, if <code>true</code> returns the dashcard, else returns <code>nil</code>.</p>
+     (dissoc parameter :default))))</pre></td></tr><tr><td class="docs"><p>Check if dashcard is a virtual with type <code>ttype</code>, if <code>true</code> returns the dashcard, else returns <code>nil</code>.</p>
 
 <p>There are currently 4 types of virtual card: "text", "action", "link", "placeholder".</p>
 </td><td class="codes"><pre class="brush: clojure">(defn virtual-card-of-type?
@@ -3008,7 +2970,7 @@ go thru <code>parameters</code> and change <code>:default</code> to <code>:value
   (cond
     (:card_id dashcard)
     (let [parameters (merge-default-values (pulse-params/parameters pulse dashboard))]
-      (execute-dashboard-subscription-card dashboard dashcard (:card_id dashcard) parameters))
+      (pu/execute-dashboard-subscription-card dashcard parameters))
     ;; actions
     (virtual-card-of-type? dashcard &quot;action&quot;)
     nil
@@ -3177,7 +3139,7 @@ returns an image url, defaulting to slack/upload-file!.</p>
              attachments))))</pre></td></tr><tr><td class="docs"><p>Do none of the cards have any results?</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- are-all-parts-empty?
   [results]
-  (every? is-card-empty? results))</pre></td></tr><tr><td class="docs">
+  (every? pu/is-card-empty? results))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- goal-met? [{:keys [alert_above_goal], :as pulse} [first-result]]
   (let [goal-comparison      (if alert_above_goal &gt;= &lt;)
         goal-val             (ui-logic/find-goal-value first-result)
