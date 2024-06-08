@@ -2865,161 +2865,52 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.models.collection.graph" name="metabase.models.collection.graph"><h1 class="project-name">metabase.models.collection.graph</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Code for generating and updating the Collection permissions graph. See [[metabase.models.permissions]] for more
-details and for the code for generating and updating the <em>data</em> permissions graph.</p>
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.models.collection.graph
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.audit" name="metabase.audit"><h1 class="project-name">metabase.audit</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Namespace for anything related to the Audit subsystem (aka Metabase Analytics) which needs to be accessible in the
+OSS product. EE-only code is located in <code>metabase-enterprise.audit-app.audit</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.audit
   (:require
-   [clojure.data :as data]
-   [metabase.audit :as audit]
-   [metabase.db.query :as mdb.query]
-   [metabase.models.collection :as collection :refer [Collection]]
-   [metabase.models.collection-permission-graph-revision
-    :as c-perm-revision
-    :refer [CollectionPermissionGraphRevision]]
-   [metabase.models.data-permissions.graph :as data-perms.graph]
-   [metabase.models.permissions :as perms :refer [Permissions]]
-   [metabase.models.permissions-group
-    :as perms-group
-    :refer [PermissionsGroup]]
-   [metabase.public-settings.premium-features :refer [defenterprise]]
-   [metabase.util :as u]
-   [metabase.util.honey-sql-2 :as h2x]
-   [metabase.util.malli :as mu]
-   [metabase.util.malli.schema :as ms]
-   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
-|                                               PERMISSIONS GRAPH                                                |
-+----------------------------------------------------------------------------------------------------------------+</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>---------------------------------------------------- Schemas -----------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private CollectionPermissions
-  [:enum :write :read :none])</pre></td></tr><tr><td class="docs"><p>collection-id -> status</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private GroupPermissionsGraph
-  ; when doing a delta between old graph and new graph root won't always
-  ; be present, which is why it's *optional*
-  [:map-of [:or [:= :root] ms/PositiveInt] CollectionPermissions])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private PermissionsGraph
-  [:map {:closed true}
-   [:revision :int]
-   [:groups   [:map-of ms/PositiveInt GroupPermissionsGraph]]])</pre></td></tr><tr><td class="docs"><p>-------------------------------------------------- Fetch Graph ---------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- group-id-&gt;permissions-set []
-  (into {} (for [[group-id perms] (group-by :group_id (t2/select Permissions))]
-             {group-id (set (map :object perms))})))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private perms-type-for-collection :- CollectionPermissions
-  [permissions-set collection-or-id]
-  (cond
-    (perms/set-has-full-permissions? permissions-set (perms/collection-readwrite-path collection-or-id)) :write
-    (perms/set-has-full-permissions? permissions-set (perms/collection-read-path collection-or-id))      :read
-    :else                                                                                                :none))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private group-permissions-graph :- GroupPermissionsGraph
-  &quot;Return the permissions graph for a single group having `permissions-set`.&quot;
-  [collection-namespace permissions-set collection-ids]
-  (into
-   {:root (perms-type-for-collection permissions-set (assoc collection/root-collection :namespace collection-namespace))}
-   (for [collection-id collection-ids]
-     {collection-id (perms-type-for-collection permissions-set collection-id)})))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private non-personal-collection-ids :- [:set ms/PositiveInt]
-  &quot;Return a set of IDs of all Collections that are neither Personal Collections nor descendants of Personal
-  Collections (i.e., things that you can set Permissions for, and that should go in the graph.)&quot;
-  [collection-namespace :- [:maybe ms/KeywordOrString]]
-  (let [personal-collection-ids (t2/select-pks-set Collection :personal_owner_id [:not= nil])
-        honeysql-form           {:select [[:id :id]]
-                                 :from   [:collection]
-                                 :where  (into [:and
-                                                ;; Does 'NULL != &quot;trash&quot;'? Postgres says the answer is undefined, aka
-                                                ;; NULL, which... is falsey. :sob:
-                                                [:or [:= :type nil] [:not= :type &quot;trash&quot;]]
-                                                (perms/audit-namespace-clause :namespace (u/qualified-name collection-namespace))
-                                                [:= :personal_owner_id nil]]
-                                               (for [collection-id personal-collection-ids]
-                                                 [:not [:like :location (h2x/literal (format &quot;/%d/%%&quot; collection-id))]]))}]
-    (set (map :id (mdb.query/query honeysql-form)))))</pre></td></tr><tr><td class="docs"><p>Return the permission graph for the collections with id in <code>collection-ids</code> and the root collection.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- collection-permission-graph
-  ([collection-ids] (collection-permission-graph collection-ids nil))
-  ([collection-ids collection-namespace]
-   (let [group-id-&gt;perms (group-id-&gt;permissions-set)]
-     {:revision (c-perm-revision/latest-id)
-      :groups   (into {} (for [group-id (t2/select-pks-set PermissionsGroup)]
-                           {group-id (group-permissions-graph collection-namespace
-                                                              (group-id-&gt;perms group-id)
-                                                              collection-ids)}))})))</pre></td></tr><tr><td class="docs"><p>In the graph, override the instance analytics collection within the admin group to read.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- modify-instance-analytics-for-admins
-  [graph]
-  (let [admin-group-id      (:id (perms-group/admin))
-        audit-collection-id (:id (audit/default-audit-collection))]
-    (if (nil? audit-collection-id)
-      graph
-      (assoc-in graph [:groups admin-group-id audit-collection-id] :read))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn graph :- PermissionsGraph
-  &quot;Fetch a graph representing the current permissions status for every group and all permissioned collections. This
-  works just like the function of the same name in `metabase.models.permissions`; see also the documentation for that
-  function.
-  The graph is restricted to a given namespace by the optional `collection-namespace` param; by default, `nil`, which
-  restricts it to the 'default' namespace containing normal Card/Dashboard/Pulse Collections.
-  Note: All Collections are returned at the same level of the 'graph', regardless of how the Collection hierarchy is
-  structured. Collections do not inherit permissions from ancestor Collections in the same way data permissions are
-  inherited (e.g. full `:read` perms for a Database implies `:read` perms for all its schemas); a 'child' object (e.g.
-  schema) *cannot* have more restrictive permissions than its parent (e.g. Database). Child Collections *can* have
-  more restrictive permissions than their parent.&quot;
-  ([]
-   (graph nil))
-  ([collection-namespace :- [:maybe ms/KeywordOrString]]
-   (t2/with-transaction [_conn]
-     (-&gt; collection-namespace
-         non-personal-collection-ids
-         (collection-permission-graph collection-namespace)
-         modify-instance-analytics-for-admins))))</pre></td></tr><tr><td class="docs"><p>-------------------------------------------------- Update Graph --------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Update the permissions for group ID with <code>group-id</code> on collection with ID
-<code>collection-id</code> in the optional <code>collection-namespace</code> to <code>new-collection-perms</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private update-collection-permissions!
-  [collection-namespace :- [:maybe ms/KeywordOrString]
-   group-id             :- ms/PositiveInt
-   collection-id        :- [:or [:= :root] ms/PositiveInt]
-   new-collection-perms :- CollectionPermissions]
-  (let [collection-id (if (= collection-id :root)
-                        (assoc collection/root-collection :namespace collection-namespace)
-                        collection-id)]
-    ;; remove whatever entry is already there (if any) and add a new entry if applicable
-    (perms/revoke-collection-permissions! group-id collection-id)
-    (case new-collection-perms
-      :write (perms/grant-collection-readwrite-permissions! group-id collection-id)
-      :read  (perms/grant-collection-read-permissions! group-id collection-id)
-      :none  nil)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private update-group-permissions!
-  [collection-namespace :- [:maybe ms/KeywordOrString]
-   group-id             :- ms/PositiveInt
-   new-group-perms      :- GroupPermissionsGraph]
-  (doseq [[collection-id new-perms] new-group-perms]
-    (update-collection-permissions! collection-namespace group-id collection-id new-perms)))</pre></td></tr><tr><td class="docs"><p>OSS implementation of <code>audit-db/update-audit-collection-permissions!</code>, which is an enterprise feature, so does nothing in the OSS
-version.</p>
-</td><td class="codes"><pre class="brush: clojure">(defenterprise update-audit-collection-permissions!
-  metabase-enterprise.audit-app.permissions [_ _] ::noop)</pre></td></tr><tr><td class="docs"><p>Update the Collections permissions graph for Collections of <code>collection-namespace</code> (default <code>nil</code>, the 'default'
-namespace). This works just like [[metabase.models.permission/update-data-perms-graph!]], but for Collections;
-refer to that function's extensive documentation to get a sense for how this works.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn update-graph!
-  ([new-graph]
-   (update-graph! nil new-graph))
-  ([collection-namespace :- [:maybe ms/KeywordOrString], new-graph :- PermissionsGraph]
-   (let [old-graph          (graph collection-namespace)
-         old-perms          (:groups old-graph)
-         new-perms          (:groups new-graph)
-         ;; filter out any groups not in the old graph
-         new-perms          (select-keys new-perms (keys old-perms))
-         ;; filter out any collections not in the old graph
-         new-perms          (into {} (for [[group-id collection-id-&gt;perms] new-perms]
-                                      [group-id (select-keys collection-id-&gt;perms (keys (get old-perms group-id)))]))
-         [diff-old changes] (data/diff old-perms new-perms)]
-     (data-perms.graph/log-permissions-changes diff-old changes)
-     (data-perms.graph/check-revision-numbers old-graph new-graph)
-     (when (seq changes)
-       (t2/with-transaction [_conn]
-         (doseq [[group-id changes] changes]
-           (update-audit-collection-permissions! group-id changes)
-           (update-group-permissions! collection-namespace group-id changes))
-         (data-perms.graph/save-perms-revision! CollectionPermissionGraphRevision
-                                                (:revision old-graph)
-                                                (assoc old-graph :namespace collection-namespace)
-                                                changes))))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+   [metabase.db :as mdb]
+   [metabase.models.setting :refer [defsetting]]
+   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs"><p>NOTE: Constants like <code>audit-db-id</code> and the entity IDs of audit collections are placed in OSS code because audit
+content may be loaded on an OSS build in the case of an EE->OSS downgrade. In these situations, we still need
+access to audit identifiers in order to enforce permission checks properly.</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>ID of Audit DB which is loaded when running an EE build.</p>
+</td><td class="codes"><pre class="brush: clojure">(def audit-db-id
+  13371337)</pre></td></tr><tr><td class="docs"><p>A place to save the analytics-checksum, to check between app startups. If set to -1, skips the checksum process
+entirely to avoid calculating checksums in environments (e2e tests) where we don't care.</p>
+</td><td class="codes"><pre class="brush: clojure">(defsetting last-analytics-checksum
+  :type       :integer
+  :visibility :internal
+  :audit      :never
+  :doc        false
+  :export?    false)</pre></td></tr><tr><td class="docs"><p>Default audit collection entity (instance analytics) id.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private default-audit-collection-entity-id
+  &quot;vG58R8k-QddHWA7_47umn&quot;)</pre></td></tr><tr><td class="docs"><p>Default custom reports entity id.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private default-custom-reports-entity-id
+  &quot;okNLSZKdSxaoG58JSQY54&quot;)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^{:arglists '([checksum model entity-id])
+       :private  true} memoized-select-audit-entity*
+  (mdb/memoize-for-application-db
+   (fn [checksum model entity-id]
+     (when checksum
+       (t2/select-one model :entity_id entity-id)))))</pre></td></tr><tr><td class="docs"><p>Returns the object from entity id and model. Memoizes from entity id.
+Should only be used for audit/pre-loaded objects.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn memoized-select-audit-entity
+  [model entity-id]
+  (memoized-select-audit-entity* (last-analytics-checksum) model entity-id))</pre></td></tr><tr><td class="docs"><p>Default custom reports collection.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn default-custom-reports-collection
+  []
+  (memoized-select-audit-entity :model/Collection default-custom-reports-entity-id))</pre></td></tr><tr><td class="docs"><p>Default audit collection (instance analytics) collection.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn default-audit-collection
+  []
+  (memoized-select-audit-entity :model/Collection default-audit-collection-entity-id))</pre></td></tr><tr><td class="docs"><p>Check if an id is one of the audit collection ids.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn is-collection-id-audit?
+  [id]
+  (contains? (set [(:id (default-audit-collection)) (:id (default-custom-reports-collection))]) id))</pre></td></tr><tr><td class="docs"><p>Check if an instance's parent collection is the audit collection.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn is-parent-collection-audit?
+  [instance]
+  (let [parent-id (:collection_id instance)]
+    (and (some? parent-id) (is-collection-id-audit? parent-id))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

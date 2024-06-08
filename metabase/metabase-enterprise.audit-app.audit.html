@@ -2865,161 +2865,223 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.models.collection.graph" name="metabase.models.collection.graph"><h1 class="project-name">metabase.models.collection.graph</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Code for generating and updating the Collection permissions graph. See [[metabase.models.permissions]] for more
-details and for the code for generating and updating the <em>data</em> permissions graph.</p>
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.models.collection.graph
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase-enterprise.audit-app.audit" name="metabase-enterprise.audit-app.audit"><h1 class="project-name">metabase-enterprise.audit-app.audit</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase-enterprise.audit-app.audit
   (:require
-   [clojure.data :as data]
+   [babashka.fs :as fs]
+   [clojure.java.io :as io]
+   [clojure.string :as str]
+   [metabase-enterprise.serialization.cmd :as serialization.cmd]
    [metabase.audit :as audit]
-   [metabase.db.query :as mdb.query]
-   [metabase.models.collection :as collection :refer [Collection]]
-   [metabase.models.collection-permission-graph-revision
-    :as c-perm-revision
-    :refer [CollectionPermissionGraphRevision]]
-   [metabase.models.data-permissions.graph :as data-perms.graph]
-   [metabase.models.permissions :as perms :refer [Permissions]]
-   [metabase.models.permissions-group
-    :as perms-group
-    :refer [PermissionsGroup]]
+   [metabase.db :as mdb]
+   [metabase.models.database :refer [Database]]
+   [metabase.models.setting :refer [defsetting]]
+   [metabase.plugins :as plugins]
    [metabase.public-settings.premium-features :refer [defenterprise]]
+   [metabase.sync.util :as sync-util]
    [metabase.util :as u]
-   [metabase.util.honey-sql-2 :as h2x]
-   [metabase.util.malli :as mu]
-   [metabase.util.malli.schema :as ms]
-   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
-|                                               PERMISSIONS GRAPH                                                |
-+----------------------------------------------------------------------------------------------------------------+</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>---------------------------------------------------- Schemas -----------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private CollectionPermissions
-  [:enum :write :read :none])</pre></td></tr><tr><td class="docs"><p>collection-id -> status</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private GroupPermissionsGraph
-  ; when doing a delta between old graph and new graph root won't always
-  ; be present, which is why it's *optional*
-  [:map-of [:or [:= :root] ms/PositiveInt] CollectionPermissions])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private PermissionsGraph
-  [:map {:closed true}
-   [:revision :int]
-   [:groups   [:map-of ms/PositiveInt GroupPermissionsGraph]]])</pre></td></tr><tr><td class="docs"><p>-------------------------------------------------- Fetch Graph ---------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- group-id-&gt;permissions-set []
-  (into {} (for [[group-id perms] (group-by :group_id (t2/select Permissions))]
-             {group-id (set (map :object perms))})))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private perms-type-for-collection :- CollectionPermissions
-  [permissions-set collection-or-id]
-  (cond
-    (perms/set-has-full-permissions? permissions-set (perms/collection-readwrite-path collection-or-id)) :write
-    (perms/set-has-full-permissions? permissions-set (perms/collection-read-path collection-or-id))      :read
-    :else                                                                                                :none))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private group-permissions-graph :- GroupPermissionsGraph
-  &quot;Return the permissions graph for a single group having `permissions-set`.&quot;
-  [collection-namespace permissions-set collection-ids]
-  (into
-   {:root (perms-type-for-collection permissions-set (assoc collection/root-collection :namespace collection-namespace))}
-   (for [collection-id collection-ids]
-     {collection-id (perms-type-for-collection permissions-set collection-id)})))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private non-personal-collection-ids :- [:set ms/PositiveInt]
-  &quot;Return a set of IDs of all Collections that are neither Personal Collections nor descendants of Personal
-  Collections (i.e., things that you can set Permissions for, and that should go in the graph.)&quot;
-  [collection-namespace :- [:maybe ms/KeywordOrString]]
-  (let [personal-collection-ids (t2/select-pks-set Collection :personal_owner_id [:not= nil])
-        honeysql-form           {:select [[:id :id]]
-                                 :from   [:collection]
-                                 :where  (into [:and
-                                                ;; Does 'NULL != &quot;trash&quot;'? Postgres says the answer is undefined, aka
-                                                ;; NULL, which... is falsey. :sob:
-                                                [:or [:= :type nil] [:not= :type &quot;trash&quot;]]
-                                                (perms/audit-namespace-clause :namespace (u/qualified-name collection-namespace))
-                                                [:= :personal_owner_id nil]]
-                                               (for [collection-id personal-collection-ids]
-                                                 [:not [:like :location (h2x/literal (format &quot;/%d/%%&quot; collection-id))]]))}]
-    (set (map :id (mdb.query/query honeysql-form)))))</pre></td></tr><tr><td class="docs"><p>Return the permission graph for the collections with id in <code>collection-ids</code> and the root collection.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- collection-permission-graph
-  ([collection-ids] (collection-permission-graph collection-ids nil))
-  ([collection-ids collection-namespace]
-   (let [group-id-&gt;perms (group-id-&gt;permissions-set)]
-     {:revision (c-perm-revision/latest-id)
-      :groups   (into {} (for [group-id (t2/select-pks-set PermissionsGroup)]
-                           {group-id (group-permissions-graph collection-namespace
-                                                              (group-id-&gt;perms group-id)
-                                                              collection-ids)}))})))</pre></td></tr><tr><td class="docs"><p>In the graph, override the instance analytics collection within the admin group to read.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- modify-instance-analytics-for-admins
-  [graph]
-  (let [admin-group-id      (:id (perms-group/admin))
-        audit-collection-id (:id (audit/default-audit-collection))]
-    (if (nil? audit-collection-id)
-      graph
-      (assoc-in graph [:groups admin-group-id audit-collection-id] :read))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn graph :- PermissionsGraph
-  &quot;Fetch a graph representing the current permissions status for every group and all permissioned collections. This
-  works just like the function of the same name in `metabase.models.permissions`; see also the documentation for that
-  function.
-  The graph is restricted to a given namespace by the optional `collection-namespace` param; by default, `nil`, which
-  restricts it to the 'default' namespace containing normal Card/Dashboard/Pulse Collections.
-  Note: All Collections are returned at the same level of the 'graph', regardless of how the Collection hierarchy is
-  structured. Collections do not inherit permissions from ancestor Collections in the same way data permissions are
-  inherited (e.g. full `:read` perms for a Database implies `:read` perms for all its schemas); a 'child' object (e.g.
-  schema) *cannot* have more restrictive permissions than its parent (e.g. Database). Child Collections *can* have
-  more restrictive permissions than their parent.&quot;
-  ([]
-   (graph nil))
-  ([collection-namespace :- [:maybe ms/KeywordOrString]]
-   (t2/with-transaction [_conn]
-     (-&gt; collection-namespace
-         non-personal-collection-ids
-         (collection-permission-graph collection-namespace)
-         modify-instance-analytics-for-admins))))</pre></td></tr><tr><td class="docs"><p>-------------------------------------------------- Update Graph --------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Update the permissions for group ID with <code>group-id</code> on collection with ID
-<code>collection-id</code> in the optional <code>collection-namespace</code> to <code>new-collection-perms</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private update-collection-permissions!
-  [collection-namespace :- [:maybe ms/KeywordOrString]
-   group-id             :- ms/PositiveInt
-   collection-id        :- [:or [:= :root] ms/PositiveInt]
-   new-collection-perms :- CollectionPermissions]
-  (let [collection-id (if (= collection-id :root)
-                        (assoc collection/root-collection :namespace collection-namespace)
-                        collection-id)]
-    ;; remove whatever entry is already there (if any) and add a new entry if applicable
-    (perms/revoke-collection-permissions! group-id collection-id)
-    (case new-collection-perms
-      :write (perms/grant-collection-readwrite-permissions! group-id collection-id)
-      :read  (perms/grant-collection-read-permissions! group-id collection-id)
-      :none  nil)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private update-group-permissions!
-  [collection-namespace :- [:maybe ms/KeywordOrString]
-   group-id             :- ms/PositiveInt
-   new-group-perms      :- GroupPermissionsGraph]
-  (doseq [[collection-id new-perms] new-group-perms]
-    (update-collection-permissions! collection-namespace group-id collection-id new-perms)))</pre></td></tr><tr><td class="docs"><p>OSS implementation of <code>audit-db/update-audit-collection-permissions!</code>, which is an enterprise feature, so does nothing in the OSS
-version.</p>
-</td><td class="codes"><pre class="brush: clojure">(defenterprise update-audit-collection-permissions!
-  metabase-enterprise.audit-app.permissions [_ _] ::noop)</pre></td></tr><tr><td class="docs"><p>Update the Collections permissions graph for Collections of <code>collection-namespace</code> (default <code>nil</code>, the 'default'
-namespace). This works just like [[metabase.models.permission/update-data-perms-graph!]], but for Collections;
-refer to that function's extensive documentation to get a sense for how this works.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn update-graph!
-  ([new-graph]
-   (update-graph! nil new-graph))
-  ([collection-namespace :- [:maybe ms/KeywordOrString], new-graph :- PermissionsGraph]
-   (let [old-graph          (graph collection-namespace)
-         old-perms          (:groups old-graph)
-         new-perms          (:groups new-graph)
-         ;; filter out any groups not in the old graph
-         new-perms          (select-keys new-perms (keys old-perms))
-         ;; filter out any collections not in the old graph
-         new-perms          (into {} (for [[group-id collection-id-&gt;perms] new-perms]
-                                      [group-id (select-keys collection-id-&gt;perms (keys (get old-perms group-id)))]))
-         [diff-old changes] (data/diff old-perms new-perms)]
-     (data-perms.graph/log-permissions-changes diff-old changes)
-     (data-perms.graph/check-revision-numbers old-graph new-graph)
-     (when (seq changes)
-       (t2/with-transaction [_conn]
-         (doseq [[group-id changes] changes]
-           (update-audit-collection-permissions! group-id changes)
-           (update-group-permissions! collection-namespace group-id changes))
-         (data-perms.graph/save-perms-revision! CollectionPermissionGraphRevision
-                                                (:revision old-graph)
-                                                (assoc old-graph :namespace collection-namespace)
-                                                changes))))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+   [metabase.util.files :as u.files]
+   [metabase.util.log :as log]
+   [toucan2.core :as t2])
+  (:import
+   (java.util.jar JarEntry JarFile)
+   (java.nio.file Path)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Returns true iff we are running from a jar.</p>
+
+<p>.getResource will return a java.net.URL, and those start with "jar:" if and only if the app is running from a jar.</p>
+
+<p>More info: https://docs.oracle.com/en/java/javase/11/docs/api/java.base/java/lang/Thread.html</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- running-from-jar?
+  []
+  (-&gt; (Thread/currentThread)
+      (.getContextClassLoader)
+      (.getResource &quot;&quot;)
+      (str/starts-with? &quot;jar:&quot;)))</pre></td></tr><tr><td class="docs"><p>Returns the path to the currently running jar file.</p>
+
+<p>More info: https://stackoverflow.com/questions/320542/how-to-get-the-path-of-a-running-jar-file</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- get-jar-path
+  []
+  (assert (running-from-jar?) &quot;Can only get-jar-path when running from a jar.&quot;)
+  (-&gt; (class {})
+      (.getProtectionDomain)
+      (.getCodeSource)
+      (.getLocation)
+      (.toURI) ;; avoid problems with special characters in path.
+      (.getPath)))</pre></td></tr><tr><td class="docs"><p>Recursively copies a subdirectory (at resource-path) from the jar at jar-path into out-dir.</p>
+
+<p>Scans every file in resources, to see which ones are inside of resource-path, since there's no
+way to "ls" or list a directory inside of a jar's resources.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn copy-from-jar!
+  [jar-path resource-path out-dir]
+  (let [jar-file (JarFile. (str jar-path))
+        entries (.entries jar-file)]
+     (doseq [^JarEntry entry (iterator-seq entries)
+             :let [entry-name (.getName entry)]
+             :when (str/starts-with? entry-name resource-path)
+             :let [out-file (fs/path out-dir entry-name)]]
+       (if (.isDirectory entry)
+         (fs/create-dirs out-file)
+         (do
+           (-&gt; out-file fs/parent fs/create-dirs)
+           (with-open [in (.getInputStream jar-file entry)
+                       out (io/output-stream (str out-file))]
+             (io/copy in out)))))))</pre></td></tr><tr><td class="docs"><p>Default Question Overview (this is a dashboard) entity id.</p>
+</td><td class="codes"><pre class="brush: clojure">(def default-question-overview-entity-id
+  &quot;jm7KgY6IuS6pQjkBZ7WUI&quot;)</pre></td></tr><tr><td class="docs"><p>Default Dashboard Overview (this is a dashboard) entity id.</p>
+</td><td class="codes"><pre class="brush: clojure">(def default-dashboard-overview-entity-id
+  &quot;bJEYb0o5CXlfWFcIztDwJ&quot;)</pre></td></tr><tr><td class="docs"><p>Creates the audit db, a clone of the app db used for auditing purposes.</p>
+
+<ul>
+<li>This uses a weird ID because some tests were hardcoded to look for database with ID = 2, and inserting an extra db
+throws that off since these IDs are sequential.</li>
+</ul>
+</td><td class="codes"><pre class="brush: clojure">(defn- install-database!
+  [engine id]
+  (t2/insert! Database {:is_audit         true
+                        :id               id
+                        :name             &quot;Internal Metabase Database&quot;
+                        :description      &quot;Internal Audit DB used to power metabase analytics.&quot;
+                        :engine           engine
+                        :is_full_sync     true
+                        :is_on_demand     false
+                        :creator_id       nil
+                        :auto_run_queries true})
+  ;; guard against someone manually deleting the audit-db entry, but not removing the audit-db permissions.
+  (t2/delete! :model/Permissions {:where [:like :object (str &quot;%/db/&quot; id &quot;/%&quot;)]}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- adjust-audit-db-to-source!
+  [{audit-db-id :id}]
+  ;; We need to move back to a schema that matches the serialized data
+  (when (contains? #{:mysql :h2} (mdb/db-type))
+    (t2/update! :model/Database audit-db-id {:engine &quot;postgres&quot;})
+    (when (= :mysql (mdb/db-type))
+      (t2/update! :model/Table {:db_id audit-db-id} {:schema &quot;public&quot;}))
+    (when (= :h2 (mdb/db-type))
+      (t2/update! :model/Table {:db_id audit-db-id} {:schema [:lower :schema] :name [:lower :name]})
+      (t2/update! :model/Field
+                  {:table_id
+                   [:in
+                    {:select [:id]
+                     :from [(t2/table-name :model/Table)]
+                     :where [:= :db_id audit-db-id]}]}
+                  {:name [:lower :name]}))
+    (log/info &quot;Adjusted Audit DB for loading Analytics Content&quot;)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- adjust-audit-db-to-host!
+  [{audit-db-id :id :keys [engine]}]
+  (when (not= engine (mdb/db-type))
+    ;; We need to move the loaded data back to the host db
+    (t2/update! :model/Database audit-db-id {:engine (name (mdb/db-type))})
+    (when (= :mysql (mdb/db-type))
+      (t2/update! :model/Table {:db_id audit-db-id} {:schema nil}))
+    (when (= :h2 (mdb/db-type))
+      (t2/update! :model/Table {:db_id audit-db-id} {:schema [:upper :schema] :name [:upper :name]})
+      (t2/update! :model/Field
+                  {:table_id
+                   [:in
+                    {:select [:id]
+                     :from [(t2/table-name :model/Table)]
+                     :where [:= :db_id audit-db-id]}]}
+                  {:name [:upper :name]}))
+    (log/infof &quot;Adjusted Audit DB to match host engine: %s&quot; (name (mdb/db-type)))))</pre></td></tr><tr><td class="docs"><p>A resource dir containing analytics content created by Metabase to load into the app instance on startup.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private analytics-dir-resource
+  (io/resource &quot;instance_analytics&quot;))</pre></td></tr><tr><td class="docs"><p>The directory analytics content is unzipped or moved to, and subsequently loaded into the app from on startup.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- instance-analytics-plugin-dir
+  [plugins-dir]
+  (fs/path (fs/absolutize plugins-dir) &quot;instance_analytics&quot;))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private jar-resource-path &quot;instance_analytics/&quot;)</pre></td></tr><tr><td class="docs"><p>Load instance analytics content (collections/dashboards/cards/etc.) from resources dir or a zip file
+ and copies it into the provided directory (by default, plugins/instance_analytics).</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- ia-content-&gt;plugins
+  [plugins-dir]
+  (let [ia-dir (instance-analytics-plugin-dir plugins-dir)]
+    (when (fs/exists? (u.files/relative-path ia-dir))
+      (fs/delete-tree (u.files/relative-path ia-dir)))
+    (if (running-from-jar?)
+      (let [path-to-jar (get-jar-path)]
+        (log/info &quot;The app is running from a jar, starting copy...&quot;)
+        (log/info (str &quot;Copying &quot; path-to-jar &quot;::&quot; jar-resource-path &quot; -&gt; &quot; plugins-dir))
+        (copy-from-jar! path-to-jar jar-resource-path plugins-dir)
+        (log/info &quot;Copying complete.&quot;))
+      (let [in-path (fs/path analytics-dir-resource)]
+        (log/info &quot;The app is not running from a jar, starting copy...&quot;)
+        (log/info (str &quot;Copying &quot; in-path &quot; -&gt; &quot; ia-dir))
+        (fs/copy-tree (u.files/relative-path in-path)
+                      (u.files/relative-path ia-dir)
+                      {:replace-existing true})
+        (log/info &quot;Copying complete.&quot;)))))</pre></td></tr><tr><td class="docs"><p>Whether or not we should load Metabase analytics content on startup. Defaults to true, but can be disabled via environment variable.</p>
+</td><td class="codes"><pre class="brush: clojure">(defsetting load-analytics-content
+  :type       :boolean
+  :default    true
+  :visibility :internal
+  :setter     :none
+  :audit      :never
+  :doc        &quot;Setting this environment variable to false can also come in handy when migrating environments, as it can simplify the migration process.&quot;)</pre></td></tr><tr><td class="docs"><p>If <code>last-analytics-checksum</code> is set to this value, we will skip calculating checksums entirely and <em>always</em> reload the
+analytics data.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:constant SKIP_CHECKSUM_FLAG
+  -1)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- should-skip-checksum? [last-checksum]
+  (= SKIP_CHECKSUM_FLAG last-checksum))</pre></td></tr><tr><td class="docs"><p>Hashes the contents of all non-dir files in the <code>analytics-dir-resource</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn analytics-checksum
+  []
+  (-&gt;&gt; ^Path (instance-analytics-plugin-dir (plugins/plugins-dir))
+       (.toFile)
+       file-seq
+       (remove fs/directory?)
+       (pmap #(hash (slurp %)))
+       (reduce +)))</pre></td></tr><tr><td class="docs"><p>Should we load audit data?</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- should-load-audit?
+  [load-analytics-content? last-checksum current-checksum]
+  (and load-analytics-content?
+       (or (should-skip-checksum? last-checksum)
+           (not= last-checksum current-checksum))))</pre></td></tr><tr><td class="docs"><p>Gets the previous and current checksum for the analytics directory, respecting the <code>-1</code> flag for skipping checksums entirely.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- get-last-and-current-checksum
+  []
+  (let [last-checksum (audit/last-analytics-checksum)]
+    (if (should-skip-checksum? last-checksum)
+      [SKIP_CHECKSUM_FLAG SKIP_CHECKSUM_FLAG]
+      [last-checksum (analytics-checksum)])))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- maybe-load-analytics-content!
+  [audit-db]
+  (when analytics-dir-resource
+    (adjust-audit-db-to-source! audit-db)
+    (ia-content-&gt;plugins (plugins/plugins-dir))
+    (let [[last-checksum current-checksum] (get-last-and-current-checksum)]
+      (when (should-load-audit? (load-analytics-content) last-checksum current-checksum)
+        (log/info (str &quot;Loading Analytics Content from: &quot; (instance-analytics-plugin-dir (plugins/plugins-dir))))
+        ;; The EE token might not have :serialization enabled, but audit features should still be able to use it.
+        (let [report (log/with-no-logs
+                       (serialization.cmd/v2-load-internal! (str (instance-analytics-plugin-dir (plugins/plugins-dir)))
+                                                            {:backfill? false}
+                                                            :token-check? false))]
+          (if (not-empty (:errors report))
+            (log/info (str &quot;Error Loading Analytics Content: &quot; (pr-str report)))
+            (do
+              (log/info (str &quot;Loading Analytics Content Complete (&quot; (count (:seen report)) &quot;) entities loaded.&quot;))
+              (audit/last-analytics-checksum! current-checksum))))))
+    (when-let [audit-db (t2/select-one :model/Database :is_audit true)]
+      (adjust-audit-db-to-host! audit-db))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- maybe-install-audit-db
+  []
+  (let [audit-db (t2/select-one :model/Database :is_audit true)]
+    (cond
+      (nil? audit-db)
+      (u/prog1 ::installed
+       (log/info &quot;Installing Audit DB...&quot;)
+       (install-database! (mdb/db-type) audit/audit-db-id))
+      (not= (mdb/db-type) (:engine audit-db))
+      (u/prog1 ::updated
+       (log/infof &quot;App DB change detected. Changing Audit DB source to match: %s.&quot; (name (mdb/db-type)))
+       (adjust-audit-db-to-host! audit-db))
+      :else
+      ::no-op)))</pre></td></tr><tr><td class="docs"><p>EE implementation of <code>ensure-db-installed!</code>. Installs audit db if it does not already exist, and loads audit
+content if it is available.</p>
+</td><td class="codes"><pre class="brush: clojure">(defenterprise ensure-audit-db-installed!
+  :feature :none
+  []
+  (u/prog1 (maybe-install-audit-db)
+   (let [audit-db (t2/select-one :model/Database :is_audit true)]
+       ;; prevent sync while loading
+     ((sync-util/with-duplicate-ops-prevented :sync-database audit-db
+        (fn []
+          (maybe-load-analytics-content! audit-db)))))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
