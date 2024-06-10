@@ -2883,6 +2883,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [toucan2.connection :as t2.conn])
   (:import
    (java.io StringWriter)
+   (java.sql Connection)
    (java.util List Map)
    (javax.sql DataSource)
    (liquibase Contexts LabelExpression Liquibase RuntimeEnvironment Scope Scope$Attr Scope$ScopedRunner)
@@ -2918,44 +2919,40 @@ output stream to the null output stream</p>
   ^String changelog-legacy-file &quot;liquibase_legacy.yaml&quot;)</pre></td></tr><tr><td class="docs"><p>Liquibase setting used for upgrading a fresh instance or instances running version >= 45.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^{:private true
        :doc     }
-  ^String changelog-file &quot;liquibase.yaml&quot;)</pre></td></tr><tr><td class="docs"><p>Return the proper changelog table name based on db type of the connection.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn changelog-table-name
-  [^java.sql.Connection conn]
-  (if (= &quot;PostgreSQL&quot; (-&gt; conn .getMetaData .getDatabaseProductName))
-    &quot;databasechangelog&quot;
-    &quot;DATABASECHANGELOG&quot;))</pre></td></tr><tr><td class="docs"><p>Check if a table exists.</p>
+  ^String changelog-file &quot;liquibase.yaml&quot;)</pre></td></tr><tr><td class="docs"><p>Check if a table exists.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn table-exists?
-  [table-name ^java.sql.Connection conn]
+  [table-name ^Connection conn]
   (-&gt; (.getMetaData conn)
       (.getTables  nil nil table-name (u/varargs String [&quot;TABLE&quot;]))
       jdbc/metadata-query
       seq
       boolean))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- fresh-install?
-  [^java.sql.Connection conn]
-  (not (table-exists? (changelog-table-name conn) conn)))</pre></td></tr><tr><td class="docs">
+  [^Connection conn ^Database database]
+  (not (table-exists? (.getDatabaseChangeLogTableName database) conn)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- decide-liquibase-file
-  [^java.sql.Connection conn]
-  (if (fresh-install? conn)
-   changelog-file
-   (let [latest-migration (-&gt;&gt; (jdbc/query {:connection conn}
-                                           [(format &quot;select id from %s order by dateexecuted desc limit 1&quot; (changelog-table-name conn))])
-                               first
-                               :id)]
-     (cond
-       (nil? latest-migration)
-       changelog-file
-       ;; post-44 installation downgraded to 45
-       (= latest-migration &quot;v00.00-000&quot;)
-       changelog-file
-       ;; pre 42
-       (not (str/starts-with? latest-migration &quot;v&quot;))
-       changelog-legacy-file
-       (&lt; (-&gt;&gt; latest-migration (re-find #&quot;v(\d+)\..*&quot;) second parse-long) 45)
-       changelog-legacy-file
-       :else
-       changelog-file))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- liquibase-connection ^JdbcConnection [^java.sql.Connection jdbc-connection]
+  [^Connection conn ^Database database]
+  (if (fresh-install? conn database)
+    changelog-file
+    (let [latest-migration (-&gt;&gt; (jdbc/query {:connection conn}
+                                            [(format &quot;select id from %s order by dateexecuted desc limit 1&quot;
+                                                     (.getDatabaseChangeLogTableName database))])
+                                first
+                                :id)]
+      (cond
+        (nil? latest-migration)
+        changelog-file
+        ;; post-44 installation downgraded to 45
+        (= latest-migration &quot;v00.00-000&quot;)
+        changelog-file
+        ;; pre 42
+        (not (str/starts-with? latest-migration &quot;v&quot;))
+        changelog-legacy-file
+        (&lt; (-&gt;&gt; latest-migration (re-find #&quot;v(\d+)\..*&quot;) second parse-long) 45)
+        changelog-legacy-file
+        :else
+        changelog-file))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- liquibase-connection ^JdbcConnection [^Connection jdbc-connection]
   (JdbcConnection. jdbc-connection))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- h2? [^JdbcConnection liquibase-conn]
   (str/starts-with? (.getURL liquibase-conn) &quot;jdbc:h2&quot;))</pre></td></tr><tr><td class="docs">
@@ -2963,13 +2960,13 @@ output stream to the null output stream</p>
   (if (h2? liquibase-conn)
     (liquibase.h2/h2-database liquibase-conn)
     (.findCorrectDatabaseImplementation (DatabaseFactory/getInstance) liquibase-conn)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- liquibase ^Liquibase [^java.sql.Connection conn ^Database database]
+</td><td class="codes"><pre class="brush: clojure">(defn- liquibase ^Liquibase [^Connection conn ^Database database]
   (Liquibase.
-   ^String (decide-liquibase-file conn)
+   ^String (decide-liquibase-file conn database)
    (ClassLoaderResourceAccessor. (classloader/the-classloader))
    database))</pre></td></tr><tr><td class="docs"><p>Impl for [[with-liquibase-macro]].</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn do-with-liquibase
-  [conn-or-data-source :- [:or (ms/InstanceOfClass java.sql.Connection) (ms/InstanceOfClass javax.sql.DataSource)]
+  [conn-or-data-source :- [:or (ms/InstanceOfClass Connection) (ms/InstanceOfClass javax.sql.DataSource)]
    f                   :- fn?]
   ;; Custom migrations use toucan2, so we need to make sure it uses the same connection with liquibase
   (let [f* (fn [^Liquibase liquibase]
@@ -2978,7 +2975,7 @@ output stream to the null output stream</p>
              (.checkLiquibaseTables liquibase false (.getDatabaseChangeLog liquibase) nil nil)
              (f liquibase))]
     (binding [t2.conn/*current-connectable* conn-or-data-source]
-      (if (instance? java.sql.Connection conn-or-data-source)
+      (if (instance? Connection conn-or-data-source)
         (f* (-&gt;&gt; conn-or-data-source liquibase-connection database (liquibase conn-or-data-source)))
         ;; closing the `LiquibaseConnection`/`Database` closes the parent JDBC `Connection`, so only use it in combination
         ;; with `with-open` *if* we are opening a new JDBC `Connection` from a JDBC spec. If we're passed in a `Connection`,
@@ -2996,7 +2993,13 @@ output stream to the null output stream</p>
   `(do-with-liquibase
     ~conn-or-data-source
     (fn [~(vary-meta liquibase-binding assoc :tag (symbol (.getCanonicalName Liquibase)))]
-      ~@body)))</pre></td></tr><tr><td class="docs"><p>Return a string of SQL containing the DDL statements needed to perform unrun <code>liquibase</code> migrations, custom migrations will be ignored.</p>
+      ~@body)))</pre></td></tr><tr><td class="docs"><p>Return the proper changelog table name based on db type of the connection.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn changelog-table-name
+  [liquibase-or-conn]
+  (if (instance? Liquibase liquibase-or-conn)
+    (.getDatabaseChangeLogTableName (.getDatabase ^Liquibase liquibase-or-conn))
+    (with-liquibase [liquibase liquibase-or-conn]
+      (changelog-table-name liquibase))))</pre></td></tr><tr><td class="docs"><p>Return a string of SQL containing the DDL statements needed to perform unrun <code>liquibase</code> migrations, custom migrations will be ignored.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn migrations-sql
   ^String [^Liquibase liquibase]
   ;; calling update on custom migrations will execute them, so we ignore it and generates
@@ -3236,11 +3239,11 @@ reflect that these migrations were grouped into 2 files.</p>
 <p>See https://github.com/metabase/metabase/issues/3715
 Also see https://github.com/metabase/metabase/pull/34400</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn consolidate-liquibase-changesets!
-  [conn :- (ms/InstanceOfClass java.sql.Connection)
+  [conn :- (ms/InstanceOfClass Connection)
    liquibase :- (ms/InstanceOfClass Liquibase)]
-  (let [liquibase-table-name (changelog-table-name conn)
+  (let [liquibase-table-name (changelog-table-name liquibase)
         conn-spec            {:connection conn}]
-    (when-not (fresh-install? conn)
+    (when-not (fresh-install? conn (.getDatabase ^Liquibase liquibase))
       ;; Skip mutating the table if the filenames are already correct. It assumes we have never moved the boundary
       ;; between the two files, i.e. that update-migrations still start from v45.
       (when-not (= #{legacy-migrations-file update-migrations-file}
@@ -3271,16 +3274,17 @@ Also see https://github.com/metabase/metabase/pull/34400</p>
                      (config/current-major-version)))))
    (with-scope-locked liquibase
     ;; count and rollback only the applied change set ids which come after the target version (only the &quot;v...&quot; IDs need to be considered)
-    (let [changeset-query (format &quot;SELECT id FROM %s WHERE id LIKE 'v%%' ORDER BY ORDEREXECUTED ASC&quot; (changelog-table-name conn))
+    (let [changeset-query (format &quot;SELECT id FROM %s WHERE id LIKE 'v%%' ORDER BY ORDEREXECUTED ASC&quot; (changelog-table-name liquibase))
           changeset-ids   (map :id (jdbc/query {:connection conn} [changeset-query]))
           ;; IDs in changesets do not include the leading 0/1 digit, so the major version is the first number
           ids-to-drop     (drop-while #(not= (inc target-version) (first (extract-numbers %))) changeset-ids)]
       (log/infof &quot;Rolling back app database schema to version %d&quot; target-version)
-      (.rollback liquibase (count ids-to-drop) &quot;&quot;)))))</pre></td></tr><tr><td class="docs"><p>Gets the latest version that was applied to the database.</p>
+      (.rollback liquibase (count ids-to-drop) &quot;&quot;)))))</pre></td></tr><tr><td class="docs"><p>Gets the latest version applied to the database.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn latest-applied-major-version
-  [conn]
-  (when-not (fresh-install? conn)
-    (let [changeset-query (format &quot;SELECT id FROM %s WHERE id LIKE 'v%%' ORDER BY ORDEREXECUTED DESC LIMIT 1&quot; (changelog-table-name conn))
+  [conn ^Database database]
+  (when-not (fresh-install? conn database)
+    (let [changeset-query (format &quot;SELECT id FROM %s WHERE id LIKE 'v%%' ORDER BY ORDEREXECUTED DESC LIMIT 1&quot;
+                                  (.getDatabaseChangeLogTableName database))
           changeset-id (last (map :id (jdbc/query {:connection conn} [changeset-query])))]
       (some-&gt; changeset-id extract-numbers first))))</pre></td></tr><tr><td class="docs"><p>Get the latest version that Liquibase would apply if we ran migrations right now.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn latest-available-major-version

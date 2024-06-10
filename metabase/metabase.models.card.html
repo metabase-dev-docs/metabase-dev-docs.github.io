@@ -2885,7 +2885,9 @@ is a historical name, but is the same thing; both terms are used interchangeably
    [metabase.email.messages :as messages]
    [metabase.events :as events]
    [metabase.legacy-mbql.normalize :as mbql.normalize]
+   [metabase.lib.core :as lib]
    [metabase.lib.schema.template-tag :as lib.schema.template-tag]
+   [metabase.lib.util :as lib.util]
    [metabase.models.audit-log :as audit-log]
    [metabase.models.collection :as collection]
    [metabase.models.field-values :as field-values]
@@ -2994,21 +2996,33 @@ gradually.</p>
          (map (juxt :card_id :count))
          (into {}))
    :id
-   {:default 0}))</pre></td></tr><tr><td class="docs"><p>Adds can<em>run</em>adhoc_query to each card.</p>
+   {:default 0}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- source-card-id
+  [query]
+  (let [query-type (lib/normalized-query-type query)]
+    (case query-type
+      :query      (-&gt; query mbql.normalize/normalize qp.util/query-&gt;source-card-id)
+      :mbql/query (-&gt; query lib/normalize lib.util/source-card-id)
+      nil)))</pre></td></tr><tr><td class="docs"><p>Adds can<em>run</em>adhoc_query to each card.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn with-can-run-adhoc-query
   [cards]
-  (mi/instances-with-hydrated-data
-   cards :can_run_adhoc_query
-   (fn []
-     (into {}
-           (comp
-            (filter (comp seq :dataset_query))
-            (map
-             (fn [{card-id :id :keys [dataset_query]}]
-               [card-id (query-perms/can-run-query? dataset_query)])))
-           cards))
-   :id
-   {:default false}))</pre></td></tr><tr><td class="docs">
+  (let [dataset-cards (filter (comp seq :dataset_query) cards)
+        source-card-ids (into #{}
+                              (keep (comp source-card-id :dataset_query))
+                              dataset-cards)]
+    (binding [query-perms/*card-instances*
+              (when (seq source-card-ids)
+                (t2/select-fn-&gt;fn :id identity [Card :id :collection_id] :id [:in source-card-ids]))]
+      (mi/instances-with-hydrated-data
+       cards :can_run_adhoc_query
+       (fn []
+         (into {}
+               (map
+                (fn [{card-id :id :keys [dataset_query]}]
+                  [card-id (query-perms/can-run-query? dataset_query)]))
+               dataset-cards))
+       :id
+       {:default false}))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mi/define-batched-hydration-method add-can-run-adhoc-query
   :can_run_adhoc_query
   &quot;Hydrate can_run_adhoc_query onto cards&quot;

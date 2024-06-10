@@ -3398,20 +3398,28 @@ We require that there is at least one relevant key to find a match.</p>
                           {:case-insensitive :agnostic
                            :allow-unused?    true}))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private heavily-quoted-query-mixed-case
-  &quot;SELECT RAW, \&quot;Foo\&quot;, \&quot;dong\&quot;.\&quot;bAr\&quot;, `ding`.`dong`.`feE` FROM `ding`.dong&quot;)</pre></td></tr><tr><td class="docs">
+  &quot;SELECT RAW, \&quot;Foo\&quot;, \&quot;doNg\&quot;.\&quot;bAr\&quot;, `ding`.`doNg`.`feE` FROM `ding`.`doNg`&quot;)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest case-and-quotes-test
   (testing &quot;By default, quoted references are also case insensitive&quot;
     (is (= heavily-quoted-query-rewritten
            (m/replace-names heavily-quoted-query-mixed-case
                             heavily-quoted-query-rewrites
                             :case-insensitive :lower))))
-  (testing &quot;One can opt-into ignoring case only for unquoted references&quot;
-    (is (thrown-with-msg? ExceptionInfo
-                          #&quot;Unknown rename: .* \&quot;(bar)|(foo)|(fee)\
-                          (m/replace-names heavily-quoted-query-mixed-case
-                                           heavily-quoted-query-rewrites
-                                           :case-insensitive :lower
-                                           :quotes-preserve-case? true)))))</pre></td></tr><tr><td class="docs">
+  (testing &quot;One can opt-into ignoring case only for unquoted references\n&quot;
+    (testing &quot;None of the quoted identifiers with different case will be matched&quot;
+      (is (thrown-with-msg? ExceptionInfo
+                            #&quot;Unknown rename: .* \&quot;(dong)|(bar)|(foo)|(fee)\
+                            (m/replace-names heavily-quoted-query-mixed-case
+                                             heavily-quoted-query-rewrites
+                                             :case-insensitive :agnostic
+                                             :quotes-preserve-case? true))))
+    (testing &quot;The query is unchanged when allowed to run partially&quot;
+      (is (= heavily-quoted-query-mixed-case
+             (m/replace-names heavily-quoted-query-mixed-case
+                              heavily-quoted-query-rewrites
+                              {:case-insensitive      :agnostic
+                               :quotes-preserve-case? true
+                               :allow-unused?         true}))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private ambiguous-case-replacements
   {:columns {{:schema &quot;public&quot; :table &quot;DOGS&quot; :column &quot;BARK&quot;}  &quot;MEOW&quot;
              {:schema &quot;public&quot; :table &quot;dogs&quot; :column &quot;bark&quot;}  &quot;meow&quot;
@@ -3634,6 +3642,48 @@ We require that there is at least one relevant key to find a match.</p>
   (let [filename (fixture-&gt;filename fixture)]
     (spit (str &quot;test/resources/&quot; filename)
           (anonymize-query (query-fixture fixture)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private alias-shadow-query
+  &quot;SELECT people.*, orders.a as foo
+   FROM orders
+   JOIN people
+   ON
+   people.foo = orders.foo_id&quot;)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(deftest alias-shadow-replace-test
+  (testing &quot;Aliases are not replaced, but real usages are&quot;
+    (is (ws= (str/replace alias-shadow-query &quot;people.foo&quot; &quot;people.bar&quot;)
+             (m/replace-names alias-shadow-query
+                              {:columns {{:table &quot;people&quot; :column &quot;foo&quot;} &quot;bar&quot;}}
+                              {:allow-unused? true})))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private cte-query
+  &quot;WITH engineering_employees AS (
+       SELECT id, name, department, favorite_language
+       FROM employees
+       WHERE department = 'Engineering')
+   SELECT id, name, favorite_language as fave_lang
+   FROM engineering_employees
+   WHERE favorite_language in ('mandarin clojure', 'middle javascript');&quot;)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private sub-select-query
+  &quot;SELECT id, name, favorite_language as fave_lang
+   FROM (
+       SELECT id, name, department, favorite_language
+       FROM employees
+       WHERE department = 'Engineering') as engineering_employees
+   WHERE favorite_language in ('mandarin clojure', 'middle javascript');&quot;)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(deftest cte-propagate-test
+  (testing &quot;Transitive references are tracked to their source when replacing columns in queries with CTEs.&quot;
+    (is (= (str/replace cte-query &quot;favorite_language&quot; &quot;first_language&quot;)
+           (m/replace-names cte-query
+                            {:columns {{:table &quot;employees&quot;, :column &quot;favorite_language&quot;} &quot;first_language&quot;}})))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(deftest sub-select-propagate-test
+  (testing &quot;Transitive references are tracked to their source when replacing columns in queries with sub-selects.&quot;
+    (is (= (str/replace sub-select-query &quot;favorite_language&quot; &quot;first_language&quot;)
+           (m/replace-names sub-select-query
+                            {:columns {{:table &quot;employees&quot;, :column &quot;favorite_language&quot;} &quot;first_language&quot;}})))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(deftest large-snowflake-test
+  (testing &quot;We are able to parse a complex Snowflake queries&quot;
+    ;; Start with the smaller example
+    (components (query-fixture :snowflakelet))
+    (components (query-fixture :snowflake))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(comment
  (require 'virgil)
  (require 'clojure.tools.namespace.repl)
@@ -3642,12 +3692,7 @@ We require that there is at least one relevant key to find a match.</p>
  (anonymize-query &quot;SELECT x FROM a&quot;)
  (anonymize-fixture :snowflake)
  (anonymize-fixture :snowflakelet)
- )</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(deftest large-snowflake-test
-  ;; See https://metabase.zendesk.com/agent/tickets/27376
-  (testing &quot;We are able to parse a complex Snowflake queries&quot;
-    (components (query-fixture :snowflakelet))
-    (components (query-fixture :snowflake))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.test.util" name="macaw.test.util"><h1 class="project-name">macaw.test.util</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+ )</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.test.util" name="macaw.test.util"><h1 class="project-name">macaw.test.util</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns macaw.test.util
   (:require
    [clojure.string :as str]
