@@ -2881,6 +2881,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.models.table :refer [Table]]
    [metabase.util.honey-sql-2 :as h2x]
    [metabase.util.malli :as mu]
+   [metabase.util.malli.schema :as ms]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- models-query
   [model ids]
@@ -2889,13 +2890,11 @@ net.brehaut.ClojureTools = (function (SH) {
      &quot;card&quot;      [Card
                   :id :name :collection_id :description :display
                   :dataset_query :type :archived
-                  :collection.authority_level [:collection.name :collection_name]
-                  :trashed_from_collection_id]
+                  :collection.authority_level [:collection.name :collection_name]]
      &quot;dashboard&quot; [Dashboard
                   :id :name :collection_id :description
                   :archived
-                  :collection.authority_level [:collection.name :collection_name]
-                  :trashed_from_collection_id]
+                  :collection.authority_level [:collection.name :collection_name]]
      &quot;table&quot;     [Table
                   :id :name :db_id :active
                   :display_name [:metabase_database.initial_sync_status :initial-sync-status]
@@ -2944,6 +2943,7 @@ query results for dashboard and table views.</p>
                                               [:%max.timestamp :max_ts]]
                                              {:group-by  [:model :model_id]
                                               :where     [:and
+                                                          [:= :context &quot;view&quot;]
                                                           [:in :model #{&quot;dashboard&quot; &quot;table&quot;}]]
                                               :order-by  [[:max_ts :desc] [:model :desc]]
                                               :limit     views-limit
@@ -2972,11 +2972,30 @@ query results for dashboard and table views.</p>
          reverse)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private views-limit 8)
 (def ^:private card-runs-limit 8)</pre></td></tr><tr><td class="docs"><p>/recent_views</p>
-</td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
+</td><td class="codes"><pre class="brush: clojure">(api/defendpoint ^:deprecated GET 
   &quot;Get a list of 100 models (cards, models, tables, dashboards, and collections) that the current user has been viewing most
   recently. Return a maximum of 20 model of each, if they've looked at at least 20.&quot;
   []
-  {:recent_views (recent-views/get-list *current-user-id*)})</pre></td></tr><tr><td class="docs"><p>/most<em>recently</em>viewed_dashboard</p>
+  {:recent_views (:recents (recent-views/get-recents *current-user-id* [:views]))})</pre></td></tr><tr><td class="docs"><p>/recents</p>
+</td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
+  &quot;Get a list of recent items the current user has been viewing most recently under the `:recents` key.
+  Allows for filtering by context: views or selections&quot;
+  [:as {{:keys [context]} :params}]
+  {context (ms/QueryVectorOf [:enum :selections :views])}
+  (when-not (seq context) (throw (ex-info &quot;context is required.&quot; {})))
+  (recent-views/get-recents *current-user-id* context))</pre></td></tr><tr><td class="docs"><p>/recents</p>
+</td><td class="codes"><pre class="brush: clojure">(api/defendpoint POST 
+  &quot;Adds a model to the list of recently selected items.&quot;
+  [:as {{:keys [model model_id context]} :body}]
+  {model (into [:enum] recent-views/rv-models)
+   model_id ms/PositiveInt
+   context [:enum :selection]}
+  (let [model-id model_id
+        model-type (recent-views/rv-model-&gt;model model)]
+    (when-not (t2/exists? model-type :id model-id)
+      (throw (ex-info &quot;Model not found&quot; {:model model :model_id model-id})))
+    (api/read-check (t2/select-one model-type :id model-id))
+    (recent-views/update-users-recent-views! *current-user-id* model-type model-id context)))</pre></td></tr><tr><td class="docs"><p>/most<em>recently</em>viewed_dashboard</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
   &quot;Get the most recently viewed dashboard for the current user. Returns a 204 if the user has not viewed any dashboards
    in the last 24 hours.&quot;
@@ -3009,17 +3028,20 @@ if the item can be placed in a collection.</p>
                official-wt 1
                recency-wt 2
                views-wt 4
-               scores [;; cards and dashboards? can be 'verified' in enterprise
-                       (if (verified? model_object) verified-wt 0)
-                       ;; items may exist in an 'official' collection in enterprise
-                       (if (official? model_object) official-wt 0)
-                       ;; most recent item = 1 * recency-wt, least recent item of 10 items = 1/10 * recency-wt
-                       (* (/ (- n-items recency-pos) n-items) recency-wt)
-                       ;; item with highest count = 1 * views-wt, lowest = item-view-count / max-view-count * views-wt
-                       ;; NOTE: the query implementation `views-and-runs` has an order-by clause using most recent timestamp
-                       ;; this has an effect on the outcomes. Consider an item with a massively high viewcount but a last view by the user
-                       ;; a long time ago. This may not even make it into the firs 10 items from the query, even though it might be worth showing
-                       (* (/ cnt max-count) views-wt)]]
+               scores (remove nil?
+                              [;; cards and dashboards? can be 'verified' in enterprise
+                               (when (verified? model_object) verified-wt)
+                               ;; items may exist in an 'official' collection in enterprise
+                               (when (official? model_object) official-wt)
+                               ;; most recent item = 1 * recency-wt, least recent item of 10 items = 1/10 * recency-wt
+                               (when-not (zero? n-items)
+                                 (* (/ (- n-items recency-pos) n-items) recency-wt))
+                               ;; item with highest count = 1 * views-wt, lowest = item-view-count / max-view-count * views-wt
+                               ;; NOTE: the query implementation `views-and-runs` has an order-by clause using most recent timestamp
+                               ;; this has an effect on the outcomes. Consider an item with a massively high viewcount but a last view by the user
+                               ;; a long time ago. This may not even make it into the firs 10 items from the query, even though it might be worth showing
+                               (when-not (zero? max-count)
+                                 (* (/ cnt max-count) views-wt))])]
            (assoc item :score (double (reduce + scores))))) items))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private model-&gt;precedence
   {&quot;dashboard&quot;  0

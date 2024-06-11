@@ -2963,30 +2963,24 @@ net.brehaut.ClojureTools = (function (SH) {
        :from   (from-clause-for-model model)}
       (search.filter/build-filters model context)))</pre></td></tr><tr><td class="docs"><p>Add a <code>WHERE</code> clause to the query to only return Collections the Current User has access to; join against Collection
 so we can return its <code>:name</code>.</p>
-
-<p>A brief note here on <code>collection-join-id</code> and <code>collection-permission-id</code>. What the heck do these represent?</p>
-
-<p>Permissions on Trashed items work differently than normal permissions. If something is in the trash, you can only
-see it if you have the relevant permissions on the <em>original</em> collection the item was trashed from. This is set as
-<code>trashed_from_collection_id</code>.</p>
-
-<p>However, the item is actually <em>in</em> the Trash, and we want to show that to the frontend. Therefore, we need two
-different collection IDs. One, the ID we should be checking permissions on, and two, the ID we should be joining to
-Collections on.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn add-collection-join-and-where-clauses
   [honeysql-query                                :- ms/Map
    model                                         :- :string
    {:keys [current-user-perms
-           filter-items-in-personal-collection]} :- SearchContext]
-  (let [visible-collections      (collection/permissions-set-&gt;visible-collection-ids current-user-perms)
-        collection-join-id       (if (= model &quot;collection&quot;)
+           filter-items-in-personal-collection
+           archived]} :- SearchContext]
+  (let [visible-collections      (collection/permissions-set-&gt;visible-collection-ids
+                                  current-user-perms
+                                  {:include-archived-items :all
+                                   :include-trash-collection? true
+                                   :permission-level (if archived
+                                                       :write
+                                                       :read)})
+        collection-id-col        (if (= model &quot;collection&quot;)
                                    :collection.id
                                    :collection_id)
-        collection-permission-id (if (= model &quot;collection&quot;)
-                                   :collection.id
-                                   (mi/parent-collection-id-column-for-perms (:db-model (search.config/model-to-db-model model))))
         collection-filter-clause (collection/visible-collection-ids-&gt;honeysql-filter-clause
-                                  collection-permission-id
+                                  collection-id-col
                                   visible-collections)]
     (cond-&gt; honeysql-query
       true
@@ -2994,7 +2988,7 @@ Collections on.</p>
       ;; add a JOIN against Collection *unless* the source table is already Collection
       (not= model &quot;collection&quot;)
       (sql.helpers/left-join [:collection :collection]
-                             [:= collection-join-id :collection.id])
+                             [:= collection-id-col :collection.id])
       (some? filter-items-in-personal-collection)
       (sql.helpers/where
        (case filter-items-in-personal-collection
@@ -3013,7 +3007,7 @@ Collections on.</p>
                 [:and [:= :collection.personal_owner_id nil]]
                 (for [id (t2/select-pks-set :model/Collection :personal_owner_id [:not= nil])]
                   [:not-like :collection.location (format &quot;/%d/%%&quot; id)]))
-               [:= collection-join-id nil]))))))</pre></td></tr><tr><td class="docs"><p>Add a WHERE clause to only return tables with the given DB id.
+               [:= collection-id-col nil]))))))</pre></td></tr><tr><td class="docs"><p>Add a WHERE clause to only return tables with the given DB id.
 Used in data picker for joins because we can't join across DB's.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private add-table-db-id-clause
   [query :- ms/Map id :- [:maybe ms/PositiveInt]]
@@ -3136,15 +3130,14 @@ Used in data picker for joins because we can't join across DB's.</p>
       (let [has-root-access?
             (or (contains? current-user-perms &quot;/collection/root/&quot;)
                 (contains? current-user-perms &quot;/collection/root/read/&quot;))
-            collection-id [:coalesce :model.trashed_from_collection_id :collection_id]
             collection-perm-clause
             [:or
-             (when has-root-access? [:= collection-id nil])
+             (when has-root-access? [:= :collection_id nil])
              [:and
-              [:not= collection-id nil]
+              [:not= :collection_id nil]
               [:or
-               (has-perm-clause &quot;/collection/&quot; collection-id &quot;/&quot;)
-               (has-perm-clause &quot;/collection/&quot; collection-id &quot;/read/&quot;)]]]]
+               (has-perm-clause &quot;/collection/&quot; :collection_id &quot;/&quot;)
+               (has-perm-clause &quot;/collection/&quot; :collection_id &quot;/read/&quot;)]]]]
         (sql.helpers/where
          query
          collection-perm-clause)))))</pre></td></tr><tr><td class="docs">
@@ -3346,7 +3339,8 @@ land and then convert the stuff that actually gets sent over the wire in the RES
 endpoint itself, not in the search impl.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn serialize
   [{:as result :keys [all-scores relevant-scores name display_name collection_id collection_name
-                      collection_authority_level collection_type collection_effective_ancestors effective_parent]}]
+                      collection_authority_level collection_type collection_effective_ancestors effective_parent
+                      archived_directly model]}]
   (let [matching-columns    (into #{} (remove nil? (map :column relevant-scores)))
         match-context-thunk (first (keep :match-context-thunk relevant-scores))]
     (-&gt; result
@@ -3358,14 +3352,17 @@ endpoint itself, not in the search impl.</p>
                                     (empty?
                                      (remove matching-columns search.config/displayed-columns)))
                            (match-context-thunk))
-         :collection     (merge {:id              collection_id
-                                 :name            collection_name
-                                 :authority_level collection_authority_level
-                                 :type            collection_type}
-                                (when effective_parent
-                                  effective_parent)
-                                (when collection_effective_ancestors
-                                  {:effective_ancestors collection_effective_ancestors}))
+         :collection     (if (and archived_directly (not= &quot;collection&quot; model))
+                           (select-keys (collection/trash-collection)
+                                        [:id :name :authority_level :type])
+                           (merge {:id              collection_id
+                                   :name            collection_name
+                                   :authority_level collection_authority_level
+                                   :type            collection_type}
+                                  ;; for  non-root collections, override :collection with the values for its effective parent
+                                  effective_parent
+                                  (when collection_effective_ancestors
+                                    {:effective_ancestors collection_effective_ancestors})))
          :scores          all-scores)
         (update :dataset_query (fn [dataset-query]
                                  (when-let [query (some-&gt; dataset-query json/parse-string)]
@@ -3376,11 +3373,11 @@ endpoint itself, not in the search impl.</p>
          :all-scores
          :relevant-scores
          :collection_effective_ancestors
-         :trashed_from_collection_id
          :collection_id
          :collection_location
          :collection_name
          :collection_type
+         :archived_directly
          :display_name
          :effective_parent))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- add-can-write [row]
@@ -3408,13 +3405,18 @@ endpoint itself, not in the search impl.</p>
         xf                 (comp
                             (map t2.realize/realize)
                             (map to-toucan-instance)
+                            (map #(if (and (t2/instance-of? :model/Collection %)
+                                           (:archived_directly %))
+                                    (assoc % :location (collection/trash-path))
+                                    %))
                             (map #(cond-&gt; %
                                     (t2/instance-of? :model/Collection %) (assoc :type (:collection_type %))))
                             (map #(cond-&gt; % (t2/instance-of? :model/Collection %) collection/maybe-localize-trash-name))
-                            ;; MySQL returns `:bookmark` and `:archived` as `1` or `0` so convert those to boolean as
+                            ;; MySQL returns booleans as `1` or `0` so convert those to boolean as
                             ;; needed
                             (map #(update % :bookmark bit-&gt;boolean))
                             (map #(update % :archived bit-&gt;boolean))
+                            (map #(update % :archived_directly bit-&gt;boolean))
                             (filter (partial check-permissions-for-model search-ctx))
                             (map #(update % :pk_ref json/parse-string))
                             (map add-can-write)
