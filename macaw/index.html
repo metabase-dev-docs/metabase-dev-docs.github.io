@@ -3018,6 +3018,7 @@ referenced in a table-wildcard (as far as can be determined from the query).</p>
      :table-wildcards   (into #{} (update-components (partial resolve-table-name opts) table-wildcards))}))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.core" name="macaw.core"><h1 class="project-name">macaw.core</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns macaw.core
   (:require
+   [clojure.string :as str]
    [macaw.collect :as collect]
    [macaw.rewrite :as rewrite])
   (:import
@@ -3025,7 +3026,12 @@ referenced in a table-wildcard (as far as can be determined from the query).</p>
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Main entry point: takes a string query and returns a <code>Statement</code> object that can be handled by the other functions.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn parsed-query
   [^String query]
-  (CCJSqlParserUtil/parse query))</pre></td></tr><tr><td class="docs"><p>Given a parsed query (i.e., a [subclass of] <code>Statement</code>) return a map with the elements found within it.</p>
+  ;; Dialects like SQLite and Databricks treat consecutive blank lines as implicit semicolons.
+  ;; JSQLParser, as a polyglot parser, always has this behavior, and there is no option to disable it.
+  ;; For Metabase, we are always dealing with single queries, so there's no point ever having this behavior.
+  ;; TODO When JSQLParser 4.10 is released, move to the more robust [[CCJSqlParserUtil.sanitizeSingleSql]] helper.
+  ;; See https://github.com/JSQLParser/JSqlParser/issues/1988
+  (CCJSqlParserUtil/parse (str/replace query #&quot;\n{2,}&quot; &quot;\n&quot;)))</pre></td></tr><tr><td class="docs"><p>Given a parsed query (i.e., a [subclass of] <code>Statement</code>) return a map with the elements found within it.</p>
 
 <p>(Specifically, it returns their fully-qualified names as strings, where 'fully-qualified' means 'as referred to in
 the query'; this function doesn't do additional inference work to find out a table's schema.)</p>
@@ -3048,10 +3054,13 @@ the query'; this function doesn't do additional inference work to find out a tab
 </ul>
 </td><td class="codes"><pre class="brush: clojure">(defn replace-names
   [sql renames &amp; {:as opts}]
-  (rewrite/replace-names sql
-                         (parsed-query sql)
-                         renames
-                         (select-keys opts [:case-insensitive :quotes-preserve-case? :allow-unused?])))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.rewrite" name="macaw.rewrite"><h1 class="project-name">macaw.rewrite</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+  ;; We need to pre-sanitize the SQL before its analyzed so that the AST token positions match up correctly.
+  ;; Currently we use a more complex and expensive sanitization method, so that it's reversible.
+  ;; If we decide that it's OK to normalize whitespace etc. during replacement then we can use the same helper.
+  (let [sql' (str/replace sql #&quot;(?m)^\n&quot; &quot; \n&quot;)
+        opts' (select-keys opts [:case-insensitive :quotes-preserve-case? :allow-unused?])]
+    (str/replace (rewrite/replace-names sql' (parsed-query sql') renames opts')
+                 #&quot;(?m)^ \n&quot; &quot;\n&quot;)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.rewrite" name="macaw.rewrite"><h1 class="project-name">macaw.rewrite</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns macaw.rewrite
   (:require
    [macaw.collect :as collect]
@@ -3281,7 +3290,19 @@ We require that there is at least one relevant key to find a match.</p>
   [query]
   (mw/fold-query (m/parsed-query query)
                  {:column-qualifier (fn [acc tbl _ctx] (conj acc (.getName ^Table tbl)))}
-                 #{}))</pre></td></tr><tr><td class="docs">
+                 #{}))</pre></td></tr><tr><td class="docs"><p>See [[macaw.core/parsed-query]] and https://github.com/JSQLParser/JSqlParser/issues/1988 for more details.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private implicit-semicolon
+  &quot;select id
+from foo&quot;)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- -&gt;windows [sql]
+  (str/replace sql &quot;\n&quot; &quot;\r\n&quot;))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(deftest three-or-more-line-breaks-test
+  (doseq [f [identity -&gt;windows]
+          :let [query (f implicit-semicolon)]]
+    (is (= (-&gt; query (str/replace &quot;id&quot; &quot;pk&quot;) (str/replace &quot;foo&quot; &quot;bar&quot;))
+           (m/replace-names query
+                            {:columns {{:table &quot;foo&quot; :column &quot;id&quot;} &quot;pk&quot;}
+                             :tables  {{:table &quot;foo&quot;} &quot;bar&quot;}})))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest query-&gt;tables-test
   (testing &quot;Simple queries&quot;
     (is (= #{{:table &quot;core_user&quot;}}
