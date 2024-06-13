@@ -2873,7 +2873,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [macaw.util :as u]
    [macaw.walk :as mw])
   (:import
-   (com.metabase.macaw AstWalker$QueueItem)
+   (com.metabase.macaw AstWalker$Scope)
    (java.util.regex Pattern)
    (net.sf.jsqlparser.expression Alias)
    (net.sf.jsqlparser.schema Column Table)
@@ -2887,8 +2887,8 @@ net.brehaut.ClojureTools = (function (SH) {
    (fn item-conjer [results component context]
      (update results key-name conj {:component (xf component)
                                     :context   (mapv
-                                                 (fn [^AstWalker$QueueItem x]
-                                                   [(keyword (.getKey x)) (.getValue x)])
+                                                 (fn [^AstWalker$Scope x]
+                                                   [(keyword (.getType x)) (.getLabel x) (.getId x)])
                                                  context)}))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- query-&gt;raw-components
   [^Statement parsed-ast]
@@ -2976,7 +2976,7 @@ referenced in a table-wildcard (as far as can be determined from the query).</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- only-query-context [ctx]
   (into [] (comp (filter #(= (first %) :query))
-                 (map second))
+                 (map (comp vec rest)))
     ctx))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- update-components
   [f components]
@@ -3037,10 +3037,10 @@ referenced in a table-wildcard (as far as can be determined from the query).</p>
 the query'; this function doesn't do additional inference work to find out a table's schema.)</p>
 </td><td class="codes"><pre class="brush: clojure">(defn query-&gt;components
   [statement &amp; {:as opts}]
-  ;; By default, we will preserve identifiers verbatim, to be agnostic of case and quote behaviour.
+  ;; By default, we will preserve identifiers verbatim, to be agnostic of case and quote behavior.
   ;; This may result in duplicate components, which are left to the caller to deduplicate.
-  ;; In Metabase's case this is done during the stage where the database metadata is queried.
-  (collect/query-&gt;components statement (merge {:preserve-identifiers? true} opts)))</pre></td></tr><tr><td class="docs"><p>Given a SQL query, apply the given table, column, and schema renames.</p>
+  ;; In Metabase's case, this is done during the stage where the database metadata is queried.
+  (collect/query-&gt;components statement (merge {:preserve-identifiers? true} opts)))</pre></td></tr><tr><td class="docs"><p>Given an SQL query, apply the given table, column, and schema renames.</p>
 
 <p>Supported options:</p>
 
@@ -3269,9 +3269,11 @@ We require that there is at least one relevant key to find a match.</p>
    [clojure.java.io :as io]
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
+   [clojure.walk :as walk]
    [macaw.core :as m]
    [macaw.test.util :refer [ws=]]
-   [macaw.walk :as mw])
+   [macaw.walk :as mw]
+   [mb.hawk.assert-exprs.approximately-equal :as =?])
   (:import
    (clojure.lang ExceptionInfo)
    (net.sf.jsqlparser.schema Table)))</pre></td></tr><tr><td class="docs">
@@ -3286,6 +3288,20 @@ We require that there is at least one relevant key to find a match.</p>
 (def mutations      (comp raw-components :mutation-commands components))
 (def tables         (comp raw-components :tables components))
 (def table-wcs      (comp raw-components :table-wildcards components))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- strip-context-ids [m]
+  (walk/prewalk
+   (fn [x]
+     (if (:context x)
+       (update x :context (partial mapv first))
+       x))
+   m))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- contexts-&gt;scopes [m]
+  (walk/prewalk
+   (fn [x]
+     (if-let [context (:context x)]
+       (-&gt; x (dissoc :context) (assoc :scope (first context)))
+       x))
+   m))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn column-qualifiers
   [query]
   (mw/fold-query (m/parsed-query query)
@@ -3555,7 +3571,7 @@ from foo&quot;)</pre></td></tr><tr><td class="docs">
             :mutation-commands #{},
             :tables            #{{:component {:table &quot;orders&quot;}, :context [&quot;FROM&quot; &quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
             :table-wildcards   #{}}
-           (components &quot;SELECT * FROM (SELECT id, total FROM orders) WHERE total &gt; 10&quot;))))
+           (strip-context-ids (components &quot;SELECT * FROM (SELECT id, total FROM orders) WHERE total &gt; 10&quot;)))))
   (testing &quot;Sub-select with inner wildcard&quot;
     (is (= {:columns
             #{{:component {:column &quot;id&quot;    :table &quot;orders&quot;}, :context [&quot;SELECT&quot;]}
@@ -3565,7 +3581,7 @@ from foo&quot;)</pre></td></tr><tr><td class="docs">
             :mutation-commands #{},
             :tables            #{{:component {:table &quot;orders&quot;}, :context [&quot;FROM&quot; &quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
             :table-wildcards   #{}}
-           (components &quot;SELECT id, total FROM (SELECT * FROM orders) WHERE total &gt; 10&quot;))))
+           (strip-context-ids (components &quot;SELECT id, total FROM (SELECT * FROM orders) WHERE total &gt; 10&quot;)))))
   (testing &quot;Sub-select with dual wildcards&quot;
     (is (= {:columns           #{{:component {:column &quot;total&quot; :table &quot;orders&quot;}, :context [&quot;WHERE&quot; &quot;JOIN&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
             :has-wildcard?
@@ -3574,7 +3590,7 @@ from foo&quot;)</pre></td></tr><tr><td class="docs">
             :mutation-commands #{},
             :tables            #{{:component {:table &quot;orders&quot;}, :context [&quot;FROM&quot; &quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
             :table-wildcards   #{}}
-           (components &quot;SELECT * FROM (SELECT * FROM orders) WHERE total &gt; 10&quot;))))
+           (strip-context-ids (components &quot;SELECT * FROM (SELECT * FROM orders) WHERE total &gt; 10&quot;)))))
   (testing &quot;Join; table wildcard&quot;
     (is (= {:columns           #{{:component {:column &quot;order_id&quot; :table &quot;foo&quot;}, :context [&quot;JOIN&quot; &quot;SELECT&quot;]}
                                  {:component {:column &quot;id&quot; :table &quot;orders&quot;}, :context [&quot;JOIN&quot; &quot;SELECT&quot;]}},
@@ -3583,7 +3599,7 @@ from foo&quot;)</pre></td></tr><tr><td class="docs">
             :tables            #{{:component {:table &quot;foo&quot;}, :context [&quot;FROM&quot; &quot;JOIN&quot; &quot;SELECT&quot;]}
                                  {:component {:table &quot;orders&quot;}, :context [&quot;FROM&quot; &quot;SELECT&quot;]}},
             :table-wildcards   #{{:component {:table &quot;orders&quot;}, :context [&quot;SELECT&quot;]}}}
-           (components &quot;SELECT o.* FROM orders o JOIN foo ON orders.id = foo.order_id&quot;)))))</pre></td></tr><tr><td class="docs">
+           (strip-context-ids (components &quot;SELECT o.* FROM orders o JOIN foo ON orders.id = foo.order_id&quot;))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest replace-names-test
   (is (= &quot;SELECT aa.xx, b.x, b.y FROM aa, b;&quot;
          (m/replace-names &quot;SELECT a.x, b.x, b.y FROM a, b;&quot;
@@ -3704,7 +3720,19 @@ from foo&quot;)</pre></td></tr><tr><td class="docs">
   (testing &quot;We are able to parse a complex Snowflake queries&quot;
     ;; Start with the smaller example
     (components (query-fixture :snowflakelet))
-    (components (query-fixture :snowflake))))</pre></td></tr><tr><td class="docs">
+    (components (query-fixture :snowflake))))</pre></td></tr><tr><td class="docs"><p>A transformation to help write tests, where hawk would face limitations on predicates within sets.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn sorted-vec
+  [element-set]
+  (sort-by (comp (juxt :schema :table :column :scope) :component) element-set))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(deftest duplicate-scopes-test
+  ;; TODO Fix these entries to mention &quot;a&quot; as their source table, otherwise we cannot compute the source fields.
+  ;; TODO Fix kondo linting of =?/same
+  #_{:clj-kondo/ignore [:unresolved-symbol]}
+  (is (=? [{:component {:column &quot;x&quot;}, :scope [&quot;SELECT&quot; (=?/same :subselect-1)]}
+           {:component {:column &quot;x&quot;}, :scope [&quot;SELECT&quot; (=?/same :subselect-2)]}
+           {:component {:table &quot;b&quot;, :column &quot;x&quot;}, :scope [&quot;SUB_SELECT&quot; (=?/same :top-level)]}
+           {:component {:table &quot;c&quot;, :column &quot;x&quot;}, :scope [&quot;SUB_SELECT&quot; (=?/same :top-level)]}]
+          (sorted-vec (contexts-&gt;scopes (:columns (components (query-fixture :duplicate-scopes))))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(comment
  (require 'virgil)
  (require 'clojure.tools.namespace.repl)
