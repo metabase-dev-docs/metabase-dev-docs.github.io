@@ -3129,18 +3129,23 @@ the query'; this function doesn't do additional inference work to find out a tab
 </td><td class="codes"><pre class="brush: clojure">(defn- rename-table
   [updated-nodes table-renames schema-renames known-tables opts ^Table t _ctx]
   (when-let [rename (u/find-relevant table-renames (get known-tables t) [:table :schema])]
+    ;; Handle both raw string renames, as well as more precise element based ones.
     (vswap! updated-nodes conj [t rename])
-    (.setName t (val rename)))
+    (let [identifier (as-&gt; (val rename) % (:table % %))]
+      (.setName t identifier)))
   (let [raw-schema-name (.getSchemaName t)
         schema-name     (collect/normalize-reference raw-schema-name opts)]
     (when-let [schema-rename (u/seek (comp (partial u/match-component schema-name) key) schema-renames)]
       (vswap! updated-nodes conj [raw-schema-name schema-rename])
-      (.setSchemaName t (val schema-rename)))))</pre></td></tr><tr><td class="docs">
+      (let [identifier (as-&gt; (val schema-rename) % (:table % %))]
+        (.setSchemaName t identifier)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- rename-column
   [updated-nodes column-renames known-columns ^Column c _ctx]
   (when-let [rename (u/find-relevant column-renames (get known-columns c) [:column :table :schema])]
+    ;; Handle both raw string renames, as well as more precise element based ones.
     (vswap! updated-nodes conj [c rename])
-    (.setColumnName c (val rename))))</pre></td></tr><tr><td class="docs">
+    (let [identifier (as-&gt; (val rename) % (:column % %))]
+      (.setColumnName c identifier))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- alert-unused! [updated-nodes renames]
   (let [known-rename? (set (map second updated-nodes))]
     (doseq [[k items] renames]
@@ -3278,17 +3283,19 @@ We require that there is at least one relevant key to find a match.</p>
    (clojure.lang ExceptionInfo)
    (net.sf.jsqlparser.schema Table)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- and*
-  [x y]
-  (and x y))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- non-empty-and-truthy [xs]
+  (if (seq xs)
+    (every? true? xs)
+    false))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def components     (comp m/query-&gt;components m/parsed-query))
 (def raw-components (comp (partial into #{}) (partial map :component)))
 (def columns        (comp raw-components :columns components))
-(def has-wildcard?  (comp (partial reduce and*) raw-components :has-wildcard? components))
+(def has-wildcard?  (comp non-empty-and-truthy raw-components :has-wildcard? components))
 (def mutations      (comp raw-components :mutation-commands components))
 (def tables         (comp raw-components :tables components))
-(def table-wcs      (comp raw-components :table-wildcards components))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- strip-context-ids [m]
+(def table-wcs      (comp raw-components :table-wildcards components))</pre></td></tr><tr><td class="docs"><p>Strip the scope id from the context stacks, to get deterministic values for testing.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- strip-context-ids
+  [m]
   (walk/prewalk
    (fn [x]
      (if (:context x)
@@ -3605,6 +3612,21 @@ from foo&quot;)</pre></td></tr><tr><td class="docs">
          (m/replace-names &quot;SELECT a.x, b.x, b.y FROM a, b;&quot;
                           {:tables  {{:schema &quot;public&quot; :table &quot;a&quot;} &quot;aa&quot;}
                            :columns {{:schema &quot;public&quot; :table &quot;a&quot; :column &quot;x&quot;} &quot;xx&quot;}})))
+  (testing &quot;Handle fully qualified replacement targets&quot;
+    ;; Giving Macaw more context could make it easier to
+    ;; In any case, this is trivial for Metabase to provide.
+    (is (= &quot;SELECT aa.xx, b.x, b.y FROM aa, b;&quot;
+           (m/replace-names &quot;SELECT a.x, b.x, b.y FROM a, b;&quot;
+                            {:tables  {{:schema &quot;public&quot; :table &quot;a&quot;} &quot;aa&quot;}
+                             :columns {{:schema &quot;public&quot; :table &quot;a&quot;  :column &quot;x&quot;}
+                                       {:schema &quot;public&quot; :table &quot;aa&quot; :column &quot;xx&quot;}}}))))
+  ;; To consider - we could avoid splitting up the renames into column and table portions in the client, as
+  ;; qualified targets would allow us to infer such changes. Partial qualification could also work fine where there
+  ;; is no ambiguity - even if this is just a nice convenience for testing.
+  #_(is (= &quot;SELECT aa.xx, b.x, b.y FROM aa, b;&quot;
+         (m/replace-names &quot;SELECT a.x, b.x, b.y FROM a, b;&quot;
+                          {:columns {{:schema &quot;public&quot; :table &quot;a&quot; :column &quot;x&quot;}
+                                     {:table &quot;aa&quot; :column &quot;xx&quot;}}})))
   (is (= &quot;SELECT qwe FROM orders&quot;
          (m/replace-names &quot;SELECT id FROM orders&quot;
                           {:columns {{:schema &quot;public&quot; :table &quot;orders&quot; :column &quot;id&quot;} &quot;qwe&quot;}})))
@@ -3660,7 +3682,11 @@ from foo&quot;)</pre></td></tr><tr><td class="docs">
   (let [prefix (str seq-type &quot;_&quot;)]
     (rest (iterate (fn [_] (str (gensym prefix))) nil))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- fixture-&gt;filename [fixture]
-  (str (str/replace (name fixture) &quot;-&quot; &quot;_&quot;) &quot;.sql&quot;))</pre></td></tr><tr><td class="docs">
+  (-&gt; (-&gt;&gt; ((juxt namespace name) fixture)
+           (remove nil?)
+           (str/join &quot;__&quot;))
+      (str/replace &quot;-&quot; &quot;_&quot;)
+      (str &quot;.sql&quot;)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- query-fixture [fixture]
   (slurp (io/resource (fixture-&gt;filename fixture))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- anonymize-query [query]
@@ -3721,18 +3747,82 @@ from foo&quot;)</pre></td></tr><tr><td class="docs">
     ;; Start with the smaller example
     (components (query-fixture :snowflakelet))
     (components (query-fixture :snowflake))))</pre></td></tr><tr><td class="docs"><p>A transformation to help write tests, where hawk would face limitations on predicates within sets.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn sorted-vec
+</td><td class="codes"><pre class="brush: clojure">(defn sorted
   [element-set]
-  (sort-by (comp (juxt :schema :table :column :scope) :component) element-set))</pre></td></tr><tr><td class="docs">
+  (sort-by (comp (juxt :schema :table :column :scope) #(:component % %)) element-set))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest duplicate-scopes-test
   ;; TODO Fix these entries to mention &quot;a&quot; as their source table, otherwise we cannot compute the source fields.
   ;; TODO Fix kondo linting of =?/same
   #_{:clj-kondo/ignore [:unresolved-symbol]}
-  (is (=? [{:component {:column &quot;x&quot;}, :scope [&quot;SELECT&quot; (=?/same :subselect-1)]}
-           {:component {:column &quot;x&quot;}, :scope [&quot;SELECT&quot; (=?/same :subselect-2)]}
+  (is (=? [{:component {#_#_:table &quot;a&quot;, :column &quot;x&quot;}, :scope [&quot;SELECT&quot; (=?/same :subselect-1)]}
+           {:component {#_#_:table &quot;a&quot;, :column &quot;x&quot;}, :scope [&quot;SELECT&quot; (=?/same :subselect-2)]}
            {:component {:table &quot;b&quot;, :column &quot;x&quot;}, :scope [&quot;SUB_SELECT&quot; (=?/same :top-level)]}
            {:component {:table &quot;c&quot;, :column &quot;x&quot;}, :scope [&quot;SUB_SELECT&quot; (=?/same :top-level)]}]
-          (sorted-vec (contexts-&gt;scopes (:columns (components (query-fixture :duplicate-scopes))))))))</pre></td></tr><tr><td class="docs">
+          (sorted (contexts-&gt;scopes (:columns (components (query-fixture :duplicate-scopes))))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(deftest count-field-test
+  (testing &quot;COUNT(*) does not actually read any columns&quot;
+    (is (empty? (columns &quot;SELECT COUNT(*) FROM users&quot;)))
+    #_(is (false? (has-wildcard? &quot;SELECT COUNT(*) FROM users&quot;)))
+    (is (empty? (table-wcs &quot;SELECT COUNT(*) FROM users&quot;))))
+  (testing &quot;COUNT(1) does not actually read any columns&quot;
+    (is (empty? (columns &quot;SELECT COUNT(1) FROM users&quot;)))
+    (is (false? (has-wildcard? &quot;SELECT COUNT(1) FROM users&quot;)))
+    (is (empty? (table-wcs &quot;SELECT COUNT(1) FROM users&quot;))))
+  (testing &quot;We do care about explicitly referenced fields in a COUNT&quot;
+    (is (= #{{:table &quot;users&quot; :column &quot;id&quot;}}
+           (columns &quot;SELECT COUNT(id) FROM users&quot;))))
+  (testing &quot;We do care about deeply referenced fields in a COUNT however&quot;
+    (is (= #{{:table &quot;users&quot; :column &quot;id&quot;}}
+           (columns &quot;SELECT COUNT(DISTINCT(id)) FROM users&quot;)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(deftest compound-subselect-test
+  ;; TODO These first three entries should track what they're derived from, so we can filter them from query fields.
+  (is (= [{:column &quot;average_salary&quot;, :alias &quot;avg_salary&quot;}
+          {:column &quot;department&quot;, :alias &quot;department_name&quot;}
+          {:column &quot;department&quot;}
+          ;; TODO This doesn't belong here, as the identifier does not relate to any column
+          {:column &quot;total_employees&quot;}
+          {:table &quot;employees&quot;, :column &quot;department&quot;}
+          {:table &quot;employees&quot;, :column &quot;salary&quot;}
+          ;; TODO We will want to indicate that this value is transformed, somehow.
+          {:table &quot;employees&quot;, :column &quot;salary&quot;, :alias &quot;average_salary&quot;}]
+         (sorted (columns (query-fixture :compound/subselect))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(deftest compound-cte-test
+  ;; TODO These first three entries should track what they're derived from, so we can filter them from query fields.
+  (is (= [{:column &quot;department&quot;}
+          ;; TODO Both salary selects must be attributed to the employees table, and we should indicate the transform.
+          {:column &quot;salary&quot;, :alias &quot;average_salary&quot;}
+          {:column &quot;salary&quot;}
+          ;; TODO Somehow we must track that &quot;department stats&quot; and &quot;high_earners&quot; are CTEs, not tables.
+          ;;      We _could_ keep using the :table key, and track the scope / pseudo-table correspondence out of band.
+          {:table &quot;department_stats&quot;, :column &quot;average_salary&quot;, :alias &quot;avg_summary&quot;}
+          {:table &quot;department_stats&quot;, :column &quot;department&quot;, :alias &quot;department_name&quot;}
+          {:table &quot;department_stats&quot;, :column &quot;department&quot;}
+          {:table &quot;department_stats&quot;, :column &quot;total_employees&quot;}
+          {:table &quot;high_earners&quot;, :column &quot;department&quot;}
+          {:table &quot;high_earners&quot;, :column &quot;high_earners_count&quot;, :alias &quot;high_earners&quot;}]
+         (sorted (columns (query-fixture :compound/cte))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(deftest compound-union-test
+  ;; TODO We are missing the fact that we expose &quot;total_employees&quot; and &quot;high_earners&quot; columns from the query.
+  (is (= [{:table &quot;employees&quot;, :column &quot;department&quot;, :alias &quot;department_name&quot;}
+          ;; TODO there's no use for this internal reference, which is not exposed
+          {:table &quot;employees&quot;, :column &quot;department&quot;}
+          ;; TODO We will want to indicate that this value is transformed, somehow.
+          {:table &quot;employees&quot;, :column &quot;salary&quot;, :alias &quot;avg_salary&quot;}
+          {:table &quot;employees&quot;, :column &quot;salary&quot;}]
+         (sorted (columns (query-fixture :compound/union))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(deftest compound-correlated-subquery-test
+  ;; TODO We are missing the fact that we expose &quot;avg_salary&quot;, &quot;total_employees&quot; and &quot;high_earners&quot; columns from the query.
+  (is (= [{:table &quot;employees&quot;, :column &quot;department&quot;, :alias &quot;department_name&quot;}
+          ;; TODO there's no use for this internal reference, which is not exposed
+          {:table &quot;employees&quot;, :column &quot;department&quot;}
+          {:table &quot;employees&quot;, :column &quot;salary&quot;}]
+         (sorted (columns (query-fixture :compound/correlated-subquery))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(deftest shadow-subselect-test
+  ;; TODO this case is just a total mess right now
+  #_(is (= #{} (columns (query-fixture :shadow/subselect)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(deftest cycle-cte-test
+  ;; TODO this case is just a total mess right now
+  #_(is (= #{} (columns (query-fixture :cycle/cte)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(comment
  (require 'virgil)
  (require 'clojure.tools.namespace.repl)
