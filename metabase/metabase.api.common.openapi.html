@@ -2868,10 +2868,15 @@ net.brehaut.ClojureTools = (function (SH) {
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.api.common.openapi" name="metabase.api.common.openapi"><h1 class="project-name">metabase.api.common.openapi</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Generate OpenAPI schema for defendpoint routes</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.api.common.openapi
   (:require
+   [clojure.set :as set]
    [clojure.string :as str]
    [clojure.walk :as walk]
+   [malli.core :as mc]
    [malli.json-schema :as mjs]
-   [metabase.util :as u]))</pre></td></tr><tr><td class="docs">
+   [metabase.util :as u]
+   [metabase.util.malli.schema :as ms])
+  (:import [clojure.lang PersistentVector]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private ^:dynamic *definitions* nil)</pre></td></tr><tr><td class="docs"><p>Helpers</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Fixes all {:$ref ....} locations - could be in properties, or in allOf/anyOf with arbitrary nesting.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- fix-locations
@@ -2887,20 +2892,28 @@ net.brehaut.ClojureTools = (function (SH) {
       (swap! *definitions* merge definitions))
     (-&gt; jss
         (dissoc :definitions)
-        (update :properties fix-locations))))</pre></td></tr><tr><td class="docs"><p>Fix type of params to make it more understandable to Rapidoc.</p>
+        (update :properties fix-locations))))</pre></td></tr><tr><td class="docs"><p>Change type of params to make it more understandable to Rapidoc.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- fix-type
   [{:keys [schema] :as param}]
   ;; TODO: figure out how to teach rapidoc `[:or [:enum &quot;all&quot;] nat-int?]`
   (cond
     (and (:oneOf schema)
          (= (second (:oneOf schema)) {:type &quot;null&quot;}))
-    (recur
-     (assoc param :required false :schema (first (:oneOf schema))))
-    (= (:enum schema) [&quot;true&quot; &quot;false&quot; true false])
-    (assoc param :schema {:type &quot;boolean&quot;})
+    (let [real-schema (merge (first (:oneOf schema))
+                             (select-keys schema [:description :default]))]
+      (recur
+       (assoc param :required false :schema real-schema)))
+    (= (:enum schema) (mc/children ms/BooleanValue))
+    (assoc param :schema (-&gt; (dissoc schema :enum) (assoc :type &quot;boolean&quot;)))
+    (= (:enum schema) (mc/children ms/MaybeBooleanValue))
+    (assoc param
+           :schema (-&gt; (dissoc schema :enum) (assoc :type &quot;boolean&quot;))
+           :required false)
     :else
-    param))</pre></td></tr><tr><td class="docs"><p>Fix type of request body to make it more understandable to Rapidoc.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- fix-schema ;; TODO: unify this with `fix-type` somehow?
+    param))</pre></td></tr><tr><td class="docs"><p>Change type of request body to make it more understandable to Rapidoc.</p>
+
+<p>TODO: unify this with <code>fix-type</code> somehow, but <code>:required</code> is making this hard</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- fix-schema
   [{:keys [required] :as schema}]
   (let [not-required (atom #{})]
     (-&gt; schema
@@ -2913,7 +2926,8 @@ net.brehaut.ClojureTools = (function (SH) {
                                               (= (second (:oneOf v)) {:type &quot;null&quot;}))
                                          (do
                                            (swap! not-required conj k)
-                                           (assoc (first (:oneOf v)) :description (:description v)))
+                                           (merge (first (:oneOf v))
+                                                  (select-keys v [:description :default])))
                                          (= (:enum v) [&quot;true&quot; &quot;false&quot; true false])
                                          (-&gt; (dissoc v :enum) (assoc :type &quot;boolean&quot;))
                                          :else
@@ -2934,21 +2948,51 @@ net.brehaut.ClojureTools = (function (SH) {
                                (when (-&gt; route meta :routes)
                                  (mapcat (partial walk {:prefix path :tag tag}) (-&gt; route meta :routes))))))]
     (-&gt;&gt; (walk {:prefix &quot;&quot;} root)
-         (filter #(-&gt; % :route meta :schema)))))</pre></td></tr><tr><td class="docs"><p>https://spec.openapis.org/oas/latest.html#parameter-object</p>
+         (filter #(-&gt; % :route meta :schema)))))</pre></td></tr><tr><td class="docs"><p>This function is not trying to parse whole compojure syntax, just get the names of query parameters out</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- compojure-query-params
+  [args]
+  (loop [args args
+         params []]
+    (if (empty? args)
+      (map keyword params)
+      (let [[x y] args]
+        (cond
+          ;; we don't care about rest binding
+          (= '&amp; x)    (recur (nnext args) params)
+          ;; and about coercion too
+          (= :&lt;&lt; x)   (recur (nnext args) params)
+          (= :as x)   (recur (nnext args)
+                             (into params (when (map? y)
+                                            (let [qp (:query-params (set/map-invert y))]
+                                              ;; {c :count :keys [a b}} ; =&gt; [count a b]
+                                              (flatten (vals qp))))))
+          (symbol? x) (recur (next args)
+                             (conj params x)))))))</pre></td></tr><tr><td class="docs"><p>Find out everything that's renamed in Compojure routes</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- compojure-renames
+  [args]
+  (let [idx (inc (.indexOf ^PersistentVector args :as))]
+    (when (pos? idx)
+      (let [req-bindings (get args idx)
+            renames      (-&gt;&gt; (keys req-bindings) ; {{c :count} :query-params} ; =&gt; [{c :count}]
+                              (filter map?)       ; no stuff like {:keys [a]}
+                              (apply merge))]
+        (update-keys renames keyword)))))</pre></td></tr><tr><td class="docs"><p>https://spec.openapis.org/oas/latest.html#parameter-object</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- schema-&gt;params
   [full-path args schema]
   (let [{:keys [properties required]} (json-schema-transform schema)
         required                      (set required)
         in-path?                      (set (map (comp keyword second) (re-seq #&quot;\{([^}]+)\}&quot; full-path)))
-        in-query?                     (into #{} (map #(if (symbol? %) (keyword %) %) args))]
+        in-query?                     (set (compojure-query-params args))
+        renames                       (compojure-renames args)]
     (for [[k param-schema] properties
+          :let             [k (get renames k k)]
           :when            (or (in-path? k) (in-query? k))]
       (fix-type
        (cond-&gt; {:in          (if (in-path? k) :path :query)
                 :name        k
                 :required    (contains? required k)
                 :schema      (dissoc param-schema :description)}
-         (:description schema) (assoc :description (:description param-schema)))))))</pre></td></tr><tr><td class="docs"><p>Generate OpenAPI desc for a single handler</p>
+         (:description param-schema) (assoc :description (:description param-schema)))))))</pre></td></tr><tr><td class="docs"><p>Generate OpenAPI desc for a single handler</p>
 
 <p>https://spec.openapis.org/oas/latest.html#path-item-object</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- defendpoint-&gt;path-item
@@ -2981,13 +3025,16 @@ net.brehaut.ClojureTools = (function (SH) {
                           (merge-with into acc {k v}))
                         {}
                         (for [{:keys [path tag route]} (collect-routes root)]
-                          [path (defendpoint-&gt;path-item tag path route)]))]
+                          (try
+                            [path (defendpoint-&gt;path-item tag path route)]
+                            (catch Exception e
+                              (throw (ex-info (str &quot;Exception at &quot; path) {} e))))))]
       {:paths      paths
        :components {:schemas @*definitions*}})))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(comment
   ;; See what is the result of generation, could be helpful debugging what's wrong with display in rapidoc
   ;; `resolve` is to appease clj-kondo which will complain for #'
-  (defendpoint-&gt;path-item nil &quot;/path&quot; (resolve 'metabase.api.collection/GET_:id_items)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+  (defendpoint-&gt;path-item nil &quot;/path&quot; (resolve 'metabase-enterprise.serialization.api/POST_export)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
