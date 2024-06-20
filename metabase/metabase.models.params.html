@@ -2888,6 +2888,7 @@ The values of a parameter is provided so the Widget can show a list of options t
    [metabase.models.field-values :as field-values]
    [metabase.models.interface :as mi]
    [metabase.models.params.field-values :as params.field-values]
+   [metabase.query-processor.util :as qp.util]
    [metabase.util :as u]
    [metabase.util.i18n :refer [tru]]
    [metabase.util.log :as log]
@@ -2959,7 +2960,7 @@ This map is returned by various endpoints as <code>:param_values</code>, if <cod
   functions in this namespace. Use `conj` to add additional Fields beyond the ones already here. Use `rest` to get
   just the column identifiers, perhaps for use with something like `select-keys`. Clutch!
     (t2/select Field:params-columns-only)&quot;
-  [:model/Field :id :table_id :display_name :base_type :semantic_type :has_field_values :fk_target_field_id])</pre></td></tr><tr><td class="docs"><p>Given a sequence of <code>fields,</code> return a map of Table ID -> to a <code>:type/Name</code> Field in that Table, if one exists. In
+  [:model/Field :id :table_id :display_name :base_type :name :semantic_type :has_field_values :fk_target_field_id])</pre></td></tr><tr><td class="docs"><p>Given a sequence of <code>fields,</code> return a map of Table ID -> to a <code>:type/Name</code> Field in that Table, if one exists. In
 cases where more than one name Field exists for a Table, this just adds the first one it finds.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- fields-&gt;table-id-&gt;name-field
   [fields]
@@ -3025,16 +3026,6 @@ Dashboard. Implementations are below in respective sections.</p>
 |                                               DASHBOARD-SPECIFIC                                               |
 +----------------------------------------------------------------------------------------------------------------+</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private dashcards-&gt;parameter-mapping-field-clauses :- [:maybe [:set mbql.s/Field]]
-  &quot;Return set of any Fields referenced directly by the Dashboard's `:parameters` (i.e., 'explicit' parameters) by
-  looking at the appropriate `:parameter_mappings` entries for its Dashcards.&quot;
-  [dashcards]
-  (when-let [fields (seq (for [dashcard dashcards
-                               param    (:parameter_mappings dashcard)
-                               :let     [field-clause (param-target-&gt;field-clause (:target param) (:card dashcard))]
-                               :when    field-clause]
-                           field-clause))]
-    (set fields)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(declare card-&gt;template-tag-field-ids)</pre></td></tr><tr><td class="docs"><p>Return the IDs of any Fields referenced in the 'implicit' template tag field filter parameters for native queries in
 <code>cards</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- cards-&gt;card-param-field-ids
@@ -3046,10 +3037,21 @@ Dashboard. Implementations are below in respective sections.</p>
   `dashcards` must be hydrated with :card.&quot;
   [dashcards]
   (set/union
-   (set (lib.util.match/match (seq (dashcards-&gt;parameter-mapping-field-clauses dashcards))
-          [:field (id :guard integer?) _]
-          id))
-   (cards-&gt;card-param-field-ids (map :card dashcards))))</pre></td></tr><tr><td class="docs"><p>Retrieve a map relating paramater ids to field ids.</p>
+    (set (for [{:keys [card] :as dashcard} dashcards
+               param    (:parameter_mappings dashcard)
+               :let     [field-clause (param-target-&gt;field-clause (:target param) (:card dashcard))]
+               :when    field-clause
+               :let     [field-id (or
+                                    ;; Get the field id from the field-clause if it contains it. This is the common case
+                                    ;; for mbql queries.
+                                    (lib.util.match/match-one field-clause [:field (id :guard integer?) _] id)
+                                    ;; Attempt to get the field clause from the model metadata corresponding to the field.
+                                    ;; This is the common case for native queries in which mappings from original columns
+                                    ;; have been performed using model metadata.
+                                    (:id (qp.util/field-&gt;field-info field-clause (:result_metadata card))))]
+               :when field-id]
+           field-id))
+    (cards-&gt;card-param-field-ids (map :card dashcards))))</pre></td></tr><tr><td class="docs"><p>Retrieve a map relating paramater ids to field ids.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn get-linked-field-ids
   [dashcards]
   (letfn [(targets [params card]
