@@ -3194,42 +3194,57 @@ Ref: https://docs.oracle.com/javase/8/docs/api/java/sql/DatabaseMetaData.html#ge
     JsonParser$NumberType/DOUBLE      Double
     JsonParser$NumberType/BIG_INTEGER clojure.lang.BigInt
     ;; there seem to be no way to encounter this, search in tests for `BigDecimal`
-    JsonParser$NumberType/BIG_DECIMAL BigDecimal))</pre></td></tr><tr><td class="docs"><p>Parses given json (a string or a reader) into a map of paths to types, i.e. <code>{["bob"} String}</code>.</p>
+    JsonParser$NumberType/BIG_DECIMAL BigDecimal))</pre></td></tr><tr><td class="docs"><p>Return true if the string <code>s</code> is a JSON where value is an object.</p>
+
+<p>  (is-json-object "{}") => true
+  (is-json-object "[]") => false
+  (is-json-object "\"foo\"") => false</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- json-object?
+  &quot;Return true if the string `s` is a JSON where value is an object.
+    (is-json-object \&quot;{}\&quot;) =&gt; true
+    (is-json-object \&quot;[]\&quot;) =&gt; false
+    (is-json-object \&quot;\\\&quot;foo\\\&quot;\&quot;) =&gt; false&quot;
+  [^String s]
+  (= JsonToken/START_OBJECT (-&gt; s json-parser .nextToken)))</pre></td></tr><tr><td class="docs"><p>Parses given json (a string or a reader) into a map of paths to types, i.e. <code>{["bob"} String}</code>.</p>
 
 <p>Uses Jackson Streaming API to skip allocating data structures, eschews allocating values when possible.
 Respects <em>nested-field-column-max-row-length</em>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- json-&gt;types
   [v path]
-  (let [p (json-parser v)]
-    (loop [path (or path [])
-           key  nil
-           res  (transient {})]
-      (let [token     (.nextToken p)
-            next-path (cond-&gt; path key (conj key))]
-        (cond
-          (nil? token)
-          (persistent! res)
-          ;; we could be more precise here and issue warning about nested fields (the one in `describe-json-fields`),
-          ;; but this limit could be hit by multiple json fields (fetched in `describe-json-fields`) rather than only
-          ;; by this one. So for the sake of issuing only a single warning in logs we'll spill over limit by a single
-          ;; entry (instead of doing `&lt;=`).
-          (&lt; max-nested-field-columns (count res))
-          (persistent! res)
-          :else
-          (u/case-enum token
-            JsonToken/VALUE_NUMBER_INT   (recur path key (assoc! res next-path (number-type (.getNumberType p))))
-            JsonToken/VALUE_NUMBER_FLOAT (recur path key (assoc! res next-path (number-type (.getNumberType p))))
-            JsonToken/VALUE_TRUE         (recur path key (assoc! res next-path Boolean))
-            JsonToken/VALUE_FALSE        (recur path key (assoc! res next-path Boolean))
-            JsonToken/VALUE_NULL         (recur path key (assoc! res next-path nil))
-            JsonToken/VALUE_STRING       (recur path key (assoc! res next-path (type-by-parsing-string (.getText p))))
-            JsonToken/FIELD_NAME         (recur path (.getText p) res)
-            JsonToken/START_OBJECT       (recur next-path key res)
-            JsonToken/END_OBJECT         (recur (cond-&gt; path (seq path) pop) key res)
-            ;; We put top-level array row type semantics on JSON roadmap but skip for now
-            JsonToken/START_ARRAY        (do (.skipChildren p)
-                                             (recur path key (assoc! res next-path clojure.lang.PersistentVector)))
-            JsonToken/END_ARRAY          (recur path key res)))))))</pre></td></tr><tr><td class="docs">
+  (if-not (json-object? v)
+    {}
+    (let [p (json-parser v)]
+      (loop [path      (or path [])
+             field     nil
+             res       (transient {})]
+        (let [token (.nextToken p)]
+          (cond
+           (nil? token)
+           (persistent! res)
+           ;; we could be more precise here and issue warning about nested fields (the one in `describe-json-fields`),
+           ;; but this limit could be hit by multiple json fields (fetched in `describe-json-fields`) rather than only
+           ;; by this one. So for the sake of issuing only a single warning in logs we'll spill over limit by a single
+           ;; entry (instead of doing `&lt;=`).
+           (&lt; max-nested-field-columns (count res))
+           (persistent! res)
+           :else
+           (u/case-enum token
+             JsonToken/VALUE_NUMBER_INT   (recur path field (assoc! res (conj path field) (number-type (.getNumberType p))))
+             JsonToken/VALUE_NUMBER_FLOAT (recur path field (assoc! res (conj path field) (number-type (.getNumberType p))))
+             JsonToken/VALUE_TRUE         (recur path field (assoc! res (conj path field) Boolean))
+             JsonToken/VALUE_FALSE        (recur path field (assoc! res (conj path field) Boolean))
+             JsonToken/VALUE_NULL         (recur path field (assoc! res (conj path field) nil))
+             JsonToken/VALUE_STRING       (recur path field (assoc! res (conj path field)
+                                                                    (type-by-parsing-string (.getText p))))
+             JsonToken/FIELD_NAME         (recur path (.getText p) res)
+             JsonToken/START_OBJECT       (recur (cond-&gt; path field  (conj field)) field res)
+             JsonToken/END_OBJECT         (recur (cond-&gt; path (seq path) pop) field res)
+             ;; We put top-level array row type semantics on JSON roadmap but skip for now
+             JsonToken/START_ARRAY        (do (.skipChildren p)
+                                              (if field
+                                                (recur path field (assoc! res (conj path field) clojure.lang.PersistentVector))
+                                                (recur path field res)))
+             JsonToken/END_ARRAY          (recur path field res))))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- json-map-&gt;types [json-map]
   (apply merge (map #(json-&gt;types (second %) [(first %)]) json-map)))</pre></td></tr><tr><td class="docs"><p>Reducing function that takes a bunch of maps from json-map->types,
 and gets them to conform to the type hierarchy,
