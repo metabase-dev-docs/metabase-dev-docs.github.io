@@ -2906,21 +2906,20 @@ net.brehaut.ClojureTools = (function (SH) {
    [toucan2.core :as t2])
   (:import
    (java.io File)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>This tracks the size of the metabase_field.name field</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private max-field-name-length
-  254)</pre></td></tr><tr><td class="docs"><p>The number of characters to reserve for disambiguating column names</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private unique-field-name-buffer
-  ;; This corresponds to at most 4 digits, excluding the underscore, so 1,000 duplicates.
-  5)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>This tracks the size of the metabase_field.name field, in bytes.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private max-field-name-bytes
+  254)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private min-safe (fnil min Long/MAX_VALUE Long/MAX_VALUE))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- max-column-bytes [driver]
+  (let [column-limit (some-&gt; driver driver/column-name-length-limit)]
+    (min-safe column-limit max-field-name-bytes)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- normalize-column-name
   [driver raw-name]
   (if (str/blank? raw-name)
     &quot;unnamed_column&quot;
     (u/slugify (str/trim raw-name)
-               (let [column-limit (some-&gt; driver driver/column-name-length-limit)
-                     max-len      (min-safe column-limit max-field-name-length)]
-                 {:max-length (- max-len unique-field-name-buffer)}))))</pre></td></tr><tr><td class="docs"><p>The lower-case name of the auto-incrementing PK column. The actual name in the database could be in upper-case.</p>
+               ;; since slugified names contain only ASCII characters, we can conflate bytes and length here.
+               {:max-length (max-column-bytes driver)})))</pre></td></tr><tr><td class="docs"><p>The lower-case name of the auto-incrementing PK column. The actual name in the database could be in upper-case.</p>
 </td><td class="codes"><pre class="brush: clojure">(def auto-pk-column-name
   &quot;_mb_row_id&quot;)</pre></td></tr><tr><td class="docs"><p>The keyword of the auto-incrementing PK column.</p>
 </td><td class="codes"><pre class="brush: clojure">(def auto-pk-column-keyword
@@ -2957,6 +2956,8 @@ net.brehaut.ClojureTools = (function (SH) {
   [driver table-name]
   (let [time-format                 &quot;_yyyyMMddHHmmss&quot;
         slugified-name               (or (u/slugify table-name) &quot;&quot;)
+        ;; since both the time-format and the slugified-name contain only ASCII characters, we can behave as if
+        ;; [[driver/table-name-length-limit]] were defining a length in characters.
         max-length                  (- (driver/table-name-length-limit driver) (count time-format))
         acceptable-length           (min (count slugified-name) max-length)
         truncated-name-without-time (subs slugified-name 0 acceptable-length)]
