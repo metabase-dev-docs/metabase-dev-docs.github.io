@@ -2865,129 +2865,17 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#dev.migrate" name="dev.migrate"><h1 class="project-name">dev.migrate</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns dev.migrate
-  (:gen-class)
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#dev.migrate-test" name="dev.migrate-test"><h1 class="project-name">dev.migrate-test</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns dev.migrate-test
   (:require
-   [clojure.string :as str]
-   [metabase.db :as mdb]
-   [metabase.db.liquibase :as liquibase]
-   [metabase.util.malli :as mu]
-   [toucan2.core :as t2])
-  (:import
-   (liquibase Contexts Liquibase RuntimeEnvironment)
-   (liquibase.changelog ChangeLogIterator)
-   (liquibase.changelog.filter ChangeSetFilter)
-   (liquibase.sqlgenerator SqlGeneratorFactory)
-   (liquibase.changelog.visitor ListVisitor)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Run migrations for the Metabase application database. Possible directions are <code>:up</code> (default), <code>:force</code>, <code>:down</code>, and
-<code>:release-locks</code>. When migrating <code>:down</code> pass along a version to migrate to (44+).</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- latest-migration
-  []
-  ((juxt :id :comments)
-   (t2/query-one {:select [:id :comments]
-                  :from   [(keyword (liquibase/changelog-table-name (mdb/data-source)))]
-                  :order-by [[:orderexecuted :desc]]
-                  :limit 1})))
-(defn migrate!
-  ([]
-   (migrate! :up))
-  ;; do we really use this in dev?
-  ([direction &amp; [version]]
-   (mdb/migrate! (mdb/data-source) direction version)
-   #_{:clj-kondo/ignore [:discouraged-var]}
-   (println &quot;Migrated up. Latest migration:&quot; (latest-migration))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- rollback-n-migrations!
-  [^Integer n]
-  (with-open [conn (.getConnection (mdb/data-source))]
-    (liquibase/with-liquibase [^Liquibase liquibase conn]
-      (liquibase/with-scope-locked liquibase
-        (.rollback liquibase n )))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- migration-since
-  [id]
-  (-&gt;&gt; (t2/query-one {:select [[:%count.* :count]]
-                      :from   [:databasechangelog]
-                      :where  [:&gt; :orderexecuted {:select   [:orderexecuted]
-                                                  :from     [:databasechangelog]
-                                                  :where    [:like :id (format &quot;%s%%&quot; id)]
-                                                  :order-by [[:orderexecuted :desc]]
-                                                  :limit    1}]
-                      :limit 1})
-       :count
-       ;; includes the selected id
-       inc))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- maybe-parse-long
-  [x]
-  (cond-&gt; x
-    (string? x)
-    parse-long))</pre></td></tr><tr><td class="docs"><p>Rollback helper, can take a number of migrations to rollback or a specific migration ID(inclusive).</p>
-
-<p>  ;; Rollback 2 migrations:
-  (rollback! :count 2)</p>
-
-<p>  ;; rollback to "v50.2024-03-18T16:00:00" (inclusive)
-  (rollback! :id "v50.2024-03-18T16:00:00")</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn rollback!
- [k :- [:enum :id :count &quot;id&quot; &quot;count&quot;]
-  target]
- (let [n (case (keyword k)
-           :id    (migration-since target)
-           :count (maybe-parse-long target))]
-  (rollback-n-migrations! n)
-  #_{:clj-kondo/ignore [:discouraged-var]}
-  (println (format &quot;Rollbacked %d migrations. Latest migration: %s&quot; n (latest-migration)))))</pre></td></tr><tr><td class="docs"><p>Print the latest migration ID.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn migration-status
-  []
-  #_{:clj-kondo/ignore [:discouraged-var]}
-  (println &quot;Current migration:&quot; (latest-migration)))</pre></td></tr><tr><td class="docs"><p>Migrations helpers</p>
-
-<p>Usage:
-  clojure -M:migrate up                         ;; migrate up to the latest
-  clojure -M:migrate rollback count 2           ;; rollback 2 migrations
-  clojure -M:migrate rollback id "v40.00.001" ;; rollback to a specific migration with id
-  clojure -M:migrate status                     ;; print the latest migration id</p>
-</td><td class="codes"><pre class="brush: clojure">(defn -main
-  [&amp; args]
-  (let [[cmd &amp; migration-args] args]
-    (case cmd
-      &quot;rollback&quot;
-      (apply rollback! migration-args)
-      &quot;up&quot;
-      (apply migrate! migration-args)
-      &quot;status&quot;
-      (migration-status)
-      (throw (ex-info &quot;Invalid command&quot; {:command cmd
-                                         :args    args})))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- stmts-to-sql
-  [stmts sql-generator-factory database]
-  (str/join &quot;\n&quot; (for [stmt stmts
-                       sql (.generateSql ^SqlGeneratorFactory sql-generator-factory stmt database)]
-                   (.toString sql))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- change-&gt;sql
-  [change sql-generator-factory database]
-  {:forward  (stmts-to-sql (.generateStatements change database) sql-generator-factory database)
-   :rollback (stmts-to-sql (.generateRollbackStatements change database) sql-generator-factory database)})</pre></td></tr><tr><td class="docs"><p>Get the sql statements for a specific migration ID.
-  (migration-sql-by-id "v51.2024-06-12T18:53:02")
-  ;; =>
-    {:forward "DROP INDEX public.idx<em>user</em>id<em>device</em>id;",
-     :rollback "CREATE INDEX idx<em>user</em>id<em>device</em>id ON public.login<em>history(session</em>id, device_id);"}</p>
-</td><td class="codes"><pre class="brush: clojure">(defn migration-sql-by-id
-  [id]
-  (t2/with-connection [conn]
-    (liquibase/with-liquibase [^Liquibase liquibase conn]
-      (let [database            (.getDatabase liquibase)
-            change-log-iterator (ChangeLogIterator. (.getDatabaseChangeLog liquibase) (into-array ChangeSetFilter []))
-            list-visistor       (ListVisitor.)
-            runtime-env         (RuntimeEnvironment. database (Contexts.) nil)
-            _                   (.run change-log-iterator list-visistor runtime-env)
-            change-set          (first (filter #(= id (.getId %))(.getSeenChangeSets list-visistor)))
-            sql-generator-factory (SqlGeneratorFactory/getInstance)]
-        (reduce (fn [acc data]
-                  ;; merge all changes in one change set into one single :forward and :rollback
-                  (merge-with (fn [x y]
-                                (str x &quot;\n&quot; y)) acc data))
-                {}
-                (map #(change-&gt;sql % sql-generator-factory database) (.getChanges change-set)))))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+   [clojure.test :refer :all]
+   [metabase.dev.migrate :as dev.migrate]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(deftest migration-sql-by-id-test
+  (is (= {:forward
+          &quot;ALTER TABLE public.query_field RENAME COLUMN direct_reference TO explicit_reference;&quot;,
+          :rollback
+          &quot;ALTER TABLE public.query_field RENAME COLUMN explicit_reference TO direct_reference;&quot;}
+         (dev.migrate/migration-sql-by-id &quot;v51.2024-06-07T12:37:36&quot;))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
