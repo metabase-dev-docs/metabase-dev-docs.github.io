@@ -2940,8 +2940,8 @@ net.brehaut.ClojureTools = (function (SH) {
     ;; MSSQL
     #&quot;^syncobj_0x.*&quot;})</pre></td></tr><tr><td class="docs"><p>Should we give newly created TABLE a <code>visibility_type</code> of <code>:cruft</code>?</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private is-crufty-table?
-  [table :- i/DatabaseMetadataTable]
-  (some #(re-find % (u/lower-case-en (:name table))) crufty-table-patterns))</pre></td></tr><tr><td class="docs"><p>---------------------------------------------------- Syncing -----------------------------------------------------</p>
+  [table-name]
+  (some #(re-find % (u/lower-case-en table-name)) crufty-table-patterns))</pre></td></tr><tr><td class="docs"><p>---------------------------------------------------- Syncing -----------------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>If there is a version in the db-metadata update the DB to have that in the DB model</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private update-database-metadata!
   [database    :- i/DatabaseInstance
@@ -2949,34 +2949,36 @@ net.brehaut.ClojureTools = (function (SH) {
   (log/infof &quot;Found new version for DB: %s&quot; (:version db-metadata))
   (t2/update! Database (u/the-id database)
               {:details
-               (assoc (:details database) :version (:version db-metadata))}))</pre></td></tr><tr><td class="docs"><p>Create a single new table in the database, or mark it as active if it already exists.</p>
+               (assoc (:details database) :version (:version db-metadata))}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- cruft-dependent-columns [table-name]
+  ;; if this is a crufty table, mark initial sync as complete since we'll skip the subsequent sync steps
+  (let [is-crufty? (is-crufty-table? table-name)]
+    {:initial_sync_status (if is-crufty? &quot;complete&quot; &quot;incomplete&quot;)
+     :visibility_type     (when is-crufty? :cruft)}))</pre></td></tr><tr><td class="docs"><p>Creates a new table in the database, ready to be synced.
+ Throws an exception if there is already a table with the same name, schema and database ID.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn create-table!
+  [database table]
+  (t2/insert-returning-instance!
+   Table
+   (merge (cruft-dependent-columns (:name table))
+          {:active                  true
+           :db_id                   (:id database)
+           :schema                  (:schema table)
+           :description             (:description table)
+           :database_require_filter (:database_require_filter table)
+           :display_name            (or (:display_name table) (humanization/name-&gt;human-readable-name (:name table)))
+           :name                    (:name table)})))</pre></td></tr><tr><td class="docs"><p>Create a single new table in the database, or mark it as active if it already exists.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn create-or-reactivate-table!
   [database {schema :schema table-name :name :as table}]
-  (let [;; if this is a crufty table, mark initial sync as complete since we'll skip the subsequent sync steps
-        is-crufty?          (is-crufty-table? table)
-        initial-sync-status (if is-crufty? &quot;complete&quot; &quot;incomplete&quot;)
-        visibility-type     (when is-crufty? :cruft)]
-    (if-let [existing-id (t2/select-one-pk Table
-                                           :db_id (u/the-id database)
-                                           :schema schema
-                                           :name table-name
-                                           :active false)]
-      ;; if the table already exists but is marked *inactive*, mark it as *active*
-      (t2/update! Table existing-id
-                  {:active              true
-                   :visibility_type     visibility-type
-                   :initial_sync_status initial-sync-status})
-      ;; otherwise create a new Table
-      (first (t2/insert-returning-instances! Table
-                                             :db_id (u/the-id database)
-                                             :schema schema
-                                             :description (:description table)
-                                             :database_require_filter (:database_require_filter table)
-                                             :name table-name
-                                             :display_name (humanization/name-&gt;human-readable-name table-name)
-                                             :active true
-                                             :visibility_type visibility-type
-                                             :initial_sync_status initial-sync-status)))))</pre></td></tr><tr><td class="docs"><p>TODO - should we make this logic case-insensitive like it is for fields?</p>
+  (if-let [existing-id (t2/select-one-pk Table
+                                         :db_id (u/the-id database)
+                                         :schema schema
+                                         :name table-name
+                                         :active false)]
+    ;; if the table already exists but is marked *inactive*, mark it as *active*
+    (t2/update! Table existing-id (assoc (cruft-dependent-columns (:name table)) :active true))
+    ;; otherwise create a new Table
+    (create-table! database table)))</pre></td></tr><tr><td class="docs"><p>TODO - should we make this logic case-insensitive like it is for fields?</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Create <code>new-tables</code> for database, or if they already exist, mark them as active.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private create-or-reactivate-tables!
   [database :- i/DatabaseInstance
