@@ -2868,11 +2868,11 @@ net.brehaut.ClojureTools = (function (SH) {
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.models.dashboard" name="metabase.models.dashboard"><h1 class="project-name">metabase.models.dashboard</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.models.dashboard
   (:require
-   [clojure.core.async :as a]
    [clojure.data :refer [diff]]
    [clojure.set :as set]
    [clojure.string :as str]
    [medley.core :as m]
+   [metabase.api.common :as api]
    [metabase.audit :as audit]
    [metabase.config :as config]
    [metabase.db.query :as mdb.query]
@@ -2880,9 +2880,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.models.audit-log :as audit-log]
    [metabase.models.card :as card :refer [Card]]
    [metabase.models.collection :as collection :refer [Collection]]
-   [metabase.models.dashboard-card
-    :as dashboard-card
-    :refer [DashboardCard]]
+   [metabase.models.dashboard-card :as dashboard-card :refer [DashboardCard]]
    [metabase.models.dashboard-tab :as dashboard-tab]
    [metabase.models.field-values :as field-values]
    [metabase.models.interface :as mi]
@@ -2895,7 +2893,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.models.serialization :as serdes]
    [metabase.moderation :as moderation]
    [metabase.public-settings :as public-settings]
-   [metabase.query-processor.async :as qp.async]
+   [metabase.query-processor.metadata :as qp.metadata]
    [metabase.util :as u]
    [metabase.util.embed :refer [maybe-populate-initially-published-at]]
    [metabase.util.honey-sql-2 :as h2x]
@@ -2906,8 +2904,8 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.xrays :as xrays]
    [methodical.core :as methodical]
    [toucan2.core :as t2]
-   [toucan2.realize :as t2.realize]))</pre></td></tr><tr><td class="docs"><p>Used to be the toucan1 model name defined using [[toucan.models/defmodel]], not it's a reference to the toucan2 model name.
- We'll keep this till we replace all the Dashboard symbol in our codebase.</p>
+   [toucan2.realize :as t2.realize]))</pre></td></tr><tr><td class="docs"><p>Used to be the toucan1 model name defined using [[toucan.models/defmodel]], not it's a reference to the toucan2 model
+name. We'll keep this till we replace all the Dashboard symbol in our codebase.</p>
 </td><td class="codes"><pre class="brush: clojure">(def Dashboard
   :model/Dashboard)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/table-name :model/Dashboard [_model] :report_dashboard)</pre></td></tr><tr><td class="docs">
@@ -3284,12 +3282,10 @@ net.brehaut.ClojureTools = (function (SH) {
         (dashboard-card/update-dashboard-card! dashboard-card old-dashcard)))
     (let [new-param-field-ids (params/dashcards-&gt;param-field-ids (t2/hydrate new-dashcards :card))]
       (update-field-values-for-on-demand-dbs! (params/dashcards-&gt;param-field-ids old-dashcards) new-param-field-ids))))</pre></td></tr><tr><td class="docs"><p>Fetch the results metadata for a <code>query</code> by running the query and seeing what the <code>qp</code> gives us in return.</p>
-
-<p>TODO - we need to actually make this async, but then we'd need to make <code>save-card!</code> async, and so forth
-Issue: https://github.com/metabase/metabase/issues/39413</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- result-metadata-for-query
+</td><td class="codes"><pre class="brush: clojure">(defn- legacy-result-metadata-for-query
   [query]
-  (a/&lt;!! (qp.async/result-metadata-for-query-async query)))</pre></td></tr><tr><td class="docs">
+  #_{:clj-kondo/ignore [:deprecated-var]}
+  (qp.metadata/legacy-result-metadata query api/*current-user-id*))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- save-card!
   [card]
   (cond
@@ -3303,7 +3299,7 @@ Issue: https://github.com/metabase/metabase/issues/39413</p>
                        (-&gt; card
                            (update :result_metadata #(or % (-&gt; card
                                                                :dataset_query
-                                                               result-metadata-for-query)))
+                                                               legacy-result-metadata-for-query)))
                             ;; Xrays populate this in their transient cards
                            (dissoc :id :can_run_adhoc_query))))]
       (events/publish-event! :event/card-create {:object card :user-id (:creator_id card)})

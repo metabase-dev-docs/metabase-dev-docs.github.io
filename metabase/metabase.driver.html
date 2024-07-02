@@ -3240,6 +3240,51 @@ automatically create an implementation for you.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti execute-reducible-query
   {:added &quot;0.35.0&quot;, :arglists '([driver query context respond])}
   dispatch-on-initialized-driver
+  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Optional. Efficiently calculate metadata about the columns that would be returned if we were to run a
+<code>query</code> (hopefully without actually running), for example:</p>
+
+<p>  (query-results-metadata
+   :postgres
+   {:lib/type :mbql/query
+    :stages   [{:lib/type :mbql.stage/native
+                :native   "SELECT * FROM venues WHERE id = ?"
+                :args     [1]}]
+    ...})
+  =>
+  [{:lib/type      :metadata/column
+    :name          "ID"
+    :database-type "BIGINT"
+    :base-type     :type/BigInteger}
+   {:lib/type      :metadata/column
+    :name          "NAME"
+    :database-type "CHARACTER VARYING"
+    :base-type     :type/Text}
+    ...]</p>
+
+<p>Metadata should be returned as a sequence of column maps matching the <code>:metabase.lib.schema.metadata/column</code> shape.</p>
+
+<p>This is needed in certain circumstances such as saving native queries before they have been run; metadata for
+MBQL-only queries can usually be determined by looking at the query itself without any driver involvement.</p>
+
+<p>If this method does need to be invoked, ideally it can calculate this information without actually having to run the
+query in question; it that is not possible, ideally we'd run a faster version of the query with the equivalent of
+<code>LIMIT 0</code> or <code>LIMIT 1</code>.</p>
+
+<p>A naive default implementation of this method lives in [[metabase.query-processor.metadata]] that runs the query in
+question with a <code>LIMIT 1</code> added to it. Drivers that can infer result metadata in a more performant way (i.e.,
+without actually running the query) should implement this method.</p>
+
+<p>The <code>:sql-jdbc</code> parent driver provides a default implementation for JDBC-based drivers
+in [[metabase.driver.sql-jdbc.metadata/query-result-metadata]], so you shouldn't need to implement this yourself if
+your driver derives from <code>:sql-jdbc</code>. For other drivers, please use this implementation as a reference when working
+on your own one.</p>
+
+<p>There is no guarantee that <code>query</code> is already fully compiled from MBQL to the appropriate native query
+language (e.g. SQL), so you should call [[metabase.query-processor.compile/compile]] to get a fully-compiled native
+query.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmulti query-result-metadata
+  {:added &quot;0.51.0&quot;, :arglists '([driver query])}
+  dispatch-on-initialized-driver
   :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Set of all features a driver can support.</p>
 </td><td class="codes"><pre class="brush: clojure">(def features
   #{;; Does this database support following foreign key relationships while querying?
