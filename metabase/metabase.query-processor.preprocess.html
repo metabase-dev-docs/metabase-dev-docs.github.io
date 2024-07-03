@@ -2872,6 +2872,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.lib.convert :as lib.convert]
    [metabase.lib.query :as lib.query]
    [metabase.lib.schema.id :as lib.schema.id]
+   [metabase.query-processor.debug :as qp.debug]
    [metabase.query-processor.error-type :as qp.error-type]
    [metabase.query-processor.middleware.add-default-temporal-unit :as qp.add-default-temporal-unit]
    [metabase.query-processor.middleware.add-dimension-projections :as qp.add-dimension-projections]
@@ -2921,15 +2922,17 @@ flavor of MBQL it is written for.</p>
   [query]
   (lib.convert/-&gt;legacy-MBQL query))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- ^:deprecated ensure-legacy [middleware-fn]
-  (fn [query]
-    (let [query (cond-&gt; query
-                  (:lib/type query) -&gt;legacy)]
-      (middleware-fn query))))</pre></td></tr><tr><td class="docs">
+  (-&gt; (fn [query]
+        (let [query (cond-&gt; query
+                      (:lib/type query) -&gt;legacy)]
+          (middleware-fn query)))
+      (with-meta (meta middleware-fn))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- ensure-pmbql [middleware-fn]
-  (fn [query]
-    (let [query (cond-&gt;&gt; query
-                  (not (:lib/type query)) (lib.query/query (qp.store/metadata-provider)))]
-      (middleware-fn query))))</pre></td></tr><tr><td class="docs"><p>Pre-processing middleware. Has the form</p>
+  (-&gt; (fn [query]
+        (let [query (cond-&gt;&gt; query
+                      (not (:lib/type query)) (lib.query/query (qp.store/metadata-provider)))]
+          (middleware-fn query)))
+      (with-meta (meta middleware-fn))))</pre></td></tr><tr><td class="docs"><p>Pre-processing middleware. Has the form</p>
 
 <p>  (f query) -> query</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private middleware
@@ -2977,6 +2980,7 @@ flavor of MBQL it is written for.</p>
   &quot;Fully preprocess a query, but do not compile it to a native query or execute it.&quot;
   [query :- :map]
   (qp.setup/with-qp-setup [query query]
+    (qp.debug/debug&gt; (list `preprocess query))
     (transduce
      identity
      (fn
@@ -2985,8 +2989,18 @@ flavor of MBQL it is written for.</p>
         preprocessed)
        ([query middleware-fn]
         (try
+          (assert (ifn? middleware-fn))
           ;; make sure the middleware returns a valid query... this should be dev-facing only so no need to i18n
           (u/prog1 (middleware-fn query)
+            (qp.debug/debug&gt;
+              (when-not (= &lt;&gt; query)
+                (let [middleware-fn-name (if-let [fn-name (:name (meta middleware-fn))]
+                                           (if-let [fn-ns (:ns (meta middleware-fn))]
+                                             (format &quot;%s/%s&quot; (ns-name fn-ns) fn-name)
+                                             fn-name)
+                                           middleware-fn)]
+                  (list middleware-fn-name '=&gt; &lt;&gt;))))
+            ;; make sure the middleware returns a valid query... this should be dev-facing only so no need to i18n
             (when-not (map? &lt;&gt;)
               (throw (ex-info (format &quot;Middleware did not return a valid query.&quot;)
                               {:fn middleware-fn, :query query, :result &lt;&gt;, :type qp.error-type/qp}))))
