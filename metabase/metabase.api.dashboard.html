@@ -2869,6 +2869,8 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.api.dashboard
   (:require
    [cheshire.core :as json]
+   [clojure.core.cache :as cache]
+   [clojure.core.memoize :as memoize]
    [clojure.set :as set]
    [compojure.core :refer [DELETE GET POST PUT]]
    [medley.core :as m]
@@ -2883,6 +2885,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.legacy-mbql.normalize :as mbql.normalize]
    [metabase.legacy-mbql.schema :as mbql.s]
    [metabase.legacy-mbql.util :as mbql.u]
+   [metabase.lib.metadata.jvm :as lib.metadata.jvm]
    [metabase.lib.schema.parameter :as lib.schema.parameter]
    [metabase.lib.util.match :as lib.util.match]
    [metabase.models.action :as action]
@@ -3080,8 +3083,36 @@ array).</p>
                              (add-query-average-duration-to-card card hash-vec-&gt;avg-time))))))))</pre></td></tr><tr><td class="docs"><p>Add a <code>average_execution_time</code> field to each card (and series) belonging to <code>dashboard</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn add-query-average-durations
   [dashboard]
-  (update dashboard :dashcards add-query-average-duration-to-dashcards))</pre></td></tr><tr><td class="docs"><p>Get Dashboard with ID.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- get-dashboard
+  (update dashboard :dashcards add-query-average-duration-to-dashcards))</pre></td></tr><tr><td class="docs"><p>Using 10 seconds for the cache TTL.</p>
+
+<h2>Dashboard load caching</h2>
+
+<p>When the FE loads a dashboard, there is a burst of requests sent to the BE:
+- One  /api/dashboard/:id
+- One  /api/dashboard/:id/query_metadata
+- Many /:dashboard-id/dashcard/:dashcard-id/card/:card-id/query
+Each of these needs some metadata from the appdb: to hydrate the dashboard, get the query_metadata, and to run the
+query processor over all the dashcards.
+That leads to a lot of re-fetching of the same information from the appdb, and is a great opportunity for caching.</p>
+
+<p>To connect the dots across these N+2 HTTP requests, the FE attaches a <code>?dashboard_load_id=UUID</code> parameter to all
+the calls coming from a single dashboard load. That gives the BE an excellent cache key!</p>
+
+<h3>Why not cache on dashboard ID?</h3>
+
+<p>There may be different users with different permissions fetching the same dashboard at the same time. They see a
+different picture of the queries and their metadata, so must be fetched separately.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private dashboard-load-cache-ttl
+  (* 10 1000))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^:dynamic *dashboard-load-id* nil)</pre></td></tr><tr><td class="docs"><p>This is a kind of two-layer memoization:
+- The outer layer is a 10-second TTL cache on <em>dashboard-load-id</em>.
+- Its value is the <em>function</em> to use to get the dashboard by ID!
+If <em>dashboard-load-id</em> is set, the outer layer returns a forever-memoized wrapper around get-dashboard*.
+If <em>dashboard-load-id</em> is nil, it returns the unwrapped get-dashboard*.</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Get Dashboard with ID.</p>
+
+<p>TODO: This indirect memoization by <em>dashboard-load-id</em> could probably be turned into a macro for reuse elsewhere.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- get-dashboard*
   [id]
   (span/with-span!
     {:name       &quot;get-dashboard&quot;
@@ -3092,7 +3123,30 @@ array).</p>
         collection.root/hydrate-root-collection
         hide-unreadable-cards
         add-query-average-durations
-        (api/present-in-trash-if-archived-directly (collection/trash-collection-id)))))</pre></td></tr><tr><td class="docs"><p>Returns a map of which cards we need to copy and which are not to be copied. The <code>:copy</code> key is a map from id to
+        (api/present-in-trash-if-archived-directly (collection/trash-collection-id)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private get-dashboard-fn
+  (memoize/ttl (fn [dashboard-load-id]
+                 (if dashboard-load-id
+                   (memoize get-dashboard*) ; If dashboard-load-id is set, return a memoized get-dashboard*.
+                   get-dashboard*))         ; If unset, just call through to get-dashboard*.
+               :ttl/threshold dashboard-load-cache-ttl))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private dashboard-load-metadata-provider-cache
+  (memoize/ttl (fn [_dashboard-load-id]
+                 (atom (cache/basic-cache-factory {})))
+               :ttl/threshold dashboard-load-cache-ttl))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- do-with-dashboard-load-id [dashboard-load-id body-fn]
+  (if dashboard-load-id
+    (binding [*dashboard-load-id*                        dashboard-load-id
+              lib.metadata.jvm/*metadata-provider-cache* (dashboard-load-metadata-provider-cache dashboard-load-id)]
+      (body-fn))
+    (body-fn)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmacro ^:private with-dashboard-load-id [dashboard-load-id &amp; body]
+  `(do-with-dashboard-load-id ~dashboard-load-id (^:once fn* [] ~@body)))</pre></td></tr><tr><td class="docs"><p>Get Dashboard with ID.</p>
+
+<p>Memoized per <code>*dashboard-load-id*</code> with a TTL of 10 seconds.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- get-dashboard
+  [id]
+  ((get-dashboard-fn *dashboard-load-id*) id))</pre></td></tr><tr><td class="docs"><p>Returns a map of which cards we need to copy and which are not to be copied. The <code>:copy</code> key is a map from id to
 card. The <code>:discard</code> key is a vector of cards which were not copied due to permissions.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- cards-to-copy
   [dashcards]
@@ -3239,11 +3293,12 @@ collections and it is omitted. Dashboard-id is only needed for useful errors.</p
 </td><td class="codes"></td></tr><tr><td class="docs"><p>/:id</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
   &quot;Get Dashboard with ID.&quot;
-  [id]
+  [id :as {{dashboard-load-id &quot;dashboard_load_id&quot;} :query-params}]
   {id ms/PositiveInt}
-  (let [dashboard (get-dashboard id)]
-    (u/prog1 (first (last-edit/with-last-edit-info [dashboard] :dashboard))
-      (events/publish-event! :event/dashboard-read {:object-id (:id dashboard) :user-id api/*current-user-id*}))))</pre></td></tr><tr><td class="docs"><p>You must be a superuser to change the value of <code>enable_embedding</code> or <code>embedding_params</code>. Embedding must be
+  (with-dashboard-load-id dashboard-load-id
+    (let [dashboard (get-dashboard id)]
+      (u/prog1 (first (last-edit/with-last-edit-info [dashboard] :dashboard))
+               (events/publish-event! :event/dashboard-read {:object-id (:id dashboard) :user-id api/*current-user-id*})))))</pre></td></tr><tr><td class="docs"><p>You must be a superuser to change the value of <code>enable_embedding</code> or <code>embedding_params</code>. Embedding must be
 enabled.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- check-allowed-to-change-embedding
   [dash-before-update dash-updates]
@@ -3631,11 +3686,12 @@ that subscriptions require). If so, delete the subscriptions and notify the dash
     :revision-id revision_id}))</pre></td></tr><tr><td class="docs"><p>/:id/query_metadata</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
   &quot;Get all of the required query metadata for the cards on dashboard.&quot;
-  [id]
+  [id :as {{dashboard-load-id &quot;dashboard_load_id&quot;} :query-params}]
   {id ms/PositiveInt}
-  (data-perms/with-relevant-permissions-for-user api/*current-user-id*
-    (let [dashboard (get-dashboard id)]
-      (api.query-metadata/dashboard-metadata dashboard))))</pre></td></tr><tr><td class="docs"><p>----------------------------------------------- Sharing is Caring ------------------------------------------------</p>
+  (with-dashboard-load-id dashboard-load-id
+    (data-perms/with-relevant-permissions-for-user api/*current-user-id*
+      (let [dashboard (get-dashboard id)]
+        (api.query-metadata/dashboard-metadata dashboard)))))</pre></td></tr><tr><td class="docs"><p>----------------------------------------------- Sharing is Caring ------------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>/:dashboard-id/public_link</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint POST 
   &quot;Generate publicly-accessible links for this Dashboard. Returns UUID to be used in public links. (If this
@@ -3912,18 +3968,20 @@ are provided (rather than field-ids). This is a common case for nested queries.<
 </td><td class="codes"></td></tr><tr><td class="docs"><p>/:dashboard-id/dashcard/:dashcard-id/card/:card-id/query</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint POST 
   &quot;Run the query associated with a Saved Question (`Card`) in the context of a `Dashboard` that includes it.&quot;
-  [dashboard-id dashcard-id card-id :as {{:keys [parameters], :as body} :body}]
+  [dashboard-id dashcard-id card-id :as {{:keys [parameters], :as body}          :body
+                                         {dashboard-load-id &quot;dashboard_load_id&quot;} :query-params}]
   {dashboard-id  ms/PositiveInt
    dashcard-id   ms/PositiveInt
    card-id       ms/PositiveInt
    parameters    [:maybe [:sequential ParameterWithID]]}
-  (u/prog1 (m/mapply qp.dashboard/process-query-for-dashcard
-                     (merge
-                      body
-                      {:dashboard-id dashboard-id
-                       :card-id      card-id
-                       :dashcard-id  dashcard-id}))
-    (events/publish-event! :event/card-read {:object-id card-id, :user-id api/*current-user-id*, :context :dashboard})))</pre></td></tr><tr><td class="docs"><p>/:dashboard-id/dashcard/:dashcard-id/card/:card-id/query/:export-format</p>
+  (with-dashboard-load-id dashboard-load-id
+    (u/prog1 (m/mapply qp.dashboard/process-query-for-dashcard
+                       (merge
+                         body
+                         {:dashboard-id dashboard-id
+                          :card-id      card-id
+                          :dashcard-id  dashcard-id}))
+             (events/publish-event! :event/card-read {:object-id card-id, :user-id api/*current-user-id*, :context :dashboard}))))</pre></td></tr><tr><td class="docs"><p>/:dashboard-id/dashcard/:dashcard-id/card/:card-id/query/:export-format</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint POST 
   &quot;Run the query associated with a Saved Question (`Card`) in the context of a `Dashboard` that includes it, and return
   its results as a file in the specified format.
