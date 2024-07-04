@@ -2870,92 +2870,22 @@ params in place.</p>
 
 <p>TODO -- since this is no longer strictly a 'util' namespace (most <code>:sql-jdbc</code> drivers need to implement one or
 methods from here) let's rename this <code>metabase.driver.sql.unprepare</code> when we get a chance.</p>
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.driver.sql.util.unprepare
+</td><td class="codes"><pre class="brush: clojure">(ns ^{:deprecated &quot;0.51.0&quot;} metabase.driver.sql.util.unprepare
   (:require
-   [clojure.string :as str]
-   [java-time.api :as t]
-   [metabase.driver :as driver]
-   [metabase.driver.sql.util :as sql.u]
-   [metabase.util :as u]
-   [metabase.util.log :as log])
-  (:import
-   (java.time Instant LocalDate LocalDateTime LocalTime OffsetDateTime OffsetTime ZonedDateTime)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Convert a single argument to appropriate raw SQL for splicing directly into a SQL query. Dispatches on both driver
-and the class of <code>value</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti unprepare-value
-  {:added &quot;0.32.0&quot; :arglists '(^String [driver value])}
-  (fn [driver value]
-    [(driver/the-initialized-driver driver) (class value)])
-  :hierarchy #'driver/hierarchy)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod unprepare-value :default
-  [_ value]
-  ;; it's better return a slightly broken SQL query with a probably incorrect string representation of the value than
-  ;; to have the entire QP run fail because of an unknown type.
-  (log/warnf &quot;Don't know how to unprepare values of class %s&quot; (.getName (class value)))
-  (str value))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod unprepare-value [:sql nil]
-  [_ _]
-  &quot;NULL&quot;)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod unprepare-value [:sql String]
-  [_ s]
-  ;; escape single-quotes like Cam's String -&gt; Cam''s String
-  (str \' (sql.u/escape-sql s :ansi) \'))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod unprepare-value [:sql Boolean]
-  [_ value]
-  (if value &quot;TRUE&quot; &quot;FALSE&quot;))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod unprepare-value [:sql Number]
-  [_ value]
-  (str value))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod unprepare-value [:sql LocalDate]
-  [_ t]
-  (format &quot;date '%s'&quot; (t/format &quot;yyyy-MM-dd&quot; t)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod unprepare-value [:sql LocalTime]
-  [_ t]
-  (format &quot;time '%s'&quot; (t/format &quot;HH:mm:ss.SSS&quot; t)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod unprepare-value [:sql OffsetTime]
-  [_ t]
-  (format &quot;time with time zone '%s'&quot; (t/format &quot;HH:mm:ss.SSSZZZZZ&quot; t)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod unprepare-value [:sql LocalDateTime]
-  [_ t]
-  (format &quot;timestamp '%s'&quot; (t/format &quot;yyyy-MM-dd HH:mm:ss.SSS&quot; t)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod unprepare-value [:sql OffsetDateTime]
-  [_ t]
-  (format &quot;timestamp with time zone '%s'&quot; (t/format &quot;yyyy-MM-dd HH:mm:ss.SSSZZZZZ&quot; t)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod unprepare-value [:sql ZonedDateTime]
-  [_ t]
-  (format &quot;timestamp with time zone '%s'&quot; (t/format &quot;yyyy-MM-dd HH:mm:ss.SSSZZZZZ&quot; t)))</pre></td></tr><tr><td class="docs"><p>TODO - pretty sure we can remove this</p>
-</td><td class="codes"><pre class="brush: clojure">(defmethod unprepare-value [:sql Instant]
-  [driver t]
-  (unprepare-value driver (t/offset-date-time t (t/zone-offset 0))))</pre></td></tr><tr><td class="docs"><p>Convert a normal SQL <code>[statement &amp; prepared-statement-args]</code> vector into a flat, non-prepared statement.
-Implementations should return a plain SQL string.</p>
+   [metabase.driver.sql.query-processor :as sql.qp]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Deprecated in 0.51.0 and renamed to [[metabase.driver.sql.query-processor/inline-value]]. Replace method
+implementations of <code>unprepare-value</code> with <code>inline-value</code>.</p>
 
-<p>Drivers likely do not need to implement this method themselves -- instead, you should only need to provide
-implementations of <code>unprepare-value</code> for the cases where it is needed.</p>
-
-<p>TODO - I think a name like <code>deparameterize</code> would be more appropriate here</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti ^String unprepare
-  {:added &quot;0.32.0&quot;, :arglists '([driver [sql &amp; args]]), :style/indent 1}
-  driver/dispatch-on-initialized-driver
-  :hierarchy #'driver/hierarchy)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod unprepare :sql [driver [sql &amp; args]]
-  (transduce
-   identity
-   (completing
-    (fn [sql arg]
-      ;; Only match single question marks; do not match ones like `??` which JDBC converts to `?` to use as Postgres
-      ;; JSON operators amongst other things.
-      ;;
-      ;; TODO - this is not smart enough to handle question marks in non argument contexts, for example if someone
-      ;; were to have a question mark inside an identifier such as a table name. I think we'd have to parse the SQL in
-      ;; order to handle those situations.
-      (let [v (str (unprepare-value driver arg))]
-        (log/tracef &quot;Splice %s as %s&quot; (pr-str arg) (pr-str v))
-        (str/replace-first sql #&quot;(?&lt;!\?)\?(?!\?)&quot; (str/re-quote-replacement v))))
-    (fn [spliced-sql]
-      (log/tracef &quot;Spliced %s\n-&gt; %s&quot; (u/colorize 'green (pr-str sql)) (u/colorize 'blue (pr-str spliced-sql)))
-      spliced-sql))
-   sql
-   args))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+<p><code>sql.qp/inline-value</code> is just a Potemkin-style copy of [[sql.qp/inline-value]], so <code>defmethod</code> on it will actually
+just define a method on <code>inline-value</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^{:added &quot;0.32.0&quot; :arglists '(^String [driver value]), :deprecated &quot;0.51.0&quot;} unprepare-value
+  sql.qp/inline-value)</pre></td></tr><tr><td class="docs"><p>add a watch so if <code>inline-value</code> changes we point to the updated value.</p>
+</td><td class="codes"><pre class="brush: clojure">(add-watch
+ #'sql.qp/inline-value
+ ::reload
+ (fn [_key _ref _old-state _new-state]
+   #_{:clj-kondo/ignore [:deprecated-var]}
+   (alter-var-root #'unprepare-value (constantly sql.qp/inline-value))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
