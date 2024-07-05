@@ -3194,11 +3194,15 @@ They should follow the pattern of:
   (try
     (extract-one model opts instance)
     (catch Exception e
-      (throw (ex-info (format &quot;Exception extracting %s %s&quot; model (:id instance))
-                      {:model     model
-                       :id        (:id instance)
-                       :entity_id (:entity_id instance)}
-                      e)))))</pre></td></tr><tr><td class="docs">
+      (if (:skip (ex-data e))
+        (log/warnf &quot;Skipping %s %s because of an error extracting it: %s %s&quot;
+                   model (:id instance) (.getMessage e) (dissoc (ex-data e) :skip))
+        (throw (ex-info (format &quot;Exception extracting %s %s&quot; model (:id instance))
+                        {:model     model
+                         :id        (:id instance)
+                         :entity_id (:entity_id instance)
+                         :cause     (.getMessage e)}
+                        e))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod extract-all :default [model opts]
   (eduction (map (partial log-and-extract-one model opts))
             (extract-query model opts)))</pre></td></tr><tr><td class="docs"><p>Helper for the common (but not default) [[extract-query]] case of fetching everything that isn't in a personal
@@ -3537,10 +3541,13 @@ portable ID string.. Nested entities are returned as a vector of such ID strings
     (let [model-name (name model)
           model      (t2.model/resolve-model (symbol model-name))
           entity     (t2/select-one model (first (t2/primary-keys model)) id)
-          path       (mapv :id (generate-path model-name entity))]
-      (if (= (count path) 1)
-        (first path)
-        path))))</pre></td></tr><tr><td class="docs"><p>Given an identifier, and the model it represents (symbol, name or IModel), looks up the corresponding
+          path       (when entity (mapv :id (generate-path model-name entity)))]
+      (cond
+        (nil? entity)      (throw (ex-info &quot;FK target not found&quot; {:model model
+                                                                  :id    id
+                                                                  :skip  true}))
+        (= (count path) 1) (first path)
+        :else              path))))</pre></td></tr><tr><td class="docs"><p>Given an identifier, and the model it represents (symbol, name or IModel), looks up the corresponding
 entity and gets its primary key.</p>
 
 <p>The identifier can be a single entity ID string, a single identity-hash string, or a vector of entity ID and hash
@@ -3680,7 +3687,7 @@ This is useful for writing [[dependencies]] implementations.</p>
        [:dimension (dim :guard vector?)]
        [:dimension (mbql-id-&gt;fully-qualified-name dim)]
        [:metric (id :guard integer?)]
-       [:metric (*export-fk* id 'LegacyMetric)]
+       [:metric (*export-fk* id 'Card)]
        [:segment (id :guard integer?)]
        [:segment (*export-fk* id 'Segment)])))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- export-source-table
