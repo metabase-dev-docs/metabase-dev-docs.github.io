@@ -2868,6 +2868,7 @@ net.brehaut.ClojureTools = (function (SH) {
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.driver.sql" name="metabase.driver.sql"><h1 class="project-name">metabase.driver.sql</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Shared code for all drivers that use SQL under the hood.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.driver.sql
   (:require
+   [clojure.set :as set]
    [metabase.driver :as driver]
    [metabase.driver.common.parameters.parse :as params.parse]
    [metabase.driver.common.parameters.values :as params.values]
@@ -2914,12 +2915,16 @@ net.brehaut.ClojureTools = (function (SH) {
   (sql.u/format-sql-and-fix-params driver native-form))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defmethod driver/substitute-native-parameters :sql
   [_driver {:keys [query] :as inner-query} :- [:and [:map-of :keyword :any] [:map {:query ::lib.schema.common/non-blank-string}]]]
-  (let [[query params] (-&gt; query
-                           params.parse/parse
-                           (sql.params.substitute/substitute (params.values/query-&gt;params-map inner-query)))]
-    (assoc inner-query
-           :query query
-           :params params)))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
+  (let [params-map          (params.values/query-&gt;params-map inner-query)
+        referenced-card-ids (params.values/referenced-card-ids params-map)
+        [query params]      (-&gt; query
+                                params.parse/parse
+                                (sql.params.substitute/substitute params-map))]
+    (cond-&gt; (assoc inner-query
+                   :query  query
+                   :params params)
+      (seq referenced-card-ids)
+      (update :metabase.models.query.permissions/referenced-card-ids set/union referenced-card-ids))))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
 |                                              Connection Impersonation                                          |
 +----------------------------------------------------------------------------------------------------------------+</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>SQL for setting the active role for a connection, such as USE ROLE or equivalent, for the given driver.</p>
