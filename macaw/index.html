@@ -2911,11 +2911,12 @@ net.brehaut.ClojureTools = (function (SH) {
                   :tables            #{}
                   :table-wildcards   #{}}))</pre></td></tr><tr><td class="docs"><p>tables</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private quotes (map str [\` \&quot;]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private quotes (map str &quot;`\&quot;[&quot;))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private closing {&quot;[&quot; &quot;]&quot;})</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- quoted? [s]
   (some (fn [q]
           (and (str/starts-with? s q)
-               (str/ends-with? s q)))
+               (str/ends-with? s (closing q q))))
         quotes))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- strip-quotes [s]
   (subs s 1 (dec (count s))))</pre></td></tr><tr><td class="docs">
@@ -3082,7 +3083,9 @@ referenced in a table-wildcard (as far as can be determined from the query).</p>
    [macaw.collect :as collect]
    [macaw.rewrite :as rewrite])
   (:import
-   (net.sf.jsqlparser.parser CCJSqlParserUtil)))</pre></td></tr><tr><td class="docs">
+   (java.util.function Consumer)
+   (net.sf.jsqlparser.parser CCJSqlParser CCJSqlParserUtil)
+   (net.sf.jsqlparser.parser.feature Feature)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- escape-keywords ^String [sql keywords]
   (reduce
@@ -3091,7 +3094,23 @@ referenced in a table-wildcard (as far as can be determined from the query).</p>
    sql
    keywords))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- unescape-keywords [sql _keywords]
-  (str/replace sql &quot;____escaped____&quot; ))</pre></td></tr><tr><td class="docs"><p>Main entry point: takes a string query and returns a <code>Statement</code> object that can be handled by the other functions.</p>
+  (str/replace sql &quot;____escaped____&quot; ))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private features
+  {:backslash-escape-char  Feature/allowBackslashEscapeCharacter
+   :complex-parsing        Feature/allowComplexParsing
+   :postgres-syntax        Feature/allowPostgresSpecificSyntax
+   :square-bracket-quotes  Feature/allowSquareBracketQuotation
+   :unsupported-statements Feature/allowUnsupportedStatements})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- -&gt;Feature ^Feature [k]
+  (get features k))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private default-timeout-seconds 5)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- -&gt;parser-fn ^Consumer [opts]
+  (reify Consumer
+    (accept [_this parser]
+      (let [^long timeout-ms (:timeout opts (* default-timeout-seconds 1000))]
+        (.withFeature ^CCJSqlParser parser Feature/timeOut timeout-ms))
+      (doseq [[f ^boolean v] (:features opts)]
+        (.withFeature ^CCJSqlParser parser (-&gt;Feature f) v)))))</pre></td></tr><tr><td class="docs"><p>Main entry point: takes a string query and returns a <code>Statement</code> object that can be handled by the other functions.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn parsed-query
   [^String query &amp; {:as opts}]
   ;; Dialects like SQLite and Databricks treat consecutive blank lines as implicit semicolons.
@@ -3102,7 +3121,7 @@ referenced in a table-wildcard (as far as can be determined from the query).</p>
   (-&gt; query
       (str/replace #&quot;\n{2,}&quot; &quot;\n&quot;)
       (escape-keywords (:non-reserved-words opts))
-      (CCJSqlParserUtil/parse)))</pre></td></tr><tr><td class="docs"><p>Given a parsed query (i.e., a [subclass of] <code>Statement</code>) return a map with the elements found within it.</p>
+      (CCJSqlParserUtil/parse (-&gt;parser-fn opts))))</pre></td></tr><tr><td class="docs"><p>Given a parsed query (i.e., a [subclass of] <code>Statement</code>) return a map with the elements found within it.</p>
 
 <p>(Specifically, it returns their fully-qualified names as strings, where 'fully-qualified' means 'as referred to in
 the query'; this function doesn't do additional inference work to find out a table's schema.)</p>
@@ -3457,8 +3476,9 @@ This map gives a pattern in the exception message we expect to receive when tryi
   (if (seq xs)
     (every? true? xs)
     false))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def components     (comp m/query-&gt;components m/parsed-query))
-(def raw-components #(let [xs (empty %)] (into xs (keep :component) %)))
+</td><td class="codes"><pre class="brush: clojure">(defn components [sql &amp; {:as opts}]
+  (m/query-&gt;components (m/parsed-query sql opts) opts))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def raw-components #(let [xs (empty %)] (into xs (keep :component) %)))
 (def columns        (comp raw-components :columns components))
 (def source-columns (comp :source-columns components))
 (def has-wildcard?  (comp non-empty-and-truthy raw-components :has-wildcard? components))
@@ -3717,8 +3737,8 @@ from foo&quot;)</pre></td></tr><tr><td class="docs">
          (mutations &quot;UPDATE people SET name = 'Robert Fergusson' WHERE id = 23&quot;))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest complicated-mutations-test
   ;; https://github.com/metabase/macaw/issues/18
-  #_  (is (= #{&quot;delete&quot; &quot;insert&quot;}
-             (mutations &quot;WITH outdated_orders AS (
+  #_(is (= #{&quot;delete&quot; &quot;insert&quot;}
+           (mutations &quot;WITH outdated_orders AS (
                        DELETE FROM orders
                        WHERE
                          date &lt;= '2018-01-01'
@@ -3967,6 +3987,15 @@ from foo&quot;)</pre></td></tr><tr><td class="docs">
                             {:tables  {{:table &quot;x&quot;} &quot;final&quot;}
                              :columns {{:table &quot;x&quot; :column &quot;final&quot;} &quot;y&quot;}}
                             {:non-reserved-words [:final]})))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(deftest square-bracket-test
+  (testing &quot;We can opt into allowing square brackets to quote things&quot;
+    (is (=? {:tables  #{{:schema &quot;s&quot; :table &quot;t&quot;}}
+             :columns #{{:schema &quot;s&quot; :table &quot;t&quot; :column &quot;f&quot;}}}
+            (update-vals
+             (components &quot;SELECT [f] FROM [s].[t]&quot;
+                         {:features              {:square-bracket-quotes true}
+                          :preserve-identifiers? false})
+             raw-components)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(comment
  (require 'hashp.core)
  (require 'virgil)
