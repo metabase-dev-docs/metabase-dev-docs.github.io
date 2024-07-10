@@ -2865,106 +2865,136 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.shared.formatting.internal.numbers" name="metabase.shared.formatting.internal.numbers"><h1 class="project-name">metabase.shared.formatting.internal.numbers</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>ClojureScript implementation of number formatting.
-Implements the [[NumberFormatter]] protocol from numbers_core, plus some helpers.</p>
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.shared.formatting.internal.numbers" name="metabase.shared.formatting.internal.numbers"><h1 class="project-name">metabase.shared.formatting.internal.numbers</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>JVM Clojure implementation of the [[core/NumberFormatter]] abstaction.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.shared.formatting.internal.numbers
   (:require
    [clojure.string :as str]
    [metabase.shared.formatting.internal.numbers-core :as core]
-   [metabase.shared.util.currency :as currency]
-   [metabase.util :as u]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private default-number-separators &quot;.,&quot;)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- adjust-number-separators [text separators]
-  (if (and separators
-           (not= separators default-number-separators))
-    (let [decimal    (first separators)
-          grouping   (or (second separators) ) ; grouping separators are optional
-          transform  {&quot;,&quot; grouping &quot;.&quot; decimal}]
-      (str/replace text #&quot;[\.,]&quot; transform))
-    text))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- fix-currency-symbols [text currency]
-  (let [sym (currency/currency-symbol currency)]
-    (-&gt; text
-        ;; Some have spaces and some don't - remove the space if it's there.
-        (str/replace (str (name currency) core/non-breaking-space) sym)
-        (str/replace (name currency) sym))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- base-format-scientific [nf number]
-  (letfn [(transform [{:keys [type value]}]
-            (case type
-              &quot;exponentSeparator&quot; &quot;e&quot;
-              value))]
-    (let [parts  (js-&gt;clj (.formatToParts nf number) {:keywordize-keys true})
-          ;; If there's no exponent minus sign, add a plus sign.
-          parts  (if (some #(= (:type %) &quot;exponentMinusSign&quot;) parts)
-                   parts
-                   (let [[pre post] (split-with #(not= (:type %) &quot;exponentInteger&quot;) parts)]
-                     (concat pre [{:type &quot;exponentPlusSign&quot; :value &quot;+&quot;}] post)))]
-      (apply str (map transform parts)))))</pre></td></tr><tr><td class="docs"><p>Core internals =================================================================================================
-TODO(braden) We could get more nicely localized currency values by using the user's locale.
-The problem is that then we don't know what the number separators are. We could determine it
-with a simple test like formatting 12345.67, though.
-Using "en" here means, among other things, that currency values are not localized as well
-as they could be. Many European languages put currency signs as suffixes, eg. 123 euros is:
-- "€123.00" in "en"
-- "€123,00" with "en" but fixing up the separators for a German locale
-- "123,00 €" in actual German convention, which is what we would get with a native "de" locale here.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- number-formatter-for-options-baseline [options]
-  (let [default-fraction-digits (when (= (:number-style options) &quot;currency&quot;)
-                                  2)]
-    (js/Intl.NumberFormat.
-      &quot;en&quot;
-      (clj-&gt;js (u/remove-nils
-                 {:style    (when-not (= (:number-style options) &quot;scientific&quot;)
-                              (:number-style options &quot;decimal&quot;))
-                  :notation (when (= (:number-style options) &quot;scientific&quot;)
-                              &quot;scientific&quot;)
-                  :currency (:currency options)
-                  :currencyDisplay (:currency-style options)
-                  ;; Always use grouping separators, but we may remove them per number_separators.
-                  :useGrouping              true
-                  :minimumIntegerDigits     (:minimum-integer-digits     options)
-                  :minimumFractionDigits    (:minimum-fraction-digits    options default-fraction-digits)
-                  :maximumFractionDigits    (:maximum-fraction-digits    options default-fraction-digits)
-                  :minimumSignificantDigits (:minimum-significant-digits options)
-                  :maximumSignificantDigits (:maximum-significant-digits options)})))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- currency-symbols? [options]
-  (let [style (:currency-style options)]
-    (and (:currency options)
-         (or (nil? style)
-             (= style &quot;symbol&quot;)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- formatter-fn [nf options]
-  (case (:number-style options)
-    &quot;scientific&quot; #(base-format-scientific nf %)
-    #(.format nf %)))</pre></td></tr><tr><td class="docs"><p>The key function implemented for each language, and called by the top-level number formatting.
+   [metabase.shared.util.currency :as currency])
+  (:import
+   (java.math BigDecimal MathContext RoundingMode)
+   (java.text DecimalFormat NumberFormat)
+   (java.util Currency Locale)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Clojure helpers ================================================================================================</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- sig-figs [number figures]
+  (BigDecimal. (double number) (MathContext. figures RoundingMode/HALF_UP)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- str-run [n x]
+  (apply str (repeat n x)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- attach-currency-symbol [text ^NumberFormat nf ^Locale locale currency]
+  (str (currency/currency-symbol currency)
+       (subs text (count (.getSymbol (.getCurrency nf) locale)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- symbol-for [currency locale]
+  (case currency
+    :BTC &quot;₿&quot;
+    (-&gt; (name currency)
+        (Currency/getInstance)
+        (.getSymbol locale))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- apply-currency-style [text ^Currency _currency ^Locale locale style currency-key]
+  (let [sym   (symbol-for currency-key locale)
+        ;; TODO Our currency table has plurals but no translation; Java's `Currency.getDisplayName` is singular but
+        ;; translated. We should get the names in currency/currency keyed by locale.
+        currency (get currency/currency currency-key)]
+    (case (or style &quot;symbol&quot;)
+      &quot;symbol&quot; (str/replace text sym (:symbol currency)) ; Java's symbols are not identical to ours
+      &quot;name&quot;   (str (str/replace text sym ) &quot; &quot; (:name_plural currency))
+      &quot;code&quot;   (str/replace text sym (str (:code currency) core/non-breaking-space)))))</pre></td></tr><tr><td class="docs"><p>Currencies known not to be supported by the Java [[Currency]] classes. Rendered as USD, then the symbols are
+replaced.</p>
+
+<p>Core internals =================================================================================================</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private bad-currencies
+  #{:BTC})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- active-locale [options]
+  (if (:locale options)
+    (Locale. (:locale options))
+    (Locale/getDefault)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- number-formatter-for-options-baseline
+  ^NumberFormat [{:keys [maximum-fraction-digits minimum-fraction-digits number-style]} locale]
+  (let [^NumberFormat nf (case number-style
+                           ;; For scientific, assemble the 0.###E0 DecimalFormat pattern.
+                           &quot;scientific&quot; (DecimalFormat. (str &quot;0.&quot;
+                                                             (str-run (or minimum-fraction-digits 0) &quot;0&quot;)
+                                                             (str-run (- (or maximum-fraction-digits 2)
+                                                                         (or minimum-fraction-digits 0))
+                                                                      &quot;#&quot;)
+                                                             &quot;E0&quot;))
+                           &quot;currency&quot;   (NumberFormat/getCurrencyInstance locale)
+                           &quot;percent&quot;    (NumberFormat/getPercentInstance locale)
+                           (NumberFormat/getInstance locale))]
+    (when (not (= number-style #&quot;scientific&quot;))
+      (.setMaximumFractionDigits nf (or maximum-fraction-digits 300)))
+    nf))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- set-rounding! [^NumberFormat nf]
+  ;; JavaScript does not support picking the rounding mode; it's always HALF_UP.
+  ;; (Intl.NumberFormat has an option `roundingMode` but it's new and not supported anywhere as of EOY2022.)
+  ;; Since Java is flexible, we match the HALF_UP behavior here.
+  (.setRoundingMode nf RoundingMode/HALF_UP))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- set-minimum-fraction! [^NumberFormat nf options]
+  (when (:minimum-fraction-digits options)
+    (.setMinimumFractionDigits nf (:minimum-fraction-digits options))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- set-currency! [^NumberFormat nf currency]
+  (when currency
+    (.setCurrency nf (if (bad-currencies currency)
+                       ;; For the currencies the JVM doesn't support, we use USD and replace the symbols later.
+                       (Currency/getInstance &quot;USD&quot;)
+                       (Currency/getInstance (name currency))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- set-separators! [^NumberFormat nf options]
+  (when-let [[decimal grouping] (:number-separators options)]
+    (let [^DecimalFormat df nf
+          syms              (.getDecimalFormatSymbols df)]
+      (when decimal
+        (.setDecimalSeparator syms decimal))
+      (if grouping
+        (.setGroupingSeparator syms grouping)
+        (.setGroupingUsed df false))
+      (.setDecimalFormatSymbols df syms))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- prepare-number-formatter! [^NumberFormat nf options currency]
+  (set-rounding! nf)
+  (set-minimum-fraction! nf options)
+  (set-currency! nf currency)
+  (set-separators! nf options))</pre></td></tr><tr><td class="docs"><p>Certain options do not map into Java's [[NumberFormat]] classes. They are handled by preprocessing the number
+(eg. by rounding) instead.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- preformat-step
+  [options]
+  (if (:maximum-significant-digits options)
+    #(sig-figs % (:maximum-significant-digits options))
+    identity))</pre></td></tr><tr><td class="docs"><p>The key function implemented for each language, and called by the top-level number formatting.
 Returns a [[core/NumberFormatter]] instance for each set of options.
 These formatters are reusable, but this does no caching.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn number-formatter-for-options
   [options]
-  (let [nf        (number-formatter-for-options-baseline options)
-        symbols?  (currency-symbols? options)
-        formatter (formatter-fn nf options)]
+  (let [currency     (some-&gt; options :currency keyword)
+        locale       (active-locale options)
+        currency-sym (some-&gt; currency (symbol-for locale))
+        nf           (number-formatter-for-options-baseline options locale)
+        pre          (preformat-step options)]
+    (prepare-number-formatter! nf options currency)
     (reify
       core/NumberFormatter
       (format-number-basic [_ number]
-        (cond-&gt; (formatter number)
-          true     (adjust-number-separators (:number-separators options))
-          symbols? (fix-currency-symbols (:currency options))))
+        (cond-&gt; (.format nf (pre (bigdec (double number))))
+          ;; If running a &quot;bad&quot; currency Java doesn't support, replace the default symbol with the real one.
+          (and currency (bad-currencies currency))
+          (attach-currency-symbol nf locale currency)
+          ;; Handle the :currency-style option, which isn't supported natively on Java.
+          currency
+          (apply-currency-style (.getCurrency nf) locale (:currency-style options) currency)))
       (wrap-currency [_ text]
-        ;; Intl.NumberFormat.formatToParts(1) returns, eg. [currency, integer, decimal, fraction]
-        ;; Keep only currency and integer, and replace integer's :value with our provided text.
-        (apply str (for [{:keys [type value]} (js-&gt;clj (.formatToParts nf 1) :keywordize-keys true)
-                         :when (#{&quot;currency&quot; &quot;integer&quot;} type)]
-                     (if (= type &quot;integer&quot;)
-                       text
-                       value))))
-      (split-exponent [_ formatted] (throw (ex-info &quot;split-exponent not implemented&quot; {:text formatted}))))))</pre></td></tr><tr><td class="docs"><p>Formats a number in scientific notation. The wrangling required differs by platform.</p>
+        (str currency-sym text))
+      (split-exponent [_ formatted]
+        (let [^DecimalFormat df nf ;; Scientific mode always uses the DecimalFormat subclass.
+              sep (.. df getDecimalFormatSymbols getExponentSeparator)
+              exp (str/last-index-of formatted sep)]
+          {:mantissa (subs formatted 0 exp)
+           :exponent (subs formatted (+ exp (count sep)))})))))</pre></td></tr><tr><td class="docs"><p>Formats a number in scientific notation. The wrangling required differs by platform.</p>
 
 <p>Scientific notation ============================================================================================</p>
 </td><td class="codes"><pre class="brush: clojure">(defn format-number-scientific
   [number options]
-  (-&gt; (core/prep-options options)
-      number-formatter-for-options
-      (core/format-number-basic number)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+  (let [nf   (-&gt; options core/prep-options number-formatter-for-options)
+        base (core/format-number-basic nf number)
+        {:keys [mantissa exponent]} (core/split-exponent nf base)
+        ?plus (when-not (str/starts-with? exponent &quot;-&quot;) &quot;+&quot;)]
+    (str mantissa &quot;e&quot; ?plus exponent)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

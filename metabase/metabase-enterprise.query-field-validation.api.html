@@ -2865,119 +2865,94 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.util.memoize" name="metabase.util.memoize"><h1 class="project-name">metabase.util.memoize</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Copied from clojure.core.memoize.</p>
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.util.memoize
-  (:require [cljs.cache :as cache]))</pre></td></tr><tr><td class="docs"><p>Similar to clojure.lang.Delay, but will not memoize an exception and will
-instead retry.
-  fun - the function, never nil
-  available? - indicates a memoized value is available, volatile for visibility
-  value - the value (if available) - volatile for visibility</p>
-</td><td class="codes"><pre class="brush: clojure">(deftype RetryingDelay [fun ^:volatile-mutable available? ^:volatile-mutable value]
-  IDeref
-  (-deref [_]
-    ;; first check (safe with volatile flag)
-    (if available?
-      value
-      ;; fun may throw - will retry on next deref
-      (let [v (fun)]
-        (set! value v)
-        (set! available? true)
-        v)))
-  IPending
-  (-realized? [_]
-    available?))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- d-lay [fun]
-  (-&gt;RetryingDelay fun false nil))</pre></td></tr><tr><td class="docs"><p>If a value is not already derefable, wrap it up.</p>
-
-<p>This is used to help rebuild seed/base maps passed in to the various
-caches so that they conform to core.memoize's world view.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- make-derefable
-  [v]
-  (if (instance? IDeref v)
-    v
-    (reify IDeref
-      (-deref [_] v))))</pre></td></tr><tr><td class="docs"><p>Given a seed/base map, ensure all the values in it are derefable.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- derefable-seed
-  [seed]
-  (update-vals seed make-derefable))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(deftype PluggableMemoization [f cache]
-  cache/CacheProtocol
-  (has? [_ item]
-    (cache/has? cache item))
-  (hit  [_ item]
-    (PluggableMemoization. f (cache/hit cache item)))
-  (miss [_ item result]
-    (PluggableMemoization. f (cache/miss cache item result)))
-  (evict [_ key]
-    (PluggableMemoization. f (cache/evict cache key)))
-  (lookup [_ item]
-    (cache/lookup cache item nil))
-  (lookup [_ item not-found]
-    (cache/lookup cache item (delay not-found)))
-  (seed [_ base]
-    (PluggableMemoization.
-     f (cache/seed cache (derefable-seed base))))
-  Object
-  (toString [_] (str cache)))</pre></td></tr><tr><td class="docs"><p>Returns a function's argument transformer.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^{:private true
-       :doc }
-  args-fn #(or (::args-fn (meta %)) identity))</pre></td></tr><tr><td class="docs"><p>The basic hit/miss logic for the cache system based on <code>cache/through</code>.
-Clojure delays are used to hold the cache value.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- through*
-  [cache f args item]
-  (cache/through
-   (fn [f _] (d-lay #(f args)))
-   #(apply f %)
-   cache
-   item))</pre></td></tr><tr><td class="docs"><p>Given a function, an atom containing a (pluggable memoization cache), and
-and cache key function, return a new function that behaves like the original
-function except it is cached, based on its arguments.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- cached-function
-  [f cache-atom ckey-fn]
-  (fn [&amp; args]
-    (let [ckey (or (ckey-fn args) [])
-          cs   (swap! cache-atom through* f args ckey)
-          val  (cache/lookup cs ckey ::not-found)]
-       ;; If `lookup` returns `(delay ::not-found)`, it's likely that
-       ;; we ran into a timing issue where eviction and access
-       ;; are happening at about the same time. Therefore, we retry
-       ;; the `swap!` (potentially several times).
-       ;;
-       ;; metabase.util.memoize currently wraps all of its values in a `delay`.
-      (when val
-        (loop [n 0 v @val]
-          (if (= ::not-found v)
-            (when-let [v' (cache/lookup
-                           (swap! cache-atom through* f args ckey)
-                           ckey ::not-found)]
-              (when (&lt; n 10)
-                (recur (inc n) @v')))
-            v))))))</pre></td></tr><tr><td class="docs"><p>Build a pluggable memoized version of a function. Given a function and a
-(pluggable memoized) cache, and an optional seed (hash map of arguments to
-return values), return a cached version of that function.</p>
-
-<p>If you want to build your own cached function, perhaps with combined caches
-or customized caches, this is the preferred way to do so now.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn memoizer
-  ([f cache]
-   (let [cache   (atom (PluggableMemoization. f cache))
-         ckey-fn (args-fn f)]
-     (cached-function f cache ckey-fn)))
-  ([f cache seed]
-   (let [cache   (atom (cache/seed (PluggableMemoization. f cache)
-                                   (derefable-seed seed)))
-         ckey-fn (args-fn f)]
-     (cached-function f cache ckey-fn))))</pre></td></tr><tr><td class="docs"><p>Works the same as the basic memoization function (i.e.
- <code>core.memoize</code> except when a given threshold is breached.
- When the threshold is passed, the cache will expel the
- <strong>L</strong>east <strong>R</strong>ecently <strong>U</strong>sed element in favor of the new.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn lru
-  ([f] (lru f {} :lru/threshold 32))
-  ([f base] (lru f base :lru/threshold 32))
-  ([f tkey threshold] (lru f {} tkey threshold))
-  ([f base key threshold]
-   (assert (= key :lru/threshold) (str &quot;wrong parameter key &quot; key))
-   (memoizer f (cache/lru-cache-factory {} :threshold threshold) base)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase-enterprise.query-field-validation.api" name="metabase-enterprise.query-field-validation.api"><h1 class="project-name">metabase-enterprise.query-field-validation.api</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase-enterprise.query-field-validation.api
+  (:require
+   [compojure.core :refer [GET]]
+   [medley.core :as m]
+   [metabase.api.common :as api]
+   [metabase.api.routes.common :refer [+auth]]
+   [metabase.server.middleware.offset-paging :as mw.offset-paging]
+   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs"><p>Columns that the card errors can be sorted by</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private valid-sort-columns 
+  #{&quot;name&quot; &quot;collection&quot; &quot;created_by&quot; &quot;last_edited_at&quot;}) ;; We don't support sorting by error message for now</pre></td></tr><tr><td class="docs"><p>We don't support sorting by error message for now</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private default-sort-column &quot;name&quot;)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private valid-sort-directions
+  #{&quot;asc&quot; &quot;desc&quot;})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private default-sort-direction &quot;asc&quot;)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private card-joins
+  [[(t2/table-name :model/QueryField) :qf] [:and
+                                            [:= :qf.card_id :c.id]
+                                            [:= :qf.explicit_reference true]]
+   [(t2/table-name :model/Field) :f] [:and
+                                      [:= :qf.field_id :f.id]
+                                      [:= :f.active false]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- cards-with-inactive-fields
+  [sort-column sort-direction offset limit]
+  (let [additional-joins      (condp = sort-column
+                                &quot;name&quot;           []
+                                &quot;collection&quot;     [[(t2/table-name :model/Collection) :coll] [:= :coll.id :c.collection_id]]
+                                &quot;created_by&quot;     [[(t2/table-name :model/User) :u] [:= :u.id :c.creator_id]]
+                                &quot;last_edited_at&quot; [])
+        order-by-column       (condp = sort-column
+                                &quot;name&quot;           :c.name
+                                &quot;collection&quot;     :coll.name
+                                &quot;created_by&quot;     [:coalesce [:|| :u.first_name &quot; &quot; :u.last_name] :u.first_name :u.last_name :u.email]
+                                &quot;last_edited_at&quot; :c.updated_at)
+        cards                 (t2/select :model/Card
+                                         (m/assoc-some
+                                          {:from     [[(t2/table-name :model/Card) :c]]
+                                           :join     (concat card-joins additional-joins)
+                                           :where    [:= :c.archived false]
+                                           :order-by [[order-by-column (keyword sort-direction)]]}
+                                          :limit limit
+                                          :offset offset))
+        card-id-&gt;query-fields (when (seq cards)
+                                (group-by :card_id (t2/select :model/QueryField
+                                                              {:select [:qf.* [:f.name :column_name] [:t.name :table_name]]
+                                                               :from   [[(t2/table-name :model/QueryField) :qf]]
+                                                               :join   [[(t2/table-name :model/Field) :f] [:= :f.id :qf.field_id]
+                                                                        [(t2/table-name :model/Table) :t] [:= :t.id :f.table_id]]
+                                                               :where  [:and
+                                                                        [:= :qf.explicit_reference true]
+                                                                        [:= :f.active false]
+                                                                        [:in :card_id (map :id cards)]]})))
+        add-errors            (fn [{:keys [id] :as card}]
+                                (assoc-in card
+                                           [:errors :inactive-fields]
+                                           (for [{:keys [table_name column_name]} (card-id-&gt;query-fields id)]
+                                             {:table table_name :field column_name})))]
+    (map add-errors (t2/hydrate cards :collection :creator))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- invalid-card-count
+  []
+  (:count
+   (first
+    (t2/query {:select [[:%count.* :count]]
+               :from   [[(t2/table-name :model/Card) :c]]
+               :join   card-joins
+               :where  [:= :c.archived false]}))))</pre></td></tr><tr><td class="docs"><p>/invalid-cards</p>
+</td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
+  &quot;List of cards that have an invalid reference in their query. Shape of each card is standard, with the addition of an
+  `errors` key. Supports pagination (`offset` and `limit`), so it returns something in the shape:
+  ```
+    {:total  200
+     :data   [card1, card2, ...]
+     :limit  50
+     :offset 100
+  ```&quot;
+  [sort_column sort_direction]
+  {sort_column    [:maybe (into [:enum] valid-sort-columns)]
+   sort_direction [:maybe (into [:enum] valid-sort-directions)]}
+  (let [cards (cards-with-inactive-fields (or sort_column default-sort-column)
+                                          (or sort_direction default-sort-direction)
+                                          mw.offset-paging/*offset*
+                                          mw.offset-paging/*limit*)]
+    {:total  (invalid-card-count)
+     :data   cards
+     :limit  mw.offset-paging/*limit*
+     :offset mw.offset-paging/*offset*}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api/define-routes +auth)</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
