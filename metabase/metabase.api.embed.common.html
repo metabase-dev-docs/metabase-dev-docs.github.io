@@ -3226,12 +3226,16 @@ values according to [[api.card/param-values]].</p>
                          e)]
           (log/errorf e &quot;embedded card-param-values error\n%s&quot;
                       (u/pprint-to-str (u/all-ex-data e)))
-          (throw e))))))</pre></td></tr><tr><td class="docs"><p>Common implementation for fetching parameter values for embedding and preview-embedding.</p>
+          (throw e))))))</pre></td></tr><tr><td class="docs"><p>Common implementation for fetching parameter values for embedding and preview-embedding.
+Optionally pass a map with <code>:preview</code> containing <code>true</code> (or some non-falsy value) to disable checking
+if the dashboard is 'published'. This is intended to power the <code>preview_embed</code> api endpoints.
+The <code>:preview</code> key will default to <code>false</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn dashboard-param-values
-  [token searched-param-id prefix id-query-params]
+  [token searched-param-id prefix id-query-params
+   &amp; {:keys [preview] :or {preview false}}]
   (let [unsigned-token                       (embed/unsign token)
         dashboard-id                         (embed/get-in-unsigned-token-or-throw unsigned-token [:resource :dashboard])
-        _                                    (check-embedding-enabled-for-dashboard dashboard-id)
+        _                                    (when-not preview (check-embedding-enabled-for-dashboard dashboard-id))
         slug-token-params                    (embed/get-in-unsigned-token-or-throw unsigned-token [:params])
         {parameters       :parameters
          embedding-params :embedding_params} (t2/select-one :model/Dashboard :id dashboard-id)
@@ -3250,7 +3254,7 @@ values according to [[api.card/param-values]].</p>
       (let [merged-id-params (param-values-merged-params id-&gt;slug slug-&gt;id embedding-params slug-token-params id-query-params)]
         (try
           (binding [api/*current-user-permissions-set* (atom #{&quot;/&quot;})
-                    api/*is-superuser?*                 true]
+                    api/*is-superuser?*                true]
             (api.dashboard/param-values (t2/select-one :model/Dashboard :id dashboard-id) searched-param-id merged-id-params prefix))
           (catch Throwable e
             (throw (ex-info (.getMessage e)
