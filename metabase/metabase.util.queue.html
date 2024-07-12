@@ -2865,172 +2865,82 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.query-processor.preprocess" name="metabase.query-processor.preprocess"><h1 class="project-name">metabase.query-processor.preprocess</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.query-processor.preprocess
-  (:require
-   [metabase.legacy-mbql.schema :as mbql.s]
-   [metabase.lib.convert :as lib.convert]
-   [metabase.lib.query :as lib.query]
-   [metabase.lib.schema.id :as lib.schema.id]
-   [metabase.query-processor.debug :as qp.debug]
-   [metabase.query-processor.error-type :as qp.error-type]
-   [metabase.query-processor.middleware.add-default-temporal-unit :as qp.add-default-temporal-unit]
-   [metabase.query-processor.middleware.add-dimension-projections :as qp.add-dimension-projections]
-   [metabase.query-processor.middleware.add-implicit-clauses :as qp.add-implicit-clauses]
-   [metabase.query-processor.middleware.add-implicit-joins :as qp.add-implicit-joins]
-   [metabase.query-processor.middleware.add-source-metadata :as qp.add-source-metadata]
-   [metabase.query-processor.middleware.annotate :as annotate]
-   [metabase.query-processor.middleware.auto-bucket-datetimes :as qp.auto-bucket-datetimes]
-   [metabase.query-processor.middleware.auto-parse-filter-values :as auto-parse-filter-values]
-   [metabase.query-processor.middleware.binning :as binning]
-   [metabase.query-processor.middleware.check-features :as check-features]
-   [metabase.query-processor.middleware.constraints :as qp.constraints]
-   [metabase.query-processor.middleware.cumulative-aggregations :as qp.cumulative-aggregations]
-   [metabase.query-processor.middleware.desugar :as desugar]
-   [metabase.query-processor.middleware.enterprise :as qp.middleware.enterprise]
-   [metabase.query-processor.middleware.escape-join-aliases :as escape-join-aliases]
-   [metabase.query-processor.middleware.expand-macros :as expand-macros]
-   [metabase.query-processor.middleware.fetch-source-query :as fetch-source-query]
-   [metabase.query-processor.middleware.fix-bad-references :as fix-bad-refs]
-   [metabase.query-processor.middleware.limit :as limit]
-   [metabase.query-processor.middleware.metrics :as metrics]
-   [metabase.query-processor.middleware.normalize-query :as normalize]
-   [metabase.query-processor.middleware.optimize-temporal-filters :as optimize-temporal-filters]
-   [metabase.query-processor.middleware.parameters :as parameters]
-   [metabase.query-processor.middleware.permissions :as qp.perms]
-   [metabase.query-processor.middleware.persistence :as qp.persistence]
-   [metabase.query-processor.middleware.pre-alias-aggregations :as qp.pre-alias-aggregations]
-   [metabase.query-processor.middleware.reconcile-breakout-and-order-by-bucketing :as reconcile-bucketing]
-   [metabase.query-processor.middleware.resolve-fields :as qp.resolve-fields]
-   [metabase.query-processor.middleware.resolve-joined-fields :as resolve-joined-fields]
-   [metabase.query-processor.middleware.resolve-joins :as resolve-joins]
-   [metabase.query-processor.middleware.resolve-referenced :as qp.resolve-referenced]
-   [metabase.query-processor.middleware.resolve-source-table :as qp.resolve-source-table]
-   [metabase.query-processor.middleware.validate :as validate]
-   [metabase.query-processor.middleware.validate-temporal-bucketing :as validate-temporal-bucketing]
-   [metabase.query-processor.middleware.wrap-value-literals :as qp.wrap-value-literals]
-   [metabase.query-processor.setup :as qp.setup]
-   [metabase.query-processor.store :as qp.store]
-   [metabase.util :as u]
-   [metabase.util.i18n :as i18n]
-   [metabase.util.log :as log]
-   [metabase.util.malli :as mu]))</pre></td></tr><tr><td class="docs"><p>the following helper functions are temporary, to aid in the transition from a legacy MBQL QP to a pMBQL QP. Each
-individual middleware function is wrapped in either [[ensure-legacy]] or [[ensure-pmbql]], and will then see the
-flavor of MBQL it is written for.</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private -&gt;legacy :- mbql.s/Query
-  [query]
-  (lib.convert/-&gt;legacy-MBQL query))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- ^:deprecated ensure-legacy [middleware-fn]
-  (-&gt; (fn [query]
-        (let [query (cond-&gt; query
-                      (:lib/type query) -&gt;legacy)]
-          (middleware-fn query)))
-      (with-meta (meta middleware-fn))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- ensure-pmbql [middleware-fn]
-  (-&gt; (fn [query]
-        (let [query (cond-&gt;&gt; query
-                      (not (:lib/type query)) (lib.query/query (qp.store/metadata-provider)))]
-          (middleware-fn query)))
-      (with-meta (meta middleware-fn))))</pre></td></tr><tr><td class="docs"><p>Pre-processing middleware. Has the form</p>
-
-<p>  (f query) -> query</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private middleware
-  ;; ↓↓↓ PRE-PROCESSING ↓↓↓ happens from TOP TO BOTTOM
-  #_{:clj-kondo/ignore [:deprecated-var]}
-  [#'normalize/normalize-preprocessing-middleware
-   (ensure-pmbql #'qp.perms/remove-permissions-key)
-   (ensure-pmbql #'qp.constraints/maybe-add-default-userland-constraints)
-   (ensure-pmbql #'validate/validate-query)
-   (ensure-pmbql #'fetch-source-query/resolve-source-cards)
-   (ensure-pmbql #'metrics/adjust)
-   (ensure-pmbql #'expand-macros/expand-macros)
-   (ensure-pmbql #'qp.resolve-referenced/resolve-referenced-card-resources)
-   (ensure-legacy #'parameters/substitute-parameters)
-   (ensure-pmbql #'qp.resolve-source-table/resolve-source-tables)
-   (ensure-pmbql #'qp.auto-bucket-datetimes/auto-bucket-datetimes)
-   (ensure-legacy #'reconcile-bucketing/reconcile-breakout-and-order-by-bucketing)
-   (ensure-legacy #'qp.add-source-metadata/add-source-metadata-for-source-queries)
-   (ensure-legacy #'qp.middleware.enterprise/apply-sandboxing)
-   (ensure-legacy #'qp.persistence/substitute-persisted-query)
-   (ensure-legacy #'qp.add-implicit-clauses/add-implicit-clauses)
-   (ensure-legacy #'qp.add-dimension-projections/add-remapped-columns)
-   (ensure-legacy #'qp.resolve-fields/resolve-fields)
-   (ensure-legacy #'binning/update-binning-strategy)
-   (ensure-legacy #'desugar/desugar)
-   (ensure-legacy #'qp.add-default-temporal-unit/add-default-temporal-unit)
-   (ensure-legacy #'qp.add-implicit-joins/add-implicit-joins)
-   (ensure-legacy #'resolve-joins/resolve-joins)
-   (ensure-legacy #'resolve-joined-fields/resolve-joined-fields)
-   (ensure-legacy #'fix-bad-refs/fix-bad-references)
-   (ensure-legacy #'escape-join-aliases/escape-join-aliases)
-   ;; yes, this is called a second time, because we need to handle any joins that got added
-   (ensure-legacy #'qp.middleware.enterprise/apply-sandboxing)
-   (ensure-legacy #'qp.cumulative-aggregations/rewrite-cumulative-aggregations)
-   (ensure-legacy #'qp.pre-alias-aggregations/pre-alias-aggregations)
-   (ensure-legacy #'qp.wrap-value-literals/wrap-value-literals)
-   (ensure-legacy #'auto-parse-filter-values/auto-parse-filter-values)
-   (ensure-legacy #'validate-temporal-bucketing/validate-temporal-bucketing)
-   (ensure-legacy #'optimize-temporal-filters/optimize-temporal-filters)
-   (ensure-legacy #'limit/add-default-limit)
-   (ensure-legacy #'qp.middleware.enterprise/apply-download-limit)
-   (ensure-legacy #'check-features/check-features)])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn preprocess :- [:map
-                        [:database ::lib.schema.id/database]]
-  &quot;Fully preprocess a query, but do not compile it to a native query or execute it.&quot;
-  [query :- :map]
-  (qp.setup/with-qp-setup [query query]
-    (qp.debug/debug&gt; (list `preprocess query))
-    (transduce
-     identity
-     (fn
-       ([preprocessed]
-        (log/debugf &quot;Preprocessed query:\n\n%s&quot; (u/pprint-to-str preprocessed))
-        preprocessed)
-       ([query middleware-fn]
-        (try
-          (assert (ifn? middleware-fn))
-          ;; make sure the middleware returns a valid query... this should be dev-facing only so no need to i18n
-          (u/prog1 (middleware-fn query)
-            (qp.debug/debug&gt;
-              (when-not (= &lt;&gt; query)
-                (let [middleware-fn-name (if-let [fn-name (:name (meta middleware-fn))]
-                                           (if-let [fn-ns (:ns (meta middleware-fn))]
-                                             (format &quot;%s/%s&quot; (ns-name fn-ns) fn-name)
-                                             fn-name)
-                                           middleware-fn)]
-                  (list middleware-fn-name '=&gt; &lt;&gt;))))
-            ;; make sure the middleware returns a valid query... this should be dev-facing only so no need to i18n
-            (when-not (map? &lt;&gt;)
-              (throw (ex-info (format &quot;Middleware did not return a valid query.&quot;)
-                              {:fn middleware-fn, :query query, :result &lt;&gt;, :type qp.error-type/qp}))))
-          (catch Throwable e
-            (throw (ex-info (i18n/tru &quot;Error preprocessing query in {0}: {1}&quot; middleware-fn (ex-message e))
-                            {:fn middleware-fn, :query query, :type qp.error-type/qp}
-                            e))))))
-     query
-     middleware)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- restore-join-aliases [preprocessed-query]
-  (let [replacement (-&gt; preprocessed-query :info :alias/escaped-&gt;original)]
-    (escape-join-aliases/restore-aliases preprocessed-query replacement)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn query-&gt;expected-cols :- [:maybe [:sequential :map]]
-  &quot;Return the `:cols` you would normally see in MBQL query results by preprocessing the query and calling `annotate` on
-  it. This only works for pure MBQL queries, since it does not actually run the queries. Native queries or MBQL
-  queries with native source queries won't work, since we don't need the results.&quot;
-  [query :- :map]
-  (qp.setup/with-qp-setup [query query]
-    (let [preprocessed (-&gt; query preprocess restore-join-aliases)]
-      (when-not (= (:type preprocessed) :query)
-        (throw (ex-info (i18n/tru &quot;Can only determine expected columns for MBQL queries.&quot;)
-                        {:type qp.error-type/qp})))
-      ;; TODO - we should throw an Exception if the query has a native source query or at least warn about it. Need to
-      ;; check where this is used.
-      (-&gt;&gt; (annotate/merged-column-info preprocessed nil)
-           ;; remove MLv2 columns so we don't break a million tests. Once the whole QP is updated to use MLv2 metadata
-           ;; directly we can stop stripping these out
-           (mapv (fn [col]
-                   (dissoc col :lib/external_remap :lib/internal_remap)))
-           not-empty))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.util.queue" name="metabase.util.queue"><h1 class="project-name">metabase.util.queue</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.util.queue
+  (:import
+   (java.util HashSet Queue Set)
+   (java.util.concurrent ArrayBlockingQueue BlockingQueue SynchronousQueue TimeUnit)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defprotocol BoundedTransferQueue
+  (maybePut! [queue msg]
+    &quot;Put a message on the queue if there is space for it, otherwise drop it.
+     Returns whether the item was enqueued.&quot;)
+  (blockingPut! [queue msg]
+    &quot;Put a message on the queue. If necessary, block until there is space for it.&quot;)
+  (blockingTake! [queue]
+    &quot;Take a message off the queue, blocking if necessary.&quot;))</pre></td></tr><tr><td class="docs"><p>Similar to java.util.concurrent.LinkedTransferQueue, but bounded.</p>
+</td><td class="codes"><pre class="brush: clojure">(deftype ^:private ArrayTransferQueue
+  [^ArrayBlockingQueue async-queue
+   ^SynchronousQueue sync-queue
+   ^long block-ms
+   ^long sleep-ms]
+  BoundedTransferQueue
+  (maybePut! [_ msg]
+    (.offer async-queue msg))
+  (blockingPut! [_ msg]
+    (.offer sync-queue msg Long/MAX_VALUE TimeUnit/DAYS))
+  (blockingTake! [_]
+    ;; Async messages are given higher priority, as sync messages will never be dropped.
+    (or (.poll async-queue)
+        (.poll sync-queue block-ms TimeUnit/MILLISECONDS)
+        (do (Thread/sleep ^long sleep-ms)
+            (recur)))))</pre></td></tr><tr><td class="docs"><p>Similar to ArrayTransferQueue, but drops events that are already in the queue.</p>
+</td><td class="codes"><pre class="brush: clojure">(deftype ^:private DeduplicatingArrayTransferQueue
+  [^Queue async-queue
+   ^BlockingQueue sync-queue
+   ^Set queued-set
+   ^long block-ms
+   ^long sleep-ms]
+  BoundedTransferQueue
+  (maybePut!
+    [_ msg]
+    (let [payload (:payload msg msg)]
+      ;; we hold the lock while we push to avoid races
+      (locking queued-set
+        ;; returns null if we have already enqueued the message
+        (when (.add queued-set payload)
+          (let [accepted? (.offer ^Queue async-queue msg)]
+            (when-not accepted?
+              (.remove queued-set payload))
+            accepted?)))))
+  (blockingPut! [_ msg]
+   ;; we cannot hold the lock while we push, so there is some chance of a duplicate
+    (when (locking queued-set (.add queued-set (:payload msg msg)))
+      (.offer sync-queue msg Long/MAX_VALUE TimeUnit/DAYS)))
+  (blockingTake! [_]
+   ;; we lock here to avoid leaving a blocking entry behind that can never be cleared
+    (or (locking queued-set
+          (when-let [msg (or (.poll ^Queue async-queue)
+                             (.poll sync-queue block-ms TimeUnit/MILLISECONDS))]
+            (.remove queued-set (:payload msg msg))
+            msg))
+        (do (Thread/sleep ^long sleep-ms)
+            (recur)))))</pre></td></tr><tr><td class="docs"><p>Create a bounded transfer queue, specialized based on the high-level options.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn bounded-transfer-queue
+  [capacity &amp; {:keys [block-ms sleep-ms dedupe?]
+               :or   {block-ms 100
+                      sleep-ms 100
+                      dedupe?  false}}]
+  (if dedupe?
+    (-&gt;DeduplicatingArrayTransferQueue (ArrayBlockingQueue. capacity)
+                                       (SynchronousQueue.)
+                                       (HashSet.)
+                                       block-ms
+                                       sleep-ms)
+    (-&gt;ArrayTransferQueue (ArrayBlockingQueue. capacity)
+                          (SynchronousQueue.)
+                          block-ms
+                          sleep-ms)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

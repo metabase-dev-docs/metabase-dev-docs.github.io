@@ -2897,7 +2897,6 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.util.malli.schema :as ms]
    [toucan2.core :as t2]
    [toucan2.instance :as t2.instance]
-   [toucan2.jdbc.options :as t2.jdbc.options]
    [toucan2.realize :as t2.realize]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private HoneySQLColumn
@@ -3257,14 +3256,16 @@ one model without errors. Therefore we degenerate it down for it</p>
       (= (count models) 0)
       {:select [nil]}
       (= (count models) 1)
-      (search-query-for-model (first models) search-ctx)
+      (merge (search-query-for-model (first models) search-ctx)
+             {:limit search.config/*db-max-results*})
       :else
       {:select   [:*]
        :from     [[{:union-all (vec (for [model models
                                           :let  [query (search-query-for-model model search-ctx)]
                                           :when (seq query)]
                                       query))} :alias_is_required_by_sql_but_not_needed_here]]
-       :order-by order-clause})))</pre></td></tr><tr><td class="docs"><p>Hydrate common-name for last<em>edited</em>by and created_by from result.</p>
+       :order-by order-clause
+       :limit    search.config/*db-max-results*})))</pre></td></tr><tr><td class="docs"><p>Hydrate common-name for last<em>edited</em>by and created_by from result.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- hydrate-user-metadata
   [results]
   (let [user-ids             (set (flatten (for [result results]
@@ -3398,11 +3399,9 @@ endpoint itself, not in the search impl.</p>
         to-toucan-instance (fn [row]
                              (let [model (-&gt; row :model search.config/model-to-db-model :db-model)]
                                (t2.instance/instance model row)))
-        reducible-results  (reify clojure.lang.IReduceInit
-                             (reduce [_this rf init]
-                               (binding [t2.jdbc.options/*options* (assoc t2.jdbc.options/*options* :max-rows search.config/*db-max-results*)]
-                                 (reduce rf init (t2/reducible-query search-query)))))
+        reducible-results  (t2/reducible-query search-query)
         xf                 (comp
+                            (take search.config/*db-max-results*)
                             (map t2.realize/realize)
                             (map to-toucan-instance)
                             (map #(if (and (t2/instance-of? :model/Collection %)
