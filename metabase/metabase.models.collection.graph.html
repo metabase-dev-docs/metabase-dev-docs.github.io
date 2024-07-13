@@ -2870,6 +2870,7 @@ details and for the code for generating and updating the <em>data</em> permissio
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.models.collection.graph
   (:require
    [clojure.data :as data]
+   [com.climate.claypoole :as cp]
    [metabase.api.common :as api]
    [metabase.audit :as audit]
    [metabase.db.query :as mdb.query]
@@ -2932,16 +2933,22 @@ details and for the code for generating and updating the <em>data</em> permissio
                                                 [:= :personal_owner_id nil]]
                                                (for [collection-id personal-collection-ids]
                                                  [:not [:like :location (h2x/literal (format &quot;/%d/%%&quot; collection-id))]]))}]
-    (set (map :id (mdb.query/query honeysql-form)))))</pre></td></tr><tr><td class="docs"><p>Return the permission graph for the collections with id in <code>collection-ids</code> and the root collection.</p>
+    (set (map :id (mdb.query/query honeysql-form)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- calculate-perm-groups [collection-namespace group-id-&gt;perms collection-ids]
+  (into {}
+        #_:clj-kondo/ignore
+        (cp/with-shutdown! [pool (+ 2 (cp/ncpus))]
+          (doall (cp/upmap pool
+                           (fn [group-id]
+                             [group-id
+                              (group-permissions-graph collection-namespace (group-id-&gt;perms group-id) collection-ids)])
+                           (t2/select-pks-set PermissionsGroup))))))</pre></td></tr><tr><td class="docs"><p>Return the permission graph for the collections with id in <code>collection-ids</code> and the root collection.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- collection-permission-graph
   ([collection-ids] (collection-permission-graph collection-ids nil))
   ([collection-ids collection-namespace]
    (let [group-id-&gt;perms (group-id-&gt;permissions-set)]
      {:revision (c-perm-revision/latest-id)
-      :groups   (into {} (for [group-id (t2/select-pks-set PermissionsGroup)]
-                           {group-id (group-permissions-graph collection-namespace
-                                                              (group-id-&gt;perms group-id)
-                                                              collection-ids)}))})))</pre></td></tr><tr><td class="docs"><p>In the graph, override the instance analytics collection within the admin group to read.</p>
+      :groups   (calculate-perm-groups collection-namespace group-id-&gt;perms collection-ids)})))</pre></td></tr><tr><td class="docs"><p>In the graph, override the instance analytics collection within the admin group to read.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- modify-instance-analytics-for-admins
   [graph]
   (let [admin-group-id      (:id (perms-group/admin))
