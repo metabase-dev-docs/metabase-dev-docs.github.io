@@ -2880,23 +2880,40 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.query-analysis.native-query-analyzer.replacement :as nqa.replacement]
    [metabase.util :as u]
    [metabase.util.log :as log]
-   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs"><p>Normally, a native card's query is parsed on every create/update. For most tests, this is an unnecessary
-expense. Therefore, we skip parsing while testing unless this variable is turned on.</p>
-
-<p>c.f. [[native-analysis-active?]]</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *parse-queries-in-test?*
-  false)</pre></td></tr><tr><td class="docs"><p>Should the query run? Either we're not testing or it's been explicitly turned on.</p>
-
-<p>c.f. [[<em>parse-queries-in-test?</em>]], [[public-settings/sql-parsing-enabled]]</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- native-analysis-active?
-  []
-  (and (public-settings/sql-parsing-enabled)
-       (or (not config/is-test?)
-           *parse-queries-in-test?*)))</pre></td></tr><tr><td class="docs"><p>Is analysis of the given query type enabled?</p>
-</td><td class="codes"><pre class="brush: clojure">(defn enabled?
+   [metabase.util.queue :as queue]
+   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private realtime-queue-capacity 1000)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defonce ^:private queue (queue/bounded-transfer-queue realtime-queue-capacity {:dedupe? true}))</pre></td></tr><tr><td class="docs"><p>Managing a background thread in the REPL is likely to confound and infuriate, especially when we're using it to run
+tests. For this reason we run analysis on the main thread by default.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *analyze-execution-in-dev?*
+  ::immediate)</pre></td></tr><tr><td class="docs"><p>A card's query is normally analyzed on every create/update. For most tests, this is an unnecessary expense, hence
+we disable analysis by default.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *analyze-execution-in-test?*
+  ::disabled)</pre></td></tr><tr><td class="docs"><p>Override the default execution mode, except in prod.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro with-execution*
+  [execution &amp; body]
+  `(binding [*analyze-execution-in-dev?* ~execution
+             *analyze-execution-in-test?* ~execution]
+     ~@body))</pre></td></tr><tr><td class="docs"><p>Override the default execution mode to always use the queue. Does nothing in prod - only use this in tests.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro with-queued-analysis
+  [&amp; body]
+  `(with-execution* ::queued ~@body))</pre></td></tr><tr><td class="docs"><p>Override the default execution mode to always use the current thread. Does nothing in prod - only use this in tests.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro with-immediate-analysis
+  [&amp; body]
+  `(with-execution* ::immediate ~@body))</pre></td></tr><tr><td class="docs"><p>Override the default execution mode to always use the current thread. Does nothing in prod - only use this in tests.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro without-analysis
+  [&amp; body]
+  `(with-execution* ::disabled ~@body))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- execution []
+  (case config/run-mode
+    :prod ::queued
+    :dev  *analyze-execution-in-dev?*
+    :test *analyze-execution-in-test?*))</pre></td></tr><tr><td class="docs"><p>Is analysis of the given query type enabled?</p>
+</td><td class="codes"><pre class="brush: clojure">(defn enabled-type?
   [query-type]
   (case query-type
-    :native     (native-analysis-active?)
+    :native     (public-settings/sql-parsing-enabled)
     :query      true
     :mbql/query true
     false))</pre></td></tr><tr><td class="docs"><p>Find out ids of all fields used in a query. Conforms to the same protocol as [[query-analyzer/field-ids-for-sql]],
@@ -2906,7 +2923,7 @@ so returns <code>{:explicit #{...int ids}}</code> map.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- query-field-ids
   [query]
   (let [query-type (lib/normalized-query-type query)]
-    (when (enabled? query-type)
+    (when (enabled-type? query-type)
       (case query-type
         :native     (try
                       (nqa/field-ids-for-native query)
@@ -2915,25 +2932,20 @@ so returns <code>{:explicit #{...int ids}}</code> map.</p>
         :query      {:explicit (mbql.u/referenced-field-ids query)}
         :mbql/query {:explicit (lib.util/referenced-field-ids query)}))))</pre></td></tr><tr><td class="docs"><p>Clears QueryFields associated with this card and creates fresh, up-to-date-ones.</p>
 
-<p>If you're invoking this from a test, be sure to turn on [[<em>parse-queries-in-test?</em>]].</p>
-
 <p>Returns <code>nil</code> (and logs the error) if there was a parse error.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn update-query-analysis-for-card!
   [{card-id :id, query :dataset_query}]
-  (try
-    (let [{:keys [explicit implicit] :as res} (query-field-ids query)
-          id-&gt;row                             (fn [explicit? field-id]
-                                                {:card_id            card-id
-                                                 :field_id           field-id
-                                                 :explicit_reference explicit?})
-          query-field-rows                    (concat
-                                               (map (partial id-&gt;row true) explicit)
-                                               (map (partial id-&gt;row false) implicit))]
-      ;; when the response is `nil`, it's a disabled parser, not unknown columns
-      (when (some? res)
-        (query-field/update-query-fields-for-card! card-id query-field-rows)))
-    (catch Exception e
-      (log/error e &quot;Error updating query fields&quot;))))</pre></td></tr><tr><td class="docs">
+  (let [{:keys [explicit implicit] :as res} (query-field-ids query)
+        id-&gt;row          (fn [explicit? field-id]
+                           {:card_id            card-id
+                            :field_id           field-id
+                            :explicit_reference explicit?})
+        query-field-rows (concat
+                          (map (partial id-&gt;row true) explicit)
+                          (map (partial id-&gt;row false) implicit))]
+    ;; when the response is `nil`, it's a disabled parser, not unknown columns
+    (when (some? res)
+      (query-field/update-query-fields-for-card! card-id query-field-rows))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- replaced-inner-query-for-native-card
   [query {:keys [fields tables] :as _replacement-ids}]
   (let [keyvals-set         #(set/union (set (keys %))
@@ -2980,7 +2992,30 @@ so returns <code>{:explicit #{...int ids}}</code> map.</p>
   (case card-type
     :native (replaced-inner-query-for-native-card q replacements)
     (throw (ex-info &quot;We don't (yet) support replacing field and table refs in cards with MBQL queries&quot;
-                    {:card card :replacements replacements}))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+                    {:card card :replacements replacements}))))</pre></td></tr><tr><td class="docs"><p>Update the analysis for the given card, if it is active.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn analyze-card!
+  [card-id]
+  (let [card (t2/select-one [:model/Card :id :archived :dataset_query] card-id)]
+      (cond
+        (not card)       (log/warnf &quot;Card not found: %s&quot; card-id)
+        (:archived card) (log/warnf &quot;Skipping archived card: %s&quot; card-id)
+        :else            (log/infof &quot;Performing query analysis for card %s&quot; card-id))
+      (when (and card (not (:archived card)))
+        (update-query-analysis-for-card! card))))</pre></td></tr><tr><td class="docs"><p>Get the id of the next card id to be analyzed. May block indefinitely, relies on producer.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn next-card-id!
+  []
+  (queue/blocking-take! queue))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- queue-or-analyze! [offer-fn! card-or-id]
+  (case (execution)
+    ::immediate (analyze-card! (u/the-id card-or-id))
+    ::queued    (offer-fn! queue (u/the-id card-or-id))
+    ::disabled  nil))</pre></td></tr><tr><td class="docs"><p>Asynchronously hand-off the given card for analysis, at a high priority.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn analyze-async!
+  [card-or-id]
+  (queue-or-analyze! queue/maybe-put! card-or-id))</pre></td></tr><tr><td class="docs"><p>Synchronously hand-off the given card for analysis, at a low priority. May block indefinitely, relies on consumer.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn analyze-sync!
+  [card-or-id]
+  (queue-or-analyze! queue/blocking-put! card-or-id))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

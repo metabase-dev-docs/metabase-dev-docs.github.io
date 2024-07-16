@@ -2876,18 +2876,20 @@ net.brehaut.ClojureTools = (function (SH) {
   (:import
    (org.quartz DisallowConcurrentExecution)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- backfill-query-fields! []
-  (let [cards (t2/reducible-select :model/Card :id [:in {:from      [[:report_card :c]]
-                                                         :left-join [[:query_field :f] [:= :f.card_id :c.id]]
-                                                         :select    [:c.id]
-                                                         :where     [:and
-                                                                     [:not :c.archived]
-                                                                     [:= :f.id nil]]}])]
-    (run! query-analysis/update-query-analysis-for-card! cards)))</pre></td></tr><tr><td class="docs"><p>Backfill QueryField for cards created earlier. Runs once per instance.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- backfill-missing-query-fields!
+  ([]
+   (backfill-missing-query-fields! query-analysis/analyze-sync!))
+  ([analyze-fn]
+   (let [cards (t2/reducible-select [:model/Card :id]
+                                    {:left-join [[:query_field :f] [:= :f.card_id :report_card.id]]
+                                     :where     [:and
+                                                 [:not :report_card.archived]
+                                                 [:= :f.id nil]]})]
+     (run! analyze-fn cards))))</pre></td></tr><tr><td class="docs"><p>Backfill QueryField for cards created earlier. Runs once per instance.</p>
 </td><td class="codes"><pre class="brush: clojure">(jobs/defjob ^{DisallowConcurrentExecution true
                :doc                        }
              BackfillQueryField [_ctx]
-  (backfill-query-fields!))</pre></td></tr><tr><td class="docs">
+  (backfill-missing-query-fields!))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod task/init! ::BackfillQueryField [_]
   (let [job     (jobs/build
                   (jobs/of-type BackfillQueryField)

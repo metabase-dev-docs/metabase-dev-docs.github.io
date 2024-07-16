@@ -2865,434 +2865,50 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.lib.expression" name="metabase.lib.expression"><h1 class="project-name">metabase.lib.expression</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.lib.expression
-  (:refer-clojure :exclude [+ - * / case coalesce abs time concat replace])
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.util.grouper" name="metabase.util.grouper"><h1 class="project-name">metabase.util.grouper</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Our wrapper for grouper -- the batch processing utility.</p>
+
+<p>Note:
+- These utilities should only be used for scenarios where data consistency is not a requirement,
+  Execution is best effort and may not occur as the batched items are not persisted.
+- Suitable for use cases that can tolerate lag time in processing. For example, updating
+  last<em>used</em>at of cards after a query execution. Things like recording view_log should not use
+  grouper since it's important to have the data immediately available.</p>
+
+<p>Batch processing can be disabled by setting the environment variable <code>MB_DISABLE_GROUPER_BATCH_PROCESSING=true</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.util.grouper
   (:require
-   [clojure.string :as str]
-   [malli.core :as mc]
-   [malli.error :as me]
-   [medley.core :as m]
-   [metabase.lib.common :as lib.common]
-   [metabase.lib.hierarchy :as lib.hierarchy]
-   [metabase.lib.metadata.calculation :as lib.metadata.calculation]
-   [metabase.lib.options :as lib.options]
-   [metabase.lib.ref :as lib.ref]
-   [metabase.lib.schema :as lib.schema]
-   [metabase.lib.schema.aggregation :as lib.schema.aggregation]
-   [metabase.lib.schema.common :as lib.schema.common]
-   [metabase.lib.schema.expression :as lib.schema.expression]
-   [metabase.lib.schema.metadata :as lib.schema.metadata]
-   [metabase.lib.schema.temporal-bucketing :as lib.schema.temporal-bucketing]
-   [metabase.lib.temporal-bucket :as lib.temporal-bucket]
-   [metabase.lib.util :as lib.util]
-   [metabase.lib.util.match :as lib.util.match]
-   [metabase.shared.util.i18n :as i18n]
-   [metabase.types :as types]
-   [metabase.util :as u]
-   [metabase.util.malli :as mu]
-   [metabase.util.malli.registry :as mr]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn column-metadata-&gt;expression-ref :- :mbql.clause/expression
-  &quot;Given `:metadata/column` column metadata for an expression, construct an `:expression` reference.&quot;
-  [metadata :- ::lib.schema.metadata/column]
-  (let [options {:lib/uuid       (str (random-uuid))
-                 :base-type      (:base-type metadata)
-                 :effective-type ((some-fn :effective-type :base-type) metadata)}]
-    [:expression options ((some-fn :lib/expression-name :name) metadata)]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn resolve-expression :- ::lib.schema.expression/expression
-  &quot;Find the expression with `expression-name` in a given stage of a `query`, or throw an Exception if it doesn't
-  exist.&quot;
-  ([query expression-name]
-   (resolve-expression query -1 expression-name))
-  ([query           :- ::lib.schema/query
-    stage-number    :- :int
-    expression-name :- ::lib.schema.common/non-blank-string]
-   (let [stage (lib.util/query-stage query stage-number)]
-     (or (m/find-first (comp #{expression-name} lib.util/expression-name)
-                       (:expressions stage))
-         (throw (ex-info (i18n/tru &quot;No expression named {0}&quot; (pr-str expression-name))
-                         {:expression-name expression-name
-                          :query           query
-                          :stage-number    stage-number}))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/type-of-method :expression
-  [query stage-number [_expression _opts expression-name, :as _expression-ref]]
-  (let [expression (resolve-expression query stage-number expression-name)]
-    (lib.metadata.calculation/type-of query stage-number expression)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/metadata-method :expression
-  [query stage-number [_expression opts expression-name, :as expression-ref-clause]]
-  {:lib/type            :metadata/column
-   :lib/source-uuid     (:lib/uuid opts)
-   :name                expression-name
-   :lib/expression-name expression-name
-   :display-name        (lib.metadata.calculation/display-name query stage-number expression-ref-clause)
-   :base-type           (lib.metadata.calculation/type-of query stage-number expression-ref-clause)
-   :lib/source          :source/expressions})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/display-name-method :dispatch-type/integer
-  [_query _stage-number n _style]
-  (str n))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/display-name-method :dispatch-type/number
-  [_query _stage-number n _style]
-  (str n))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/display-name-method :dispatch-type/string
-  [_query _stage-number s _style]
-  (str \&quot; s \&quot;))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/display-name-method :dispatch-type/boolean
-  [_query _stage-number s _style]
-  (str s))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/display-name-method :expression
-  [_query _stage-number [_expression _opts expression-name] _style]
-  expression-name)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/column-name-method :expression
-  [_query _stage-number [_expression _opts expression-name]]
-  expression-name)</pre></td></tr><tr><td class="docs"><p>Whether the display name we are generated is recursively nested inside another display name. For infix math operators
-we'll wrap the results in parentheses to make the display name more obvious.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^:dynamic *nested*
-  false)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- wrap-str-in-parens-if-nested [s]
-  (if *nested*
-    (str \( s \))
-    s))</pre></td></tr><tr><td class="docs"><p>Generate a infix-style display name for an arithmetic expression like <code>:+</code>, e.g. <code>x + y</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- infix-display-name
-  [query stage-number operator args]
-  (wrap-str-in-parens-if-nested
-   (binding [*nested* true]
-     (str/join (str \space (name operator) \space)
-               (map (partial lib.metadata.calculation/display-name query stage-number)
-                    args)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private infix-operator-display-name
-  {:+ &quot;+&quot;
-   :- &quot;-&quot;
-   :* &quot;×&quot;
-   :/ &quot;÷&quot;})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(doseq [tag [:+ :- :/ :*]]
-  (lib.hierarchy/derive tag ::infix-operator))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/display-name-method ::infix-operator
-  [query stage-number [tag _opts &amp; args] _style]
-  (infix-display-name query stage-number (get infix-operator-display-name tag) args))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/column-name-method ::infix-operator
-  [_query _stage-number _expr]
-  &quot;expression&quot;)</pre></td></tr><tr><td class="docs"><p><code>:+</code>, <code>:-</code>, and <code>:*</code> all have the same logic; also used for [[metabase.lib.schema.expression/type-of]].</p>
-
-<p><code>:lib.type-of/type-is-type-of-arithmetic-args</code> is defined in [[metabase.lib.schema.expression.arithmetic]]</p>
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/type-of-method :lib.type-of/type-is-type-of-arithmetic-args
-  [query stage-number [_tag _opts &amp; args]]
-  ;; Okay to use reduce without an init value here since we know we have &gt;= 2 args
-  #_{:clj-kondo/ignore [:reduce-without-init]}
-  (reduce
-   types/most-specific-common-ancestor
-   (for [arg args]
-     (lib.metadata.calculation/type-of query stage-number arg))))</pre></td></tr><tr><td class="docs"><p>TODO -- this stuff should probably be moved into [[metabase.lib.temporal-bucket]]</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- interval-unit-str [amount unit]
-  ;; this uses [[clojure.string/lower-case]] so its in the user's locale in the browser rather than always using
-  ;; English lower-casing rules.
-  #_{:clj-kondo/ignore [:discouraged-var]}
-  (str/lower-case (lib.temporal-bucket/describe-temporal-unit amount unit)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private interval-display-name  :- ::lib.schema.common/non-blank-string
-  &quot;e.g. something like \&quot;- 2 days\
-  [amount :- :int
-   unit   :- ::lib.schema.temporal-bucketing/unit.date-time.interval]
-  ;; TODO -- sorta duplicated with [[metabase.shared.parameters.parameters/translated-interval]], but not exactly
-  (let [unit-str (interval-unit-str amount unit)]
-    (wrap-str-in-parens-if-nested
-     (if (pos? amount)
-       (lib.util/format &quot;+ %d %s&quot; amount                    unit-str)
-       (lib.util/format &quot;- %d %s&quot; (clojure.core/abs amount) unit-str)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private interval-column-name  :- ::lib.schema.common/non-blank-string
-  &quot;e.g. something like `minus_2_days`&quot;
-  [amount :- :int
-   unit   :- ::lib.schema.temporal-bucketing/unit.date-time.interval]
-  ;; TODO -- sorta duplicated with [[metabase.shared.parameters.parameters/translated-interval]], but not exactly
-  (let [unit-str (interval-unit-str amount unit)]
-    (if (pos? amount)
-      (lib.util/format &quot;plus_%s_%s&quot;  amount                    unit-str)
-      (lib.util/format &quot;minus_%d_%s&quot; (clojure.core/abs amount) unit-str))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/display-name-method :datetime-add
-  [query stage-number [_datetime-add _opts x amount unit] style]
-  (str (lib.metadata.calculation/display-name query stage-number x style)
-       \space
-       (interval-display-name amount unit)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/column-name-method :datetime-add
-  [query stage-number [_datetime-add _opts x amount unit]]
-  (str (lib.metadata.calculation/column-name query stage-number x)
-       \_
-       (interval-column-name amount unit)))</pre></td></tr><tr><td class="docs"><p>for now we'll just pretend <code>:coalesce</code> isn't a present and just use the display name for the expr it wraps.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/display-name-method :coalesce
-  [query stage-number [_coalesce _opts expr _null-expr] style]
-  (lib.metadata.calculation/display-name query stage-number expr style))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/column-name-method :coalesce
-  [query stage-number [_coalesce _opts expr _null-expr]]
-  (lib.metadata.calculation/column-name query stage-number expr))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">#_(defn- conflicting-name? [query stage-number expression-name]
-    (let [stage     (lib.util/query-stage query stage-number)
-          cols      (lib.metadata.calculation/visible-columns query stage-number stage)
-          expr-name (u/lower-case-en expression-name)]
-      (some #(-&gt; % :name u/lower-case-en (= expr-name)) cols)))
-
-(mr/def ::add-expression-options
-  [:map
-   ;; default: true
-   [:add-to-fields? {:optional true} [:maybe :boolean]]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- add-expression-to-stage
-  [stage
-   expression
-   {:keys [add-to-fields?], :or {add-to-fields? true}, :as _options}]
-  (cond-&gt; (update stage :expressions u/conjv expression)
-    ;; if there are explicit fields selected, add the expression to them
-    (and (vector? (:fields stage))
-         add-to-fields?)
-    (update :fields conj (lib.options/ensure-uuid [:expression {} (lib.util/expression-name expression)]))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn expression :- ::lib.schema/query
-  &quot;Adds an expression to query.
-  Options:
-  * `:add-to-fields?` (default: `true`) -- whether to add an `:expression` ref to `:fields` if one is present in the
-    query.&quot;
-  ([query expression-name expressionable]
-   (expression query -1 expression-name expressionable))
-  ([query stage-number expression-name expressionable]
-   (expression query stage-number expression-name expressionable nil))
-  ([query           :- ::lib.schema/query
-    stage-number    :- [:maybe :int]
-    expression-name :- ::lib.schema.common/non-blank-string
-    expressionable
-    options         :- [:maybe ::add-expression-options]]
-   (let [stage-number   (or stage-number -1)
-         expressionable (lib.common/-&gt;op-arg expressionable)]
-     ;; TODO: This logic was removed as part of fixing #39059. We might want to bring it back for collisions with other
-     ;; expressions in the same stage; probably not with tables or earlier stages. De-duplicating names is supported by
-     ;; the QP code, and it should be powered by MLv2 in due course.
-     #_(when (conflicting-name? query stage-number expression-name)
-         (throw (ex-info &quot;Expression name conflicts with a column in the same query stage&quot;
-                         {:expression-name expression-name})))
-     (lib.util/update-query-stage
-       query stage-number
-       add-expression-to-stage
-       (lib.util/top-level-expression-clause expressionable expression-name)
-       options))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(lib.common/defop + [x y &amp; more])
-(lib.common/defop - [x y &amp; more])
-(lib.common/defop * [x y &amp; more])</pre></td></tr><tr><td class="docs"><p>Kondo gets confused</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:unresolved-namespace :syntax]}
-(lib.common/defop / [x y &amp; more])
-(lib.common/defop case [x y &amp; more])
-(lib.common/defop coalesce [x y &amp; more])
-(lib.common/defop abs [x])
-(lib.common/defop log [x])
-(lib.common/defop exp [x])
-(lib.common/defop sqrt [x])
-(lib.common/defop ceil [x])
-(lib.common/defop floor [x])
-(lib.common/defop round [x])
-(lib.common/defop power [n expo])
-(lib.common/defop interval [n unit])
-(lib.common/defop relative-datetime [t unit])
-(lib.common/defop time [t unit])
-(lib.common/defop absolute-datetime [t unit])
-(lib.common/defop now [])
-(lib.common/defop convert-timezone [t source dest])
-(lib.common/defop get-week [t mode])
-(lib.common/defop get-year [t])
-(lib.common/defop get-month [t])
-(lib.common/defop get-day [t])
-(lib.common/defop get-hour [t])
-(lib.common/defop get-minute [t])
-(lib.common/defop get-second [t])
-(lib.common/defop get-quarter [t])
-(lib.common/defop get-day-of-week [t])
-(lib.common/defop datetime-add [t i unit])
-(lib.common/defop datetime-subtract [t i unit])
-(lib.common/defop concat [s1 s2 &amp; more])
-(lib.common/defop substring [s start end])
-(lib.common/defop replace [s search replacement])
-(lib.common/defop regexextract [s regex])
-(lib.common/defop regex-match-first [s regex])
-(lib.common/defop length [s])
-(lib.common/defop trim [s])
-(lib.common/defop ltrim [s])
-(lib.common/defop rtrim [s])
-(lib.common/defop upper [s])
-(lib.common/defop lower [s])
-(lib.common/defop host [s])
-(lib.common/defop domain [s])
-(lib.common/defop subdomain [s])
-(lib.common/defop month-name [n])
-(lib.common/defop quarter-name [n])
-(lib.common/defop day-name [n])
-(lib.common/defop offset [x n])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private expression-metadata :- ::lib.schema.metadata/column
-  [query                 :- ::lib.schema/query
-   stage-number          :- :int
-   expression-definition :- ::lib.schema.expression/expression]
-  (let [expression-name (lib.util/expression-name expression-definition)]
-    (-&gt; (lib.metadata.calculation/metadata query stage-number expression-definition)
-        (assoc :lib/source   :source/expressions
-               :name         expression-name
-               :display-name expression-name))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn expressions-metadata :- [:maybe [:sequential ::lib.schema.metadata/column]]
-  &quot;Get metadata about the expressions in a given stage of a `query`.&quot;
-  ([query]
-   (expressions-metadata query -1))
-  ([query        :- ::lib.schema/query
-    stage-number :- :int]
-   (some-&gt;&gt; (not-empty (:expressions (lib.util/query-stage query stage-number)))
-            (mapv (partial expression-metadata query stage-number)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn expressions :- [:maybe ::lib.schema.expression/expressions]
-  &quot;Get the expressions map from a given stage of a `query`.&quot;
-  ([query]
-   (expressions query -1))
-  ([query        :- ::lib.schema/query
-    stage-number :- :int]
-   (not-empty (:expressions (lib.util/query-stage query stage-number)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.ref/ref-method :expression
-  [expression-clause]
-  expression-clause)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn expressionable-columns :- [:sequential ::lib.schema.metadata/column]
-  &quot;Get column metadata for all the columns that can be used expressions in
-  the stage number `stage-number` of the query `query` and in expression index `expression-position`
-  If `stage-number` is omitted, the last stage is used.
-  Pass nil to `expression-position` for new expressions.
-  The rules for determining which columns can be broken out by are as follows:
-  1. custom `:expressions` in this stage of the query, that come before the `expression-position`
-  2. Fields 'exported' by the previous stage of the query, if there is one;
-     otherwise Fields from the current `:source-table`
-  3. Fields exported by explicit joins
-  4. Fields in Tables that are implicitly joinable.&quot;
-  ([query :- ::lib.schema/query
-    expression-position :- [:maybe ::lib.schema.common/int-greater-than-or-equal-to-zero]]
-   (expressionable-columns query -1 expression-position))
-  ([query        :- ::lib.schema/query
-    stage-number :- :int
-    expression-position :- [:maybe ::lib.schema.common/int-greater-than-or-equal-to-zero]]
-   (let [indexed-expressions (into {} (map-indexed (fn [idx expr]
-                                                     [(lib.util/expression-name expr) idx])
-                                                   (expressions query stage-number)))
-         unavailable-expressions (fn [column]
-                                   (or (not expression-position)
-                                       (not= (:lib/source column) :source/expressions)
-                                       (&lt; (get indexed-expressions (:name column)) expression-position)))
-         stage (lib.util/query-stage query stage-number)
-         columns (lib.metadata.calculation/visible-columns query stage-number stage)]
-     (-&gt;&gt; columns
-          (filterv unavailable-expressions)
-          not-empty))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn expression-ref :- :mbql.clause/expression
-  &quot;Find the expression with `expression-name` using [[resolve-expression]], then create a ref for it. Intended for use
-  when creating queries using threading macros e.g.
-    (-&gt; (lib/query ...)
-        (lib/expression \&quot;My Expression\&quot; ...)
-        (as-&gt; &lt;&gt; (lib/aggregate &lt;&gt; (lib/avg (lib/expression-ref &lt;&gt; \&quot;My Expression\&quot;)))))&quot;
-  ([query expression-name]
-   (expression-ref query -1 expression-name))
-  ([query           :- ::lib.schema/query
-    stage-number    :- :int
-    expression-name :- ::lib.schema.common/non-blank-string]
-   (-&gt;&gt; expression-name
-        (resolve-expression query stage-number)
-        (expression-metadata query stage-number)
-        lib.ref/ref)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private expression-validator
-  (mc/validator ::lib.schema.expression/expression))</pre></td></tr><tr><td class="docs"><p>Returns true if <code>expression-clause</code> is indeed an expression clause, false otherwise.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn expression-clause?
-  [expression-clause]
-  (expression-validator expression-clause))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn with-expression-name :- ::lib.schema.expression/expression
-  &quot;Return a new expression clause like `an-expression-clause` but with name `new-name`.
-  For expressions from the :expressions clause of a pMBQL query this sets the :lib/expression-name option,
-  for other expressions (for example named aggregation expressions) the :display-name option is set.
-  Note that always setting :lib/expression-name would lead to confusion, because that option is used
-  to decide what kind of reference is to be created. For example, expression are referenced by name,
-  aggregations are referenced by position.&quot;
-  [an-expression-clause :- ::lib.schema.expression/expression
-   new-name :- :string]
-  (lib.options/update-options
-   (if (lib.util/clause? an-expression-clause)
-     an-expression-clause
-     [:value {:effective-type (lib.schema.expression/type-of an-expression-clause)}
-      an-expression-clause])
-   (fn [opts]
-     (let [opts (assoc opts :lib/uuid (str (random-uuid)))]
-       (if (:lib/expression-name opts)
-         (-&gt; opts
-             (dissoc :display-name :name)
-             (assoc :lib/expression-name new-name))
-         (assoc opts :name new-name :display-name new-name))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private expression-explainer
-  (mr/explainer ::lib.schema.expression/expression))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private aggregation-validator
-  (mr/validator ::lib.schema.aggregation/aggregation))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private aggregation-explainer
-  (mr/explainer ::lib.schema.aggregation/aggregation))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private filter-validator
-  (mr/validator ::lib.schema/filterable))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private filter-explainer
-  (mr/explainer ::lib.schema/filterable))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- expression-&gt;name
-  [expr]
-  (-&gt; expr lib.options/options :lib/expression-name))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- referred-expressions
-  [expr]
-  (into #{}
-        (map #(get % 2))
-        (lib.util.match/match expr :expression)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- cyclic-definition
-  ([node-&gt;children]
-   (some #(cyclic-definition node-&gt;children %) (keys node-&gt;children)))
-  ([node-&gt;children start]
-   (cyclic-definition node-&gt;children start []))
-  ([node-&gt;children node path]
-   (if (some #{node} path)
-     (conj path node)
-     (some #(cyclic-definition node-&gt;children % (conj path node))
-           (node-&gt;children node)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn diagnose-expression :- [:maybe [:map [:message :string]]]
-  &quot;Checks `expr` for type errors and, if `expression-mode` is :expression and
-  `expression-position` is provided, for cyclic references with other expressions.
-  - `expr` is a pMBQL expression usually created from a legacy MBQL expression created
-  using the custom column editor in the FE. It is expected to have been normalized and
-  converted using [[metabase.lib.convert/-&gt;pMBQL]].
-  - `expression-mode` specifies what type of thing `expr` is: an :expression (custom column),
-  an :aggregation expression, or a :filter condition.
-  - `expression-position` is only defined when editing an existing custom column, and in that case
-  it is the index of that expression in (expressions query stage-number).
-  The function returns nil, if the expression is valid, otherwise it returns a map with
-  an i18n message describing the problem under the key :message.&quot;
-  [query               :- ::lib.schema/query
-   stage-number        :- :int
-   expression-mode     :- [:enum :expression :aggregation :filter]
-   expr                :- :any
-   expression-position :- [:maybe :int]]
-  (let [[validator explainer] (clojure.core/case expression-mode
-                                :expression [expression-validator expression-explainer]
-                                :aggregation [aggregation-validator aggregation-explainer]
-                                :filter [filter-validator filter-explainer])]
-    (or (when-not (validator expr)
-          (let [error (explainer expr)
-                humanized (str/join &quot;, &quot; (me/humanize error))]
-            {:message (i18n/tru &quot;Type error: {0}&quot; humanized)}))
-        (when-let [path (and (= expression-mode :expression)
-                             expression-position
-                             (let [exprs (expressions query stage-number)
-                                   edited-expr (nth exprs expression-position)
-                                   edited-name (expression-&gt;name edited-expr)
-                                   deps (-&gt; (m/index-by expression-&gt;name exprs)
-                                            (assoc edited-name expr)
-                                            (update-vals referred-expressions))]
-                               (cyclic-definition deps)))]
-          {:message  (i18n/tru &quot;Cycle detected: {0}&quot; (str/join &quot; → &quot; path))
-           :friendly true})
-        (when (and (= expression-mode :expression)
-                   (lib.util.match/match-one expr :offset))
-          {:message  (i18n/tru &quot;OFFSET is not supported in custom expressions&quot;)
-           :friendly true})
-        (when (and (= expression-mode :expression)
-                   (lib.util.match/match-one expr :offset)
-                   (empty? (:order-by (lib.util/query-stage query stage-number))))
-          {:message  (i18n/tru &quot;OFFSET in a custom expression requires a sort order&quot;)
-           :friendly true})
-        (when (and (= expression-mode :filter)
-                   (lib.util.match/match-one expr :offset))
-          {:message  (i18n/tru &quot;OFFSET is not supported in custom filters&quot;)
-           :friendly true}))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+   #_{:clj-kondo/ignore [:discouraged-namespace]}
+   [grouper.core :as grouper]
+   [metabase.models.setting :refer [defsetting]]
+   [metabase.util.i18n :refer [deferred-tru]]
+   [potemkin :as p])
+  (:import
+   (grouper.core Grouper)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(comment
+ p/keep-me
+ Grouper/keep-me)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defsetting synchronous-batch-updates
+  (deferred-tru &quot;Process batches updates synchronously. If true, all `submit!` calls will be processed immediately. Default is false.&quot;)
+  ;; Should be used for testing purposes only, currently set by some e2e tests
+  :type       :boolean
+  :default    false
+  :export?    true
+  ;; :admin instead of :internal because we want to change this during e2e testing
+  :visibility :admin)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(p/import-vars
+ [grouper
+  start!
+  shutdown!])</pre></td></tr><tr><td class="docs"><p>A wrapper of [[grouper.core/submit!]] that returns nil instead of a promise.
+We use grouper for fire-and-forget scenarios, so we don't care about the result.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn submit!
+  [&amp; args]
+  (let [p (apply grouper/submit! args)]
+    (when (synchronous-batch-updates)
+      ;; wake up the group immediately and wait for it to finish
+      (.wakeUp ^Grouper (first args))
+      (deref p))
+    nil))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
