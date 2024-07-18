@@ -2865,96 +2865,85 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.util.queue" name="metabase.util.queue"><h1 class="project-name">metabase.util.queue</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.util.queue
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.task.sweep-query-analysis" name="metabase.task.sweep-query-analysis"><h1 class="project-name">metabase.task.sweep-query-analysis</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.task.sweep-query-analysis
+  (:require
+   [clojurewerkz.quartzite.jobs :as jobs]
+   [clojurewerkz.quartzite.schedule.cron :as cron]
+   [clojurewerkz.quartzite.triggers :as triggers]
+   [metabase.query-analysis :as query-analysis]
+   [metabase.task :as task]
+   [toucan2.core :as t2])
   (:import
-   (java.util HashSet Queue Set)
-   (java.util.concurrent ArrayBlockingQueue BlockingQueue SynchronousQueue TimeUnit)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defprotocol BoundedTransferQueue
-  (maybe-put! [queue msg]
-    &quot;Put a message on the queue if there is space for it, otherwise drop it.
-     Returns whether the item was enqueued.&quot;)
-  (blocking-put! [queue timeout msg]
-    &quot;Put a message on the queue. If necessary, block until there is space for it.&quot;)
-  (blocking-take! [queue timeout]
-    &quot;Take a message off the queue, blocking if necessary.&quot;)
-  (clear! [queue]
-    &quot;Discard all messages on the given queue.&quot;))</pre></td></tr><tr><td class="docs"><p>Similar to java.util.concurrent.LinkedTransferQueue, but bounded.</p>
-</td><td class="codes"><pre class="brush: clojure">(deftype ^:private ArrayTransferQueue
-  [^ArrayBlockingQueue async-queue
-   ^SynchronousQueue sync-queue
-   ^long block-ms
-   ^long sleep-ms]
-  BoundedTransferQueue
-  (maybe-put! [_ msg]
-    (.offer async-queue msg))
-  (blocking-put! [_ timeout msg]
-    (.offer sync-queue msg timeout TimeUnit/MILLISECONDS))
-  (blocking-take! [_ timeout]
-    (loop [time-remaining timeout]
-      (when (pos? time-remaining)
-        ;; Async messages are given higher priority, as sync messages will never be dropped.
-        (or (.poll async-queue)
-            (.poll sync-queue block-ms TimeUnit/MILLISECONDS)
-            (do (Thread/sleep ^long sleep-ms)
-                ;; This is an underestimate, as the thread may have taken a while to wake up. That's OK.
-                (recur (- time-remaining block-ms sleep-ms)))))))
-  (clear! [_]
-    (.clear sync-queue)
-    (.clear async-queue)))</pre></td></tr><tr><td class="docs"><p>Similar to ArrayTransferQueue, but drops events that are already in the queue.</p>
-</td><td class="codes"><pre class="brush: clojure">(deftype ^:private DeduplicatingArrayTransferQueue
-  [^Queue async-queue
-   ^BlockingQueue sync-queue
-   ^Set queued-set
-   ^long block-ms
-   ^long sleep-ms]
-  BoundedTransferQueue
-  (maybe-put!
-    [_ msg]
-    (let [payload (:payload msg msg)]
-      ;; we hold the lock while we push to avoid races
-      (locking queued-set
-        ;; returns null if we have already enqueued the message
-        (when (.add queued-set payload)
-          (let [accepted? (.offer ^Queue async-queue msg)]
-            (when-not accepted?
-              (.remove queued-set payload))
-            accepted?)))))
-  (blocking-put! [_ timeout msg]
-   ;; we cannot hold the lock while we push, so there is some chance of a duplicate
-    (when (locking queued-set (.add queued-set (:payload msg msg)))
-      (.offer sync-queue msg timeout TimeUnit/MILLISECONDS)))
-  (blocking-take! [_ timeout]
-    (loop [time-remaining timeout]
-      ;; we lock here to avoid leaving a blocking entry behind that can never be cleared
-      (or (locking queued-set
-            (when-let [msg (or (.poll ^Queue async-queue)
-                               (.poll sync-queue block-ms TimeUnit/MILLISECONDS))]
-              (.remove queued-set (:payload msg msg))
-              msg))
-          (do (Thread/sleep ^long sleep-ms)
-              (recur (- time-remaining block-ms sleep-ms))))))
-  (clear! [_]
-    (locking queued-set
-      (.clear sync-queue)
-      (.clear async-queue)
-      (.clear queued-set))))</pre></td></tr><tr><td class="docs"><p>Create a bounded transfer queue, specialized based on the high-level options.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn bounded-transfer-queue
-  [capacity &amp; {:keys [block-ms sleep-ms dedupe?]
-               :or   {block-ms 100
-                      sleep-ms 100
-                      dedupe?  false}}]
-  (if dedupe?
-    (-&gt;DeduplicatingArrayTransferQueue (ArrayBlockingQueue. capacity)
-                                       (SynchronousQueue.)
-                                       (HashSet.)
-                                       block-ms
-                                       sleep-ms)
-    (-&gt;ArrayTransferQueue (ArrayBlockingQueue. capacity)
-                          (SynchronousQueue.)
-                          block-ms
-                          sleep-ms)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+   (org.quartz DisallowConcurrentExecution)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Has the sweeper been run before, in this process?</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private has-run?
+  (atom false))</pre></td></tr><tr><td class="docs"><p>This number has not been chosen scientifically.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private max-delete-batch-size 1000)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- analyze-cards-without-query-fields!
+  ([]
+   (analyze-cards-without-query-fields! query-analysis/analyze-sync!))
+  ([analyze-fn]
+   (let [cards (t2/reducible-select [:model/Card :id]
+                                    {:left-join [[:query_field :qf] [:= :qf.card_id :report_card.id]]
+                                     :where     [:and
+                                                 [:not :report_card.archived]
+                                                 [:= :qf.id nil]]})]
+     (run! analyze-fn cards))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- analyze-stale-cards!
+  ([]
+   (analyze-cards-without-query-fields! query-analysis/analyze-sync!))
+  ([analyze-fn]
+   (let [cards (t2/reducible-select [:model/Card :id])]
+     (run! analyze-fn cards))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- delete-orphan-analysis! []
+  (transduce
+   (comp (map :id)
+         (partition-all max-delete-batch-size))
+   (fn
+     ([final-count] final-count)
+     ([running-count ids]
+      (t2/delete! :model/QueryField :id [:in ids])
+      (+ running-count (count ids))))
+   0
+   (t2/reducible-select [:model/QueryField :id]
+                        {:join  [[:report_card :c] [:= :c.id :query_field.card_id]]
+                         :where :c.archived})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- sweep-query-analysis-loop!
+  ([]
+   (sweep-query-analysis-loop! (not @has-run?))
+   (reset! has-run? true))
+  ([first-time?]
+   (sweep-query-analysis-loop! first-time? query-analysis/analyze-sync!))
+  ([first-time? analyze-fn]
+   ;; prioritize cards that are missing analysis
+   (analyze-cards-without-query-fields! analyze-fn)
+   ;; we run through all the existing analysis on our first run, as it may be stale due to an old macaw version, etc.
+   (when first-time?
+     ;; this will repeat the cards we've just back-filled, but in the steady state there should be none of those.
+     ;; in the future, we will track versions, hashes, and timestamps to reduce the cost of this operation.
+     (analyze-stale-cards! analyze-fn))
+   ;; empty out useless records
+   (delete-orphan-analysis!)))</pre></td></tr><tr><td class="docs"><p>Backfill QueryField for cards created earlier. Runs once per instance.</p>
+</td><td class="codes"><pre class="brush: clojure">(jobs/defjob ^{DisallowConcurrentExecution true
+               :doc                        }
+             SweepQueryAnalysis [_ctx]
+  (sweep-query-analysis-loop!))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod task/init! ::SweepQueryAnalysis [_]
+  (let [job     (jobs/build
+                  (jobs/of-type SweepQueryAnalysis)
+                  (jobs/with-identity (jobs/key &quot;metabase.task.backfill-query-fields.job&quot;))
+                  (jobs/store-durably))
+        trigger (triggers/build
+                  (triggers/with-identity (triggers/key &quot;metabase.task.backfill-query-fields.trigger&quot;))
+                  (triggers/start-now)
+                  (triggers/with-schedule
+                   (cron/schedule
+                    (cron/cron-schedule
+                     ;; run every 4 hours at a random minute:
+                     (format &quot;0 %d 0/4 1/1 * ? *&quot; (rand-int 60)))
+                    (cron/with-misfire-handling-instruction-do-nothing))))]
+    (task/schedule-task! job trigger)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
