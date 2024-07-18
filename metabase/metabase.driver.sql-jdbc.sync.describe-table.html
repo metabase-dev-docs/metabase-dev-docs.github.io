@@ -2883,6 +2883,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.lib.schema.literal :as lib.schema.literal]
    [metabase.models :refer [Field]]
    [metabase.models.table :as table]
+   [metabase.query-processor.error-type :as qp.error-type]
    [metabase.sync.util :as sync-util]
    [metabase.util :as u]
    [metabase.util.honey-sql-2 :as h2x]
@@ -3059,38 +3060,62 @@ SELECT * query.</p>
 The PKs should be ordered by column names if there are multiple PKs.
 Ref: https://docs.oracle.com/javase/8/docs/api/java/sql/DatabaseMetaData.html#getPrimaryKeys-java.lang.String-java.lang.String-java.lang.String-</p>
 
-<p>Note: If db-name, schema, and table-name are not passed, this may return <em>all</em> pks that the metadata's connection can access.</p>
+<p>Note: If db-name, schema, and table-name are not passed, this may return <em>all</em> pks that the metadata's connection
+can access.</p>
 
 <p>This does not need to be implemented for drivers that support the [[driver/describe-fields]] multimethod.</p>
+
+<p>TODO -- it seems like in practice we usually call this without passing in a DB name, so <code>db-name-or-nil</code> is almost
+always just <code>nil</code>. There's currently not a great driver-agnostic way to determine the actual physical Database name
+anyway... Database <code>:name</code> is wrong, because it's a display name rather than a physical name. We might want to
+consider reworking this method so it takes <code>database</code> and <code>table</code> as arguments, and drivers can extract the Database
+name as needed if they want to do so from <code>database</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti get-table-pks
   {:changelog-test/ignore true
    :added    &quot;0.45.0&quot;
    :arglists '([driver ^Connection conn db-name-or-nil table])}
   driver/dispatch-on-initialized-driver
-  :hierarchy #'driver/hierarchy)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod get-table-pks :default
-  [_driver ^Connection conn db-name-or-nil table]
+  :hierarchy #'driver/hierarchy)</pre></td></tr><tr><td class="docs"><p>Starting in 51+ we started giving test Databases like <code>test-data</code> a helpful <code>:name</code> like <code>test-data (h2)</code> for ease of
+use in the GUI. This helps us catch situations where we're using the human-friendly Database name rather than the
+actual physical database name for things like sync. Check and make sure we're not trying to use the user-friendly
+Database <code>:name</code> under the hood, since the actual name should still be something like <code>test-data</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- assert-database-name-does-not-include-driver
+  [driver db-name]
+  (when (and db-name
+             (str/ends-with? db-name (format &quot;(%s)&quot; (u/qualified-name driver))))
+    ;; not i18n'ed because this is an assertion meant to catch bugs in driver implementations during test runs
+    (throw (ex-info (str &quot;Error: Database display :name detected where you should be using its physical name&quot;
+                         \newline
+                         &quot;Database `:name` (e.g. `test-data (h2)`) is the human-friendly display name used in the GUI,&quot;
+                         &quot; it does not necessarily correspond to any actual names of anything in the data warehouse&quot;
+                         &quot; itself. Make sure you're using the actual physical name (e.g. `test-data`) rather than the &quot;
+                         &quot; display name.&quot;)
+                    {:driver driver, :db-name db-name, :type qp.error-type/driver}))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod get-table-pks :sql-jdbc
+  [driver ^Connection conn db-name-or-nil table]
+  (assert-database-name-does-not-include-driver driver db-name-or-nil)
   (let [^DatabaseMetaData metadata (.getMetaData conn)]
     (into [] (sql-jdbc.sync.common/reducible-results
               #(.getPrimaryKeys metadata db-name-or-nil (:schema table) (:name table))
-              (fn [^ResultSet rs] #(.getString rs &quot;COLUMN_NAME&quot;))))))</pre></td></tr><tr><td class="docs"><p>Using <code>conn</code>, find any primary keys for <code>table</code> (or more, see: [[get-table-pks]]) and finally assoc <code>:pk?</code> to true for those columns.</p>
+              (fn [^ResultSet rs] #(.getString rs &quot;COLUMN_NAME&quot;))))))</pre></td></tr><tr><td class="docs"><p>Using <code>conn</code>, find any primary keys for <code>table</code> (or more, see: [[get-table-pks]]) and finally assoc <code>:pk?</code> to true
+for those columns.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn add-table-pks
-  [driver ^Connection conn db-name-or-nil table]
-  (let [pks (set (get-table-pks driver conn db-name-or-nil table))]
-    (update table :fields (fn [fields]
-                            (set (for [field fields]
-                                   (if-not (contains? pks (:name field))
-                                     field
-                                     (assoc field :pk? true))))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- describe-table*
   ([driver ^Connection conn table]
-   (describe-table* driver conn nil table))
+   (add-table-pks driver conn nil table))
   ([driver ^Connection conn db-name-or-nil table]
-   {:pre [(instance? Connection conn)]}
-   (-&gt;&gt; (assoc (select-keys table [:name :schema])
-               :fields (describe-table-fields driver conn table nil))
-        ;; find PKs and mark them
-        (add-table-pks driver conn db-name-or-nil))))</pre></td></tr><tr><td class="docs"><p>Default implementation of <code>driver/describe-table</code> for SQL JDBC drivers. Uses JDBC DatabaseMetaData.</p>
+   (let [pks (set (get-table-pks driver conn db-name-or-nil table))]
+     (update table :fields (fn [fields]
+                             (set (for [field fields]
+                                    (if-not (contains? pks (:name field))
+                                      field
+                                      (assoc field :pk? true)))))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- describe-table*
+  [driver ^Connection conn table]
+  {:pre [(instance? Connection conn)]}
+  (-&gt;&gt; (assoc (select-keys table [:name :schema])
+              :fields (describe-table-fields driver conn table nil))
+       ;; find PKs and mark them
+       (add-table-pks driver conn)))</pre></td></tr><tr><td class="docs"><p>Default implementation of <code>driver/describe-table</code> for SQL JDBC drivers. Uses JDBC DatabaseMetaData.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn describe-table
   [driver db table]
   (sql-jdbc.execute/do-with-connection-with-options
@@ -3374,7 +3399,7 @@ Else fetch the first n rows only.</p>
                         pk-identifier]))]}
       {:select json-field-exprs
        :from   [table-expr]
-       :limit  metadata-queries/nested-field-sample-limit})))</pre></td></tr><tr><td class="docs">
+       :limit  (sql.qp/inline-num metadata-queries/nested-field-sample-limit)})))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- describe-json-fields
   [driver jdbc-spec table json-fields pks]
   (log/infof &quot;Inferring schema for %d JSON fields in %s&quot; (count json-fields) (sync-util/name-for-logging table))
@@ -3405,7 +3430,11 @@ was JSON so what they're getting is JSON.</p>
       nil
       (fn [^Connection conn]
         (let [unfold-json-fields (table-&gt;unfold-json-fields driver conn table)
-              pks                (get-table-pks driver conn (:name database) table)]
+              ;; Just pass in `nil` here, that's what we do in the normal sync process and it seems to work correctly.
+              ;; We don't currently have a driver-agnostic way to get the physical database name. `(:name database)` is
+              ;; wrong, because it's a human-friendly name rather than a physical name. `(get-in
+              ;; database [:details :db])` works for most drivers but not H2.
+              pks                (get-table-pks driver conn nil table)]
           (if (empty? unfold-json-fields)
             #{}
             (describe-json-fields driver jdbc-spec table unfold-json-fields pks)))))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
