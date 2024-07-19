@@ -2865,76 +2865,40 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.task.analyze-queries" name="metabase.task.analyze-queries"><h1 class="project-name">metabase.task.analyze-queries</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.task.analyze-queries
-  (:require
-   [clojurewerkz.quartzite.jobs :as jobs]
-   [clojurewerkz.quartzite.schedule.simple :as simple]
-   [clojurewerkz.quartzite.triggers :as triggers]
-   [metabase.public-settings :as public-settings]
-   [metabase.query-analysis :as query-analysis]
-   [metabase.query-analysis.failure-map :as failure-map]
-   [metabase.task :as task]
-   [metabase.util :as u]
-   [metabase.util.log :as log])
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.query-analysis.failure-map" name="metabase.query-analysis.failure-map"><h1 class="project-name">metabase.query-analysis.failure-map</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.query-analysis.failure-map
   (:import
-   (org.quartz DisallowConcurrentExecution)))</pre></td></tr><tr><td class="docs">
+   (java.util.concurrent ConcurrentHashMap)
+   (java.util.function BiFunction)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private max-cpu-usage-ratio 0.2)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private wait-ratio
-  (/ (- 1 max-cpu-usage-ratio) max-cpu-usage-ratio))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private fail-wait-ms (* 2 1000))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private min-wait-ms 5)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private max-wait-ms (* 10 1000))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- wait-proportional ^long [time-taken-ms]
-  (-&gt;&gt; time-taken-ms
-       (* wait-ratio)
-       (max min-wait-ms)
-       (min max-wait-ms)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- wait-fail ^long [time-taken-ms]
-  (max fail-wait-ms (wait-proportional time-taken-ms)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- analyzer-loop* [stop-after next-card-id-fn]
-  (loop [remaining stop-after]
-    (when (public-settings/query-analysis-enabled)
-      (let [card-id (next-card-id-fn)
-            timer   (u/start-timer)
-            card    (query-analysis/-&gt;analyzable card-id)]
-        (if (failure-map/non-retryable? card)
-          (log/warnf &quot;Skipping analysis of Card % as its query has caused failures in the past.&quot; card-id)
-          (try
-            (query-analysis/analyze-card! card)
-            (failure-map/track-success! card)
-            (Thread/sleep (wait-proportional (u/since-ms timer)))
-            (catch Exception e
-              (log/errorf e &quot;Error analysing and updating query for Card %&quot; card-id)
-              (failure-map/track-failure! card)
-              (Thread/sleep (wait-fail (u/since-ms timer))))))
-        (cond
-          (nil? remaining) (recur nil)
-          (&gt; remaining 1) (recur (dec remaining)))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- analyzer-loop!
-  ([]
-   (analyzer-loop! nil))
-  ([stop-after]
-   (analyzer-loop* stop-after query-analysis/next-card-id!))
-  ([stop-after queue]
-   (analyzer-loop! stop-after queue Long/MAX_VALUE))
-  ([stop-after queue timeout]
-   (analyzer-loop* stop-after (partial query-analysis/next-card-id! queue timeout))))</pre></td></tr><tr><td class="docs"><p>Analyze </p>
-</td><td class="codes"><pre class="brush: clojure">(jobs/defjob ^{DisallowConcurrentExecution true
-               :doc                        }
-  QueryAnalyzer [_ctx]
-  (analyzer-loop!))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod task/init! ::BackfillQueryField [_]
-  (let [job     (jobs/build
-                 (jobs/of-type QueryAnalyzer)
-                 (jobs/with-identity (jobs/key &quot;metabase.task.analyze-queries.job&quot;)))
-        trigger (triggers/build
-                 (triggers/with-identity (triggers/key &quot;metabase.task.analyze-queries.trigger&quot;))
-                 (triggers/with-schedule
-                  (simple/schedule (simple/with-interval-in-minutes 1)))
-                 (triggers/start-now))]
-    (task/schedule-task! job trigger)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^ConcurrentHashMap cached-failures (ConcurrentHashMap.))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private max-size 10)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private max-retries 2)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- -&gt;query-hash [card]
+  (hash (:dataset_query card)))</pre></td></tr><tr><td class="docs"><p>Used by tests</p>
+</td><td class="codes"><pre class="brush: clojure">(defn reset-map!
+  []
+  (.clear cached-failures))</pre></td></tr><tr><td class="docs"><p>Record when we have failed to analyze a given version of a card, to prevent endless retrying.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn track-failure!
+  [card]
+  ;; This size operation is close to constant time at the moment - watch out if you change the data structure.
+  (.compute cached-failures (:id card)
+            (reify BiFunction
+              (apply [_this _k existing]
+                (let [hsh (-&gt;query-hash card)]
+                  (if (= hsh (:query-hash existing))
+                    (update existing :retries-remaining #(max 0 (dec %)))
+                    (when (&lt; (.size cached-failures) max-size)
+                      {:query-hash hsh :retries-remaining (dec max-retries)})))))))</pre></td></tr><tr><td class="docs"><p>Once we manage to analyze a card, we can forget about previous failures.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn track-success!
+  [card]
+  (.remove cached-failures (:id card)))</pre></td></tr><tr><td class="docs"><p>Should we skip retrying the given card because it has failed too many times?</p>
+</td><td class="codes"><pre class="brush: clojure">(defn non-retryable?
+  [card]
+  (boolean
+   (when-let [{:keys [retries-remaining query-hash]} (.get cached-failures (:id card))]
+     (and (zero? retries-remaining)
+          (= query-hash (-&gt;query-hash card))))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
