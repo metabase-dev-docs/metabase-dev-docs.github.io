@@ -3151,7 +3151,7 @@ we'll wrap the results in parentheses to make the display name more obvious.</p>
   If `stage-number` is omitted, the last stage is used.
   Pass nil to `expression-position` for new expressions.
   The rules for determining which columns can be broken out by are as follows:
-  1. custom `:expressions` in this stage of the query, that come before the `expression-position`
+  1. Custom `:expressions` in this stage of the query`
   2. Fields 'exported' by the previous stage of the query, if there is one;
      otherwise Fields from the current `:source-table`
   3. Fields exported by explicit joins
@@ -3161,19 +3161,21 @@ we'll wrap the results in parentheses to make the display name more obvious.</p>
    (expressionable-columns query -1 expression-position))
   ([query        :- ::lib.schema/query
     stage-number :- :int
-    expression-position :- [:maybe ::lib.schema.common/int-greater-than-or-equal-to-zero]]
-   (let [indexed-expressions (into {} (map-indexed (fn [idx expr]
-                                                     [(lib.util/expression-name expr) idx])
-                                                   (expressions query stage-number)))
-         unavailable-expressions (fn [column]
-                                   (or (not expression-position)
-                                       (not= (:lib/source column) :source/expressions)
-                                       (&lt; (get indexed-expressions (:name column)) expression-position)))
-         stage (lib.util/query-stage query stage-number)
+    ;; The legacy format, which uses a map to represent the expressions loses the ordering,
+    ;; if ten or more expressions are used. Preserving the order would require to use a
+    ;; map type preserving the order both when converting to the legacy format and when
+    ;; converting from JS to CLJ. This could be done by changing the legacy format or
+    ;; using flatland.ordered.map/ordered-map or array-map or something similar.
+    ;; Unfortunately, ordered-map doesn't implement IEditableCollection in CLJS, which means
+    ;; that some functions (e.g., update-keys, update-vals) unexpectedly convert them to a
+    ;; potentially unordered map. (One might even forget that select-keys returns a &quot;normal&quot;
+    ;; Clojure map, so there are plenty of possibilities to mess this up.)
+    ;; Changing the legacy/wire format is probably the right way to go, but that's a bigger
+    ;; endeavor.
+    _expression-position :- [:maybe ::lib.schema.common/int-greater-than-or-equal-to-zero]]
+   (let [stage (lib.util/query-stage query stage-number)
          columns (lib.metadata.calculation/visible-columns query stage-number stage)]
-     (-&gt;&gt; columns
-          (filterv unavailable-expressions)
-          not-empty))))</pre></td></tr><tr><td class="docs">
+     (not-empty columns))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn expression-ref :- :mbql.clause/expression
   &quot;Find the expression with `expression-name` using [[resolve-expression]], then create a ref for it. Intended for use
   when creating queries using threading macros e.g.
@@ -3240,7 +3242,7 @@ we'll wrap the results in parentheses to make the display name more obvious.</p>
    (cyclic-definition node-&gt;children start []))
   ([node-&gt;children node path]
    (if (some #{node} path)
-     (conj path node)
+     (drop-while (complement #{node}) (conj path node))
      (some #(cyclic-definition node-&gt;children % (conj path node))
            (node-&gt;children node)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn diagnose-expression :- [:maybe [:map [:message :string]]]
