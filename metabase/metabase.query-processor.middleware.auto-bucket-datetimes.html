@@ -2882,22 +2882,23 @@ bucketing. Applies to any unbucketed Field in a breakout, or fields in a filter 
    [metabase.util.log :as log]
    [metabase.util.malli :as mu]
    [metabase.util.malli.registry :as mr]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::field-type-info
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::column-type-info
   [:map
    [:base-type      [:maybe ::lib.schema.common/base-type]]
    [:effective-type [:maybe ::lib.schema.common/base-type]]
    [:semantic-type {:optional true} [:maybe ::lib.schema.common/semantic-or-relation-type]]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::field-id-or-name-&gt;type-info
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::column-id-or-name-&gt;type-info
   [:map-of
    [:or ::lib.schema.common/non-blank-string ::lib.schema.id/field]
-   [:maybe ::field-type-info]])</pre></td></tr><tr><td class="docs"><p>Unfortunately these Fields won't be in the store yet since Field resolution can't happen before we add the implicit
+   [:maybe ::column-type-info]])</pre></td></tr><tr><td class="docs"><p>Unfortunately these Fields won't be in the store yet since Field resolution can't happen before we add the implicit
 <code>:fields</code> clause, which happens after this</p>
 
 <p>TODO - What we could do tho is fetch all the stuff we need for the Store and then save these Fields in the store,
 which would save a bit of time when we do resolve them</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private unbucketed-fields-&gt;field-id-&gt;type-info :- ::field-id-or-name-&gt;type-info
-  &quot;Fetch a map of Field ID -&gt; type information for the Fields referred to by the `unbucketed-fields`.&quot;
-  [metadata-providerable unbucketed-fields :- [:sequential {:min 1} :mbql.clause/field]]
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private unbucketed-fields-&gt;field-id-&gt;type-info :- [:maybe ::column-id-or-name-&gt;type-info]
+  &quot;Fetch a map of Field ID -&gt; type information for the Fields referred to by the `unbucketed-fields`. Return an empty map
+  for empty `unbucketed-fields`.&quot;
+  [metadata-providerable unbucketed-fields :- [:maybe [:sequential :mbql.clause/field]]]
   (merge
    ;; build map of field-literal-name -&gt; {:base-type base-type}
    (into {} (for [[_tag opts id-or-name] unbucketed-fields
@@ -2953,50 +2954,60 @@ which would save a bit of time when we do resolve them</p>
    stage-path :- ::lib.walk/stage-path
    x]
   (cond
-    ;; do not autobucket Fields in a non-compound filter clause that either:
+    ;; do not autobucket clauses in a non-compound filter clause that either:
     (simple-filter-clause? query stage-path x)
     (cond
       ;; *  is not an equality or comparison filter. e.g. wouldn't make sense to bucket a field and then check if it is
       ;;    `NOT NULL`
       (not (mbql.u/is-clause? #{:= :!= :&lt; :&gt; :&lt;= :&gt;= :between} x))
       :do-not-bucket-reason/not-equality-or-comparison-filter
-      ;; *  has arguments that aren't `yyyy-MM-dd` date strings. The only reason we auto-bucket datetime Fields in the
+      ;; *  has arguments that aren't `yyyy-MM-dd` date strings. The only reason we auto-bucket datetime clauses in the
       ;; *  first place is for legacy reasons, if someone is specifying additional info like hour/minute then we
       ;; *  shouldn't assume they want to bucket by day
-      (let [[_tag _opts _field &amp; values] x]
+      (let [[_tag _opts _ref &amp; values] x]
         (not (every? auto-bucketable-value? values)))
       :do-not-bucket-reason/not-all-values-are-auto-bucketable)
-    ;; *  do not autobucket fields that are updating the time interval
+    ;; *  do not autobucket clauses that are updating the time interval
     (lib.util.match/match-one x
-      [(_tag :guard #{:+ :-}) _ [:field _ _] [:interval _ _n (unit :guard #{:minute :hour :second})]])
+      [(_tag :guard #{:+ :-})
+       _
+       [(_ :guard #{:expression :field}) _ _]
+       [:interval _ _n (unit :guard #{:minute :hour :second})]])
     :do-not-bucket-reason/bucket-between-relative-starting-from
-    ;; do not auto-bucket fields inside a `:time-interval` filter: it already supplies its own unit
-    ;; do not auto-bucket fields inside a `:datetime-diff` clause: the precise timestamp is needed for the difference
+    ;; do not auto-bucket clauses inside a `:time-interval` filter: it already supplies its own unit
+    ;; do not auto-bucket clauses inside a `:datetime-diff` clause: the precise timestamp is needed for the difference
     (mbql.u/is-clause? #{:time-interval :datetime-diff} x)
     :do-not-bucket-reason/bucketed-or-precise-operation
-    ;; do not autobucket Fields that already have a temporal unit, or have a binning strategy
-    (and (mbql.u/is-clause? :field x)
+    ;; do not autobucket clauses that already have a temporal unit, or have a binning strategy
+    (and (or (mbql.u/is-clause? :expression x)
+             (mbql.u/is-clause? :field x))
          (let [[_tag opts _id-or-name] x]
            ((some-fn :temporal-unit :binning) opts)))
     :do-not-bucket-reason/field-with-bucketing-or-binning))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private date-or-datetime-field?
-  [{base-type :base-type, effective-type :effective-type} :- ::field-type-info]
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private date-or-datetime-clause?
+  [{base-type :base-type, effective-type :effective-type} :- ::column-type-info]
   (some (fn [field-type]
           (some #(isa? field-type %)
                 [:type/Date :type/DateTime]))
         [base-type effective-type]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private wrap-unbucketed-fields :- ::lib.schema/stage
-  &quot;Add `:temporal-unit` to `:field`s in breakouts and filters if appropriate; look at corresponing type information in
-  `field-id-&gt;type-info` to see if we should do so.&quot;
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private wrap-unbucketed-clauses :- ::lib.schema/stage
+  &quot;Add `:temporal-unit` to `:field`s and `:expression`s in breakouts and filters if appropriate; for fields, look
+  at corresponing type information in `field-id-&gt;type-info` to see if we should do so. For expressions examine the clause
+  options.&quot;
   ;; we only want to wrap clauses in `:breakout` and `:filter` so just make a 3-arg version of this fn that takes the
   ;; name of the clause to rewrite and call that twice
   [query               :- ::lib.schema/query
    stage-path          :- ::lib.walk/stage-path
    stage               :- ::lib.schema/stage
-   field-id-&gt;type-info :- ::field-id-or-name-&gt;type-info]
+   field-id-&gt;type-info :- [:maybe ::column-id-or-name-&gt;type-info]]
   (letfn [(datetime-but-not-time? [field-id]
-            (some-&gt; field-id field-id-&gt;type-info date-or-datetime-field?))
-          (wrap-fields [x]
+            (some-&gt; field-id field-id-&gt;type-info date-or-datetime-clause?))
+          ;; Following function copies type extraction logic from [[unbucketed-fields-&gt;field-id-&gt;type-info]],
+          ;; to conform original schema.
+          (expression-opts-&gt;type-info [{:keys [base-type effective-type]}] :- ::column-id-or-name-&gt;type-info
+            {:base-type base-type
+             :effective-type (or effective-type base-type)})
+          (wrap-clauses [x]
             (lib.util.match/replace x
               ;; don't replace anything that's already bucketed or otherwise is not subject to autobucketing
               (_ :guard (partial should-not-be-autobucketed? query stage-path))
@@ -3004,9 +3015,11 @@ which would save a bit of time when we do resolve them</p>
               ;; if it's a `:field` clause and `field-id-&gt;type-info` tells us it's a `:type/Temporal` (but not
               ;; `:type/Time`), then go ahead and replace it
               [:field opts (id-or-name :guard datetime-but-not-time?)]
-              [:field (assoc opts :temporal-unit :day) id-or-name]))
+              [:field (assoc opts :temporal-unit :day) id-or-name]
+              [:expression (opts :guard (comp date-or-datetime-clause? expression-opts-&gt;type-info)) name']
+              [:expression (assoc opts :temporal-unit :day) name']))
           (rewrite-clause [stage clause-to-rewrite]
-            (m/update-existing stage clause-to-rewrite wrap-fields))]
+            (m/update-existing stage clause-to-rewrite wrap-clauses))]
     (-&gt; stage
         (rewrite-clause :breakout)
         (rewrite-clause :filters))))</pre></td></tr><tr><td class="docs">
@@ -3016,14 +3029,16 @@ which would save a bit of time when we do resolve them</p>
    {breakouts :breakout, :keys [filters], :as stage} :- ::lib.schema/stage]
   ;; find any breakouts or filters in the query that are just plain `[:field-id ...]` clauses (unwrapped by any other
   ;; clause)
-  (if-let [unbucketed-fields (lib.util.match/match (cons filters breakouts)
-                               (_clause :guard (partial should-not-be-autobucketed? query stage-path)) nil
-                               :field                                       &amp;match)]
+  (if-let [unbucketed-clauses (lib.util.match/match (cons filters breakouts)
+                                (_clause :guard (partial should-not-be-autobucketed? query stage-path)) nil
+                                :expression                                  &amp;match
+                                :field                                       &amp;match)]
     ;; if we found some unbucketed breakouts/filters, fetch the Fields &amp; type info that are referred to by those
     ;; breakouts/filters...
-    (let [field-id-&gt;type-info (unbucketed-fields-&gt;field-id-&gt;type-info query unbucketed-fields)]
+    (let [unbucketed-fields (filter (comp (partial = :field) first) unbucketed-clauses)
+          field-id-&gt;type-info (unbucketed-fields-&gt;field-id-&gt;type-info query unbucketed-fields)]
       ;; ...and then update each breakout/filter by wrapping it if appropriate
-      (wrap-unbucketed-fields query stage-path stage field-id-&gt;type-info))
+      (wrap-unbucketed-clauses query stage-path stage field-id-&gt;type-info))
     ;; otherwise if there are no unbucketed breakouts/filters return the query as-is
     stage))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn auto-bucket-datetimes :- ::lib.schema/query
