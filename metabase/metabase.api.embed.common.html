@@ -2892,14 +2892,14 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.util.malli.schema :as ms]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Is V a valid param value? (If it is a String, is it non-blank?)</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- valid-param?
+</td><td class="codes"><pre class="brush: clojure">(defn- valid-param-value?
   [v]
   (or (not (string? v))
       (not (str/blank? v))))</pre></td></tr><tr><td class="docs"><p>Check that the conditions specified by <code>object-embedding-params</code> are satisfied.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- check-params-are-allowed
   [object-embedding-params token-params user-params]
-  (let [all-params        (set/union token-params user-params)
-        duplicated-params (set/intersection token-params user-params)]
+  (let [all-params        (merge token-params user-params)
+        duplicated-params (set/intersection (set (keys token-params)) (set (keys user-params)))]
     (doseq [[param status] object-embedding-params]
       (case status
         ;; disabled means a param is not allowed to be specified by either token or user
@@ -2910,12 +2910,12 @@ net.brehaut.ClojureTools = (function (SH) {
                               [400 (tru &quot;You can''t specify a value for {0} if it''s already set in the JWT.&quot; param)])
         ;; locked means JWT must specify param
         &quot;locked&quot;   (api/check
-                    (contains? token-params param)      [400 (tru &quot;You must specify a value for {0} in the JWT.&quot; param)]
+                    (some? (get token-params param))    [400 (tru &quot;You must specify a value for {0} in the JWT.&quot; param)]
                     (not (contains? user-params param)) [400 (tru &quot;You can only specify a value for {0} in the JWT.&quot; param)])))))</pre></td></tr><tr><td class="docs"><p>Make sure all the params specified are specified in <code>object-embedding-params</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- check-params-exist
   [object-embedding-params all-params]
   (let [embedding-params (set (keys object-embedding-params))]
-    (doseq [k all-params]
+    (doseq [[k _] all-params]
       (api/check (contains? embedding-params k)
                  [400 (format &quot;Unknown parameter %s.&quot; k)]))))</pre></td></tr><tr><td class="docs"><p>Validate that sets of params passed as part of the JWT token and by the user (as query params, i.e. as part of the
 URL) are valid for the <code>object-embedding-params</code>. <code>token-params</code> and <code>user-params</code> should be sets of all valid param
@@ -2928,7 +2928,7 @@ keys specified in the JWT or by the user, respectively.</p>
              &quot;token params:&quot;            token-params
              &quot;user params:&quot;             user-params)
   (check-params-are-allowed object-embedding-params token-params user-params)
-  (check-params-exist object-embedding-params (set/union token-params user-params)))</pre></td></tr><tr><td class="docs"><p>Check that embedding is enabled, that <code>object</code> exists, and embedding for <code>object</code> is enabled.</p>
+  (check-params-exist object-embedding-params (merge token-params user-params)))</pre></td></tr><tr><td class="docs"><p>Check that embedding is enabled, that <code>object</code> exists, and embedding for <code>object</code> is enabled.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- check-embedding-enabled-for-object
   ([entity id]
    (api/check (pos-int? id)
@@ -3009,10 +3009,15 @@ using the data in the dashboard's :parameters key.</p>
    token-params            :- [:map-of :keyword :any]
    user-params             :- [:map-of :keyword :any]]
   (check-param-sets object-embedding-params
-                    (set (keys (m/filter-vals valid-param? token-params)))
-                    (set (keys (m/filter-vals valid-param? user-params))))
-  ;; ok, everything checks out, now return the merged params map
-  (merge user-params token-params))</pre></td></tr><tr><td class="docs">
+                    (m/filter-vals valid-param-value? token-params)
+                    (m/filter-vals valid-param-value? user-params))
+  ;; ok, everything checks out, now return the merged params map,
+  ;; but first turn empty lists into nil
+  (-&gt; (merge user-params token-params)
+      (update-vals (fn [v]
+                     (if (and (not (string? v)) (seqable? v))
+                       (seq v)
+                       v)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private param-values-merged-params :- [:map-of ms/NonBlankString :any]
   [id-&gt;slug slug-&gt;id embedding-params token-params id-query-params]
   (let [slug-query-params  (into {}
@@ -3026,8 +3031,9 @@ using the data in the dashboard's :parameters key.</p>
                                     v]))
         slug-query-params  (normalize-query-params slug-query-params)
         merged-slug-&gt;value (validate-and-merge-params embedding-params token-params slug-query-params)]
-    (into {} (for [[slug value] merged-slug-&gt;value]
-               [(get slug-&gt;id (name slug)) value]))))</pre></td></tr><tr><td class="docs"><p>---------------------------------------------- Other Param Util Fns ----------------------------------------------</p>
+    (into {} (for [[slug value] merged-slug-&gt;value
+                   :when        value]
+                [(get slug-&gt;id (name slug)) value]))))</pre></td></tr><tr><td class="docs"><p>---------------------------------------------- Other Param Util Fns ----------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Remove any <code>params</code> from the list whose <code>:slug</code> is in the <code>params-to-remove</code> set.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- remove-params-in-set
   [params params-to-remove]
@@ -3256,20 +3262,23 @@ The <code>:preview</code> key will default to <code>false</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn dashboard-param-values
   [token searched-param-id prefix id-query-params
    &amp; {:keys [preview] :or {preview false}}]
-  (let [unsigned-token                       (embed/unsign token)
-        dashboard-id                         (embed/get-in-unsigned-token-or-throw unsigned-token [:resource :dashboard])
-        _                                    (when-not preview (check-embedding-enabled-for-dashboard dashboard-id))
-        slug-token-params                    (embed/get-in-unsigned-token-or-throw unsigned-token [:params])
-        {parameters       :parameters
-         embedding-params :embedding_params} (t2/select-one :model/Dashboard :id dashboard-id)
-        ;; when previewing an embed, embedding-params may initially be empty (not in Appdb yet)
-        ;; to prevent an error, use the embedding params from the token in this case
-        embedding-params                     (or embedding-params
-                                                 (when preview
-                                                   (embed/get-in-unsigned-token-or-throw unsigned-token [:_embedding_params])))
-        id-&gt;slug                             (into {} (map (juxt :id :slug) parameters))
-        slug-&gt;id                             (into {} (map (juxt :slug :id) parameters))
-        searched-param-slug                  (get id-&gt;slug searched-param-id)]
+  (let [unsigned-token                                 (embed/unsign token)
+        dashboard-id                                   (embed/get-in-unsigned-token-or-throw unsigned-token [:resource :dashboard])
+        _                                              (when-not preview (check-embedding-enabled-for-dashboard dashboard-id))
+        slug-token-params                              (embed/get-in-unsigned-token-or-throw unsigned-token [:params])
+        {parameters                 :parameters
+         published-embedding-params :embedding_params} (t2/select-one :model/Dashboard :id dashboard-id)
+        ;; when previewing an embed, embedding-params should come from the token,
+        ;; since a user may be changing them prior to publishing the Embed, which is what actually persists
+        ;; the settings to the Appdb.
+        embedding-params                               (if preview
+                                                         (merge
+                                                          published-embedding-params
+                                                          (get unsigned-token :_embedding_params))
+                                                         published-embedding-params)
+        id-&gt;slug                                       (into {} (map (juxt :id :slug) parameters))
+        slug-&gt;id                                       (into {} (map (juxt :slug :id) parameters))
+        searched-param-slug                            (get id-&gt;slug searched-param-id)]
     (try
       ;; you can only search for values of a parameter if it is ENABLED and NOT PRESENT in the JWT.
       (when-not (= (get embedding-params (keyword searched-param-slug)) &quot;enabled&quot;)

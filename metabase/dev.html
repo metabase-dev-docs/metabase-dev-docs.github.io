@@ -3142,27 +3142,29 @@ first arg:</p>
   ;; Data warehouse DB, if we're using this in combination with a Database as connectable
   (let [{:keys [query params]} (binding [t2.connection/*current-connectable* nil]
                                  (qp.compile/compile built-query))]
-    (into [query] params)))</pre></td></tr><tr><td class="docs">
+    (into [query] params)))</pre></td></tr><tr><td class="docs"><p>Realize a lazy sequence if it's a lazy sequence. Otherwise, return the value as is.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- maybe-realize
+  [x]
+  (if (instance? clojure.lang.LazySeq x)
+    (doall x)
+    x))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2.hydrate/hydrate-with-strategy :around ::t2.hydrate/multimethod-simple
   &quot;Throws an error if do simple hydrations that make DB call on a sequence.&quot;
   [model strategy k instances]
-  (if (or config/is-prod?
-          (&lt; (count instances) 2)
-          ;; we skip checking these keys because most of the times its call count
-          ;; are from deferencing metabase.api.common/*current-user-permissions-set*
-          (#{:can_write :can_read} k))
+  (if config/is-prod?
     (next-method model strategy k instances)
-    (t2/with-call-count [call-count]
-      (let [res (next-method model strategy k instances)
-            ;; if it's a lazy-seq then we need to realize it so call-count is counted
-            res (if (instance? clojure.lang.LazySeq res)
-                  (doall res)
-                  res)]
-        ;; only throws an exception if the simple hydration makes a DB call
-        (when (pos-int? (call-count))
-          (throw (ex-info (format &quot;N+1 hydration detected!!! Model %s, key %s]&quot; (pr-str model) k)
-                          {:model model :strategy strategy :k k :items-count (count instances) :db-calls (call-count)})))
-        res))))</pre></td></tr><tr><td class="docs"><p>Add the application database as a Database. Currently only works if your app DB uses broken-out details!</p>
+    (do
+      ;; prevent things like dereferencing metabase.api.common/*current-user-permissions-set* from triggering the check
+      ;; by calling `next-method` *twice*. To reduce the performance impact, just call it with the first instance.
+      (maybe-realize (next-method model strategy k [(first instances)]))
+      ;; Now we can actually run the hydration with the full set of instances and make sure no more DB calls happened.
+      (t2/with-call-count [call-count]
+        (let [res (maybe-realize (next-method model strategy k instances))]
+          ;; only throws an exception if the simple hydration makes a DB call
+          (when (pos-int? (call-count))
+              (throw (ex-info (format &quot;N+1 hydration detected!!! Model %s, key %s]&quot; (pr-str model) k)
+                              {:model model :strategy strategy :k k :items-count (count instances) :db-calls (call-count)})))
+          res)))))</pre></td></tr><tr><td class="docs"><p>Add the application database as a Database. Currently only works if your app DB uses broken-out details!</p>
 </td><td class="codes"><pre class="brush: clojure">(defn app-db-as-data-warehouse
   []
   (binding [t2.connection/*current-connectable* nil]
