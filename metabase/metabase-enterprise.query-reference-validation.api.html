@@ -2865,395 +2865,118 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#types.cljc" name="types.cljc"><h1 class="project-name">types.cljc</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>The Metabase Hierarchical Type System (MHTS). This is a hierarchy where types derive from one or more parent types,
-which in turn derive from their own parents. This makes it possible to add new types without needing to add
-corresponding mappings in the frontend or other places. For example, a Database may want a type called something
-like <code>:type/CaseInsensitiveText</code>; we can add this type as a derivative of <code>:type/Text</code> and everywhere else can
-continue to treat it as such until further notice.</p>
-
-<p>There are a few different keyword hierarchies below:</p>
-
-<h3>Data (Base/Effective) Types -- keys starting with `:type/` and deriving from `:type/*`, but not `:Semantic/*` or `:Relation/*`</h3>
-
-<p>The 'base type' represents the actual data type of the column in the data warehouse. The 'effective type' is the
-data type we treat this column as; it may be the same as base type or something different if the column has a
-coercion strategy (see below). Example: a <code>VARCHAR</code> column might have a base type of <code>:type/Text</code>, but store
-ISO-8601 timestamps; we might choose to interpret this column as a timestamp column by giving it an effective type
-of <code>:type/DateTime</code> and the coercion strategy <code>:Coercion/ISO8601-&gt;DateTime</code></p>
-
-<h3>Coercion Strategies -- keys starting with `:Coercion/`</h3>
-
-<p>These strategies tell us how to coerce a column from its base type to it effective type when the two differ. For
-example, <code>:Coercion/ISO8601-&gt;DateTime</code> can be used to tell us how to interpret a <code>VARCHAR</code> column (base type =
-<code>:type/Text</code>) as a <code>:type/DateTime</code> column (effective type). This depends of the database, but we might do something
-like using a <code>parse_timestamp()</code> function whenever we fetch this column.</p>
-
-<h3>Semantic Types -- types starting with `:type/*` and deriving from `:Semantic/*`</h3>
-
-<p>NOTE: In the near future we plan to rename the semantic types so they start with <code>:Semantic/</code> rather than <code>:type/</code>.</p>
-
-<p>These types represent the semantic meaning/interpretation/purpose of a column in the data warehouse, for example
-<code>:type/UpdatedTimestamp</code>. This affects things like how we display this column or how we generate Automagic
-Dashboards. How is this different from Base/Effective type? Suppose we have an <code>updated_at</code> <code>TIMESTAMP</code> column; its
-data type is <code>TIMESTAMP</code> and thus its base type would be <code>:type/DateTime</code>. There is no such thing as an
-<code>UPDATED_AT_TIMESTAMP</code> data type; the fact that this column is used to record update timestamps is purely a semantic
-one.</p>
-
-<p>:Semantic types descend from data type(s) that are allowed to have this semantic type. For example,
-<code>:type/UpdatedTimestamp</code> descends from <code>:type/DateTime</code>, which means a column with an effective type of
-<code>:type/DateTime</code> can have a semantic type of<code>:type/UpdatedTimestamp</code>; however a <code>:type/Boolean</code> cannot -- this
-would make no sense. (Unless maybe <code>false</code> meant <code>1970-01-01T00:00:00Z</code> and <code>true</code> meant <code>1970-01-01T00:00:01Z</code>, but
-I think we can agree that's dumb.)</p>
-
-<h3>Relation Type -- types starting with `:type/*` and deriving from `:Relation/*`</h3>
-
-<p>NOTE: As with Semantic types, in the near future we'll change the relation types so they all start with <code>:Relation/</code>.</p>
-
-<p>Types that have to do with whether this column is a primary key or foreign key. These are currently stored in the
-<code>semantic_type</code> column, but we'll split them out into a separate <code>relation_type</code> column in the future.</p>
-
-<h3>Entity Types -- keys starting with `:entity/`</h3>
-
-<p>These are used to record the semantic purpose of a Table.</p>
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.types
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase-enterprise.query-reference-validation.api" name="metabase-enterprise.query-reference-validation.api"><h1 class="project-name">metabase-enterprise.query-reference-validation.api</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase-enterprise.query-reference-validation.api
   (:require
-   [clojure.set :as set]
-   [metabase.types.coercion-hierarchies :as coercion-hierarchies]
-   [metabase.util.malli :as mu]
-   #?@(:cljs
-       [[metabase.util :as u]])))</pre></td></tr><tr><td class="docs"><p>Table (entity) Types</p>
+   [compojure.core :refer [GET]]
+   [medley.core :as m]
+   [metabase.api.common :as api]
+   [metabase.api.routes.common :refer [+auth]]
+   [metabase.server.middleware.offset-paging :as mw.offset-paging]
+   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs"><p>Columns that the card errors can be sorted by</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private valid-sort-columns 
+  #{&quot;name&quot; &quot;collection&quot; &quot;created_by&quot; &quot;last_edited_at&quot;}) ;; We don't support sorting by error message for now</pre></td></tr><tr><td class="docs"><p>We don't support sorting by error message for now</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :entity/GenericTable :entity/*)
-(derive :entity/UserTable :entity/GenericTable)
-(derive :entity/CompanyTable :entity/GenericTable)
-(derive :entity/TransactionTable :entity/GenericTable)
-(derive :entity/ProductTable :entity/GenericTable)
-(derive :entity/SubscriptionTable :entity/GenericTable)
-(derive :entity/EventTable :entity/GenericTable)</pre></td></tr><tr><td class="docs"><p>Modifier Types</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p><code>:type/field-values-unsupported</code> enables driver developers to opt out of field values calculation for specific
-fields. For more details see the <code>driver-changelog.yml</code>, section <code>Metabase 0.50.0</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(derive :type/field-values-unsupported :type/*)</pre></td></tr><tr><td class="docs"><p><code>:type/fingerprint-unsupported</code> enables driver developers to opt out of fingerprinting for specific
-fields.</p>
-</td><td class="codes"><pre class="brush: clojure">(derive :type/fingerprint-unsupported :type/*)</pre></td></tr><tr><td class="docs"><p><code>:type/Large</code> enables driver developers to signal that the field values can be relatively large and can use a lot of
-memory. These types will be excluded from scanning and fingerprinting, and possibly other features in the future.</p>
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Large :type/field-values-unsupported)
-(derive :type/Large :type/fingerprint-unsupported)</pre></td></tr><tr><td class="docs"><p>Numeric Types</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Number :type/*)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Integer :type/Number)
-(derive :type/BigInteger :type/Integer)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Quantity :Semantic/*)
-(derive :type/Quantity :type/Integer)</pre></td></tr><tr><td class="docs"><p><code>:type/Float</code> means any number with a decimal place! It doesn't explicitly mean a 32-bit or 64-bit floating-point
-number. That's why there's no <code>:type/Double</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Float :type/Number)</pre></td></tr><tr><td class="docs"><p><code>:type/Decimal</code> means a column that is actually stored as an arbitrary-precision decimal type, e.g. <code>BigDecimal</code> or
-<code>DECIMAL</code>. For fixed-precision columns, just use <code>:type/Float</code></p>
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Decimal :type/Float)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Share :Semantic/*)
-(derive :type/Share :type/Float)</pre></td></tr><tr><td class="docs"><p>A percent value (generally 0-100)</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Percentage :Semantic/*)
-(derive :type/Percentage :type/Decimal)</pre></td></tr><tr><td class="docs"><p><code>:type/Currency</code> -- an actual currency data type, for example Postgres <code>money</code>.
-<code>:type/Currency</code> -- a column that should be interpreted as money.</p>
-
-<p><code>money</code> (base type <code>:type/Currency</code>) columns will likely have a semantic type <code>:type/Currency</code> or a descendant
-thereof like <code>:type/Income</code>, but other floating-point data type columns can be interpreted as currency as well;
-a <code>DECIMAL</code> (base type <code>:type/Decimal</code>) column can also have a semantic type <code>:type/Currency</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Currency :type/Decimal)
-(derive :type/Currency :Semantic/*)
-(derive :type/Income :type/Currency)
-(derive :type/Discount :type/Currency)
-(derive :type/Price :type/Currency)
-(derive :type/GrossMargin :type/Currency)
-(derive :type/Cost :type/Currency)</pre></td></tr><tr><td class="docs"><p>:type/Location -- anything having to do with a location, e.g. country, city, or coordinates.</p>
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Location :Semantic/*)
-(derive :type/Coordinate :type/Location)
-(derive :type/Coordinate :type/Float)
-(derive :type/Latitude :type/Coordinate)
-(derive :type/Longitude :type/Coordinate)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Score :Semantic/*)
-(derive :type/Score :type/Number)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Duration :Semantic/*)
-(derive :type/Duration :type/Number)</pre></td></tr><tr><td class="docs"><p>Text Types</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Text :type/*)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/UUID :type/Text)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/URL :Semantic/*)
-(derive :type/URL :type/Text)
-(derive :type/ImageURL :type/URL)
-(derive :type/AvatarURL :type/ImageURL)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Email :Semantic/*)
-(derive :type/Email :type/Text)</pre></td></tr><tr><td class="docs"><p>Semantic types deriving from <code>:type/Category</code> should be marked as 'category' Fields during sync, i.e. they
-should have their FieldValues cached and synced. See
-<code>metabase.analyze.classifiers.category/field-should-be-category?</code></p>
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Category :Semantic/*)
-(derive :type/Enum :Semantic/*)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Address :type/Location)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/City :type/Address)
-(derive :type/City :type/Category)
-(derive :type/City :type/Text)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/State :type/Address)
-(derive :type/State :type/Category)
-(derive :type/State :type/Text)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Country :type/Address)
-(derive :type/Country :type/Category)
-(derive :type/Country :type/Text)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/ZipCode :type/Address)
-(derive :type/ZipCode :type/Text)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Name :type/Category)
-(derive :type/Name :type/Text)
-(derive :type/Title :type/Category)
-(derive :type/Title :type/Text)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Description :Semantic/*)
-(derive :type/Description :type/Text)
-(derive :type/Comment :Semantic/*)
-(derive :type/Comment :type/Text)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/PostgresEnum :type/Text)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/OracleCLOB :type/Text)
-(derive :type/OracleCLOB :type/Large)</pre></td></tr><tr><td class="docs"><p>DateTime Types</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Temporal :type/*)
-(derive :type/Temporal :type/field-values-unsupported)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Date :type/Temporal)</pre></td></tr><tr><td class="docs"><p>You could have Dates with TZ info but it's not supported by JSR-310 so we'll not worry about that for now.</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Time :type/Temporal)
-(derive :type/TimeWithTZ :type/Time)
-(derive :type/TimeWithLocalTZ :type/TimeWithTZ)    ; a column that is timezone-aware, but normalized to UTC or another offset at rest.</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/TimeWithZoneOffset :type/TimeWithTZ) ; a column that stores its timezone offset</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/DateTime :type/Temporal)
-(derive :type/DateTimeWithTZ :type/DateTime)
-(derive :type/DateTimeWithLocalTZ :type/DateTimeWithTZ)    ; a column that is timezone-aware, but normalized to UTC or another offset at rest.</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/DateTimeWithZoneOffset :type/DateTimeWithTZ) ; a column that stores its timezone offset, e.g. `-08:00`</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/DateTimeWithZoneID :type/DateTimeWithTZ)     ; a column that stores its timezone ID, e.g. `US/Pacific`</pre></td></tr><tr><td class="docs"><p>An <code>Instant</code> is a timestamp in (milli-)seconds since the epoch, UTC. Since it doesn't store TZ information, but is
-normalized to UTC, it is a DateTimeWithLocalTZ</p>
-
-<p><code>Instant</code> if differentiated from other <code>DateTimeWithLocalTZ</code> columns in the same way <code>java.time.Instant</code> is
-different from <code>java.time.OffsetDateTime</code>;</p>
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Instant :type/DateTimeWithLocalTZ)</pre></td></tr><tr><td class="docs"><p>TODO -- shouldn't we have a <code>:type/LocalDateTime</code> as well?</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/CreationTemporal :Semantic/*)
-(derive :type/CreationTimestamp :type/CreationTemporal)
-(derive :type/CreationTimestamp :type/DateTime)
-(derive :type/CreationTime :type/CreationTemporal)
-(derive :type/CreationTime :type/Time)
-(derive :type/CreationDate :type/CreationTemporal)
-(derive :type/CreationDate :type/Date)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/JoinTemporal :Semantic/*)
-(derive :type/JoinTimestamp :type/JoinTemporal)
-(derive :type/JoinTimestamp :type/DateTime)
-(derive :type/JoinTime :type/JoinTemporal)
-(derive :type/JoinTime :type/Time)
-(derive :type/JoinDate :type/JoinTemporal)
-(derive :type/JoinDate :type/Date)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/CancelationTemporal :Semantic/*)
-(derive :type/CancelationTimestamp :type/CancelationTemporal)
-(derive :type/CancelationTimestamp :type/DateTime)
-(derive :type/CancelationTime :type/CancelationTemporal)
-(derive :type/CancelationTime :type/Date)
-(derive :type/CancelationDate :type/CancelationTemporal)
-(derive :type/CancelationDate :type/Date)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/DeletionTemporal :Semantic/*)
-(derive :type/DeletionTimestamp :type/DeletionTemporal)
-(derive :type/DeletionTimestamp :type/DateTime)
-(derive :type/DeletionTime :type/DeletionTemporal)
-(derive :type/DeletionTime :type/Time)
-(derive :type/DeletionDate :type/DeletionTemporal)
-(derive :type/DeletionDate :type/Date)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/UpdatedTemporal :Semantic/*)
-(derive :type/UpdatedTimestamp :type/UpdatedTemporal)
-(derive :type/UpdatedTimestamp :type/DateTime)
-(derive :type/UpdatedTime :type/UpdatedTemporal)
-(derive :type/UpdatedTime :type/Time)
-(derive :type/UpdatedDate :type/UpdatedTemporal)
-(derive :type/UpdatedDate :type/Date)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Birthdate :Semantic/*)
-(derive :type/Birthdate :type/Date)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Interval :type/Temporal)</pre></td></tr><tr><td class="docs"><p>Other</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Boolean :type/*)
-(derive :type/DruidHyperUnique :type/*)
-(derive :type/DruidHyperUnique :type/field-values-unsupported)</pre></td></tr><tr><td class="docs"><p>The Snowflake <code>VARIANT</code> type is allowed to be anything, so just mark it as deriving from the core root types so
-we're allowed to use any sort of filter with it (whether it makes sense or not). See
-https://docs.snowflake.com/en/sql-reference/data-types-semistructured</p>
-</td><td class="codes"><pre class="brush: clojure">(doseq [t [:type/Number
-           :type/Text
-           :type/Temporal
-           :type/Boolean
-           :type/Collection]]
-  (derive :type/SnowflakeVariant t))</pre></td></tr><tr><td class="docs"><p>Text-Like Types: Things that should be displayed as text for most purposes but that <em>shouldn't</em> support advanced
-filter options like starts with / contains</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/TextLike :type/*)
-(derive :type/MongoBSONID :type/TextLike)
-(derive :type/MySQLEnum :type/Text)</pre></td></tr><tr><td class="docs"><p>IP address can be either a data type e.g. Postgres <code>inet</code> or a semantic type e.g. a <code>text</code> column that has IP
-addresses</p>
-</td><td class="codes"><pre class="brush: clojure">(derive :type/IPAddress :type/TextLike)
-(derive :type/IPAddress :Semantic/*)</pre></td></tr><tr><td class="docs"><p>Structured/Collections</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Collection :type/*)
-(derive :type/Collection :type/Large)
-(derive :type/Structured :type/*)
-(derive :type/Structured :type/Large)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Dictionary :type/Collection)
-(derive :type/Array :type/Collection)</pre></td></tr><tr><td class="docs"><p><code>:type/JSON</code> currently means a column that is JSON data, e.g. a Postgres JSON column</p>
-</td><td class="codes"><pre class="brush: clojure">(derive :type/JSON :type/Structured)
-(derive :type/JSON :type/Collection)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/DruidJSON :type/JSON)</pre></td></tr><tr><td class="docs"><p><code>:type/XML</code> -- an actual native XML data column</p>
-</td><td class="codes"><pre class="brush: clojure">(derive :type/XML :type/Structured)
-(derive :type/XML :type/Collection)</pre></td></tr><tr><td class="docs"><p><code>:type/Structured</code> columns are ones that are stored as text, but should be treated as a <code>:type/Collection</code>
-column (e.g. JSON or XML). These should probably be coercion strategies instead, e.g.</p>
-
-<p>   base type         = :type/Text
-   coercion strategy = :Coercion/SerializedJSON
-   effective type    = :type/JSON</p>
-
-<p>but for the time being we'll have to live with these being "weird" semantic types.</p>
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Structured :Semantic/*)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/SerializedJSON :type/Structured)
-(derive :type/XML :type/Structured)</pre></td></tr><tr><td class="docs"><p>Other</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/User :Semantic/*)
-(derive :type/Author :type/User)
-(derive :type/Owner :type/User)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Product :type/Category)
-(derive :type/Company :type/Category)
-(derive :type/Subscription :type/Category)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/Source :type/Category)</pre></td></tr><tr><td class="docs"><p>Relation types</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :type/FK :Relation/*)
-(derive :type/PK :Relation/*)</pre></td></tr><tr><td class="docs"><p>Coercion strategies</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :Coercion/String-&gt;Temporal :Coercion/*)
-(derive :Coercion/ISO8601-&gt;Temporal :Coercion/String-&gt;Temporal)
-(derive :Coercion/ISO8601-&gt;DateTime :Coercion/ISO8601-&gt;Temporal)
-(derive :Coercion/ISO8601-&gt;Time :Coercion/ISO8601-&gt;Temporal)
-(derive :Coercion/ISO8601-&gt;Date :Coercion/ISO8601-&gt;Temporal)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :Coercion/YYYYMMDDHHMMSSString-&gt;Temporal :Coercion/String-&gt;Temporal)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :Coercion/Bytes-&gt;Temporal :Coercion/*)
-(derive :Coercion/YYYYMMDDHHMMSSBytes-&gt;Temporal :Coercion/Bytes-&gt;Temporal)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :Coercion/Number-&gt;Temporal :Coercion/*)
-(derive :Coercion/UNIXTime-&gt;Temporal :Coercion/Number-&gt;Temporal)
-(derive :Coercion/UNIXSeconds-&gt;DateTime :Coercion/UNIXTime-&gt;Temporal)
-(derive :Coercion/UNIXMilliSeconds-&gt;DateTime :Coercion/UNIXTime-&gt;Temporal)
-(derive :Coercion/UNIXMicroSeconds-&gt;DateTime :Coercion/UNIXTime-&gt;Temporal)
-(derive :Coercion/UNIXNanoSeconds-&gt;DateTime :Coercion/UNIXTime-&gt;Temporal)</pre></td></tr><tr><td class="docs"><p>---------------------------------------------------- Util Fns ----------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>E.g. the version coming back from the app DB as opposed to MLv2 metadata. This should eventually be considered
-deprecated.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private SnakeCasedField
-  [:map
-   [:base_type :any]])</pre></td></tr><tr><td class="docs"><p>True if a Metabase <code>Field</code> instance has a temporal base or semantic type, i.e. if this Field represents a value
-relating to a moment in time.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn field-is-type?
-  [tyype                                                  :- :keyword
-   {base-type :base_type, effective-type :effective_type} :- SnakeCasedField]
-  (some #(isa? % tyype) [base-type effective-type]))</pre></td></tr><tr><td class="docs"><p>True if a Metabase <code>Field</code> instance has a temporal base or semantic type, i.e. if this Field represents a value
-relating to a moment in time.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn temporal-field?
-  [field :- SnakeCasedField]
-  (field-is-type? :type/Temporal field))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private assignable-hierarchy
-  (make-hierarchy))</pre></td></tr><tr><td class="docs"><p>Declare that a value of type <code>x</code> assignable to a variable of type <code>y</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn declare-assignable
-  [x y]
-  #?(:clj (alter-var-root #'assignable-hierarchy derive x y)
-     :cljs (set! assignable-hierarchy (derive assignable-hierarchy x y))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(declare-assignable :type/Integer :type/Decimal)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(declare assignable?)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- assignable?* [x y]
-  (or (isa? assignable-hierarchy x y)
-      (boolean (some #(assignable? x %) (descendants y)))
-      (boolean (some #(assignable? % y) (parents x)))))</pre></td></tr><tr><td class="docs"><p>Is a value of type <code>x</code> assignable to a variable of type <code>y</code>?</p>
-
-<p>When deciding assignability, We also consider the type hierarchy.
-If x is assignable to z and z is a y, then x is also assignable to y.
-Also, if z is assignable to y and x is an z, then x is assignable to y.</p>
-</td><td class="codes"><pre class="brush: clojure">(def assignable?
-  (memoize assignable?*))</pre></td></tr><tr><td class="docs"><p>Impl for [[most-specific-common-ancestor]].</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- most-specific-common-ancestor*
-  [x y]
-  (cond
-    (= x :type/*)     nil
-    (= y :type/*)     nil
-    (assignable? x y) y
-    (assignable? y x) x
-    ;; if we haven't had a match yet, recursively try using parent types.
-    :else
-    (some (fn [x']
-            (some (fn [y']
-                    (when-not (= [x' y'] [x y])
-                      (most-specific-common-ancestor* x' y')))
-                  (cons y (parents y))))
-          (cons x (parents x)))))</pre></td></tr><tr><td class="docs"><p>Return the most-specific type that is an ancestor of both <code>x</code> and <code>y</code>.</p>
-
-<p>  (most-specific-common-ancestor :type/BigInteger :type/Decimal) => :type/Number</p>
-</td><td class="codes"><pre class="brush: clojure">(defn most-specific-common-ancestor
-  [x y]
-  (or (most-specific-common-ancestor* x y)
-      :type/*))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">#?(:cljs
-   (defn ^:export isa
-     &quot;Is `x` the same as, or a descendant type of, `y`?&quot;
-     [x y]
-     (isa? (keyword x) (keyword y))))
-
-#?(:cljs
-   (def ^:export TYPE
-     &quot;A map of Type name (as string, without `:type/` namespace) -&gt; qualified type name as string
-
-         {\&quot;Temporal\&quot; \&quot;type/Temporal\&quot;, ...}&quot;
-     (clj-&gt;js (into {} (for [tyype (distinct (mapcat descendants [:type/* :Semantic/* :Relation/*]))]
-                         [(name tyype) (u/qualified-name tyype)])))))
-
-(coercion-hierarchies/define-types! :Coercion/UNIXNanoSeconds-&gt;DateTime #{:type/Integer :type/Decimal} :type/Instant)
-(coercion-hierarchies/define-types! :Coercion/UNIXMicroSeconds-&gt;DateTime #{:type/Integer :type/Decimal} :type/Instant)
-(coercion-hierarchies/define-types! :Coercion/UNIXMilliSeconds-&gt;DateTime #{:type/Integer :type/Decimal} :type/Instant)
-(coercion-hierarchies/define-types! :Coercion/UNIXSeconds-&gt;DateTime      #{:type/Integer :type/Decimal} :type/Instant)
-(coercion-hierarchies/define-types! :Coercion/ISO8601-&gt;Date              :type/Text                     :type/Date)
-(coercion-hierarchies/define-types! :Coercion/ISO8601-&gt;DateTime          :type/Text                     :type/DateTime)
-(coercion-hierarchies/define-types! :Coercion/ISO8601-&gt;Time              :type/Text                     :type/Time)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(coercion-hierarchies/define-types! :Coercion/YYYYMMDDHHMMSSString-&gt;Temporal :type/Text                 :type/DateTime)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(coercion-hierarchies/define-non-inheritable-type! :Coercion/YYYYMMDDHHMMSSBytes-&gt;Temporal :type/* :type/DateTime)</pre></td></tr><tr><td class="docs"><p>Whether <code>coercion-strategy</code> is allowed for <code>base-type</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn is-coercible-from?
-  [coercion-strategy base-type]
-  (or (isa? (coercion-hierarchies/base-type-hierarchy) base-type coercion-strategy)
-      (boolean (some-&gt; (coercion-hierarchies/non-descending-strategies)
-                       (get base-type)
-                       (contains? coercion-strategy)))))</pre></td></tr><tr><td class="docs"><p>Whether <code>coercion-strategy</code> coerces to <code>effective-type</code> or some subtype thereof.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn is-coercible-to?
-  [coercion-strategy effective-type]
-  (isa? (coercion-hierarchies/effective-type-hierarchy) coercion-strategy effective-type))</pre></td></tr><tr><td class="docs"><p>Whether <code>coercion-strategy</code> is allowed for <code>base-type</code> and coerces to <code>effective-type</code> or some subtype thereof.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn is-coercible?
-  [coercion-strategy base-type effective-type]
-  (and (is-coercible-from? coercion-strategy base-type)
-       (is-coercible-to? coercion-strategy effective-type)))</pre></td></tr><tr><td class="docs"><p>Possible coercions for a base type, returned as a map of <code>effective-type -&gt; #{coercion-strategy}</code></p>
-</td><td class="codes"><pre class="brush: clojure">(defn coercion-possibilities
-  [base-type]
-  (let [base-type-hierarchy      (coercion-hierarchies/base-type-hierarchy)
-        effective-type-hierarchy (coercion-hierarchies/effective-type-hierarchy)]
-    (-&gt;&gt; (for [strategy       (ancestors base-type-hierarchy base-type)
-               :when          (isa? strategy :Coercion/*)
-               :let           [effective-types (parents effective-type-hierarchy strategy)]
-               effective-type effective-types
-               :when          (not (isa? effective-type :Coercion/*))]
-           {effective-type #{strategy}})
-         (reduce (partial merge-with set/union)
-                 (select-keys (coercion-hierarchies/non-descending-strategies) [base-type]))
-         not-empty)))</pre></td></tr><tr><td class="docs"><p>Returns a boolean of whether a field base-type has any coercion strategies available.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ^:export is_coerceable
-  [base-type]
-  (boolean (not-empty (coercion-possibilities (keyword base-type)))))</pre></td></tr><tr><td class="docs"><p>The effective type resulting from a coercion.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn effective-type-for-coercion
-  [coercion]
-  (coercion-hierarchies/effective-type-for-strategy coercion))</pre></td></tr><tr><td class="docs"><p>Coercions available for a type. In cljs will return a js array of strings like ["Coercion/ISO8601->Time" ...]. In
-clojure will return a sequence of keywords.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ^:export coercions_for_type
-   [base-type]
-  (let [applicable (into () (comp (distinct) cat)
-                         (vals (coercion-possibilities (keyword base-type))))]
-     #?(:cljs
-        (clj-&gt;js (map (fn [kw] (str (namespace kw) &quot;/&quot; (name kw)))
-                      applicable))
-        :clj
-        applicable)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+</td><td class="codes"><pre class="brush: clojure">(def ^:private default-sort-column &quot;name&quot;)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private valid-sort-directions
+  #{&quot;asc&quot; &quot;desc&quot;})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private default-sort-direction &quot;asc&quot;)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private card-joins
+  [[(t2/table-name :model/QueryField) :qf] [:and
+                                            [:= :qf.card_id :c.id]
+                                            [:= :qf.explicit_reference true]]
+   [(t2/table-name :model/Field) :f] [:and
+                                      [:= :qf.field_id :f.id]
+                                      [:= :f.active false]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- inactive-fields [cards]
+  (when (seq cards)
+    (t2/select :model/QueryField
+               {:select [:qf.card_id
+                         [:f.name :field]
+                         [:t.name :table]
+                         [:t.active :table_active]]
+                :from   [[(t2/table-name :model/QueryField) :qf]]
+                :join   [[(t2/table-name :model/Field) :f] [:= :f.id :qf.field_id]
+                         [(t2/table-name :model/Table) :t] [:= :t.id :f.table_id]]
+                :where  [:and
+                         [:= :qf.explicit_reference true]
+                         [:= :f.active false]
+                         [:in :card_id (map :id cards)]]})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- inactive-errors [inactive-fields]
+  (mapv
+   (fn [{:keys [field table table_active]}]
+     {:type  (if table_active
+               :inactive-field
+               :inactive-table)
+      :table table
+      :field field})
+   inactive-fields))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- cards-with-inactive-fields
+  [sort-column sort-direction offset limit]
+  (let [sort-dir-kw           (keyword sort-direction)
+        additional-joins      (case sort-column
+                                &quot;name&quot;           []
+                                &quot;collection&quot;     [[(t2/table-name :model/Collection) :coll] [:= :coll.id :c.collection_id]]
+                                &quot;created_by&quot;     [[(t2/table-name :model/User) :u] [:= :u.id :c.creator_id]]
+                                &quot;last_edited_at&quot; [])
+        extra-selects         (case sort-column
+                                &quot;name&quot;           [:c.name]
+                                &quot;collection&quot;     [[[:max :coll.name]]
+                                                  ;; ^^ All these `max`es are silly, but they're necessary since we
+                                                  ;; group by card
+                                                  [[:not= nil [:max :coll.name]] :is_child_collection]]
+                                &quot;created_by&quot;     [:u.first_name :u.last_name :u.email]
+                                &quot;last_edited_at&quot; [:c.updated_at])
+        order-by-column       (condp = sort-column
+                                &quot;collection&quot;     [[:is_child_collection sort-dir-kw]
+                                                  [[:max :coll.name] sort-dir-kw]]
+                                &quot;created_by&quot;     [[[:coalesce [:|| :u.first_name &quot; &quot; :u.last_name]
+                                                    :u.first_name :u.last_name :u.email]
+                                                   sort-dir-kw]]
+                                [(into extra-selects [sort-dir-kw])])
+        card-query            (m/assoc-some
+                               {:select    (into [:c.*] extra-selects)
+                                :from      [[(t2/table-name :model/Card) :c]]
+                                :join      card-joins
+                                :left-join additional-joins
+                                :where     [:= :c.archived false]
+                                :order-by  order-by-column
+                                :group-by  :c.id}
+                               :limit  limit
+                               :offset offset)
+        cards                 (t2/select :model/Card card-query)
+        id-&gt;inactive-fields   (group-by :card_id (inactive-fields cards))
+        add-errors            (fn [{:keys [id] :as card}]
+                                (assoc card :errors (inactive-errors (id-&gt;inactive-fields id))))]
+    (map add-errors (t2/hydrate cards :collection :creator))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- invalid-card-count
+  []
+  (:count
+   (t2/query-one {:select [[[:count [:distinct :c.id]] :count]]
+                  :from   [[(t2/table-name :model/Card) :c]]
+                  :join   card-joins
+                  :where  [:= :c.archived false]})))</pre></td></tr><tr><td class="docs"><p>/invalid-cards</p>
+</td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
+  &quot;List of cards that have an invalid reference in their query. Shape of each card is standard, with the addition of an
+  `errors` key. Supports pagination (`offset` and `limit`), so it returns something in the shape:
+  ```
+    {:total  200
+     :data   [card1, card2, ...]
+     :limit  50
+     :offset 100
+  ```&quot;
+  [sort_column sort_direction]
+  {sort_column    [:maybe (into [:enum] valid-sort-columns)]
+   sort_direction [:maybe (into [:enum] valid-sort-directions)]}
+  (let [cards (cards-with-inactive-fields (or sort_column default-sort-column)
+                                          (or sort_direction default-sort-direction)
+                                          mw.offset-paging/*offset*
+                                          mw.offset-paging/*limit*)]
+    {:total  (invalid-card-count)
+     :data   cards
+     :limit  mw.offset-paging/*limit*
+     :offset mw.offset-paging/*offset*}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api/define-routes api/+check-superuser +auth)</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
