@@ -2873,7 +2873,47 @@ net.brehaut.ClojureTools = (function (SH) {
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/table-name :model/QueryField [_model] :query_field)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(doto :model/QueryField
-  (derive :metabase/model))</pre></td></tr><tr><td class="docs"><p>Updating QueryField from card</p>
+  (derive :metabase/model))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private reference-error-joins
+  [[(t2/table-name :model/QueryField) :qf]
+   [:and
+    [:= :qf.card_id :c.id]
+    [:= :qf.explicit_reference true]]
+   [(t2/table-name :model/Field) :f]
+   [:and
+    [:= :qf.field_id :f.id]
+    [:= :f.active false]]])</pre></td></tr><tr><td class="docs"><p>Given some HoneySQL query map with :model/Card bound as :c, restrict this query to only return cards
+with invalid references.
+For now this only handles inactive references, but in future it will also handle unknown references too.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn cards-with-reference-errors
+  [card-query-map]
+  ;; NOTE: We anticipate a schema change to support missing references that will result in left-joins and
+  ;; where clauses being appended as well.
+  (update card-query-map :join concat reference-error-joins))</pre></td></tr><tr><td class="docs"><p>Given a seq of cards, return a map of card-id => reference errors</p>
+</td><td class="codes"><pre class="brush: clojure">(defn reference-errors
+  [cards]
+  (when (seq cards)
+    (-&gt;&gt; (t2/select :model/QueryField
+                    {:select [:qf.card_id
+                              [:f.name :field]
+                              [:t.name :table]
+                              [:t.active :table_active]]
+                     :from   [[(t2/table-name :model/QueryField) :qf]]
+                     :join   [[(t2/table-name :model/Field) :f] [:= :f.id :qf.field_id]
+                              [(t2/table-name :model/Table) :t] [:= :t.id :f.table_id]]
+                     :where  [:and
+                              [:= :qf.explicit_reference true]
+                              [:= :f.active false]
+                              [:in :card_id (map :id cards)]]})
+         (map (fn [{:keys [card_id table field table_active]}]
+                [card_id {:type  (if table_active
+                                   :inactive-field
+                                   :inactive-table)
+                          :table table
+                          :field field}]))
+         (reduce (fn [acc [id error]]
+                   (update acc id u/conjv error))
+                 {}))))</pre></td></tr><tr><td class="docs"><p>Updating QueryField from card</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Clears QueryFields associated with this card and creates fresh, up-to-date-ones.</p>
 
 <p>Returns <code>nil</code> (and logs the error) if there was a parse error.</p>
