@@ -2867,13 +2867,60 @@ net.brehaut.ClojureTools = (function (SH) {
 })(SyntaxHighlighter);
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#cache.cljc" name="cache.cljc"><h1 class="project-name">cache.cljc</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.lib.cache
-  #?@(:cljs ((:require [goog.object :as gobject]))))</pre></td></tr><tr><td class="docs"><p>Caching wrapper for use in [[side-channel-cache]].</p>
+  #?@(:clj  ((:import
+              [java.util Collections Map WeakHashMap]
+              [java.util.function Function]))
+      :cljs ((:require [goog.object :as gobject]))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">#?(:clj
+   (def ^:private atom-function
+     (reify
+       Function
+       (apply [_this _arg]
+         (atom {})))))</pre></td></tr><tr><td class="docs"><p>Caching wrapper for use in [[side-channel-cache]].</p>
 
-<p>Uses an <code>(atom {})</code> as the cache and any CLJS value as the <code>subkey</code>.</p>
+<p><strong>CLJS</strong></p>
+
+<p>Attaches the cache to the <code>host</code> by mutating the JS property <code>__mbcache</code>.
+The value is an <code>(atom {})</code> with any CLJS value as the <code>subkey</code>.</p>
+
+<p><strong>CLJ</strong></p>
+
+<p>Attaches the cache to the host's metadata, if present. See [[attach-query-cache]]. Does nothing if that
+key is not found. The outer cache is a synchronized <code>WeakHashMap</code>, whose keys are the <code>host</code> maps. This is
+necessary because Clojure metadata survives <code>assoc</code> etc. but we want the caching to be distinct for each instance
+of the query. Inside that is an <code>(atom {})</code> keyed by <code>subkey</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- atomic-map-cache-fn
-  ([]                      (atom {}))
+  #?(:cljs ([^js host]
+            (if-let [cache (.-__mbcache host)]
+              cache
+              (set! (.-__mbcache host) (atom {}))))
+     :clj  ([host]
+            (when-let [^Map outer-cache (-&gt; host meta :lib/__cache)]
+              (.computeIfAbsent outer-cache host atom-function))))
   ([cache subkey _x]       (get @cache subkey))
-  ([cache subkey _x value] (swap! cache assoc subkey value)))</pre></td></tr><tr><td class="docs"><p>(CLJS only; this is a pass-through in CLJ.)</p>
+  ([cache subkey _x value] (swap! cache assoc subkey value)))</pre></td></tr><tr><td class="docs"><p>Attaches the cache to a newly constructed query.</p>
+
+<p>This uses metadata on CLJ and does nothing on CLJS.</p>
+</td><td class="codes"><pre class="brush: clojure">#?(:cljs
+   (defn- js-weak-map-cache-fn
+     &quot;Caching wrapper for use in [[side-channel-cache*]].
+     Uses a two-layer cache: the outer layer is a vanilla JS object with string `subkey`s as its keys. The values are
+     `WeakMap`s, using the input value `x` as the key and holding the cached result.
+     For example, this works for caching by `:database-id` and then by legacy query object.&quot;
+     ([^js host]                 (if-let [cache (.-__mbcache host)]
+                                   cache
+                                   (set! (.-__mbcache host) #js {})))
+     ([^js cache subkey x]       (when-let [inner-cache (gobject/get cache subkey)]
+                                   (.get inner-cache x)))
+     ([^js cache subkey x value] (let [inner-cache (gobject/setWithReturnValueIfNotSet cache subkey #(js/WeakMap.))]
+                                   (.set inner-cache x value)))))
+(defn attach-query-cache
+  [query]
+  #?(:cljs query
+     :clj  (vary-meta query (fn [mmeta]
+                              (cond-&gt; mmeta
+                                (not (contains? mmeta :lib/__cache))
+                                (assoc :lib/__cache (Collections/synchronizedMap (WeakHashMap.))))))))</pre></td></tr><tr><td class="docs"><p>(CLJS only; this is a pass-through in CLJ.)</p>
 
 <p>Attaches a JS property <code>__mbcache</code> to <code>host</code> (a JS object or CLJS map) if it doesn't already have one.</p>
 
@@ -2905,57 +2952,48 @@ and <code>x</code>.</p>
 <p>  By default, the cache is an <code>(atom {})</code> with <code>get</code> and <code>(swap! ... assoc ...)</code>; see [[atomic-map-cache-fn]].
 - <code>:force? true</code> causes the caching to be used even if the <code>host</code> does not meet the usual safety check of
   being a vanilla JS object or a CLJS map. (Eg. if the <code>host</code> is an instance of a JS class.)</p>
-</td><td class="codes"><pre class="brush: clojure">#?(:cljs
-   (defn- js-weak-map-cache-fn
-     &quot;Caching wrapper for use in [[side-channel-cache*]].
-     Uses a two-layer cache: the outer layer is a vanilla JS object with string `subkey`s as its keys. The values are
-     `WeakMap`s, using the input value `x` as the key and holding the cached result.
-     For example, this works for caching by `:database-id` and then by legacy query object.&quot;
-     ([]                         #js {})
-     ([^js cache subkey x]       (when-let [inner-cache (gobject/get cache subkey)]
-                                   (.get inner-cache x)))
-     ([^js cache subkey x value] (let [inner-cache (gobject/setWithReturnValueIfNotSet cache subkey #(js/WeakMap.))]
-                                   (.set inner-cache x value)))))
-(defn- side-channel-cache*
+</td><td class="codes"><pre class="brush: clojure">(defn- side-channel-cache*
   [subkey host x f {:keys [cache-fn force?]
                     :or {cache-fn atomic-map-cache-fn}}]
-  (comment subkey, force?, cache-fn, host) ; Avoids lint warning for half-unused inputs.
-  #?(:clj  (f x)
-     :cljs (if (or force? (object? host) (map? host))
-             (do
-               (when-not (.-__mbcache ^js host)
-                 (set! (.-__mbcache ^js host) (cache-fn)))
-               (if-let [cache (.-__mbcache ^js host)]
-                 (if-let [cached (cache-fn cache subkey x)]
-                   cached
-                   ;; Cache miss - generate the value and cache it.
-                   (let [value (f x)]
-                     (cache-fn cache subkey x value)
-                     value))
-                 (f x)))
-             (f x))))</pre></td></tr><tr><td class="docs"><p>(CLJS only; this is a pass-through in CLJ.)</p>
+  (if (or force?
+          (map? host)
+          #?(:cljs (object? host)))
+    (if-let [cache (cache-fn host)]
+      (if-let [cached (cache-fn cache subkey x)]
+        cached
+        ;; Cache miss - generate the value and cache it.
+        (let [value (f x)]
+          (cache-fn cache subkey x value)
+          value))
+      (f x))
+    (f x)))</pre></td></tr><tr><td class="docs"><p>Creates a cache on the given <code>host</code> that will be used to cache the results of some MBQL lib calls.</p>
 
-<p>Attaches a JS property <code>__mbcache</code> to <code>host</code> (a JS object or CLJS map) if it doesn't already have one.</p>
+<p>See [[atomic-map-cache-fn]] for more details on how the caches are created and stored.</p>
 
-<p>This cache forms a "personal" cache attached to <code>host</code>. <code>subkey</code> is used as the key into that cache, and on a cache
-miss the value is computed with <code>(f x)</code>.</p>
+<p>The cache is intended to be a "personal" cache attached to the <code>host</code>. <code>subkey</code> is intended to capture the context
+such as which function is being called. On a cache miss, the value is computed with <code>(f x)</code> and its result cached.</p>
 
-<p>The 3-arity uses <code>x</code> and both the cache host and the value passed to <code>f</code>. The 5-arity has separate <code>host</code> and <code>x</code>.</p>
+<p><strong>NOTE:</strong> <code>x</code> is the argument to <code>f</code> but it is generally not used as a cache key!</p>
+
+<p>The 3-arity uses <code>x</code> as both the cache <code>host</code> and the value passed to <code>f</code>. The 5-arity has separate <code>host</code> and <code>x</code>.</p>
+
+<p>If there is no existing value at <code>subkey</code> in the cache, this will call <code>(f x)</code> and cache the result at <code>subkey</code>.</p>
+
+<p>The inner cache is an <code>(atom {})</code> and any CLJ(S) value can be used as the <code>subkey</code>; typically strings are used.</p>
+
+<p><strong>CLJS Notes</strong></p>
 
 <p>If the <code>host</code> is a CLJS value like a map, the cache is ignored by CLJS since it's a raw JS property. Any change to
 the CLJS map will return a new object, effectively invalidating the cache.</p>
 
 <p>If the <code>host</code> is a JS object, it cannot have had <code>Object.freeze()</code> called on it before the first call to
-[[side-channel-cache*]]. The <code>host</code> JS object must also be treated as immutable, since if it is modified the cache will
-contain outdated values. You have been warned.</p>
-
-<p>If there is no existing value at <code>subkey</code> in the cache, this will call <code>(f x)</code> and cache the result at <code>subkey</code>.</p>
-
-<p>The cache is an <code>(atom {})</code> and any CLJS value can be used as the <code>subkey</code>; typically strings are used.</p>
+[[side-channel-cache*]]. The <code>host</code> JS object must also be treated as immutable, since if it is modified the cache
+will contain outdated values. <strong>You have been warned.</strong></p>
 
 <p>Options:
 - <code>:force? true</code> causes the caching to be used even if the <code>host</code> does not meet the usual safety check of
-  being a vanilla JS object or a CLJS map. (Eg. if the <code>host</code> is an instance of a JS class.)</p>
+  being a vanilla JS object or a Clojure map. (Eg. if the <code>host</code> is an instance of a JS class.)
+- <code>:cache-fn</code> specifies the style of caching to be used. It defaults to <code>atomic-map-cache-fn</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn side-channel-cache
   ([subkey x f]
    (side-channel-cache subkey x f false))
