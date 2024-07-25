@@ -2868,6 +2868,7 @@ net.brehaut.ClojureTools = (function (SH) {
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.api.permissions" name="metabase.api.permissions"><h1 class="project-name">metabase.api.permissions</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>/api/permissions endpoints.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.api.permissions
   (:require
+   [clojure.data :as data]
    [compojure.core :refer [DELETE GET POST PUT]]
    [honey.sql.helpers :as sql.helpers]
    [java-time.api :as t]
@@ -2886,6 +2887,7 @@ net.brehaut.ClojureTools = (function (SH) {
     :refer [PermissionsGroup]]
    [metabase.models.permissions-revision :as perms-revision]
    [metabase.models.setting :as setting :refer [defsetting]]
+   [metabase.permissions.util :as perms.u]
    [metabase.public-settings.premium-features
     :as premium-features
     :refer [defenterprise]]
@@ -2977,28 +2979,37 @@ We should come back around and delete them from the master branch in a few month
   {body :map
    skip-graph [:maybe :boolean]}
   (api/check-superuser)
-  (let [graph (mc/decode api.permission-graph/DataPermissionsGraph
-                         body
-                         (mtx/transformer
-                          mtx/string-transformer
-                          (mtx/transformer {:name :perm-graph})))]
-    (when-not (mc/validate api.permission-graph/DataPermissionsGraph graph)
-      (let [explained (mu/explain api.permission-graph/DataPermissionsGraph graph)]
+  (let [new-graph (mc/decode api.permission-graph/StrictApiPermissionsGraph
+                             body
+                             (mtx/transformer
+                              mtx/string-transformer
+                              (mtx/transformer {:name :perm-graph})))]
+    (when-not (mc/validate api.permission-graph/DataPermissionsGraph new-graph)
+      (let [explained (mu/explain api.permission-graph/DataPermissionsGraph new-graph)]
         (throw (ex-info (tru &quot;Cannot parse permissions graph because it is invalid: {0}&quot; (pr-str explained))
                         {:status-code 400}))))
     (t2/with-transaction [_conn]
-      (data-perms.graph/update-data-perms-graph! (dissoc graph :sandboxes :impersonations))
-      (let [sandbox-updates        (:sandboxes graph)
-            sandboxes              (when sandbox-updates
-                                     (upsert-sandboxes! sandbox-updates))
-            impersonation-updates  (:impersonations graph)
-            impersonations         (when impersonation-updates
-                                     (insert-impersonations! impersonation-updates))
-            group-ids (-&gt; graph :groups keys)]
-        (merge {:revision (perms-revision/latest-id)}
-               (when-not skip-graph {:groups (:groups (data-perms.graph/api-graph {:group-ids group-ids}))})
-               (when sandboxes {:sandboxes sandboxes})
-               (when impersonations {:impersonations impersonations}))))))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
+      (let [group-ids (-&gt; new-graph :groups keys)
+            old-graph (data-perms.graph/api-graph {:group-ids group-ids})
+            [old new] (data/diff (:groups old-graph)
+                                 (:groups new-graph))
+            old       (or old {})
+            new       (or new {})]
+        (perms.u/log-permissions-changes old new)
+        (perms.u/check-revision-numbers old-graph new-graph)
+        (data-perms.graph/update-data-perms-graph! {:groups new})
+        (perms.u/save-perms-revision! :model/PermissionsRevision (:revision old-graph) old new)
+        (let [sandbox-updates        (:sandboxes new-graph)
+              sandboxes              (when sandbox-updates
+                                       (upsert-sandboxes! sandbox-updates))
+              impersonation-updates  (:impersonations new-graph)
+              impersonations         (when impersonation-updates
+                                       (insert-impersonations! impersonation-updates))
+              group-ids (-&gt; new-graph :groups keys)]
+          (merge {:revision (perms-revision/latest-id)}
+                 (when-not skip-graph {:groups (:groups (data-perms.graph/api-graph {:group-ids group-ids}))})
+                 (when sandboxes {:sandboxes sandboxes})
+                 (when impersonations {:impersonations impersonations})))))))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
 |                                          PERMISSIONS GROUP ENDPOINTS                                           |
 +----------------------------------------------------------------------------------------------------------------+</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Return a map of <code>PermissionsGroup</code> ID -> number of members in the group. (This doesn't include entries for empty

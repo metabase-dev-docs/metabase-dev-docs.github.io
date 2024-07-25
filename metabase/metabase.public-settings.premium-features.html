@@ -2989,7 +2989,7 @@ at a time.</p>
   (when-let [max-users (max-users-allowed)]
     (when (&gt; (t2/count :model/User :is_active true, :type :personal) max-users)
       (throw (Exception. (trs &quot;You have reached the maximum number of users ({0}) for your plan. Please upgrade to add more users.&quot; max-users))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private fetch-token-status* :- TokenStatus
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- fetch-token-status* :- TokenStatus
   &quot;Fetch info about the validity of `token` from the MetaStore.&quot;
   [token :- TokenStr]
   ;; NB that we fetch any settings from this thread, not inside on of the futures in the inner fetch calls.  We
@@ -3053,7 +3053,7 @@ because checks failed.</p>
       (locking lock
         (f token)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(declare token-valid-now?)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private valid-token-&gt;features* :- [:set ms/NonBlankString]
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- valid-token-&gt;features* :- [:set ms/NonBlankString]
   [token :- TokenStr]
   (let [{:keys [valid status features error-details] :as token-status} (fetch-token-status token)]
     ;; if token isn't valid throw an Exception with the `:status` message
@@ -3291,16 +3291,17 @@ availability of EE code and the necessary premium feature. Returns a fn which, w
 of the EE implementation, the OSS implementation, or the fallback function.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn dynamic-ee-oss-fn
   [ee-ns ee-fn-name]
-  (fn [&amp; args]
-    (u/ignore-exceptions (classloader/require ee-ns))
-    (let [{:keys [ee oss feature fallback]} (get @registry ee-fn-name)]
-      (cond
-        (and ee (check-feature feature))
-        (apply ee args)
-        (and ee (fn? fallback))
-        (apply fallback args)
-        :else
-        (apply oss args)))))</pre></td></tr><tr><td class="docs"><p>Throws an exception if the required :feature option is not present.</p>
+  (let [try-require-ee-ns-once (delay (u/ignore-exceptions (classloader/require ee-ns)))]
+    (fn [&amp; args]
+      @try-require-ee-ns-once
+      (let [{:keys [ee oss feature fallback]} (get @registry ee-fn-name)]
+        (cond
+          (and ee (check-feature feature))
+          (apply ee args)
+          (and ee (fn? fallback))
+          (apply fallback args)
+          :else
+          (apply oss args))))))</pre></td></tr><tr><td class="docs"><p>Throws an exception if the required :feature option is not present.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- validate-ee-args
   [{feature :feature :as options}]
   (when-not feature

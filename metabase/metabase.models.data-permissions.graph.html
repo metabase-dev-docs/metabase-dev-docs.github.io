@@ -2874,10 +2874,8 @@ keys and values stored in the <code>data_permissions</code> table.</p>
 schema.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.models.data-permissions.graph
   (:require
-   [clojure.data :as data]
    [clojure.string :as str]
    [medley.core :as m]
-   [metabase.api.common :as api]
    [metabase.api.permission-graph :as api.permission-graph]
    [metabase.audit :as audit]
    [metabase.models.data-permissions :as data-perms]
@@ -2888,7 +2886,6 @@ schema.</p>
     :refer [defenterprise]]
    [metabase.util :as u]
    [metabase.util.i18n :refer [tru]]
-   [metabase.util.log :as log]
    [metabase.util.malli :as mu]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs"><p>See also: [[data-perms/Permissions]]</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private -&gt;api-keys
@@ -2932,7 +2929,7 @@ schema.</p>
   (when-not (ellide? type value)
     [(-&gt;api-keys type) ((-&gt;api-vals type) value)]))</pre></td></tr><tr><td class="docs"><p>Helper to transform 'leaf' values with table-level schemas in the data permissions graph into an API-style data permissions value.
  Coalesces permissions at the schema level if all table-level permissions within a schema are identical.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private api-table-perms
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- api-table-perms
   [type :- data-perms/PermissionType
    schema-&gt;table-id-&gt;api-val]
   (let [transform-val         (fn [perm-val] ((-&gt;api-vals type) perm-val))
@@ -2957,7 +2954,7 @@ schema.</p>
         (assoc-in {} legacy-path (api-table-perms perm-key perm-value))
         (not (ellide? perm-key perm-value))
         (assoc-in {} legacy-path ((-&gt;api-vals perm-key) perm-value))))))</pre></td></tr><tr><td class="docs"><p>Transforms a 'leaf' value with db-level or table-level perms in the data permissions graph into an API-style data permissions value.
-There's some tricks in here that ellide table-level and table-level permissions values that are the most-permissive setting.</p>
+There's some tricks in here that ellide schema-level and table-level permissions values that are the most-permissive setting.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- rename-perm
   [perm-map]
   (let [granular-keys [:perms/download-results :perms/manage-table-metadata
@@ -3004,7 +3001,7 @@ For every db in the incoming graph, adds on admin permissions.</p>
          (filter (fn [[_ v]] (not (or (nil? v) (and (map? v) (empty? v))))))
          (into {}))
     m))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn api-graph :- api.permission-graph/StrictData
+</td><td class="codes"><pre class="brush: clojure">(mu/defn api-graph :- api.permission-graph/DataPermissionsGraph
   &quot;Converts the backend representation of the data permissions graph to the representation we send over the API. Mainly
   renames permission types and values from the names stored in the database to the ones expected by the frontend.
   - Converts DB key names to API key names
@@ -3175,44 +3172,15 @@ EE-specific -- OSS impl is a no-op, since connection impersonation is an EE-only
         (data-perms/set-database-permission! group-id db-id :perms/view-data :blocked)))))</pre></td></tr><tr><td class="docs"><p>Check that the changes coming in does not attempt to change audit database permission. Admins should
 change these permissions implicitly via collection permissions.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn check-audit-db-permissions
-  [changes]
-  (let [changes-ids (-&gt;&gt; changes
+  [group-updates]
+  (let [changes-ids (-&gt;&gt; group-updates
                          vals
                          (map keys)
                          (apply concat))]
     (when (some #{audit/audit-db-id} changes-ids)
       (throw (ex-info (tru
                        (str &quot;Audit database permissions can only be changed by updating audit collection permissions.&quot;))
-                      {:status-code 400})))))</pre></td></tr><tr><td class="docs"><p>Log changes to the permissions graph.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn log-permissions-changes
-  [old new]
-  (log/debug &quot;Changing permissions&quot;
-             &quot;\n FROM:&quot; (u/pprint-to-str :magenta old)
-             &quot;\n TO:&quot;   (u/pprint-to-str :blue new)))</pre></td></tr><tr><td class="docs"><p>Check that the revision number coming in as part of <code>new-graph</code> matches the one from <code>old-graph</code>. This way we can
-make sure people don't submit a new graph based on something out of date, which would otherwise stomp over changes
-made in the interim. Return a 409 (Conflict) if the numbers don't match up.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn check-revision-numbers
-  [old-graph new-graph]
-  (when (not= (:revision old-graph) (:revision new-graph))
-    (throw (ex-info (tru
-                      (str &quot;Looks like someone else edited the permissions and your data is out of date. &quot;
-                           &quot;Please fetch new data and try again.&quot;))
-                    {:status-code 409}))))</pre></td></tr><tr><td class="docs"><p>Save changes made to permission graph for logging/auditing purposes.
-This doesn't do anything if <code>*current-user-id*</code> is unset (e.g. for testing or REPL usage).
-*  <code>model</code>   -- revision model, should be one of
-                [PermissionsRevision, CollectionPermissionGraphRevision, ApplicationPermissionsRevision]
-*  <code>before</code>  -- the graph before the changes
-*  <code>changes</code> -- set of changes applied in this revision.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn save-perms-revision!
-  [model current-revision before changes]
-  (when api/*current-user-id*
-    (first (t2/insert-returning-instances! model
-                                           ;; manually specify ID here so if one was somehow inserted in the meantime in the fraction of a second since we
-                                           ;; called `check-revision-numbers` the PK constraint will fail and the transaction will abort
-                                           :id      (inc current-revision)
-                                           :before  before
-                                           :after   changes
-                                           :user_id api/*current-user-id*))))</pre></td></tr><tr><td class="docs"><p>Takes an API-style perms graph and sets the permissions in the database accordingly.</p>
+                      {:status-code 400})))))</pre></td></tr><tr><td class="docs"><p>Takes an API-style perms graph and sets the permissions in the database accordingly.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn update-data-perms-graph!*
   ([graph]
    (doseq [[group-id group-changes] graph]
@@ -3226,24 +3194,17 @@ This doesn't do anything if <code>*current-user-id*</code> is unset (e.g. for te
          :details        (update-details-perms! group-id db-id new-perms)))))
   ;; The following arity is provided soley for convenience for tests/REPL usage
   ([ks :- [:vector :any] new-value]
-   (update-data-perms-graph!* (assoc-in (-&gt; api-graph :groups) ks new-value))))</pre></td></tr><tr><td class="docs"><p>Takes an API-style perms graph and sets the permissions in the database accordingly. Additionally validates the revision number,
- logs the changes, and ensures impersonations and sandboxes are consistent.</p>
+   (update-data-perms-graph!* (assoc-in (-&gt; api-graph :groups) ks new-value))))</pre></td></tr><tr><td class="docs"><p>Takes an API-style perms graph and sets the permissions in the database accordingly. Additionally ensures
+impersonations and sandboxes are consistent if necessary.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn update-data-perms-graph!
-  ([new-graph :- api.permission-graph/StrictData]
-   (let [group-ids (-&gt; new-graph :groups keys)
-         old-graph (api-graph {:group-ids group-ids})
-         [old new] (data/diff (:groups old-graph) (:groups new-graph))
-         old       (or old {})
-         new       (or new {})]
-     (when (or (seq old) (seq new))
-       (log-permissions-changes old new)
-       (check-revision-numbers old-graph new-graph)
-       (check-audit-db-permissions new)
+  ([graph-updates :- api.permission-graph/DataPermissionsGraph]
+   (when (seq graph-updates)
+     (let [group-updates (:groups graph-updates)]
+       (check-audit-db-permissions group-updates)
        (t2/with-transaction [_conn]
-         (update-data-perms-graph!* new)
-         (save-perms-revision! :model/PermissionsRevision (:revision old-graph) old new)
-         (delete-impersonations-if-needed-after-permissions-change! new)
-         (delete-gtaps-if-needed-after-permissions-change! new)))))
+         (update-data-perms-graph!* group-updates)
+         (delete-impersonations-if-needed-after-permissions-change! group-updates)
+         (delete-gtaps-if-needed-after-permissions-change! group-updates)))))
   ;; The following arity is provided soley for convenience for tests/REPL usage
   ([ks :- [:vector :any] new-value]
    (update-data-perms-graph! (assoc-in (api-graph) (cons :groups ks) new-value))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;

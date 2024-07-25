@@ -2876,11 +2876,11 @@ details and for the code for generating and updating the <em>data</em> permissio
    [metabase.db.query :as mdb.query]
    [metabase.models.collection :as collection :refer [Collection]]
    [metabase.models.collection-permission-graph-revision :as c-perm-revision]
-   [metabase.models.data-permissions.graph :as data-perms.graph]
    [metabase.models.permissions :as perms :refer [Permissions]]
    [metabase.models.permissions-group
     :as perms-group
     :refer [PermissionsGroup]]
+   [metabase.permissions.util :as perms.u]
    [metabase.public-settings.premium-features :refer [defenterprise]]
    [metabase.util :as u]
    [metabase.util.honey-sql-2 :as h2x]
@@ -2905,20 +2905,20 @@ details and for the code for generating and updating the <em>data</em> permissio
 </td><td class="codes"><pre class="brush: clojure">(defn- group-id-&gt;permissions-set []
   (into {} (for [[group-id perms] (group-by :group_id (t2/select Permissions))]
              {group-id (set (map :object perms))})))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private perms-type-for-collection :- CollectionPermissions
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- perms-type-for-collection :- CollectionPermissions
   [permissions-set collection-or-id]
   (cond
     (perms/set-has-full-permissions? permissions-set (perms/collection-readwrite-path collection-or-id)) :write
     (perms/set-has-full-permissions? permissions-set (perms/collection-read-path collection-or-id))      :read
     :else                                                                                                :none))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private group-permissions-graph :- GroupPermissionsGraph
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- group-permissions-graph :- GroupPermissionsGraph
   &quot;Return the permissions graph for a single group having `permissions-set`.&quot;
   [collection-namespace permissions-set collection-ids]
   (into
    {:root (perms-type-for-collection permissions-set (assoc collection/root-collection :namespace collection-namespace))}
    (for [collection-id collection-ids]
      {collection-id (perms-type-for-collection permissions-set collection-id)})))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private non-personal-collection-ids :- [:set ms/PositiveInt]
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- non-personal-collection-ids :- [:set ms/PositiveInt]
   &quot;Return a set of IDs of all Collections that are neither Personal Collections nor descendants of Personal
   Collections (i.e., things that you can set Permissions for, and that should go in the graph.)&quot;
   [collection-namespace :- [:maybe ms/KeywordOrString]]
@@ -2977,7 +2977,7 @@ details and for the code for generating and updating the <em>data</em> permissio
          modify-instance-analytics-for-admins))))</pre></td></tr><tr><td class="docs"><p>-------------------------------------------------- Update Graph --------------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Update the permissions for group ID with <code>group-id</code> on collection with ID
 <code>collection-id</code> in the optional <code>collection-namespace</code> to <code>new-collection-perms</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private update-collection-permissions!
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- update-collection-permissions!
   [collection-namespace :- [:maybe ms/KeywordOrString]
    group-id             :- ms/PositiveInt
    collection-id        :- [:or [:= :root] ms/PositiveInt]
@@ -2991,7 +2991,7 @@ details and for the code for generating and updating the <em>data</em> permissio
       :write (perms/grant-collection-readwrite-permissions! group-id collection-id)
       :read  (perms/grant-collection-read-permissions! group-id collection-id)
       :none  nil)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private update-group-permissions!
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- update-group-permissions!
   [collection-namespace :- [:maybe ms/KeywordOrString]
    group-id             :- ms/PositiveInt
    new-group-perms      :- GroupPermissionsGraph]
@@ -3032,7 +3032,7 @@ To run this syncronously deref the non-nil return value.</p>
          new-perms          (into {} (for [[group-id collection-id-&gt;perms] new-perms]
                                        [group-id (select-keys collection-id-&gt;perms (keys (get old-perms group-id)))]))
          [diff-old changes] (data/diff old-perms new-perms)]
-     (data-perms.graph/check-revision-numbers old-graph new-graph)
+     (perms.u/check-revision-numbers old-graph new-graph)
      (when (seq changes)
        (let [revision-id (t2/with-transaction [_conn]
                            (doseq [[group-id changes] changes]
@@ -3040,7 +3040,7 @@ To run this syncronously deref the non-nil return value.</p>
                              (update-group-permissions! collection-namespace group-id changes))
                            (:id (create-perms-revision! (:revision old-graph))))]
          ;; The graph is updated infrequently, but `diff-old` and `old-graph` can get huge on larger instances.
-         (data-perms.graph/log-permissions-changes diff-old changes)
+         (perms.u/log-permissions-changes diff-old changes)
          (fill-revision-details! revision-id (assoc old-graph :namespace collection-namespace) changes))))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
