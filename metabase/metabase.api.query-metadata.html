@@ -2868,128 +2868,134 @@ net.brehaut.ClojureTools = (function (SH) {
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.api.query-metadata" name="metabase.api.query-metadata"><h1 class="project-name">metabase.api.query-metadata</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.api.query-metadata
   (:require
-   [metabase.api.database :as api.database]
    [metabase.api.field :as api.field]
    [metabase.api.table :as api.table]
-   [metabase.lib.core :as lib]
-   [metabase.lib.metadata.jvm :as lib.metadata.jvm]
-   [metabase.lib.metadata.protocols :as lib.metadata.protocols]
+   [metabase.legacy-mbql.normalize :as mbql.normalize]
    [metabase.lib.util :as lib.util]
    [metabase.models.interface :as mi]
-   [metabase.util.log :as log]
+   [metabase.util :as u]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- fetch-or-warn
-  [{entity-type :type entity-id :id} f &amp; f-args]
-  (try
-    (apply f entity-id f-args)
-    (catch Exception e
-      (log/warnf &quot;Error in dashboard metadata %s %s: %s&quot; entity-type entity-id (ex-message e)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- partition-table-ids
+</td><td class="codes"><pre class="brush: clojure">(defn- get-databases
   [ids]
-  {:card-ids  (keep lib.util/legacy-string-table-id-&gt;card-id ids)
-   :table-ids (remove lib.util/legacy-string-table-id-&gt;card-id ids)})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- metadata-for-table-dependents
-  [table-dependents]
-  (let [{:keys [card-ids table-ids]} (partition-table-ids (map :id table-dependents))
-        card-metadatas (api.table/batch-fetch-card-query-metadatas card-ids)
-        table-metadatas (api.table/batch-fetch-table-query-metadatas table-ids)
-        all-metadatas (-&gt; []
-                          (into (sort-by :id table-metadatas))
-                          (into (sort-by :id card-metadatas)))]
-    (when (&lt; (count all-metadatas) (count table-dependents))
-      (log/warn &quot;Some (possibly virtual) tables are not readable by the current user&quot;))
-    all-metadatas))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- metadata-for-field-dependents
-  [field-dependents]
-  (let [metadatas (api.field/get-fields (map :id field-dependents))]
-    (when (&lt; (count metadatas) (count field-dependents))
-      (log/warn &quot;Some fields are not readable by the current user&quot;))
-    (vec (sort-by :id metadatas))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- metadata-for-dependents [dependents]
-  {:tables (-&gt;&gt; (:table dependents)
-                ;; Can be int or &quot;card__&lt;id&gt;&quot;
-                metadata-for-table-dependents)
-   :databases (-&gt;&gt; (:database dependents)
-                   (sort-by :id)
-                   (into []
-                         (keep #(fetch-or-warn % api.database/get-database {}))))
-   :fields (-&gt;&gt; (:field dependents)
-                metadata-for-field-dependents)})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- dependents-for-cards [cards]
-  (let [cards-by-db (group-by :database_id cards)
-        db-&gt;mp (into {} (map (juxt identity lib.metadata.jvm/application-database-metadata-provider)
-                             (keys cards-by-db)))]
-    (doseq [[database-id cards] cards-by-db]
-      (let [{:keys [card-ids table-ids]}
-            (-&gt;&gt; cards
-                 (mapcat (comp lib.util/collect-source-tables #(-&gt; % :dataset_query :query)))
-                 partition-table-ids)
-            real-card-ids (filter pos-int? (concat (map :id cards) card-ids)) ; xray cards don't have real ids
-            mp (db-&gt;mp database-id)
-            table-ids (into (set table-ids)
-                            (keep :table-id)
-                            (lib.metadata.protocols/metadatas mp :metadata/card real-card-ids))]
-        (lib.metadata.protocols/metadatas mp :metadata/table table-ids)
-        (doseq [metadata-type [:metadata/column :metadata/metric]]
-          (lib.metadata.protocols/metadatas-for-tables mp metadata-type table-ids))))
-    (group-by :type (set (mapcat (fn [{card-type :type card-id :id :keys [database_id dataset_query]}]
-                                   (let [mp (db-&gt;mp database_id)
-                                         query (lib/query mp dataset_query)]
-                                     (if (and (pos-int? card-id) (some? card-type))
-                                       (lib/dependent-metadata query card-id card-type)
-                                       ;; xray cards don't have real ids
-                                       (lib/dependent-metadata query nil :question)))) cards)))))</pre></td></tr><tr><td class="docs">
+  (when (seq ids)
+    (into [] (filter mi/can-read?)
+          (t2/select :model/Database :id [:in ids]))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- field-ids-&gt;table-ids
+  [field-ids]
+  (if (seq field-ids)
+    (t2/select-fn-set :table_id :model/Field :id [:in field-ids])
+    #{}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- split-tables-and-legacy-card-refs [source-ids]
+  (-&gt; (reduce (fn [m src]
+                (if-let [card-id (lib.util/legacy-string-table-id-&gt;card-id src)]
+                  (update m :cards conj! card-id)
+                  (update m :tables conj! src)))
+              {:cards  (transient #{})
+               :tables (transient #{})}
+              source-ids)
+      (update-vals persistent!)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- query-&gt;template-tag-field-ids [query]
+  (when-let [template-tags (some-&gt; query :native :template-tags vals seq)]
+    (for [{tag-type :type, [dim-tag id _opts] :dimension} template-tags
+          :when (and (= tag-type :dimension)
+                     (= dim-tag :field)
+                     (integer? id))]
+      id)))</pre></td></tr><tr><td class="docs"><p>Fetch dependent metadata for ad-hoc queries.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- batch-fetch-query-metadata*
+  [queries]
+  (let [source-ids                (into #{} (mapcat #(lib.util/collect-source-tables (:query %)))
+                                        queries)
+        {source-table-ids :tables
+         source-card-ids  :cards} (split-tables-and-legacy-card-refs source-ids)
+        source-tables             (concat (api.table/batch-fetch-table-query-metadatas source-table-ids)
+                                          (api.table/batch-fetch-card-query-metadatas source-card-ids))
+        fk-target-field-ids       (into #{} (comp (mapcat :fields)
+                                                  (keep :fk_target_field_id))
+                                        source-tables)
+        fk-target-table-ids       (into #{} (remove source-table-ids)
+                                        (field-ids-&gt;table-ids fk-target-field-ids))
+        fk-target-tables          (api.table/batch-fetch-table-query-metadatas fk-target-table-ids)
+        tables                    (concat source-tables fk-target-tables)
+        template-tag-field-ids    (into #{} (mapcat query-&gt;template-tag-field-ids) queries)
+        query-database-ids        (into #{} (keep :database) queries)
+        database-ids              (into query-database-ids
+                                        (keep :db_id)
+                                        tables)]
+    {;; TODO: This is naive and issues multiple queries currently. That's probably okay for most dashboards,
+     ;; since they tend to query only a handful of databases at most.
+     :databases (sort-by :id (get-databases database-ids))
+     :tables    (sort-by (comp str :id) tables)
+     :fields    (or (sort-by :id (api.field/get-fields template-tag-field-ids))
+                    [])}))</pre></td></tr><tr><td class="docs"><p>Fetch dependent metadata for ad-hoc queries.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn batch-fetch-query-metadata
+  [queries]
+  (batch-fetch-query-metadata* (map mbql.normalize/normalize queries)))</pre></td></tr><tr><td class="docs"><p>Fetch dependent metadata for cards.</p>
+
+<p>Models and metrics need their definitions walked as well as their own, card-level metadata.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn batch-fetch-card-metadata
+  [cards]
+  (let [queries (into (vec (keep :dataset_query cards)) ; All the queries on all the cards
+                      ;; Plus the card-level metadata of each model.
+                      (comp (filter (comp #{:model} :type))
+                            (map (fn [card] {:query {:source-table (str &quot;card__&quot; (u/the-id card))}})))
+                      cards)]
+    (batch-fetch-query-metadata queries)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- click-behavior-&gt;link-details
+  [{:keys [linkType type targetId] :as _click-behavior}]
+  (when (= type &quot;link&quot;)
+    (when-let [link-type (case linkType
+                           &quot;question&quot;  :card
+                           &quot;dashboard&quot; :dashboard
+                           nil)]
+      {:type link-type
+       :id   targetId})))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- get-cards
   [ids]
   (when (seq ids)
-    (let [hydrate #(t2/hydrate % :can_write)]
-      (-&gt;&gt; (t2/select :model/Card :id [:in ids])
-           (filter mi/can-read?)
-           hydrate))))</pre></td></tr><tr><td class="docs"><p>Fetches dependent query-metadata for a given dashboard</p>
-</td><td class="codes"><pre class="brush: clojure">(defn dashboard-metadata
-  [dashboard]
-  (let [dashcards (:dashcards dashboard)
-        links (group-by :type (set (for [dashcard dashcards
-                                         :let [top-click-behavior (get-in dashcard [:visualization_settings :click_behavior])
-                                               col-click-behaviors (keep (comp :click_behavior val)
-                                                                         (get-in dashcard [:visualization_settings :column_settings]))]
-                                         {:keys [linkType type targetId]} (conj col-click-behaviors top-click-behavior)
-                                         :when (and (= type &quot;link&quot;)
-                                                    (contains? #{&quot;question&quot; &quot;dashboard&quot;} linkType))]
-                                     {:type (case linkType
-                                              &quot;question&quot; :card
-                                              &quot;dashboard&quot; :dashboard)
-                                      :id targetId})))
-        link-cards (-&gt;&gt; (:card links)
-                        (map :id)
-                        get-cards
-                        (sort-by :id)
-                        vec)
-        cards (-&gt;&gt; (concat
-                    (for [{:keys [card series]} dashcards
-                          :let [all (conj series card)]
-                          card all]
-                      card)
-                    link-cards)
-                   (filter :dataset_query)
-                   (into []))
-        dependents (dependents-for-cards cards)
-        dashboard-specific {:cards link-cards
-                            :dashboards (-&gt;&gt; (:dashboard links)
-                                             (sort-by :id)
-                                             (into []
-                                                   (keep #(fetch-or-warn % (requiring-resolve 'metabase.api.dashboard/get-dashboard)))))}]
-    (merge (metadata-for-dependents dependents)
-           dashboard-specific)))</pre></td></tr><tr><td class="docs"><p>Fetches dependent query-metadata for a given card.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn card-metadata
-  [card]
-  (metadata-for-dependents (dependents-for-cards [card])))</pre></td></tr><tr><td class="docs"><p>Fetches dependent query-metadata for a given ad-hoc query.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn adhoc-query-metadata
-  [{:keys [database] :as dataset-query}]
-  (let [mp (lib.metadata.jvm/application-database-metadata-provider database)
-        query (lib/query mp dataset-query)
-        dependents (lib/dependent-metadata query nil :question)]
-    (metadata-for-dependents (group-by :type dependents))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+    (let [cards (into [] (filter mi/can-read?)
+                      (t2/select :model/Card :id [:in ids]))]
+      (t2/hydrate cards :can_write))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- dashcard-&gt;click-behaviors [dashcard]
+  (let [viz-settings        (:visualization_settings dashcard)
+        top-click-behavior  (:click_behavior viz-settings)
+        col-click-behaviors (keep (comp :click_behavior val)
+                                  (:column_settings viz-settings))]
+    (conj col-click-behaviors top-click-behavior)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- batch-fetch-linked-dashboards
+  [dashboard-ids]
+  (when (seq dashboard-ids)
+    (let [dashboards (-&gt;&gt; (t2/select :model/Dashboard :id [:in dashboard-ids])
+                          (filter mi/can-read?))]
+      (t2/hydrate dashboards
+                  :can_write
+                  :param_fields))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- batch-fetch-dashboard-links
+  [dashcards]
+  (let [links      (group-by :type
+                             (into #{} (comp (mapcat dashcard-&gt;click-behaviors)
+                                             (keep click-behavior-&gt;link-details))
+                                   dashcards))
+        link-cards (get-cards (into #{} (map :id) (:card links)))
+        dashboards (-&gt;&gt; (:dashboard links)
+                        (into #{} (map :id))
+                        batch-fetch-linked-dashboards)]
+    {:cards      (sort-by (comp str :id) link-cards)
+     :dashboards (sort-by :id dashboards)}))</pre></td></tr><tr><td class="docs"><p>Fetch dependent metadata for dashboards.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn batch-fetch-dashboard-metadata
+  [dashboards]
+  (let [dashcards (mapcat :dashcards dashboards)
+        cards     (for [{:keys [card series]} dashcards
+                        :let   [all (conj series card)]
+                        card all]
+                    card)
+        card-ids  (into #{} (map :id) cards)
+        links     (batch-fetch-dashboard-links dashcards)]
+    (merge
+      (-&gt;&gt; (remove (comp card-ids :id) (:cards links))
+           (concat cards)
+           batch-fetch-card-metadata)
+      {:cards      (or (:cards links)      [])
+       :dashboards (or (:dashboards links) [])})))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
