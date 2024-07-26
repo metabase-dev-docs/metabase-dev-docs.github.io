@@ -2899,11 +2899,14 @@ its own sandbox). If so, we don't enforce the sandbox.</p>
                                                          :unrestricted
                                                          db_id
                                                          table_id))
-      true)))</pre></td></tr><tr><td class="docs"><p>Given a user-id and optional set of table-ids, return the sandboxes that should be enforced for the current user on
-any of the tables. A sandbox is not enforced if the user is in a different permissions group that grants full access
-to the table.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn enforced-sandboxes-for
-  [user-id &amp; [table-ids]]
+      true)))</pre></td></tr><tr><td class="docs"><p>Given a user-id, returns the set of sandboxes that should be enforced for the provided user ID. This result is cached
+for the duration of a request in [[metabase.models.data-permissions/<em>sandboxes-for-user</em>]].</p>
+
+<p>WARNING: This should NOT be used directly for sandboxing enforcement. Use <code>*sandboxes-for-user*</code> or
+<code>enforced-sandboxes-for-tables</code> below, so that the cache is used.</p>
+</td><td class="codes"><pre class="brush: clojure">(defenterprise enforced-sandboxes-for-user
+  :feature :sandboxes
+  [user-id]
   (let [user-group-ids           (user/group-ids user-id)
         sandboxes-with-group-ids (t2/hydrate
                                   (t2/select :model/GroupTableAccessPolicy
@@ -2912,9 +2915,7 @@ to the table.</p>
                                               :from [[:permissions_group_membership :pgm]]
                                               :left-join [[:sandboxes :s] [:= :s.group_id :pgm.group_id]]
                                               :where [:and
-                                                      [:= :pgm.user_id user-id]
-                                                      (when table-ids
-                                                       [:in :s.table_id table-ids])]})
+                                                      [:= :pgm.user_id user-id]]})
                                   :table)
         group-id-&gt;sandboxes (-&gt;&gt; sandboxes-with-group-ids
                                  (group-by :group_id)
@@ -2923,7 +2924,12 @@ to the table.</p>
                                                     (filter :table_id)
                                                     (into #{})))))]
     (filter #(enforce-sandbox? user-group-ids group-id-&gt;sandboxes %)
-            (reduce set/union #{} (vals group-id-&gt;sandboxes)))))</pre></td></tr><tr><td class="docs"><p>Returns true if the currently logged in user has any enforced sandboxes. Throws an exception if no current user is
+            (reduce set/union #{} (vals group-id-&gt;sandboxes)))))</pre></td></tr><tr><td class="docs"><p>Given collection of table-ids, return the sandboxes that should be enforced for the current user on any of the tables. A
+sandbox is not enforced if the user is in a different permissions group that grants full access to the table.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn enforced-sandboxes-for-tables
+  [table-ids]
+  (let [enforced-sandboxes-for-user @data-perms/*sandboxes-for-user*]
+    (filter #((set table-ids) (:table_id %)) enforced-sandboxes-for-user)))</pre></td></tr><tr><td class="docs"><p>Returns true if the currently logged in user has any enforced sandboxes. Throws an exception if no current user is
 bound.</p>
 </td><td class="codes"><pre class="brush: clojure">(defenterprise sandboxed-user?
   :feature :sandboxes
@@ -2931,7 +2937,7 @@ bound.</p>
   (boolean
    (when-not *is-superuser?*
      (if *current-user-id*
-       (seq (enforced-sandboxes-for *current-user-id*))
+       (seq @data-perms/*sandboxes-for-user*)
        ;; If no *current-user-id* is bound we can't check for sandboxes, so we should throw in this case to avoid
        ;; returning `false` for users who should actually be sandboxes.
        (throw (ex-info (str (tru &quot;No current user found&quot;))

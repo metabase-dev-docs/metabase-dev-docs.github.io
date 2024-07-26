@@ -2877,6 +2877,7 @@ these drivers define additional multimethods that child drivers should implement
    [clojure.set :as set]
    [clojure.string :as str]
    [java-time.api :as t]
+   [metabase.auth-provider :as auth-provider]
    [metabase.driver.impl :as driver.impl]
    [metabase.models.setting :as setting :refer [defsetting]]
    [metabase.plugins.classloader :as classloader]
@@ -3655,7 +3656,27 @@ use [[metabase.util.ssh/with-ssh-tunnel]]. See #24445 for more information.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti incorporate-ssh-tunnel-details
   {:added &quot;0.39.0&quot; :arglists '([driver db-details])}
   dispatch-on-uninitialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Normalizes db-details for the given driver. This is to handle migrations that are too difficult to perform via
+  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>A multimethod for driver specific behavior required to incorporate response of an auth-provider into the DB details.
+ In most cases this means setting the :password and/or :username based on the auth-provider and its response.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmulti incorporate-auth-provider-details
+  {:added &quot;0.50.17&quot; :arglists '([driver auth-provider auth-provider-response details])}
+  dispatch-on-initialized-driver
+  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod incorporate-auth-provider-details :default
+  [_driver _auth-provider _auth-provider-response details]
+  details)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod incorporate-auth-provider-details :sql-jdbc
+  [_driver auth-provider auth-provider-response details]
+  (case auth-provider
+    (:oauth :azure-managed-identity)
+    (let [{:keys [access_token expires_in]} auth-provider-response]
+      (cond-&gt; (assoc details :password access_token)
+        expires_in (assoc :password-expiry-timestamp (+ (System/currentTimeMillis)
+                                                        (* (- (parse-long expires_in)
+                                                              auth-provider/azure-auth-token-renew-slack-seconds)
+                                                           1000)))))
+
+    (merge details auth-provider-response)))</pre></td></tr><tr><td class="docs"><p>Normalizes db-details for the given driver. This is to handle migrations that are too difficult to perform via
 regular Liquibase queries. This multimethod will be called from a <code>:post-select</code> handler within the database model.
 The full <code>database</code> model object is passed as the 2nd parameter, and the multimethod implementation is expected to
 update the value for <code>:details</code>. The default implementation is essentially <code>identity</code> (i.e returns <code>database</code>
@@ -3674,9 +3695,9 @@ Issue: https://github.com/metabase/metabase/issues/39392</li>
   dispatch-on-initialized-driver
   :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod normalize-db-details ::driver
-  [_ db-details]
+  [_ database]
   ;; no normalization by default
-  db-details)</pre></td></tr><tr><td class="docs"><p>Returns the driver that supersedes the given <code>driver</code>.  A non-nil return value means that the given <code>driver</code> is
+  database)</pre></td></tr><tr><td class="docs"><p>Returns the driver that supersedes the given <code>driver</code>.  A non-nil return value means that the given <code>driver</code> is
 deprecated in Metabase and will eventually be replaced by the returned driver, in some future version (at which point
 any databases using it will be migrated to the new one).</p>
 

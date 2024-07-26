@@ -3806,6 +3806,9 @@ attempt to quote it as a column name instead of a string value (and the update s
   (let [collection-before-updates (t2/instance :model/Collection (t2/original collection))
         {collection-name :name
          :as collection-updates}  (or (t2/changes collection) {})]
+    (api/check
+     (not (is-trash? collection-before-updates))
+     [400 &quot;You cannot modify the Trash Collection.&quot;])
     ;; VARIOUS CHECKS BEFORE DOING ANYTHING:
     ;; (1) if this is a personal Collection, check that the 'propsed' changes are allowed
     (when (:personal_owner_id collection-before-updates)
@@ -3894,9 +3897,20 @@ macros.)</p>
   [_collection]
   [:name :namespace parent-identity-hash :created_at])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/extract-query &quot;Collection&quot; [_model {:keys [collection-set]}]
-  (if (seq collection-set)
-    (t2/reducible-select Collection :id [:in collection-set])
-    (t2/reducible-select Collection :personal_owner_id nil)))</pre></td></tr><tr><td class="docs">
+  (let [not-trash-clause [:or
+                          [:= :type nil]
+                          [:not= :type trash-collection-type]]]
+    (if (seq collection-set)
+      (t2/reducible-select Collection
+                           {:where
+                            [:and
+                             [:in :id collection-set]
+                             not-trash-clause]})
+      (t2/reducible-select Collection
+                           {:where
+                            [:and
+                             [:= :personal_owner_id nil]
+                             not-trash-clause]}))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/extract-one &quot;Collection&quot;
   ;; Transform :location (which uses database IDs) into a portable :parent_id with the parent's entity ID.
   ;; Also transform :personal_owner_id from a database ID to the email string, if it's defined.
@@ -3938,7 +3952,11 @@ macros.)</p>
     (set (map vector (repeat &quot;Collection&quot;) (location-path-&gt;ids location)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/descendants &quot;Collection&quot; [_model-name id]
   (let [location    (t2/select-one-fn :location Collection :id id)
-        child-colls (set (for [child-id (t2/select-pks-set :model/Collection {:where [:like :location (str location id &quot;/%&quot;)]})]
+        child-colls (set (for [child-id (t2/select-pks-set :model/Collection {:where [:and
+                                                                                      [:like :location (str location id &quot;/%&quot;)]
+                                                                                      [:or
+                                                                                       [:not= :type trash-collection-type]
+                                                                                       [:= :type nil]]]})]
                            [&quot;Collection&quot; child-id]))
         dashboards  (set (for [dash-id (t2/select-pks-set :model/Dashboard {:where [:= :collection_id id]})]
                            [&quot;Dashboard&quot; dash-id]))

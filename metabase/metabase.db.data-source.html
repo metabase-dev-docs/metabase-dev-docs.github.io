@@ -2871,6 +2871,7 @@ implements [[javax.sql.DataSource]] so you can call [[getConnection]] on it.</p>
   (:require
    [clojure.set :as set]
    [clojure.string :as str]
+   [metabase.auth-provider :as auth-provider]
    [metabase.config :as config]
    [metabase.connection-pool :as connection-pool]
    [metabase.db.spec :as mdb.spec]
@@ -2881,7 +2882,44 @@ implements [[javax.sql.DataSource]] so you can call [[getConnection]] on it.</p>
   (:import
    (java.sql DriverManager)
    (java.util Properties)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>NOTE: Never instantiate a DataSource directly
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Returns the current time millis, but can be overridden for testing.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn ^:dynamic *current-millis*
+  []
+  (System/currentTimeMillis))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- renew-azure-managed-identity-password
+  [client-id]
+  (let [{:keys [access_token expires_in]}
+        (auth-provider/fetch-auth :azure-managed-identity nil {:azure-managed-identity-client-id client-id})]
+    {:password access_token
+     :expiry (+ (*current-millis*) (* (- (parse-long expires_in)
+                                         auth-provider/azure-auth-token-renew-slack-seconds)
+                                      1000))}))</pre></td></tr><tr><td class="docs"><p>Make sure there is a "password" property in <code>properties</code> and returns a [[Properties]]
+object without the azure managed identity properties.
+Assumes that the "azure-managed-identity-client-id" property is only set if it
+should be used to manage the password generation.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- ensure-azure-managed-identity-password
+  [^Properties properties]
+  (if-let [client-id (.getProperty properties &quot;azure-managed-identity-client-id&quot;)]
+    (let [expiry (.get properties &quot;password-expiry-timestamp&quot;)]
+      ;; check if we need to acquire the lock
+      (when (or (nil? (.getProperty properties &quot;password&quot;))
+                (nil? expiry)           ; should not happen, as expiry should be set when the password is set
+                (&lt;= expiry (*current-millis*)))
+        (locking properties
+          ;; check if a new password has to be generated
+          (let [expiry (.get properties &quot;password-expiry-timestamp&quot;)]
+            (when (or (nil? (.getProperty properties &quot;password&quot;))
+                      (nil? expiry)
+                      (&lt;= expiry (*current-millis*)))
+              (let [{:keys [password expiry]} (renew-azure-managed-identity-password client-id)]
+                (doto properties
+                  (.setProperty &quot;password&quot; password)
+                  (.put &quot;password-expiry-timestamp&quot; expiry)))))))
+      (doto (Properties.)
+        (.putAll properties)
+        (.remove &quot;azure-managed-identity-client-id&quot;)
+        (.remove &quot;password-expiry-timestamp&quot;)))
+    properties))</pre></td></tr><tr><td class="docs"><p>NOTE: Never instantiate a DataSource directly
 Use one of our helper functions below to ensure [[update-h2/update-if-needed!]] is called
 You can use [[raw-connection-string->DataSource]] or [[broken-out-details->DataSource]]</p>
 </td><td class="codes"><pre class="brush: clojure">(p/deftype+ ^:private DataSource [^String url ^Properties properties]
@@ -2895,7 +2933,7 @@ You can use [[raw-connection-string->DataSource]] or [[broken-out-details->DataS
   javax.sql.DataSource
   (getConnection [_]
     (doto (if properties
-            (DriverManager/getConnection url properties)
+            (DriverManager/getConnection url (ensure-azure-managed-identity-password properties))
             (DriverManager/getConnection url))
       ;; MySQL/MariaDB default to REPEATABLE_READ which ends up making everything SLOW because it locks all the time.
       ;; Postgres defaults to READ_COMMITTED. Explicitly set transaction isolation for new connections so we can make
@@ -2915,8 +2953,8 @@ You can use [[raw-connection-string->DataSource]] or [[broken-out-details->DataS
 </td><td class="codes"><pre class="brush: clojure">(alter-meta! #'-&gt;DataSource assoc :private true)</pre></td></tr><tr><td class="docs"><p>Return a [[javax.sql.DataSource]] given a raw JDBC connection string.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn raw-connection-string-&gt;DataSource
   (^javax.sql.DataSource [s]
-   (raw-connection-string-&gt;DataSource s nil nil))
-  (^javax.sql.DataSource [s username password]
+   (raw-connection-string-&gt;DataSource s nil nil nil))
+  (^javax.sql.DataSource [s username password azure-managed-identity-client-id]
    {:pre [(string? s)]}
    ;; normalize the protocol in case someone is trying to trip us up. Heroku is known for this and passes stuff in
    ;; like `postgres:...` to screw with us.
@@ -2945,11 +2983,23 @@ You can use [[raw-connection-string->DataSource]] or [[broken-out-details->DataS
                  (log/error &quot;Connection string contains a username, but MB_DB_USER is specified. MB_DB_USER will be used.&quot;))
          _     (when (and (:password m) (seq password))
                  (log/error &quot;Connection string contains a password, but MB_DB_PASS is specified. MB_DB_PASS will be used.&quot;))
+         _     (when (and (seq password) (seq azure-managed-identity-client-id))
+                 (log/error &quot;Both password and MB_DB_AZURE_MANAGED_IDENTITY_CLIENT_ID are specified. The password will be used.&quot;))
          m     (cond-&gt; m
-                 (seq username) (assoc :user username)
-                 (seq password) (assoc :password password))]
+                 (seq username)                               (assoc :user username)
+                 (seq password)                               (assoc :password password)
+                 (and (empty? password)
+                      (seq azure-managed-identity-client-id)) (assoc :azure-managed-identity-client-id
+                                                                     azure-managed-identity-client-id))]
      (update-h2/update-if-needed! s)
-     (-&gt;DataSource s (some-&gt; (not-empty m) connection-pool/map-&gt;properties)))))</pre></td></tr><tr><td class="docs"><p>Return a [[javax.sql.DataSource]] given a broken-out Metabase connection details.</p>
+     (-&gt;DataSource s (some-&gt; (not-empty m) connection-pool/map-&gt;properties)))))</pre></td></tr><tr><td class="docs"><p>A normal password takes precedence over Azure managed identity and we don't want
+an empty string to be taken for a valid client ID.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- remove-shadowed-azure-managed-identity-client-id
+  [spec]
+  (cond-&gt; spec
+    (or (empty? (:azure-managed-identity-client-id spec))
+        (seq (:password spec)))
+    (dissoc :azure-managed-identity-client-id)))</pre></td></tr><tr><td class="docs"><p>Return a [[javax.sql.DataSource]] given a broken-out Metabase connection details.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn broken-out-details-&gt;DataSource
   ^javax.sql.DataSource [db-type details]
   {:pre [(keyword? db-type) (map? details)]}
@@ -2958,6 +3008,7 @@ You can use [[raw-connection-string->DataSource]] or [[broken-out-details->DataS
         _                                       (assert subname)
         url                                     (format &quot;jdbc:%s:%s&quot; subprotocol subname)
         properties                              (some-&gt; (not-empty (dissoc spec :classname :subprotocol :subname))
+                                                        remove-shadowed-azure-managed-identity-client-id
                                                         connection-pool/map-&gt;properties)]
     (update-h2/update-if-needed! url)
     (-&gt;DataSource url properties)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
