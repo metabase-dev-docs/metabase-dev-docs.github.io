@@ -2871,43 +2871,36 @@ net.brehaut.ClojureTools = (function (SH) {
   (:require
    [metabase.lib.options :as lib.options]
    [metabase.util.malli.registry :as mr]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(declare collect-uuids)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- collect-uuids-in-map [m]
-  (into (if-let [our-uuid (or (:lib/uuid (lib.options/options m))
-                              (:lib/uuid m))]
-          [our-uuid]
-          [])
-        (comp (remove (fn [[k _v]]
-                        (qualified-keyword? k)))
-              (mapcat (fn [[_k v]]
-                        (collect-uuids v))))
-        m))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- collect-uuids-in-sequence [xs]
-  (into [] (mapcat collect-uuids) xs))</pre></td></tr><tr><td class="docs"><p>Return all the <code>:lib/uuid</code>s in a part of an MBQL query (a clause or map) as a sequence. This will be used to ensure
+</td><td class="codes"><pre class="brush: clojure">(declare collect-uuids*)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- collect-uuids-in-map [m result]
+  (when-let [our-uuid (or (:lib/uuid (lib.options/options m))
+                          (:lib/uuid m))]
+    ;; Keep duplicates in metadata of the result.
+    (if (@result our-uuid)
+      (vswap! result vary-meta update :duplicates (fnil conj #{}) our-uuid)
+      (vswap! result conj our-uuid)))
+  (reduce-kv (fn [_ k v]
+               (when (not (qualified-keyword? k))
+                 (collect-uuids* v result)))
+             nil m))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- collect-uuids-in-sequence [xs result]
+  (run! #(collect-uuids* % result) xs))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- collect-uuids* [x result]
+  (cond
+    (map? x)        (collect-uuids-in-map x result)
+    (sequential? x) (collect-uuids-in-sequence x result)
+    :else           nil))</pre></td></tr><tr><td class="docs"><p>Return all the <code>:lib/uuid</code>s in a part of an MBQL query (a clause or map) as a sequence. This will be used to ensure
 there are no duplicates.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn collect-uuids
   [x]
-  (cond
-    (map? x)        (collect-uuids-in-map x)
-    (sequential? x) (collect-uuids-in-sequence x)
-    :else           nil))</pre></td></tr><tr><td class="docs">
+  (let [result (volatile! #{})]
+    (collect-uuids* x result)
+    @result))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- find-duplicate-uuid [x]
-  (transduce
-   identity
-   (fn
-     ([]
-      #{})
-     ([result]
-      (when (string? result)
-        result))
-     ([seen a-uuid]
-      (if (contains? seen a-uuid)
-        (reduced a-uuid)
-        (conj seen a-uuid))))
-   (collect-uuids x)))</pre></td></tr><tr><td class="docs"><p>True if all the <code>:lib/uuid</code>s in something are unique.</p>
+  (:duplicates (meta (collect-uuids x))))</pre></td></tr><tr><td class="docs"><p>True if all the <code>:lib/uuid</code>s in something are unique.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn unique-uuids?
   [x]
-  (not (find-duplicate-uuid x)))</pre></td></tr><tr><td class="docs"><p>Malli schema for to ensure that all <code>:lib/uuid</code>s are unique.</p>
+  (empty? (find-duplicate-uuid x)))</pre></td></tr><tr><td class="docs"><p>Malli schema for to ensure that all <code>:lib/uuid</code>s are unique.</p>
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::unique-uuids
   [:fn
    {:error/message &quot;all :lib/uuids must be unique&quot;

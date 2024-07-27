@@ -3562,15 +3562,17 @@ Returns <code>nil</code> if no IDs are found.</p>
            [id (:source-field opts)]))))</pre></td></tr><tr><td class="docs"><p>Find the forms matching pred, returns a list of tuples of location (as used in get-in) and the match.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn matching-locations
   [form pred]
-  (loop [stack [[[] form]], matches []]
+  ;; Surprisingly enough, a list works better as a stack here than a vector.
+  (loop [stack (list [[] form]), matches []]
     (if-let [[loc form :as top] (peek stack)]
       (let [stack (pop stack)
-            onto-stack #(into stack (map (fn [[k v]] [(conj loc k) v])) %)]
+            map-onto-stack #(transduce (map (fn [[k v]] [(conj loc k) v])) conj stack %)
+            seq-onto-stack #(transduce (map-indexed (fn [i v] [(conj loc i) v])) conj stack %)]
         (cond
-          (pred form)        (recur stack                                  (conj matches top))
-          (map? form)        (recur (onto-stack form)                      matches)
-          (sequential? form) (recur (onto-stack (map-indexed vector form)) matches)
-          :else              (recur stack                                  matches)))
+          (pred form)        (recur stack                 (conj matches top))
+          (map? form)        (recur (map-onto-stack form) matches)
+          (sequential? form) (recur (seq-onto-stack form) matches)
+          :else              (recur stack                 matches)))
       matches)))</pre></td></tr><tr><td class="docs"><p>Wrap a raw Field ID in a <code>:field</code> clause if needed.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn wrap-field-id-if-needed
   [field-id-or-form]
