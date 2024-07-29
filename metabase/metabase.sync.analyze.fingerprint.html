@@ -2889,18 +2889,20 @@ net.brehaut.ClojureTools = (function (SH) {
    [redux.core :as redux]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(comment
-  metadata-queries/keep-me-for-default-table-row-sample)</pre></td></tr><tr><td class="docs">
+  metadata-queries/keep-me-for-default-table-row-sample)</pre></td></tr><tr><td class="docs"><p>Key-value pairs corresponding to the state of Fields that have the latest fingerprint, but have not yet
+ <em>completed</em> analysis. All Fields who get new fingerprints should get marked as having the latest fingerprint
+ version, but we'll clear their values for <code>last_analyzed</code>. This way we know these fields haven't 'completed'
+ analysis for the latest fingerprints. This is a function because `<em>latest-fingerprint-version</em> may be rebound
+ in tests.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn incomplete-analysis-kvs
+  []
+  {:fingerprint_version i/*latest-fingerprint-version*
+   :last_analyzed       nil})</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn- save-fingerprint!
   [field       :- i/FieldInstance
    fingerprint :- [:maybe analyze/Fingerprint]]
   (log/debugf &quot;Saving fingerprint for %s&quot; (sync-util/name-for-logging field))
-  ;; All Fields who get new fingerprints should get marked as having the latest fingerprint version, but we'll
-  ;; clear their values for `last_analyzed`. This way we know these fields haven't &quot;completed&quot; analysis for the
-  ;; latest fingerprints.
-  (t2/update! Field (u/the-id field)
-              {:fingerprint         fingerprint
-               :fingerprint_version i/*latest-fingerprint-version*
-               :last_analyzed       nil}))</pre></td></tr><tr><td class="docs">
+  (t2/update! Field (u/the-id field) (merge (incomplete-analysis-kvs) {:fingerprint fingerprint})))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::FingerprintStats
   [:map
    [:no-data-fingerprints   ms/IntGreaterThanOrEqualToZero]
@@ -3052,41 +3054,37 @@ are analyzed and have fingerprints.</p>
   [:=&gt; [:cat :string [:schema i/TableInstance]] :any])</pre></td></tr><tr><td class="docs"><p>Invokes <code>fingerprint-fields!</code> on every table in <code>database</code></p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn- fingerprint-fields-for-db!*
   ([database        :- i/DatabaseInstance
-    tables          :- [:maybe [:sequential i/TableInstance]]
     log-progress-fn :- LogProgressFn]
-   (fingerprint-fields-for-db!* database tables log-progress-fn (constantly true)))
+   (fingerprint-fields-for-db!* database log-progress-fn (constantly true)))
   ([database        :- i/DatabaseInstance
-    tables          :- [:maybe [:sequential i/TableInstance]]
     log-progress-fn :- LogProgressFn
     continue?       :- [:=&gt; [:cat ::FingerprintStats] :any]]
    (qp.store/with-metadata-provider (u/the-id database)
-     (reduce (fn [acc table]
-               (log-progress-fn (if *refingerprint?* &quot;refingerprint-fields&quot; &quot;fingerprint-fields&quot;) table)
-               (let [new-acc (merge-with + acc (fingerprint-fields! table))]
-                 (if (continue? new-acc)
-                   new-acc
-                   (reduced new-acc))))
-             (empty-stats-map 0)
-             tables))))</pre></td></tr><tr><td class="docs"><p>Invokes [[fingerprint-fields!]] on every table in <code>database</code></p>
+     (let [tables (if *refingerprint?*
+                    (sync-util/refingerprint-reducible-sync-tables database)
+                    (sync-util/reducible-sync-tables database))]
+       (reduce (fn [acc table]
+                 (log-progress-fn (if *refingerprint?* &quot;refingerprint-fields&quot; &quot;fingerprint-fields&quot;) table)
+                 (let [new-acc (merge-with + acc (fingerprint-fields! table))]
+                   (if (continue? new-acc)
+                     new-acc
+                     (reduced new-acc))))
+               (empty-stats-map 0)
+               tables)))))</pre></td></tr><tr><td class="docs"><p>Invokes [[fingerprint-fields!]] on every table in <code>database</code></p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn fingerprint-fields-for-db!
   [database        :- i/DatabaseInstance
-   tables          :- [:maybe [:sequential i/TableInstance]]
    log-progress-fn :- LogProgressFn]
   (if (driver.u/supports? (:engine database) :fingerprint database)
-    (fingerprint-fields-for-db!* database tables log-progress-fn)
+    (fingerprint-fields-for-db!* database log-progress-fn)
     (empty-stats-map 0)))</pre></td></tr><tr><td class="docs"><p>Maximum number of fields to refingerprint. Balance updating our fingerprinting values while not spending too much
 time in the db.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private max-refingerprint-field-count
   1000)</pre></td></tr><tr><td class="docs"><p>Invokes [[fingeprint-fields!]] on every table in <code>database</code> up to some limit.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn refingerprint-fields-for-db!
   [database        :- i/DatabaseInstance
-   tables          :- [:maybe [:sequential i/TableInstance]]
    log-progress-fn :- LogProgressFn]
   (binding [*refingerprint?* true]
     (fingerprint-fields-for-db!* database
-                                 ;; our rudimentary refingerprint strategy is to shuffle the tables and fingerprint
-                                 ;; until we are over some threshold of fields
-                                 (shuffle tables)
                                  log-progress-fn
                                  (fn [stats-acc]
                                    (&lt; (:fingerprints-attempted stats-acc) max-refingerprint-field-count)))))</pre></td></tr><tr><td class="docs"><p>Refingerprint a field</p>

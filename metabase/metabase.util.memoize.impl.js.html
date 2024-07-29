@@ -2865,494 +2865,156 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.sync.util" name="metabase.sync.util"><h1 class="project-name">metabase.sync.util</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Utility functions and macros to abstract away some common patterns and operations across the sync processes, such
-as logging start/end messages.</p>
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.sync.util
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.util.memoize.impl.js" name="metabase.util.memoize.impl.js"><h1 class="project-name">metabase.util.memoize.impl.js</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>CLJS-specific implementation code for [[metabase.util.memoize]].</p>
+
+<p>Not to be referenced from other code!</p>
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.util.memoize.impl.js
   (:require
-   [clojure.math.numeric-tower :as math]
-   [clojure.string :as str]
-   [java-time.api :as t]
-   [medley.core :as m]
-   [metabase.driver :as driver]
-   [metabase.driver.util :as driver.u]
-   [metabase.events :as events]
-   [metabase.models.interface :as mi]
-   [metabase.models.task-history :as task-history]
-   [metabase.query-processor.interface :as qp.i]
-   [metabase.sync.interface :as i]
-   [metabase.util :as u]
-   [metabase.util.date-2 :as u.date]
-   [metabase.util.log :as log]
-   [metabase.util.malli :as mu]
-   [metabase.util.malli.registry :as mr]
-   [metabase.util.malli.schema :as ms]
-   [toucan2.core :as t2]
-   [toucan2.realize :as t2.realize])
-  (:import
-   (java.time.temporal Temporal)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive ::event :metabase/event)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private sync-event-topics
-  #{:event/sync-begin
-    :event/sync-end
-    :event/analyze-begin
-    :event/analyze-end
-    :event/refingerprint-begin
-    :event/refingerprint-end
-    :event/cache-field-values-begin
-    :event/cache-field-values-end
-    :event/sync-metadata-begin
-    :event/sync-metadata-end})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(doseq [topic sync-event-topics]
-  (derive topic ::event))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private Topic
-  [:and
-   events/Topic
-   [:fn
-    {:error/message &quot;Sync event deriving from :metabase.sync.util/event&quot;}
-    #(isa? % ::event)]])</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
-|                                          SYNC OPERATION "MIDDLEWARE"                                           |
-+----------------------------------------------------------------------------------------------------------------+</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>When using the <code>sync-operation</code> macro below the BODY of the macro will be executed in the context of several
-different functions below that do things like prevent duplicate operations from being ran simultaneously and taking
-care of things like event publishing, error handling, and logging.</p>
+   [cljs.cache :as cache]))</pre></td></tr><tr><td class="docs"><p>Similar to clojure.lang.Delay, but will not memoize an exception and will
+instead retry.
+  fun - the function, never nil
+  available? - indicates a memoized value is available, volatile for visibility
+  value - the value (if available) - volatile for visibility</p>
+</td><td class="codes"><pre class="brush: clojure">(deftype RetryingDelay [fun ^:volatile-mutable available? ^:volatile-mutable value]
+  IDeref
+  (-deref [_]
+    ;; first check (safe with volatile flag)
+    (if available?
+      value
+      ;; fun may throw - will retry on next deref
+      (let [v (fun)]
+        (set! value v)
+        (set! available? true)
+        v)))
+  IPending
+  (-realized? [_]
+    available?))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- d-lay [fun]
+  (-&gt;RetryingDelay fun false nil))</pre></td></tr><tr><td class="docs"><p>If a value is not already derefable, wrap it up.</p>
 
-<p>These basically operate in a middleware pattern, where the various different steps take a function, and return a
-new function that will execute the original in whatever context or with whatever side effects appropriate for that
-step.</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>This looks something like {:sync #{1 2}, :cache #{2 3}} when populated.
-Key is a type of sync operation, e.g. <code>:sync</code> or <code>:cache</code>; vals are sets of DB IDs undergoing that operation.</p>
+<p>This is used to help rebuild seed/base maps passed in to the various
+caches so that they conform to core.memoize's world view.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- make-derefable
+  [v]
+  (if (instance? IDeref v)
+    v
+    (reify IDeref
+      (-deref [_] v))))</pre></td></tr><tr><td class="docs"><p>Given a seed/base map, ensure all the values in it are derefable.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- derefable-seed
+  [seed]
+  (update-vals seed make-derefable))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(deftype PluggableMemoization [f cache]
+  cache/CacheProtocol
+  (has? [_ item]
+    (cache/has? cache item))
+  (hit  [_ item]
+    (PluggableMemoization. f (cache/hit cache item)))
+  (miss [_ item result]
+    (PluggableMemoization. f (cache/miss cache item result)))
+  (evict [_ key]
+    (PluggableMemoization. f (cache/evict cache key)))
+  (lookup [_ item]
+    (cache/lookup cache item nil))
+  (lookup [_ item not-found]
+    (cache/lookup cache item (delay not-found)))
+  (seed [_ base]
+    (PluggableMemoization.
+     f (cache/seed cache (derefable-seed base))))
+  Object
+  (toString [_] (str cache)))</pre></td></tr><tr><td class="docs"><p>Returns a function's argument transformer.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^{:private true
+       :doc }
+  args-fn #(or (::args-fn (meta %)) identity))</pre></td></tr><tr><td class="docs"><p>The basic hit/miss logic for the cache system based on <code>cache/through</code>.
+Clojure delays are used to hold the cache value.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- through*
+  [cache f args item]
+  (cache/through
+   (fn [f _] (d-lay #(f args)))
+   #(apply f %)
+   cache
+   item))</pre></td></tr><tr><td class="docs"><p>Given a function, an atom containing a (pluggable memoization cache), and
+and cache key function, return a new function that behaves like the original
+function except it is cached, based on its arguments.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- cached-function
+  [f cache-atom ckey-fn]
+  (fn [&amp; args]
+    (let [ckey (or (ckey-fn args) [])
+          cs   (swap! cache-atom through* f args ckey)
+          val  (cache/lookup cs ckey ::not-found)]
+       ;; If `lookup` returns `(delay ::not-found)`, it's likely that
+       ;; we ran into a timing issue where eviction and access
+       ;; are happening at about the same time. Therefore, we retry
+       ;; the `swap!` (potentially several times).
+       ;;
+       ;; metabase.util.memoize currently wraps all of its values in a `delay`.
+      (when val
+        (loop [n 0 v @val]
+          (if (= ::not-found v)
+            (when-let [v' (cache/lookup
+                           (swap! cache-atom through* f args ckey)
+                           ckey ::not-found)]
+              (when (&lt; n 10)
+                (recur (inc n) @v')))
+            v))))))</pre></td></tr><tr><td class="docs"><p>Build a pluggable memoized version of a function. Given a function and a
+(pluggable memoized) cache, and an optional seed (hash map of arguments to
+return values), return a cached version of that function.</p>
 
-<p>TODO - as @salsakran mentioned it would be nice to do this via the DB so we could better support multi-instance
-setups in the future</p>
-</td><td class="codes"><pre class="brush: clojure">(defonce ^:private operation-&gt;db-ids (atom {}))</pre></td></tr><tr><td class="docs"><p>Run <code>f</code> in a way that will prevent it from simultaneously being ran more for a single database more than once for a
-given <code>operation</code>. This prevents duplicate sync-like operations from taking place for a given DB, e.g. if a user
-hits the <code>Sync</code> button in the admin panel multiple times.</p>
+<p>If you want to build your own cached function, perhaps with combined caches
+or customized caches, this is the preferred way to do so now.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn memoizer
+  ([f cache]
+   (let [cache   (atom (PluggableMemoization. f cache))
+         ckey-fn (args-fn f)]
+     (cached-function f cache ckey-fn)))
+  ([f cache seed]
+   (let [cache   (atom (cache/seed (PluggableMemoization. f cache)
+                                   (derefable-seed seed)))
+         ckey-fn (args-fn f)]
+     (cached-function f cache ckey-fn))))</pre></td></tr><tr><td class="docs"><p>Works the same as the basic memoization function (i.e.
+ <code>core.memoize</code> except when a given threshold is breached.
+ When the threshold is passed, the cache will expel the
+ <strong>L</strong>east <strong>R</strong>ecently <strong>U</strong>sed element in favor of the new.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn lru
+  ([f] (lru f {} :lru/threshold 32))
+  ([f base] (lru f base :lru/threshold 32))
+  ([f tkey threshold] (lru f {} tkey threshold))
+  ([f base key threshold]
+   (assert (= key :lru/threshold) (str &quot;wrong parameter key &quot; key))
+   (memoizer f (cache/lru-cache-factory {} :threshold threshold) base)))</pre></td></tr><tr><td class="docs"><p>Used as a more flexible alternative to Clojure's core <code>memoization</code>
+ function.  Memoized functions built using <code>memo</code> will respond to
+ the core.memo manipulable memoization utilities.  As a nice bonus,
+ you can use <code>memo</code> in place of <code>memoize</code> without any additional
+ changes, with the added guarantee that the memoized function will
+ only be called once for a given sequence of arguments (<code>memoize</code>
+ can call the function multiple times when concurrent calls are
+ made with the same sequence of arguments).</p>
 
-<p>  ;; Only one <code>sync-db!</code> for <code>database-id</code> will be allowed at any given moment; duplicates will be ignored
-  (with-duplicate-ops-prevented :sync database-id
-    #(sync-db! database-id))</p>
-</td><td class="codes"><pre class="brush: clojure">(defn with-duplicate-ops-prevented
-  [operation database-or-id f]
-  (fn []
-    (when-not (contains? (@operation-&gt;db-ids operation) (u/the-id database-or-id))
-      (try
-        ;; mark this database as currently syncing so we can prevent duplicate sync attempts (#2337)
-        (swap! operation-&gt;db-ids update operation #(conj (or % #{}) (u/the-id database-or-id)))
-        (log/debug &quot;Sync operations in flight:&quot; (m/filter-vals seq @operation-&gt;db-ids))
-        ;; do our work
-        (f)
-        ;; always take the ID out of the set when we are through
-        (finally
-          (swap! operation-&gt;db-ids update operation #(disj % (u/the-id database-or-id))))))))</pre></td></tr><tr><td class="docs"><p>Publish events related to beginning and ending a sync-like process, e.g. <code>:sync-database</code> or <code>:cache-values</code>, for a
-<code>database-id</code>. <code>f</code> is executed between the logging of the two events.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- with-sync-events
-  {:style/indent [:form]}
-  ;; we can do everyone a favor and infer the name of the individual begin and sync events
-  ([event-name-prefix database-or-id f]
-   (letfn [(event-keyword [prefix suffix]
-             (keyword (or (namespace event-name-prefix) &quot;event&quot;)
-                      (str (name prefix) suffix)))]
-     (with-sync-events
-       (event-keyword event-name-prefix &quot;-begin&quot;)
-       (event-keyword event-name-prefix &quot;-end&quot;)
-       database-or-id
-       f)))
-  ([begin-event-name :- Topic
-    end-event-name   :- Topic
-    database-or-id
-    f]
-   (fn []
-     (let [start-time    (System/nanoTime)
-           tracking-hash (str (random-uuid))]
-       (events/publish-event! begin-event-name {:database_id (u/the-id database-or-id), :custom_id tracking-hash})
-       (let [return        (f)
-             total-time-ms (int (/ (- (System/nanoTime) start-time)
-                                   1000000.0))]
-         (events/publish-event! end-event-name {:database_id  (u/the-id database-or-id)
-                                                :custom_id    tracking-hash
-                                                :running_time total-time-ms})
-         return)))))</pre></td></tr><tr><td class="docs"><p>Logs start/finish messages using <code>log-fn</code>, timing <code>f</code></p>
-</td><td class="codes"><pre class="brush: clojure">(defn- with-start-and-finish-logging*
-  {:style/indent [:form]}
-  [log-fn message f]
-  (let [start-time (System/nanoTime)
-        _          (log-fn (u/format-color 'magenta &quot;STARTING: %s&quot; message))
-        result     (f)]
-    (log-fn (u/format-color 'magenta &quot;FINISHED: %s (%s)&quot;
-                            message
-                            (u/format-nanoseconds (- (System/nanoTime) start-time))))
-    result))</pre></td></tr><tr><td class="docs"><p>Log <code>message</code> about a process starting, then run <code>f</code>, and then log a <code>message</code> about it finishing.
- (The final message includes a summary of how long it took to run <code>f</code>.)</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- with-start-and-finish-logging
-  {:style/indent [:form]}
-  [message f]
-  (fn []
-    (with-start-and-finish-logging* #(log/info %) message f)))</pre></td></tr><tr><td class="docs"><p>Similar to <code>with-start-and-finish-logging except invokes</code>f` and returns its result and logs at the debug level</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- do-with-start-and-finish-debug-logging
-  {:style/indent [:form]}
-  [message f]
-  (with-start-and-finish-logging* #(log/info %) message f))</pre></td></tr><tr><td class="docs"><p>Disable all QP and DB logging when running BODY. (This should be done for <em>all</em> sync-like processes to avoid
-cluttering the logs.)</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- with-db-logging-disabled
-  {:style/indent [:form]}
-  [f]
-  (fn []
-    (binding [qp.i/*disable-qp-logging* true]
-      (f))))</pre></td></tr><tr><td class="docs"><p>Pass the sync operation defined by <code>body</code> to the <code>database</code>'s driver's implementation of <code>sync-in-context</code>.
-This method is used to do things like establish a connection or other driver-specific steps needed for sync
-operations.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- sync-in-context
-  [database f]
-  (fn []
-    (driver/sync-in-context (driver.u/database-&gt;driver database) database
-      f)))</pre></td></tr><tr><td class="docs"><p>TODO: future, expand this to <code>driver</code> level, where the drivers themselves can add to the
-list of exception classes (like, driver-specific exceptions)</p>
-</td><td class="codes"><pre class="brush: clojure">(doseq [klass [java.net.ConnectException
-               java.net.NoRouteToHostException
-               java.net.UnknownHostException
-               com.mchange.v2.resourcepool.CannotAcquireResourceException
-               javax.net.ssl.SSLHandshakeException]]
-  (derive klass ::exception-class-not-to-retry))</pre></td></tr><tr><td class="docs"><p>Whether to log exceptions during a sync step and proceed with the rest of the sync process. This is the default
-behavior. You can disable this for debugging or test purposes.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *log-exceptions-and-continue?*
-  true)</pre></td></tr><tr><td class="docs"><p>Internal implementation of [[with-error-handling]]; use that instead of calling this directly.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn do-with-error-handling
-  ([f]
-   (do-with-error-handling &quot;Error running sync step&quot; f))
-  ([message f]
-   (try
-     (f)
-     (catch Throwable e
-       (if *log-exceptions-and-continue?*
-         (do
-           (log/warn e message)
-           e)
-         (throw e))))))</pre></td></tr><tr><td class="docs"><p>Execute <code>body</code> in a way that catches and logs any Exceptions thrown, and returns <code>nil</code> if they do so. Pass a
-<code>message</code> to help provide information about what failed for the log message.</p>
+<p> The default way to use this function is to simply supply a function
+ that will be memoized.  Additionally, you may also supply a map
+ of the form <code>'{[42] 42, [108] 108}</code> where keys are a vector
+ mapping expected argument values to arity positions.  The map values
+ are the return values of the memoized function.</p>
 
-<p>The exception classes deriving from <code>:metabase.sync.util/exception-class-not-to-retry</code> are a list of classes tested
-against exceptions thrown. If there is a match found, the sync is aborted as that error is not considered
-recoverable for this sync run.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro with-error-handling
-  {:style/indent 1}
-  [message &amp; body]
-  `(do-with-error-handling ~message (fn [] ~@body)))</pre></td></tr><tr><td class="docs"><p>Internal implementation of [[sync-operation]]; use that instead of calling this directly.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn do-sync-operation
-  [operation :- :keyword ; something like `:sync-metadata` or `:refingerprint`
-   database  :- (ms/InstanceOf :model/Database)
-   message   :- ms/NonBlankString
-   f         :- fn?]
-  ((with-duplicate-ops-prevented operation database
-     (with-sync-events operation database
-       (with-start-and-finish-logging message
-         (with-db-logging-disabled
-           (sync-in-context database
-             (partial do-with-error-handling (format &quot;Error in sync step %s&quot; message) f))))))))</pre></td></tr><tr><td class="docs"><p>Perform the operations in <code>body</code> as a sync operation, which wraps the code in several special macros that do things
-like error handling, logging, duplicate operation prevention, and event publishing. Intended for use with the
-various top-level sync operations, such as <code>sync-metadata</code> or <code>analyze</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro sync-operation
-  {:style/indent 3}
-  [operation database message &amp; body]
-  `(do-sync-operation ~operation ~database ~message (fn [] ~@body)))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
-|                                              EMOJI PROGRESS METER                                              |
-+----------------------------------------------------------------------------------------------------------------+</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>This is primarily provided because it makes sync more fun to look at. The functions below make it fairly simple to
-log a progress bar with a corresponding emoji when iterating over a sequence of objects during sync, e.g. syncing
-all the Tables in a given Database.</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^:const ^Integer emoji-meter-width 50)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private progress-emoji
-  [&quot;😱&quot;   ; face screaming in fear
-   &quot;😢&quot;   ; crying face
-   &quot;😞&quot;   ; disappointed face
-   &quot;😒&quot;   ; unamused face
-   &quot;😕&quot;   ; confused face
-   &quot;😐&quot;   ; neutral face
-   &quot;😬&quot;   ; grimacing face
-   &quot;😌&quot;   ; relieved face
-   &quot;😏&quot;   ; smirking face
-   &quot;😋&quot;   ; face savouring delicious food
-   &quot;😊&quot;   ; smiling face with smiling eyes
-   &quot;😍&quot;   ; smiling face with heart shaped eyes
-   &quot;😎&quot;]) ; smiling face with sunglasses</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- percent-done-&gt;emoji [percent-done]
-  (progress-emoji (int (math/round (* percent-done (dec (count progress-emoji)))))))</pre></td></tr><tr><td class="docs"><p>Create a string that shows progress for something, e.g. a database sync process.</p>
+<p> If the supplied function has metadata containing an
+ <code>:clojure.core.memoize/args-fn</code> key, the value is assumed to be a
+ function that should be applied to the arguments to produce a
+ subset or transformed sequence of arguments that are used for the
+ key in the cache (the full, original arguments will still be used
+ to call the function). This allows you to memoize functions where
+ one or more arguments are irrelevant for memoization, such as the
+ <code>clojure.java.jdbc</code> functions, whose first argument may include
+ a (mutable) JDBC <code>Connection</code> object:</p>
 
-<p>   (emoji-progress-bar 10 40)
-     -> "[<strong><em>*</em><em>*</em>**</strong>······································] 😒   25%</p>
-</td><td class="codes"><pre class="brush: clojure">(defn emoji-progress-bar
-  [completed total log-every-n]
-  (let [percent-done (float (/ completed total))
-        filleds      (int (* percent-done emoji-meter-width))
-        blanks       (- emoji-meter-width filleds)]
-    (when (or (zero? (mod completed log-every-n))
-              (= completed total))
-      (str &quot;[&quot;
-           (str/join (repeat filleds &quot;*&quot;))
-           (str/join (repeat blanks &quot;·&quot;))
-           (format &quot;] %s  %3.0f%%&quot; (u/emoji (percent-done-&gt;emoji percent-done)) (* percent-done 100.0))))))</pre></td></tr><tr><td class="docs"><p>Run BODY with access to a function that makes using our amazing emoji-progress-bar easy like Sunday morning.
-Calling the function will return the approprate string output for logging and automatically increment an internal
-counter as needed.</p>
+<p>   (memo/memo (with-meta jdbc/execute! {::memo/args-fn rest}))</p>
 
-<p>  (with-emoji-progress-bar [progress-bar 10]
-    (dotimes [i 10]
-      (println (progress-bar))))</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro with-emoji-progress-bar
-  {:style/indent 1}
-  [[emoji-progress-fn-binding total-count] &amp; body]
-  `(let [finished-count#            (atom 0)
-         total-count#               ~total-count
-         log-every-n#               (Math/ceil (/ total-count# 10))
-         ~emoji-progress-fn-binding (fn [] (emoji-progress-bar (swap! finished-count# inc) total-count# log-every-n#))]
-     ~@body))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
-|                                            INITIAL SYNC STATUS                                                 |
-+----------------------------------------------------------------------------------------------------------------+</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>If this is the first sync of a database, we need to update the <code>initial_sync_status</code> field on individual tables
-when they have finished syncing, as well as the corresponding field on the database itself when the entire sync
-is complete (excluding analysis). This powers a UX that displays the progress of the initial sync to the admin who
-added the database, and enables individual tables when they become usable for queries.</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Marks initial sync as complete for this table so that it becomes usable in the UI, if not already set</p>
-</td><td class="codes"><pre class="brush: clojure">(defn set-initial-table-sync-complete!
-  [table]
-  (when (not= (:initial_sync_status table) &quot;complete&quot;)
-    (t2/update! :model/Table (u/the-id table) {:initial_sync_status &quot;complete&quot;})))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private sync-tables-kv-args
-  {:active          true
-   :visibility_type nil})</pre></td></tr><tr><td class="docs"><p>Marks initial sync for all tables in <code>db</code> as complete so that it becomes usable in the UI, if not already
-set.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn set-initial-table-sync-complete-for-db!
-  [database-or-id]
-  (t2/update! :model/Table (merge sync-tables-kv-args {:db_id (u/the-id database-or-id)})
-              {:initial_sync_status &quot;complete&quot;}))</pre></td></tr><tr><td class="docs"><p>Marks initial sync as complete for this database so that this is reflected in the UI, if not already set</p>
-</td><td class="codes"><pre class="brush: clojure">(defn set-initial-database-sync-complete!
-  [database]
-  (when (not= (:initial_sync_status database) &quot;complete&quot;)
-    (t2/update! :model/Database (u/the-id database) {:initial_sync_status &quot;complete&quot;})))</pre></td></tr><tr><td class="docs"><p>Marks initial sync as aborted for this database so that an error can be displayed on the UI</p>
-</td><td class="codes"><pre class="brush: clojure">(defn set-initial-database-sync-aborted!
-  [database]
-  (when (not= (:initial_sync_status database) &quot;complete&quot;)
-    (t2/update! :model/Database (u/the-id database) {:initial_sync_status &quot;aborted&quot;})))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
-|                                          OTHER SYNC UTILITY FUNCTIONS                                          |
-+----------------------------------------------------------------------------------------------------------------+</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Returns a clause that can be used inside a HoneySQL :where clause to select all the Tables that should be synced</p>
-</td><td class="codes"><pre class="brush: clojure">(def sync-tables-clause
-  (into [:and] (for [[k v] sync-tables-kv-args]
-                 [:= k v])))</pre></td></tr><tr><td class="docs"><p>Returns a reducible of all the Tables that should go through the sync processes for <code>database-or-id</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn reducible-sync-tables
-  [database-or-id &amp; {:keys [schema-names table-names]}]
-  (eduction (map t2.realize/realize)
-            (t2/reducible-select :model/Table
-                                 :db_id (u/the-id database-or-id)
-                                 {:where [:and sync-tables-clause
-                                          (when (seq schema-names) [:in :schema schema-names])
-                                          (when (seq table-names) [:in :name table-names])]})))</pre></td></tr><tr><td class="docs"><p>The count of all tables that should be synced for <code>database-or-id</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn sync-tables-count
-  [database-or-id]
-  (t2/count :model/Table :db_id (u/the-id database-or-id) {:where sync-tables-clause}))</pre></td></tr><tr><td class="docs"><p>A reducible collection of all the Tables that should go through the sync processes for <code>database-or-id</code>, in the
- order they should be refingerprinted (by earliest last_analyzed timestamp).</p>
-</td><td class="codes"><pre class="brush: clojure">(defn refingerprint-reducible-sync-tables
-  [database-or-id]
-  (eduction (map t2.realize/realize)
-            (t2/reducible-select :model/Table
-                                 {:select    [:t.*]
-                                  :from      [[(t2/table-name :model/Table) :t]]
-                                  :left-join [[{:select   [:table_id
-                                                           [[:min :last_analyzed] :earliest_last_analyzed]]
-                                                :from     [(t2/table-name :model/Field)]
-                                                :group-by [:table_id]} :sub]
-                                              [:= :t.id :sub.table_id]]
-                                  :where     [:and sync-tables-clause [:= :t.db_id (u/the-id database-or-id)]]
-                                  :order-by  [[:sub.earliest_last_analyzed :asc]]})))</pre></td></tr><tr><td class="docs"><p>Returns all the Schemas that have their metadata sync'd for <code>database-or-id</code>.
-Assumes the database supports schemas.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn sync-schemas
-  [database-or-id]
-  (vec (map :schema (t2/query {:select-distinct [:schema]
-                               :from            [:metabase_table]
-                               :where           [:and sync-tables-clause [:= :db_id (u/the-id database-or-id)]]}))))</pre></td></tr><tr><td class="docs"><p>Return an appropriate string for logging an object in sync logging messages. Should be something like</p>
-
-<p>  "postgres Database 'test-data'"</p>
-
-<p>This function is used all over the sync code to make sure we have easy access to consistently formatted descriptions
-of various objects.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti name-for-logging
-  {:arglists '([instance])}
-  mi/model)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod name-for-logging :model/Database
-  [{database-name :name, id :id, engine :engine}]
-  (format &quot;%s Database %s ''%s''&quot; (name engine) (str (or id &quot;&quot;)) database-name))</pre></td></tr><tr><td class="docs"><p>Return an appropriate string for logging a table in sync logging messages.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn table-name-for-logging
-  [&amp; {:keys [id schema name]}]
-  (format &quot;Table %s ''%s''&quot; (or (str id) &quot;&quot;) (str (when (seq schema) (str schema &quot;.&quot;)) name)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod name-for-logging :model/Table [table]
-  (table-name-for-logging table))</pre></td></tr><tr><td class="docs"><p>Return an appropriate string for logging a field in sync logging messages.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn field-name-for-logging
-  [&amp; {:keys [id name]}]
-  (format &quot;Field %s ''%s''&quot; (or (str id) &quot;&quot;) name))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod name-for-logging :model/Field [field]
-  (field-name-for-logging field))</pre></td></tr><tr><td class="docs"><p>this is used for result metadata stuff.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmethod name-for-logging :default [{field-name :name}]
-  (format &quot;Field ''%s''&quot; field-name))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn calculate-duration-str :- :string
-  &quot;Given two datetimes, caculate the time between them, return the result as a string&quot;
-  [begin-time :- (ms/InstanceOfClass Temporal)
-   end-time   :- (ms/InstanceOfClass Temporal)]
-  (u/format-nanoseconds (.toNanos (t/duration begin-time end-time))))</pre></td></tr><tr><td class="docs"><p>Metadata common to both sync steps and an entire sync/analyze operation run</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private TimedSyncMetadata
-  [:map
-   [:start-time                  (ms/InstanceOfClass Temporal)]
-   [:end-time   {:optional true} (ms/InstanceOfClass Temporal)]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::StepRunMetadata
-  [:merge
-   TimedSyncMetadata
-   [:map
-    [:log-summary-fn [:maybe [:=&gt; [:cat [:ref ::StepRunMetadata]] :string]]]]])</pre></td></tr><tr><td class="docs"><p>Map with metadata about the step. Contains both generic information like <code>start-time</code> and <code>end-time</code> and step
-specific information</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private StepRunMetadata
-  [:ref ::StepRunMetadata])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mr/def ::StepNameWithMetadata
-  [:tuple
-   ;; step name
-   :string
-   ;; step metadata
-   StepRunMetadata])</pre></td></tr><tr><td class="docs"><p>Pair with the step name and metadata about the completed step run</p>
-</td><td class="codes"><pre class="brush: clojure">(def StepNameWithMetadata
-  [:ref ::StepNameWithMetadata])</pre></td></tr><tr><td class="docs"><p>Timing and step information for the entire sync or analyze run</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private SyncOperationMetadata
-  [:merge
-   TimedSyncMetadata
-   [:map
-    [:steps [:maybe [:sequential StepNameWithMetadata]]]]])</pre></td></tr><tr><td class="docs"><p>A log summary function takes a <code>StepRunMetadata</code> and returns a string with a step-specific log message</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private LogSummaryFunction
-  [:=&gt; [:cat StepRunMetadata] :string])</pre></td></tr><tr><td class="docs"><p>Defines a step. <code>:sync-fn</code> runs the step, returns a map that contains step specific metadata. <code>log-summary-fn</code>
-takes that metadata and turns it into a string for logging</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private StepDefinition
-  [:map
-   [:sync-fn        [:=&gt; [:cat StepRunMetadata] i/DatabaseInstance]]
-   [:step-name      :string]
-   [:log-summary-fn [:maybe LogSummaryFunction]]])</pre></td></tr><tr><td class="docs"><p>Creates and returns a step suitable for <code>run-step-with-metadata</code>. See <code>StepDefinition</code> for more info.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn create-sync-step
-  ([step-name sync-fn]
-   (create-sync-step step-name sync-fn nil))
-  ([step-name sync-fn log-summary-fn]
-   {:sync-fn        sync-fn
-    :step-name      step-name
-    :log-summary-fn (when log-summary-fn
-                      (comp str log-summary-fn))}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- run-step-with-metadata :- StepNameWithMetadata
-  &quot;Runs `step` on `database` returning metadata from the run&quot;
-  [database :- i/DatabaseInstance
-   {:keys [step-name sync-fn log-summary-fn] :as _step} :- StepDefinition]
-  (let [start-time (t/zoned-date-time)
-        results    (do-with-start-and-finish-debug-logging
-                    (format &quot;step ''%s'' for %s&quot;
-                            step-name
-                            (name-for-logging database))
-                    (fn [&amp; args]
-                      (try
-                        (task-history/with-task-history
-                          {:task            step-name
-                           :db_id           (u/the-id database)
-                           :on-success-info (fn [result]
-                                              (if (instance? Throwable result)
-                                                (throw result)
-                                                {:task_details (dissoc result :start-time :end-time :log-summary-fn)}))}
-                          (apply sync-fn database args))
-                        (catch Throwable e
-                          (if *log-exceptions-and-continue?*
-                            (do
-                              (log/warnf e &quot;Error running step ''%s'' for %s&quot; step-name (name-for-logging database))
-                              {:throwable e})
-                            (throw e))))))
-        end-time   (t/zoned-date-time)]
-    [step-name (assoc results
-                      :start-time start-time
-                      :end-time end-time
-                      :log-summary-fn log-summary-fn)]))</pre></td></tr><tr><td class="docs"><p>The logging logic from <code>log-sync-summary</code>. Separated for testing purposes as the <code>log/debug</code> macro won't invoke
-this function unless the logging level is at debug (or higher).</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- make-log-sync-summary-str
-  [operation :- :string
-   database :- i/DatabaseInstance
-   {:keys [start-time end-time steps]} :- SyncOperationMetadata]
-  (str
-   (apply format
-          (str &quot;\n#################################################################\n&quot;
-               &quot;# %s\n&quot;
-               &quot;# %s\n&quot;
-               &quot;# %s\n&quot;
-               &quot;# %s\n&quot;)
-          [(format &quot;Completed %s on %s&quot; operation (:name database))
-           (format &quot;Start: %s&quot; (u.date/format start-time))
-           (format &quot;End: %s&quot; (u.date/format end-time))
-           (format &quot;Duration: %s&quot; (calculate-duration-str start-time end-time))])
-   (apply str (for [[step-name {:keys [start-time end-time log-summary-fn] :as step-info}] steps]
-                (apply format (str &quot;# ---------------------------------------------------------------\n&quot;
-                                   &quot;# %s\n&quot;
-                                   &quot;# %s\n&quot;
-                                   &quot;# %s\n&quot;
-                                   &quot;# %s\n&quot;
-                                   (when log-summary-fn
-                                     (format &quot;# %s\n&quot; (log-summary-fn step-info))))
-                       [(format &quot;Completed step ''%s''&quot; step-name)
-                        (format &quot;Start: %s&quot; (u.date/format start-time))
-                        (format &quot;End: %s&quot; (u.date/format end-time))
-                        (format &quot;Duration: %s&quot; (calculate-duration-str start-time end-time))])))
-   &quot;#################################################################\n&quot;))</pre></td></tr><tr><td class="docs"><p>Log a sync/analyze summary message with info from each step</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- log-sync-summary
-  [operation :- :string
-   database :- i/DatabaseInstance
-   sync-metadata :- SyncOperationMetadata]
-  ;; Note this needs to either stay nested in the `debug` macro call or be guarded by an log/enabled?
-  ;; call. Constructing the log below requires some work, no need to incur that cost debug logging isn't enabled
-  (log/debug (make-log-sync-summary-str operation database sync-metadata)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- do-not-retry-exception? [e]
-  (or (isa? (class e) ::exception-class-not-to-retry)
-      (some-&gt; (ex-cause e) recur)))</pre></td></tr><tr><td class="docs"><p>Given the results of a sync step, returns truthy if a non-recoverable exception occurred</p>
-</td><td class="codes"><pre class="brush: clojure">(defn abandon-sync?
-  [step-results]
-  (when-let [caught-exception (:throwable step-results)]
-    (do-not-retry-exception? caught-exception)))</pre></td></tr><tr><td class="docs"><p>Run <code>sync-steps</code> and log a summary message</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn run-sync-operation
-  [operation :- :string
-   database :- i/DatabaseInstance
-   sync-steps :- [:maybe [:sequential StepDefinition]]]
-  (task-history/with-task-history {:task  operation
-                                   :db_id (u/the-id database)}
-    (let [start-time    (t/zoned-date-time)
-          step-metadata (loop [[step-defn &amp; rest-defns] sync-steps
-                               result                   []]
-                          (let [[step-name r] (run-step-with-metadata database step-defn)
-                                new-result    (conj result [step-name r])]
-                            (cond (abandon-sync? r) new-result
-                                  (not (seq rest-defns)) new-result
-                                  :else (recur rest-defns new-result))))
-          end-time      (t/zoned-date-time)
-          sync-metadata {:start-time start-time
-                         :end-time   end-time
-                         :steps      step-metadata}]
-      (log-sync-summary operation database sync-metadata)
-      sync-metadata)))</pre></td></tr><tr><td class="docs"><p>Similar to a 2-arg call to <code>map</code>, but will add all numbers that result from the invocations of <code>f</code>. Used mainly for
-logging purposes, such as to count and log the number of Fields updated by a sync operation. See also
-<code>sum-for</code>, a <code>for</code>-style macro version.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn sum-numbers
-  [f coll]
-  (reduce + (for [item coll
-                  :let [result (f item)]
-                  :when (number? result)]
-              result)))</pre></td></tr><tr><td class="docs"><p>Impl for <code>sum-for</code> macro; see its docstring;</p>
-</td><td class="codes"><pre class="brush: clojure">(defn sum-for*
-  [results]
-  (reduce + (filter number? results)))</pre></td></tr><tr><td class="docs"><p>Basically the same as <code>for</code>, but sums the results of each iteration of <code>body</code> that returned a number. See also
-<code>sum-numbers</code>.</p>
-
-<p>As an added bonus, unlike normal <code>for</code>, this wraps <code>body</code> in an implicit <code>do</code>, so you can have more than one form
-inside the loop. Nice</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro sum-for
-  {:style/indent 1}
-  [[item-binding coll &amp; more-for-bindings] &amp; body]
-  `(sum-for* (for [~item-binding ~coll
-                   ~@more-for-bindings]
-               (do ~@body))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+<p> You can access the memoization cache directly via the <code>:clojure.core.memoize/cache</code> key
+ on the memoized function's metadata.  However, it is advised to
+ use the core.memo primitives instead as implementation details may
+ change over time.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn memo
+  ([f] (memo f {}))
+  ([f seed]
+   (memoizer f (cache/basic-cache-factory {}) seed)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

@@ -2871,7 +2871,6 @@ net.brehaut.ClojureTools = (function (SH) {
  and infer field semantic types.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.sync.analyze
   (:require
-   [metabase.models.field :refer [Field]]
    [metabase.sync.analyze.classify :as classify]
    [metabase.sync.analyze.fingerprint :as sync.fingerprint]
    [metabase.sync.interface :as i]
@@ -2917,23 +2916,21 @@ re-fingerprinted and re-classified.</p></li>
 fingerprint version is introduced, Fields that need it will be upgraded to it. We'll still only reclassify the
 newly re-fingerprinted Fields, because we'll know to skip the ones from last time since their value of
 <code>last_analyzed</code> is not <code>nil</code>.</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- update-last-analyzed!
-  [tables :- [:sequential i/TableInstance]]
-  (when-let [ids (seq (map u/the-id tables))]
-    ;; The WHERE portion of this query should match up with that of `classify/fields-to-classify`
-    (t2/update! Field {:table_id            [:in ids]
-                       :fingerprint_version i/*latest-fingerprint-version*
-                       :last_analyzed       nil}
-                {:last_analyzed :%now})))</pre></td></tr><tr><td class="docs"><p>Update the <code>last_analyzed</code> date for all the recently re-fingerprinted/re-classified Fields in TABLE.</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Update the <code>last_analyzed</code> date for all the recently re-fingerprinted/re-classified Fields in <code>table</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn- update-fields-last-analyzed!
   [table :- i/TableInstance]
-  (update-last-analyzed! [table]))</pre></td></tr><tr><td class="docs"><p>Update the <code>last_analyzed</code> date for all the recently re-fingerprinted/re-classified Fields in TABLE.</p>
+  (t2/update! :model/Field
+              (merge (sync.fingerprint/incomplete-analysis-kvs)
+                     {:table_id (:id table)})
+              {:last_analyzed :%now}))</pre></td></tr><tr><td class="docs"><p>Update the <code>last_analyzed</code> date for all the recently re-fingerprinted/re-classified Fields in <code>database</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn- update-fields-last-analyzed-for-db!
-  [_database :- i/DatabaseInstance
-   tables    :- [:sequential i/TableInstance]]
-  ;; The WHERE portion of this query should match up with that of `classify/fields-to-classify`
-  (update-last-analyzed! tables))</pre></td></tr><tr><td class="docs"><p>Perform in-depth analysis for a <code>table</code>.</p>
+  [database :- i/DatabaseInstance]
+  (t2/update! :model/Field
+              (merge (sync.fingerprint/incomplete-analysis-kvs)
+                     {:table_id [:in {:select [:id]
+                                      :from   [(t2/table-name :model/Table)]
+                                      :where  [:and sync-util/sync-tables-clause [:= :db_id (:id database)]]}]})
+              {:last_analyzed :%now}))</pre></td></tr><tr><td class="docs"><p>Perform in-depth analysis for a <code>table</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn analyze-table!
   [table :- i/TableInstance]
   (sync.fingerprint/fingerprint-fields! table)
@@ -2954,36 +2951,34 @@ newly re-fingerprinted Fields, because we'll know to skip the ones from last tim
 </td><td class="codes"><pre class="brush: clojure">(defn- classify-tables-summary [{:keys [total-tables tables-classified]}]
   (format &quot;Total number of tables classified %d, %d updated&quot;
           total-tables tables-classified))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- make-analyze-steps [tables log-fn]
+</td><td class="codes"><pre class="brush: clojure">(defn- make-analyze-steps [log-fn]
   [(sync-util/create-sync-step &quot;fingerprint-fields&quot;
-                               #(sync.fingerprint/fingerprint-fields-for-db! % tables log-fn)
+                               #(sync.fingerprint/fingerprint-fields-for-db! % log-fn)
                                fingerprint-fields-summary)
    (sync-util/create-sync-step &quot;classify-fields&quot;
-                               #(classify/classify-fields-for-db! % tables log-fn)
+                               #(classify/classify-fields-for-db! % log-fn)
                                classify-fields-summary)
    (sync-util/create-sync-step &quot;classify-tables&quot;
-                               #(classify/classify-tables-for-db! % tables log-fn)
+                               #(classify/classify-tables-for-db! % log-fn)
                                classify-tables-summary)])</pre></td></tr><tr><td class="docs"><p>Perform in-depth analysis on the data for all Tables in a given <code>database</code>. This is dependent on what each database
 driver supports, but includes things like cardinality testing and table row counting. This also updates the
 <code>:last_analyzed</code> value for each affected Field.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn analyze-db!
   [database :- i/DatabaseInstance]
   (sync-util/sync-operation :analyze database (format &quot;Analyze data for %s&quot; (sync-util/name-for-logging database))
-    (let [tables (sync-util/db-&gt;sync-tables database)]
-      (sync-util/with-emoji-progress-bar [emoji-progress-bar (inc (* 3 (count tables)))]
-        (u/prog1 (sync-util/run-sync-operation &quot;analyze&quot; database (make-analyze-steps tables (maybe-log-progress emoji-progress-bar)))
-          (update-fields-last-analyzed-for-db! database tables))))))</pre></td></tr><tr><td class="docs"><p>Refingerprint a subset of tables in a given <code>database</code>. This will re-fingerprint tables up to a threshold amount of
+    (sync-util/with-emoji-progress-bar [emoji-progress-bar (inc (* 3 (sync-util/sync-tables-count database)))]
+      (u/prog1 (sync-util/run-sync-operation &quot;analyze&quot; database (make-analyze-steps (maybe-log-progress emoji-progress-bar)))
+        (update-fields-last-analyzed-for-db! database)))))</pre></td></tr><tr><td class="docs"><p>Refingerprint a subset of tables in a given <code>database</code>. This will re-fingerprint tables up to a threshold amount of
 [[fingerprint/max-refingerprint-field-count]].</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn refingerprint-db!
   [database :- i/DatabaseInstance]
   (sync-util/sync-operation :refingerprint database (format &quot;Refingerprinting tables for %s&quot; (sync-util/name-for-logging database))
-    (let [tables (sync-util/db-&gt;sync-tables database)
-          log-fn (fn [step table]
+    (let [log-fn (fn [step table]
                    (log/info (u/format-color 'blue &quot;%s Analyzed %s&quot; step (sync-util/name-for-logging table))))]
       (sync-util/run-sync-operation &quot;refingerprint database&quot;
                                     database
                                     [(sync-util/create-sync-step &quot;refingerprinting fields&quot;
-                                                                 #(sync.fingerprint/refingerprint-fields-for-db! % tables log-fn)
+                                                                 #(sync.fingerprint/refingerprint-fields-for-db! % log-fn)
                                                                  fingerprint-fields-summary)]))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
