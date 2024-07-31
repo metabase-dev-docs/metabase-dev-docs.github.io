@@ -3133,11 +3133,7 @@ HTML</p>
       x-col-settings
       (assoc :x x-col-settings)
       y-col-settings
-      (assoc :y y-col-settings))))</pre></td></tr><tr><td class="docs"><p>Colors to cycle through for charts. These are copied from https://stats.metabase.com/_internal/colors</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private colors
-  [&quot;#509EE3&quot; &quot;#88BF4D&quot; &quot;#A989C5&quot; &quot;#EF8C8C&quot; &quot;#F9D45C&quot; &quot;#F2A86F&quot; &quot;#98D9D9&quot; &quot;#7172AD&quot; &quot;#6450e3&quot; &quot;#4dbf5e&quot;
-   &quot;#c589b9&quot; &quot;#efce8c&quot; &quot;#b5f95c&quot; &quot;#e35850&quot; &quot;#554dbf&quot; &quot;#bec589&quot; &quot;#8cefc6&quot; &quot;#5cc2f9&quot; &quot;#55e350&quot; &quot;#bf4d4f&quot;
-   &quot;#89c3c5&quot; &quot;#be8cef&quot; &quot;#f95cd0&quot; &quot;#50e3ae&quot; &quot;#bf974d&quot; &quot;#899bc5&quot; &quot;#ef8cde&quot; &quot;#f95c67&quot;])</pre></td></tr><tr><td class="docs"><p>Format a percentage which includes site settings for locale. The first arg is a numeric value to format. The second
+      (assoc :y y-col-settings))))</pre></td></tr><tr><td class="docs"><p>Format a percentage which includes site settings for locale. The first arg is a numeric value to format. The second
 is an optional string of decimal and grouping symbols to be used, ie ".,". There will soon be a values.clj file
 that will handle this but this is here in the meantime.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn format-percentage
@@ -3150,98 +3146,7 @@ that will handle this but this is here in the meantime.</p>
                                       (cond-&gt; decimal (.setDecimalSeparator decimal))
                                       (cond-&gt; grouping (.setGroupingSeparator grouping))))
                (DecimalFormat. base))]
-     (.format fmt value))))</pre></td></tr><tr><td class="docs"><p>Process rows with a minimum slice threshold. Collapses any segments below the threshold given as a percentage (the
-value 25 for 25%) into a single category as "Other". </p>
-</td><td class="codes"><pre class="brush: clojure">(defn- donut-info
-  [threshold-percentage rows]
-  (let [total                    (reduce + 0 (map second rows))
-        threshold                (* total (/ threshold-percentage 100))
-        {as-is true clump false} (group-by (comp #(&gt; % threshold) second) rows)
-        rows (cond-&gt; as-is
-               (seq clump)
-               (conj [(tru &quot;Other&quot;) (reduce (fnil + 0) 0 (map second clump))]))]
-    {:rows        rows
-     :percentages (into {}
-                        (for [[label value] rows]
-                          [label (if (zero? total)
-                                   (tru &quot;N/A&quot;)
-                                   (format-percentage (/ value total)))]))}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- donut-legend
-  [legend-entries]
-  (letfn [(table-fn [entries]
-            (into [:table {:style (style/style {:color       &quot;#4C5773&quot;
-                                                :font-family &quot;Lato, sans-serif&quot;
-                                                :font-size   &quot;24px&quot;
-                                                :font-weight &quot;bold&quot;
-                                                :box-sizing  &quot;border-box&quot;
-                                                :white-space &quot;nowrap&quot;})}]
-                  (for [{:keys [label percentage color]} entries]
-                    [:tr {:style (style/style {:margin-right &quot;12px&quot;})}
-                     [:td {:style (style/style {:color         color
-                                                :padding-right &quot;7px&quot;
-                                                :line-height   &quot;0&quot;})}
-                      [:span {:style (style/style {:font-size   &quot;2.875rem&quot;
-                                                   :line-height &quot;0&quot;
-                                                   :position    &quot;relative&quot;
-                                                   :top         &quot;-4px&quot;})} &quot;•&quot;]]
-                     [:td {:style (style/style {:padding-right &quot;30px&quot;})}
-                      label]
-                     [:td percentage]])))]
-    (if (&lt; (count legend-entries) 8)
-      (table-fn legend-entries)
-      [:table (into [:tr]
-                    (map (fn [some-entries]
-                           [:td {:style (style/style {:padding-right  &quot;20px&quot;
-                                                      :vertical-align &quot;top&quot;})}
-                            (table-fn some-entries)])
-                         (split-at (/ (count legend-entries) 2) legend-entries)))])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- replace-nils [rows]
-  (mapv (fn [row]
-          (if (nil? (first row))
-            (assoc row 0 &quot;(empty)&quot;)
-            row))
-        rows))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defmethod render :categorical/donut :- formatter/RenderedPulseCard
-  [_chart-type
-   render-type
-   timezone-id :- [:maybe :string]
-   card
-   _dashcard
-   {:keys [rows cols viz-settings] :as data}]
-  (let [[x-axis-rowfn y-axis-rowfn] (formatter/graphing-column-row-fns card data)
-        rows                        (map (juxt (comp str x-axis-rowfn) y-axis-rowfn)
-                                         (formatter/row-preprocess x-axis-rowfn y-axis-rowfn (replace-nils rows)))
-        slice-threshold             (or (get viz-settings :pie.slice_threshold)
-                                        2.5)
-        {:keys [rows percentages]}  (donut-info slice-threshold rows)
-        legend-colors               (merge (zipmap (map first rows) (cycle colors))
-                                           (update-keys (:pie.colors viz-settings) name))
-        settings                    {:percent_visibility (:pie.percent_visibility viz-settings) :show_total (:pie.show_total viz-settings)}
-        image-bundle                (image-bundle/make-image-bundle
-                                     render-type
-                                     (js-svg/categorical-donut rows legend-colors settings))
-        {label-viz-settings :x}     (-&gt;js-viz (x-axis-rowfn cols) (y-axis-rowfn cols) viz-settings)]
-    {:attachments
-     (when image-bundle
-       (image-bundle/image-bundle-&gt;attachment image-bundle))
-     :content
-     [:div
-      [:img {:style (style/style {:display :block :width :100%})
-             :src   (:image-src image-bundle)}]
-      (donut-legend
-       (mapv (fn [row]
-               (let [label (first row)]
-                 {:percentage (percentages (first row))
-                  :color      (legend-colors (first row))
-                  :label      (if (and (contains? label-viz-settings :date_style)
-                                       (formatter/temporal-string? label))
-                                (formatter/format-temporal-str
-                                 timezone-id
-                                 (first row)
-                                 (x-axis-rowfn cols)
-                                 viz-settings)
-                                label)}))
-             rows))]}))</pre></td></tr><tr><td class="docs">
+     (.format fmt value))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defmethod render :progress :- formatter/RenderedPulseCard
   [_chart-type
    render-type
