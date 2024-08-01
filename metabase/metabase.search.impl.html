@@ -2876,6 +2876,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.legacy-mbql.normalize :as mbql.normalize]
    [metabase.lib.core :as lib]
    [metabase.models.collection :as collection]
+   [metabase.models.collection.root :as collection.root]
    [metabase.models.data-permissions :as data-perms]
    [metabase.models.database :as database]
    [metabase.models.interface :as mi]
@@ -3280,48 +3281,21 @@ one model without errors. Therefore we degenerate it down for it</p>
           results)))</pre></td></tr><tr><td class="docs"><p>Adds <code>collection_effective_ancestors</code> to <em>datasets</em> in the search results.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn add-dataset-collection-hierarchy
   [search-results]
-  (let [;; this helper function takes a search result (with `collection_id` and `collection_location`) and returns the
-        ;; effective location of the result.
-        result-&gt;loc  (fn [{:keys [collection_id collection_location]}]
-                        (:effective_location
-                         (t2/hydrate
-                          (if (nil? collection_id)
-                            collection/root-collection
-                            {:location collection_location})
-                          :effective_location)))
-        ;; a map of collection-ids to collection info
-        col-id-&gt;info (into {}
-                           (for [item  search-results
-                                 :when (= (:model item) &quot;dataset&quot;)]
-                              [(:collection_id item)
-                               {:id                 (:collection_id item)
-                                :name               (-&gt; {:name (:collection_name item)
-                                                         :id   (:collection_id item)
-                                                         :type (:collection_type item)}
-                                                        collection/maybe-localize-trash-name
-                                                        :name)
-                                :type               (:collection_type item)
-                                :effective_location (result-&gt;loc item)}]))
-        ;; the set of all collection IDs where we *don't* know the collection name. For example, if `col-id-&gt;info`
-        ;; contained `{1 {:effective_location &quot;/2/&quot; :name &quot;Foo&quot;}}`, we need to look up the name of collection `2`.
-        to-fetch     (into #{} (comp (keep :effective_location)
-                                     (mapcat collection/location-path-&gt;ids)
-                                      ;; already have these names
-                                     (remove col-id-&gt;info))
-                            (vals col-id-&gt;info))
-        ;; the now COMPLETE map of collection IDs to info
-        col-id-&gt;info (merge (if (seq to-fetch)
-                              (t2/select-pk-&gt;fn #(select-keys % [:name :type :id]) :model/Collection :id [:in to-fetch])
-                              {})
-                            (update-vals col-id-&gt;info #(dissoc % :effective_location)))
-        annotate     (fn [x]
-                        (cond-&gt; x
-                          (= (:model x) &quot;dataset&quot;)
+  (let [annotate     (fn [result]
+                        (cond-&gt; result
+                          (= (:model result) &quot;dataset&quot;)
                           (assoc :collection_effective_ancestors
-                                 (if-let [loc (result-&gt;loc x)]
-                                   (-&gt;&gt; (collection/location-path-&gt;ids loc)
-                                        (map col-id-&gt;info))
-                                   []))))]
+                                 (-&gt;&gt; (t2/hydrate
+                                       (if (nil? (:collection_id result))
+                                         collection/root-collection
+                                         {:location (:collection_location result)})
+                                       :effective_ancestors)
+                                      :effective_ancestors
+                                      ;; two pieces for backwards compatibility:
+                                      ;; - remove the root collection
+                                      ;; - remove the `personal_owner_id`
+                                      (remove collection.root/is-root-collection?)
+                                      (map #(dissoc % :personal_owner_id))))))]
     (map annotate search-results)))</pre></td></tr><tr><td class="docs"><p>Batch-hydrates :effective<em>location and :effective</em>parent on collection search results. Keeps search results in
 order.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- add-collection-effective-location

@@ -3303,22 +3303,32 @@ and collection search results.</p>
     (t2/select [Collection :name :id :personal_owner_id]
       :id [:in ancestor-ids]
       {:order-by [:location]})))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mi/define-simple-hydration-method ^:private ancestors
+</td><td class="codes"><pre class="brush: clojure">(mi/define-simple-hydration-method ancestors
   :ancestors
   &quot;Fetch ancestors (parent, grandparent, etc.) of a `collection`. These are returned in order starting with the
   highest-level (e.g. most distant) ancestor.&quot;
   [collection]
-  (ancestors* collection))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- effective-ancestors* :- [:sequential [:or RootCollection (ms/InstanceOf Collection)]]
-  [collection :- CollectionWithLocationAndIDOrRoot]
-  (if (collection.root/is-root-collection? collection)
+  (ancestors* collection))</pre></td></tr><tr><td class="docs"><p>Given a collection, return the effective ancestors of that collection.
+Note that the map <code>(collection-id-&gt;collection)</code> is cached for the lifetime
+of the request, so this will make at most one DB query per request regardless
+of how many times it is called.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- effective-ancestors*
+  [collection :- [:maybe CollectionWithLocationOrRoot]]
+  (if (or (nil? collection)
+          (collection.root/is-root-collection? collection))
     []
-    (filter mi/can-read? (cons (root-collection-with-ui-details (:namespace collection)) (ancestors collection)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mi/define-simple-hydration-method effective-ancestors
+    (some-&gt;&gt; (effective-location-path collection)
+             location-path-&gt;ids
+             (map (collection-id-&gt;collection))
+             (map #(select-keys % [:name :id :personal_owner_id :type]))
+             (map #(t2/instance :model/Collection %))
+             (cons (root-collection-with-ui-details (:namespace collection)))
+             (filter mi/can-read?))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mi/define-batched-hydration-method effective-ancestors
   :effective_ancestors
-  &quot;Fetch the ancestors of a `collection`, filtering out any ones the current User isn't allowed to see. This is used
-  in the UI to power the 'breadcrumb' path to the location of a given Collection. For example, suppose we have four
-  Collections, nested like:
+  &quot;Efficiently hydrate the ancestors of a `collection`, filtering out any ones the current User isn't allowed to see.
+  This is used in the UI to power the 'breadcrumb' path to the location of a given Collection. For example, suppose we
+  have four Collections, nested like:
     A &gt; B &gt; C &gt; D
   The ancestors of D are:
     [Root] &gt; A &gt; B &gt; C
@@ -3326,8 +3336,12 @@ and collection search results.</p>
     [Root] &gt; A &gt; C
   Thus the existence of C will be kept hidden from the current User, and for all intents and purposes the current User
   can effectively treat A as the parent of C.&quot;
-  [collection]
-  (effective-ancestors* collection))</pre></td></tr><tr><td class="docs">
+  [collections]
+  (map (fn [collection]
+         (assoc collection
+                :effective_ancestors
+                (effective-ancestors* collection)))
+       collections))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn- parent-id* :- [:maybe ms/PositiveInt]
   [{:keys [location]} :- CollectionWithLocationOrRoot]
   (some-&gt; location location-path-&gt;parent-id))</pre></td></tr><tr><td class="docs">
