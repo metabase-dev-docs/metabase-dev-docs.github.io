@@ -2877,7 +2877,6 @@ to the corresponding queue.</p>
    [metabase.legacy-mbql.util :as mbql.u]
    [metabase.lib.core :as lib]
    [metabase.lib.util :as lib.util]
-   [metabase.models.query-field :as query-field]
    [metabase.public-settings :as public-settings]
    [metabase.query-analysis.native-query-analyzer :as nqa]
    [metabase.query-analysis.native-query-analyzer.replacement :as nqa.replacement]
@@ -2962,15 +2961,31 @@ Returns <code>nil</code> and leaves the database records as-is if analysis is di
   [{card-id :id, query :dataset_query}]
   (let [query-type (lib/normalized-query-type query)]
     (when (enabled-type? query-type)
-      (let [references       (query-references query query-type)
-            reference-&gt;row   (fn [{:keys [table column field-id explicit-reference]}]
-                               {:card_id            card-id
-                                :table              table
-                                :column             column
-                                :field_id           field-id
-                                :explicit_reference explicit-reference})
-            query-field-rows (map reference-&gt;row (:fields references))]
-        (query-field/update-query-fields-for-card! card-id query-field-rows)))))</pre></td></tr><tr><td class="docs"><p>Substitute new references for certain fields and tables, based upon the given mappings.</p>
+      (t2/with-transaction [_conn]
+        (let [analysis-id      (t2/insert-returning-pk! :model/QueryAnalysis {:card_id card-id})
+              references       (query-references query query-type)
+              table-&gt;row       (fn [{:keys [schema table table-id]}]
+                                 {:card_id     card-id
+                                  :analysis_id analysis-id
+                                  :schema      schema
+                                  :table       table
+                                  :table_id    table-id})
+              field-&gt;row       (fn [{:keys [table column table-id field-id explicit-reference]}]
+                                 {:card_id            card-id
+                                  :analysis_id        analysis-id
+                                  :table              table
+                                  :column             column
+                                  :table_id           table-id
+                                  :field_id           field-id
+                                  :explicit_reference explicit-reference})
+              query-field-rows (map field-&gt;row (:fields references))
+              query-table-rows (map table-&gt;row (:tables references))]
+          (t2/insert! :model/QueryField query-field-rows)
+          (t2/insert! :model/QueryTable query-table-rows)
+          (t2/delete! :model/QueryAnalysis
+                      {:where [:and
+                               [:= :card_id card-id]
+                               [:not= :id analysis-id]]}))))))</pre></td></tr><tr><td class="docs"><p>Substitute new references for certain fields and tables, based upon the given mappings.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- replaced-inner-query-for-native-card
   [query {:keys [fields tables] :as _replacement-ids}]
   (let [keyvals-set         #(set/union (set (keys %))
