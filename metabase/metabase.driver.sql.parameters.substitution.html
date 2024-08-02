@@ -2888,7 +2888,6 @@ should be represented as SQL. (Specifically, they return information in this for
    [metabase.query-processor.error-type :as qp.error-type]
    [metabase.query-processor.middleware.wrap-value-literals :as qp.wrap-value-literals]
    [metabase.query-processor.util.add-alias-info :as add]
-   [metabase.shared.util.time :as shared.ut]
    [metabase.util :as u]
    [metabase.util.date-2 :as u.date]
    [metabase.util.i18n :refer [tru]]
@@ -2897,7 +2896,7 @@ should be represented as SQL. (Specifically, they return information in this for
    (clojure.lang IPersistentVector Keyword)
    (java.time.temporal Temporal)
    (java.util UUID)
-   (metabase.driver.common.parameters Date DateRange FieldFilter ReferencedCardQuery ReferencedQuerySnippet)))</pre></td></tr><tr><td class="docs"><p>------------------------------------ ->prepared-substitution &amp; default impls -------------------------------------</p>
+   (metabase.driver.common.parameters Date DateRange DateTimeRange FieldFilter ReferencedCardQuery ReferencedQuerySnippet)))</pre></td></tr><tr><td class="docs"><p>------------------------------------ ->prepared-substitution &amp; default impls -------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Returns a <code>PreparedStatementSubstitution</code> (see schema below) for <code>x</code> and the given driver. This allows driver
 specific parameters and SQL replacement text (usually just ?). The param value is already prepared and ready for
 inlcusion in the query, such as what's needed for SQLite and timestamps.</p>
@@ -2965,13 +2964,7 @@ Returns <code>nil</code> if the conversion is not necessary for this <code>field
   (when (params.dates/date-type? param-type)
     (if-let [exclusion-type (params.dates/exclusion-date-type param-type value)]
       exclusion-type
-      (let [value* (if (params.dates/not-single-date-type? param-type)
-                     (let [param-range (params.dates/date-string-&gt;range value)]
-                       (or (:start param-range) (:end param-range))) ;; Before or after filters only have one of these
-                     value)]
-        (if (re-matches shared.ut/local-date-regex value*)
-          :day
-          :minute)))))</pre></td></tr><tr><td class="docs"><p>------------------------------------------- ->replacement-snippet-info -------------------------------------------</p>
+      :default)))</pre></td></tr><tr><td class="docs"><p>------------------------------------------- ->replacement-snippet-info -------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private ParamSnippetInfo
   [:map
@@ -2982,7 +2975,7 @@ Returns <code>nil</code> if the conversion is not necessary for this <code>field
 <p>  (->replacement-snippet-info :h2 "ABC") -> {:replacement-snippet "?", :prepared-statement-args "ABC"}</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti -&gt;replacement-snippet-info
   {:added &quot;0.33.4&quot; :arglists '([driver value])}
-  (fn [driver v] [(driver/the-initialized-driver driver) (class v)])
+  (fn [driver v &amp; _args] [(driver/the-initialized-driver driver) (class v)])
   :hierarchy #'driver/hierarchy)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- create-replacement-snippet
   [driver nil-or-obj]
@@ -3048,7 +3041,15 @@ Returns <code>nil</code> if the conversion is not necessary for this <code>field
                              (-&gt;prepared-substitution driver (maybe-parse-temporal-literal s)))
                            [start end])]
       {:replacement-snippet     (format &quot;BETWEEN %s AND %s&quot; (:sql-string start) (:sql-string end))
-       :prepared-statement-args (concat (:param-values start) (:param-values end))})))</pre></td></tr><tr><td class="docs"><p>------------------------------------- Field Filter replacement snippet info --------------------------------------</p>
+       :prepared-statement-args (concat (:param-values start) (:param-values end))})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;replacement-snippet-info [:sql DateTimeRange]
+  [driver {:keys [start end]} &amp; [field-identifier]]
+  (let [[start end] (map (fn [s]
+                           (-&gt;prepared-substitution driver (maybe-parse-temporal-literal s)))
+                         [start end])]
+    {:replacement-snippet     (format &quot;%s &gt;= %s AND %s &lt; %s&quot;
+                                      field-identifier (:sql-string start) field-identifier (:sql-string end))
+     :prepared-statement-args (concat (:param-values start) (:param-values end))}))</pre></td></tr><tr><td class="docs"><p>------------------------------------- Field Filter replacement snippet info --------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn- combine-replacement-snippet-maps :- ParamSnippetInfo
   &quot;Combine multiple `replacement-snippet-maps` into a single map using a SQL `AND` clause.&quot;
@@ -3100,10 +3101,19 @@ Returns <code>nil</code> if the conversion is not necessary for this <code>field
   (-&gt;&gt; (field-&gt;clause driver field param-type value)
        (sql.qp/-&gt;honeysql driver)
        (honeysql-&gt;replacement-snippet-info driver)
-       :replacement-snippet))</pre></td></tr><tr><td class="docs">
+       :replacement-snippet))</pre></td></tr><tr><td class="docs"><p>Generate replacement snippet for field filter on datetime field. For details on how range is generated see
+the docstring of [[params.dates/date-str->datetime-range]].</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- field-filter-&gt;replacement-snippet-for-datetime-field
+  [driver {:keys [field] {:keys [value type]} :value :as _field-filter}]
+  (letfn [(-&gt;datetime-replacement-snippet-info
+            [range]
+            (-&gt;replacement-snippet-info driver range (field-&gt;identifier driver field type value)))]
+    (-&gt; (params.dates/date-str-&gt;datetime-range value)
+        params/map-&gt;DateTimeRange
+        -&gt;datetime-replacement-snippet-info)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn- field-filter-&gt;replacement-snippet-info :- ParamSnippetInfo
   &quot;Return `[replacement-snippet &amp; prepared-statement-args]` appropriate for a field filter parameter.&quot;
-  [driver {{param-type :type, value :value, :as params} :value, field :field, :as _field-filter}]
+  [driver {{param-type :type, value :value, :as params} :value, field :field, :as field-filter}]
   (assert (:id field) (format &quot;Why doesn't Field have an ID?\n%s&quot; (u/pprint-to-str field)))
   (letfn [(prepend-field [x]
             (update x :replacement-snippet
@@ -3125,6 +3135,10 @@ Returns <code>nil</code> if the conversion is not necessary for this <code>field
              qp.wrap-value-literals/wrap-value-literals-in-mbql
              -&gt;honeysql
              (honeysql-&gt;replacement-snippet-info driver)))
+      ;; Special handling for `FieldFilter`s on `:type/DateTime` fields. DateTime range is always generated.
+      (and (params.dates/date-type? param-type)
+           (isa? ((some-fn :effective-type :base-type) field) :type/DateTime))
+      (field-filter-&gt;replacement-snippet-for-datetime-field driver field-filter)
       ;; convert other date to DateRange record types
       (params.dates/not-single-date-type? param-type) (prepend-field
                                                        (date-range-field-filter-&gt;replacement-snippet-info driver value))

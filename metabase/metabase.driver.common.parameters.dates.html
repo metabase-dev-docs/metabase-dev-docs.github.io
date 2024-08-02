@@ -2877,6 +2877,8 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.lib.schema.id :as lib.schema.id]
    [metabase.lib.schema.parameter :as lib.schema.parameter]
    [metabase.query-processor.error-type :as qp.error-type]
+   [metabase.query-processor.timezone :as qp.timezone]
+   [metabase.shared.util.time :as shared.ut]
    [metabase.util.date-2 :as u.date]
    [metabase.util.i18n :refer [tru]]
    [metabase.util.malli :as mu])
@@ -3263,7 +3265,54 @@ dox for [[date-string->range]] for more details.</p>
          ;; if both of the decoders above fail, then the date string is invalid
          (throw (ex-info (tru &quot;Don''t know how to parse date param ''{0}'' — invalid format&quot; date-string)
                          {:param date-string
-                          :type  qp.error-type/invalid-parameter}))))))</pre></td></tr><tr><td class="docs">
+                          :type  qp.error-type/invalid-parameter}))))))</pre></td></tr><tr><td class="docs"><p>Generate offset datetime from <code>date-str</code> with respect to qp's <code>results-timezone</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- date-str-&gt;qp-aware-offset-dt
+  [date-str]
+  (when date-str
+    (let [[y M d h m s] (shared.ut/yyyyMMddhhmmss-&gt;parts date-str)]
+      (try (.toOffsetDateTime (t/zoned-date-time y M d h m s 0 (t/zone-id (qp.timezone/results-timezone-id))))
+           (catch Throwable _
+             (t/offset-date-time y M d h m s 0 (t/zone-offset (qp.timezone/results-timezone-id))))))))</pre></td></tr><tr><td class="docs"><p>Return appropriate function for interval end adjustments in [[exclusive-datetime-range-end]].</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- date-str-&gt;unit-fn
+  [date-str]
+  (when date-str
+    (if (re-matches shared.ut/local-date-regex date-str)
+      t/days
+      t/minutes)))</pre></td></tr><tr><td class="docs"><p>Transform <code>end-dt</code> OffsetDateTime to appropriate range end.</p>
+
+<p>Context. Datetime range is required for <code>FieldFilter</code>s on <code>:type/DateTime</code> fields (see the
+[[metabase.driver.sql.parameters.substitution/field-filter->replacement-snippet-info]]) instead of <em>Date Range</em>
+available from [[date-string->range]].</p>
+
+<p>[[date-string->range]] returns interval of dates. [[date-str->datetime-range]] modifies the interval to consist
+of datetimes. By adding 0 temporal padding the end interval has to be adjusted.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- exclusive-datetime-range-end
+  [end-dt unit-fn]
+  (when (and end-dt unit-fn)
+    (t/+ end-dt (unit-fn 1))))</pre></td></tr><tr><td class="docs"><p>Try to extract date time value if [[date-string->range]] fails.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- fallback-raw-range
+  [date-str]
+  (let [date-str (first (re-find #&quot;\d+-\d+-\d+T?(\d?+)?(:\d+)?(:\d+)?&quot; date-str))]
+    {:start date-str
+     :end   date-str}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn date-str-&gt;datetime-range :- DateStringRange
+  &quot;Generate range from `date-range-str`.
+  First [[date-string-&gt;range]] generates range for dates (inclusive by default). Operating on that range,
+  this function:
+  1. converts dates to OffsetDateTime, respecting qp's timezone, adding zero temporal padding,
+  2. updates range to correct _end-exclusive datetime_*
+  3. formats the range.
+  This function is meant to be used for generating inclusive intervals for `:type/DateTime` field filters.
+  * End-exclusive gte lt filters are generated for `:type/DateTime` fields.&quot;
+  [raw-date-str]
+  (let [;; `raw-date-str` is sanitized in case it contains millis and timezone which are incompatible
+        ;; with [[date-string-&gt;range]]. `substitute-field-filter-test` expects that to happen.
+        range-raw (try (date-string-&gt;range raw-date-str)
+                       (catch Throwable _
+                         (fallback-raw-range raw-date-str)))]
+    (-&gt; (update-vals range-raw date-str-&gt;qp-aware-offset-dt)
+        (update :end exclusive-datetime-range-end (date-str-&gt;unit-fn (:end range-raw)))
+        format-date-range)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn date-string-&gt;filter :- mbql.s/Filter
   &quot;Takes a string description of a *date* (not datetime) range such as 'lastmonth' or '2016-07-15~2016-08-6' and
    returns a corresponding MBQL filter clause for a given field reference.&quot;
