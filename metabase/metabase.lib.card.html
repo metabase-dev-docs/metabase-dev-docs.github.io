@@ -2868,10 +2868,12 @@ net.brehaut.ClojureTools = (function (SH) {
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.lib.card" name="metabase.lib.card"><h1 class="project-name">metabase.lib.card</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.lib.card
   (:require
+   [medley.core :as m]
    [metabase.legacy-mbql.normalize :as mbql.normalize]
    [metabase.lib.convert :as lib.convert]
    [metabase.lib.metadata :as lib.metadata]
    [metabase.lib.metadata.calculation :as lib.metadata.calculation]
+   [metabase.lib.metadata.protocols :as lib.metadata.protocols]
    [metabase.lib.query :as lib.query]
    [metabase.lib.schema.common :as lib.schema.common]
    [metabase.lib.schema.id :as lib.schema.id]
@@ -2928,43 +2930,51 @@ untangle. The FE currently ignores results metadata for ad-hoc queries, and thus
 refs like 'Products__CATEGORY'... for the time being we'll have to force ID refs even when we should be using
 nominal refs so as to not completely destroy the FE. Once we port more stuff over maybe we can fix this.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *force-broken-card-refs*
-  true)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn -&gt;card-metadata-column :- ::lib.schema.metadata/column
-  &quot;Massage possibly-legacy Card results metadata into MLv2 ColumnMetadata.&quot;
-  ([metadata-providerable col]
-   (-&gt;card-metadata-column metadata-providerable nil col))
-  ([metadata-providerable :- ::lib.schema.metadata/metadata-providerable
-    card-or-id            :- [:maybe [:or ::lib.schema.id/card ::lib.schema.metadata/card]]
-    col                   :- :map]
+  true)</pre></td></tr><tr><td class="docs"><p>Massage possibly-legacy Card results metadata into MLv2 ColumnMetadata. Note that <code>card</code> might be unavailable so we
+accept both <code>card-id</code> and <code>card</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- -&gt;card-metadata-column
+  [col
+   card-id
+   card
+   field]
    (let [col (-&gt; col
                  (update-keys u/-&gt;kebab-case-en))]
      (cond-&gt; (merge
               {:base-type :type/*, :lib/type :metadata/column}
-              (when-let [field-id (:id col)]
-                (try
-                  (lib.metadata/field metadata-providerable field-id)
-                  (catch #?(:clj Throwable :cljs :default) _
-                    nil)))
+              field
               col
               {:lib/type                :metadata/column
                :lib/source              :source/card
                :lib/source-column-alias ((some-fn :lib/source-column-alias :name) col)})
-       card-or-id
-       (assoc :lib/card-id (u/the-id card-or-id))
+       card-id
+       (assoc :lib/card-id card-id)
        (and *force-broken-card-refs*
             ;; never force broken refs for Models, because Models can have give columns with completely
             ;; different names the Field ID of a different column, somehow. See #22715
             (or
-             ;; we can only do this check if `card-or-id` is passed in.
-             (not card-or-id)
-             (not= (:type (lib.metadata/card metadata-providerable (u/the-id card-or-id)))
-                   :model)))
+             ;; we can only do this check if `card-id` is passed in.
+             (not card-id)
+             (not= (:type card) :model)))
        (assoc ::force-broken-id-refs true)
        ;; If the incoming col doesn't have `:semantic-type :type/FK`, drop `:fk-target-field-id`.
        ;; This comes up with metadata on SQL cards, which might be linked to their original DB field but should not be
        ;; treated as FKs unless the metadata is configured accordingly.
        (not= (:semantic-type col) :type/FK)
-       (assoc :fk-target-field-id nil)))))</pre></td></tr><tr><td class="docs">
+       (assoc :fk-target-field-id nil))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn -&gt;card-metadata-columns :- [:sequential ::lib.schema.metadata/column]
+  &quot;Massage possibly-legacy Card results metadata into MLv2 ColumnMetadata.&quot;
+  ([metadata-providerable cols]
+   (-&gt;card-metadata-columns metadata-providerable nil cols))
+  ([metadata-providerable :- ::lib.schema.metadata/metadata-providerable
+    card-or-id            :- [:maybe [:or ::lib.schema.id/card ::lib.schema.metadata/card]]
+    cols                  :- [:sequential :map]]
+   (let [metadata-provider (lib.metadata/-&gt;metadata-provider metadata-providerable)
+         card-id           (when card-or-id (u/the-id card-or-id))
+         card              (when card-id (lib.metadata/card metadata-providerable card-id))
+         field-ids         (keep :id cols)
+         fields            (lib.metadata.protocols/metadatas metadata-provider :metadata/column field-ids)
+         field-id-&gt;field   (m/index-by :id fields)]
+     (mapv #(-&gt;card-metadata-column % card-id card (get field-id-&gt;field (:id %))) cols))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private CardColumnMetadata
   [:merge
    ::lib.schema.metadata/column
@@ -2989,8 +2999,7 @@ references between one another.</p>
         (when-let [cols (not-empty (cond
                                      (map? result-metadata)        (:columns result-metadata)
                                      (sequential? result-metadata) result-metadata))]
-          (mapv (partial -&gt;card-metadata-column metadata-providerable card)
-                cols))))))</pre></td></tr><tr><td class="docs">
+          (-&gt;card-metadata-columns metadata-providerable card cols))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn saved-question-metadata :- CardColumns
   &quot;Metadata associated with a Saved Question with `card-id`.&quot;
   [metadata-providerable :- ::lib.schema.metadata/metadata-providerable
