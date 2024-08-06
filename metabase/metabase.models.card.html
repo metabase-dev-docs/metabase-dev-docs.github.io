@@ -3224,37 +3224,38 @@ targets. See https://github.com/metabase/metabase/issues/14145 for more details.
 - card.result_metadata changes and the parameter values source field can't be found anymore</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- update-parameters-using-card-as-values-source
   [{id :id, :as changes}]
-  (let [parameter-cards   (t2/select ParameterCard :card_id id)]
-    (doseq [[[po-type po-id] param-cards]
-            (group-by (juxt :parameterized_object_type :parameterized_object_id) parameter-cards)]
-      (let [model                  (case po-type :card 'Card :dashboard 'Dashboard)
-            {:keys [parameters]}   (t2/select-one [model :parameters] :id po-id)
-            affected-param-ids-set (cond
-                                     ;; update all parameters that use this card as source
-                                     (:archived changes)
-                                     (set (map :parameter_id param-cards))
-                                     ;; update only parameters that have value_field no longer in this card
-                                     (:result_metadata changes)
-                                     (let [param-id-&gt;parameter (m/index-by :id parameters)]
-                                       (-&gt;&gt; param-cards
-                                            (filter (fn [param-card]
-                                                      ;; if cant find the value-field in result_metadata, then we should
-                                                      ;; remove it
-                                                      (nil? (qp.util/field-&gt;field-info
+  (when (some #{:archived :result_metadata} (keys changes))
+    (let [parameter-cards (t2/select ParameterCard :card_id id)]
+      (doseq [[[po-type po-id] param-cards]
+              (group-by (juxt :parameterized_object_type :parameterized_object_id) parameter-cards)]
+        (let [model                  (case po-type :card 'Card :dashboard 'Dashboard)
+              {:keys [parameters]}   (t2/select-one [model :parameters] :id po-id)
+              affected-param-ids-set (cond
+                                      ;; update all parameters that use this card as source
+                                      (:archived changes)
+                                      (set (map :parameter_id param-cards))
+                                      ;; update only parameters that have value_field no longer in this card
+                                      (:result_metadata changes)
+                                      (let [param-id-&gt;parameter (m/index-by :id parameters)]
+                                        (-&gt;&gt; param-cards
+                                             (filter (fn [param-card]
+                                                       ;; if cant find the value-field in result_metadata, then we should
+                                                       ;; remove it
+                                                       (nil? (qp.util/field-&gt;field-info
                                                               (get-in (param-id-&gt;parameter (:parameter_id param-card)) [:values_source_config :value_field])
                                                               (:result_metadata changes)))))
-                                            (map :parameter_id)
-                                            set))
-                                     :else #{})
-            new-parameters (map (fn [parameter]
-                                  (if (affected-param-ids-set (:id parameter))
-                                    (-&gt; parameter
-                                        (assoc :values_source_type nil)
-                                        (dissoc :values_source_config))
-                                    parameter))
-                                parameters)]
-        (when-not (= parameters new-parameters)
-          (t2/update! model po-id {:parameters new-parameters}))))))</pre></td></tr><tr><td class="docs"><p>A model with implicit action supported iff they are a raw table,
+                                             (map :parameter_id)
+                                             set))
+                                      :else #{})
+              new-parameters (map (fn [parameter]
+                                    (if (affected-param-ids-set (:id parameter))
+                                      (-&gt; parameter
+                                          (assoc :values_source_type nil)
+                                          (dissoc :values_source_config))
+                                      parameter))
+                                  parameters)]
+          (when-not (= parameters new-parameters)
+            (t2/update! model po-id {:parameters new-parameters})))))))</pre></td></tr><tr><td class="docs"><p>A model with implicit action supported iff they are a raw table,
 meaning there are no clauses such as filter, limit, breakout...</p>
 
 <p>It should be the opposite of [[metabase.lib.stage/has-clauses]] but for all stages.</p>
@@ -3314,6 +3315,10 @@ meaning there are no clauses such as filter, limit, breakout...</p>
       (params/assert-valid-parameters changes)
       (params/assert-valid-parameter-mappings changes)
       (update-parameters-using-card-as-values-source changes)
+      ;; TODO: should be done in after-update
+      ;; has to place it here because changes is not available in after-update hook see toucan2#129
+      (when (contains? changes :dataset_query)
+        (query-analysis/analyze-async! id))
       (when (:parameters changes)
         (parameter-card/upsert-or-delete-from-parameters! &quot;card&quot; id (:parameters changes)))
       ;; additional checks (Enterprise Edition only)
@@ -3359,12 +3364,7 @@ meaning there are no clauses such as filter, limit, breakout...</p>
       pre-update
       populate-query-fields
       maybe-populate-initially-published-at
-      (dissoc :id)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(t2/define-after-update :model/Card
-  [card]
-  (u/prog1 card
-    (when (contains? (t2/changes card) :dataset_query)
-      (query-analysis/analyze-async! card))))</pre></td></tr><tr><td class="docs"><p>Cards don't normally get deleted (they get archived instead) so this mostly affects tests</p>
+      (dissoc :id)))</pre></td></tr><tr><td class="docs"><p>Cards don't normally get deleted (they get archived instead) so this mostly affects tests</p>
 </td><td class="codes"><pre class="brush: clojure">(t2/define-before-delete :model/Card
   [{:keys [id] :as _card}]
   ;; delete any ParameterCard that the parameters on this card linked to
