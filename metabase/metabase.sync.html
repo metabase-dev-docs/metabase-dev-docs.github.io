@@ -2900,6 +2900,23 @@ be called directly instead of calling the [[sync-database!]] function to do all 
      [:end-time   (ms/InstanceOfClass Temporal)]
      [:name       :string]
      [:steps      [:maybe [:sequential sync-util/StepNameWithMetadata]]]]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private phase-&gt;fn
+  {:metadata     sync-metadata/sync-db-metadata!
+   :analyze      analyze/analyze-db!
+   :field-values field-values/update-field-values!})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- scan-phases [scan]
+  (if (not= :full scan)
+    [:metadata]
+    [:metadata :analyze :field-values]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- do-phase! [database phase]
+  (let [f      (phase-&gt;fn phase)
+        result (f database)]
+    (if (instance? Throwable result)
+      ;; do nothing if we're configured to just move on.
+      (when-not sync-util/*log-exceptions-and-continue?*
+        ;; but if we didn't expect any suppressed exceptions, rethrow it
+        (throw result))
+      (assoc result :name (name phase)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn sync-database! :- SyncDatabaseResults
   &quot;Perform all the different sync operations synchronously for `database`.
   By default, does a `:full` sync that performs all the different sync operations consecutively. You may instead
@@ -2912,10 +2929,9 @@ be called directly instead of calling the [[sync-database!]] function to do all 
     {:keys [scan], :or {scan :full}} :- [:maybe [:map
                                                  [:scan {:optional true} [:maybe [:enum :schema :full]]]]]]
    (sync-util/sync-operation :sync database (format &quot;Sync %s&quot; (sync-util/name-for-logging database))
-     (cond-&gt; [(assoc (sync-metadata/sync-db-metadata! database) :name &quot;metadata&quot;)]
-       (= scan :full)
-       (conj (assoc (analyze/analyze-db! database) :name &quot;analyze&quot;)
-             (assoc (field-values/update-field-values! database) :name &quot;field-values&quot;))))))</pre></td></tr><tr><td class="docs"><p>Perform all the different sync operations synchronously for a given <code>table</code>. Since often called on a sequence of
+     (-&gt;&gt; (scan-phases scan)
+          (keep (partial do-phase! database))
+          (doall)))))</pre></td></tr><tr><td class="docs"><p>Perform all the different sync operations synchronously for a given <code>table</code>. Since often called on a sequence of
 tables, caller should check if can connect.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn sync-table!
   [table :- i/TableInstance]
