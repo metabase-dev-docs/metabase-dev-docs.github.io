@@ -2868,55 +2868,42 @@ net.brehaut.ClojureTools = (function (SH) {
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.shared.util.i18n" name="metabase.shared.util.i18n"><h1 class="project-name">metabase.shared.util.i18n</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.shared.util.i18n
   (:require
-   [metabase.util.i18n :as i18n]
-   [net.cgrand.macrovich :as macros]))</pre></td></tr><tr><td class="docs"><p>i18n a string with the user's locale. Format string will be translated to the user's locale when the form is eval'ed.
-Placeholders should use <code>gettext</code> format e.g. <code>{0}</code>, <code>{1}</code>, and so forth.</p>
+   [&quot;ttag&quot; :as ttag]
+   [clojure.string :as str])
+  (:require-macros
+   [metabase.shared.util.i18n]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(comment metabase.shared.util.i18n/keep-me
+         ttag/keep-me)</pre></td></tr><tr><td class="docs"><p>Converts <code>''</code> to <code>'</code> inside the string; that's <code>java.text.MessageFormat</code> escaping that isn't needed in JS.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- escape-format-string
+  [format-string]
+  (str/replace format-string #&quot;''&quot; &quot;'&quot;))</pre></td></tr><tr><td class="docs"><p>Format an i18n <code>format-string</code> with <code>args</code> with a translated string in the user locale.</p>
 
-<p>  (tru "Number of cans: {0}" 2)</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro tru
-  {:style/indent [:form]}
+<p>The strings are formatted in <code>java.test.MessageFormat</code> style. That's used directly in JVM Clojure, but in CLJS we have
+to adapt to ttag, which doesn't have the same escaping rules.
+- 'xyz' single quotes wrap literal text which should not be interpolated, and could contain literal '{0}'.
+- A literal single quote is written with two single quotes: <code>''</code>
+The first part is not supported at all. <code>''</code> is converted to a single <code>'</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn js-i18n
   [format-string &amp; args]
-  (macros/case
-    :clj
-    `(i18n/tru ~format-string ~@args)
-    :cljs
-    `(js-i18n ~format-string ~@args)))</pre></td></tr><tr><td class="docs"><p>i18n a string with the site's locale, when called from Clojure. Format string will be translated to the site's
-locale when the form is eval'ed. Placeholders should use <code>gettext</code> format e.g. <code>{0}</code>, <code>{1}</code>, and so forth.</p>
-
-<p>  (trs "Number of cans: {0}" 2)</p>
-
-<p>NOTE: When called from ClojureScript, this function behaves identically to <code>tru</code>. The originating JS callsite must
-temporarily override the locale used by ttag using the <code>withInstanceLocalization</code> wrapper function.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro trs
-  {:style/indent [:form]}
-  [format-string &amp; args]
-  (macros/case
-    :clj
-    (do
-      (require 'metabase.util.i18n)
-      `(i18n/trs ~format-string ~@args))
-    :cljs
-    `(js-i18n ~format-string ~@args)))</pre></td></tr><tr><td class="docs"><p>i18n a string with both singular and plural forms, using the current user's locale. The appropriate plural form will
-be returned based on the value of <code>n</code>. <code>n</code> can be interpolated into the format strings using the <code>{0}</code>
-syntax. (Other placeholders are not supported).</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro trun
-  {:style/indent [:form]}
+  (let [strings (-&gt; format-string
+                    escape-format-string
+                    (str/split #&quot;\{\d+\}&quot;))]
+    (apply ttag/t (clj-&gt;js strings) (clj-&gt;js args))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private re-param-zero #&quot;\{0\}&quot;)</pre></td></tr><tr><td class="docs"><p>Format an i18n <code>format-string</code> with the appropriate plural form based on the value <code>n</code>.
+ Allows <code>n</code> to be interpolated into the string using {0}.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn js-i18n-n
   [format-string format-string-pl n]
-  (macros/case
-    :clj
-    `(i18n/trun ~format-string ~format-string-pl ~n)
-    :cljs
-    `(js-i18n-n ~format-string ~format-string-pl ~n)))</pre></td></tr><tr><td class="docs"><p>i18n a string with both singular and plural forms, using the site's locale. The appropriate plural form will be
-returned based on the value of <code>n</code>. <code>n</code> can be interpolated into the format strings using the <code>{0}</code> syntax. (Other
-placeholders are not supported).</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro trsn
-  {:style/indent [:form]}
-  [format-string format-string-pl n]
-  (macros/case
-    :clj
-    `(i18n/trsn ~format-string ~format-string-pl ~n)
-    :cljs
-    `(js-i18n-n ~format-string ~format-string-pl ~n)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+  (let [format-string-esc (escape-format-string format-string)
+        strings           (str/split format-string-esc re-param-zero)
+        strings           (if (= (count strings) 1)
+                            [format-string-esc &quot;&quot;]
+                            strings)
+        has-n?            (re-find #&quot;.*\{0\}.*&quot; format-string-esc)]
+    (ttag/ngettext (ttag/msgid (clj-&gt;js strings) (if has-n? n &quot;&quot;))
+                   (-&gt; format-string-pl
+                      escape-format-string
+                      (str/replace re-param-zero (str n)))
+                   n)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

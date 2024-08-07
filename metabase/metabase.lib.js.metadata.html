@@ -3266,6 +3266,11 @@ key <code>_card</code> (not sure why), but if it is just unwrap it and then pars
       (catch js/Error e
         (log/errorf e &quot;Error parsing %s objects: %s&quot; object-type (ex-message e))
         nil))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- card-&gt;metric-card
+  [card]
+  (-&gt; card
+      (select-keys [:id :table-id :name :description :archived :dataset-query :source-card-id])
+      (assoc :lib/type :metadata/metric)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- metric-cards
   [delayed-cards]
   (when-let [cards @delayed-cards]
@@ -3273,11 +3278,7 @@ key <code>_card</code> (not sure why), but if it is just unwrap it and then pars
           (keep (fn [[id card]]
                   (when (and card (= (:type @card) :metric) (not (:archived @card)))
                     (let [card @card]
-                      [id (-&gt; card
-                              (select-keys [:id :table-id :name :description :archived
-                                            :dataset-query])
-                              (assoc :lib/type :metadata/metric)
-                              delay)]))))
+                      [id (-&gt; card card-&gt;metric-card delay)]))))
           cards)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- parse-metadata [metadata]
   (let [delayed-cards (parse-objects-delay :card metadata)]
@@ -3316,7 +3317,19 @@ key <code>_card</code> (not sure why), but if it is just unwrap it and then pars
     (into []
           (keep (fn [[_id dlay]]
                   (when-let [object (some-&gt; dlay deref)]
-                    (when (= (:table-id object) table-id)
+                    (when (and (= (:table-id object) table-id)
+                               (or (not= metadata-type :metadata/metric)
+                                   (nil? (:source-card-id object))))
+                      object))))
+          (some-&gt; metadata k deref))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- metadatas-for-card
+  [metadata metadata-type card-id]
+  (let [k (case metadata-type
+            :metadata/metric :metrics)]
+    (into []
+          (keep (fn [[_id dlay]]
+                  (when-let [object (some-&gt; dlay deref)]
+                    (when (= (:source-card-id object) card-id)
                       object))))
           (some-&gt; metadata k deref))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- setting [^js unparsed-metadata setting-key]
@@ -3336,9 +3349,8 @@ key <code>_card</code> (not sure why), but if it is just unwrap it and then pars
         (tables metadata database-id))
       (metadatas-for-table [_this metadata-type table-id]
         (metadatas-for-table metadata metadata-type table-id))
-      (metadatas-for-tables [_this metadata-type table-ids]
-        ;; since this is already all in memory, we don't worry about batching
-        (map #(metadatas-for-table metadata metadata-type %) table-ids))
+      (metadatas-for-card [_this metadata-type card-id]
+        (metadatas-for-card metadata metadata-type card-id))
       (setting [_this setting-key]
         (setting unparsed-metadata setting-key))
       ;; for debugging: call [[clojure.datafy/datafy]] on one of these to parse all of our metadata and see the whole

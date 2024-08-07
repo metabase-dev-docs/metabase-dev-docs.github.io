@@ -2985,11 +2985,12 @@ gradually.</p>
    {:default 0}))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- source-card-id
   [query]
-  (let [query-type (lib/normalized-query-type query)]
-    (case query-type
-      :query      (-&gt; query mbql.normalize/normalize qp.util/query-&gt;source-card-id)
-      :mbql/query (-&gt; query lib/normalize lib.util/source-card-id)
-      nil)))</pre></td></tr><tr><td class="docs"><p>Return integer source table ids for card's :dataset_query.</p>
+  (when (map? query)
+    (let [query-type (lib/normalized-query-type query)]
+      (case query-type
+        :query      (-&gt; query mbql.normalize/normalize qp.util/query-&gt;source-card-id)
+        :mbql/query (-&gt; query lib/normalize lib.util/source-card-id)
+        nil))))</pre></td></tr><tr><td class="docs"><p>Return integer source table ids for card's :dataset_query.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- card-&gt;integer-table-ids
   [card]
   (when-some [query (-&gt; card :dataset_query :query)]
@@ -3006,6 +3007,7 @@ enabled, as per https://github.com/metabase/metabase/pull/45050. Returns <code>n
       (lib.metadata.protocols/metadatas mp :metadata/table table-ids))))</pre></td></tr><tr><td class="docs"><p>Adds can<em>run</em>adhoc_query to each card.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn with-can-run-adhoc-query
   [cards]
+  ;; TODO: for metrics, we can get (some-fn :source_model_id :source_question_id)
   (let [dataset-cards (filter (comp seq :dataset_query) cards)
         source-card-ids (into #{}
                               (keep (comp source-card-id :dataset_query))
@@ -3073,6 +3075,17 @@ enabled, as per https://github.com/metabase/metabase/pull/45050. Returns <code>n
                     :group-by [:card_id]})
          (map (juxt :card_id :started_at))
          (into {}))
+   :id))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/batched-hydrate [:model/Card :metrics]
+  [_model k cards]
+  (mi/instances-with-hydrated-data
+   cards k
+   #(group-by :source_card_id
+              (t2/select :model/Card
+                         :source_card_id [:in (map :id cards)],
+                         :archived false,
+                         :type :metric,
+                         {:order-by [[:name :asc]]}))
    :id))</pre></td></tr><tr><td class="docs"><p>There's more hydration in the shared metabase.moderation namespace, but it needs to be required:</p>
 </td><td class="codes"><pre class="brush: clojure">(comment moderation/keep-me)</pre></td></tr><tr><td class="docs"><p>--------------------------------------------------- Revisions ----------------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
@@ -3095,11 +3108,14 @@ enabled, as per https://github.com/metabase/metabase/pull/45050. Returns <code>n
      ;; the type check only needed in tests because most test object does not include `type` key
      (and (some? (:type instance)) (not (model? instance)))
      (dissoc :result_metadata))))</pre></td></tr><tr><td class="docs"><p>--------------------------------------------------- Lifecycle ----------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Lift <code>database_id</code>, <code>table_id</code>, and <code>query_type</code> from query definition when inserting/updating a Card.</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Lift <code>database_id</code>, <code>table_id</code>, <code>query_type</code>, and <code>source_card_id</code> fields
+from query definition when inserting/updating a Card.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn populate-query-fields
   [{query :dataset_query, :as card}]
   (merge
    card
+   (when-let [source-id (source-card-id query)]
+     {:source_card_id source-id})
    ;; mega HACK FIXME -- don't update this stuff when doing deserialization because it might differ from what's in the
    ;; YAML file and break tests like [[metabase-enterprise.serialization.v2.e2e.yaml-test/e2e-storage-ingestion-test]].
    ;; The root cause of this issue is that we're generating Cards that have a different Database ID or Table ID from
@@ -3326,8 +3342,10 @@ meaning there are no clauses such as filter, limit, breakout...</p>
       (assert-valid-type (merge old-card-info changes)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(t2/define-after-select :model/Card
   [card]
-  (public-settings/remove-public-uuid-if-public-sharing-is-disabled
-   (dissoc card :dataset_query_metrics_v2_migration_backup)))</pre></td></tr><tr><td class="docs">
+  (-&gt; card
+      (dissoc :dataset_query_metrics_v2_migration_backup)
+      (m/assoc-some :source_card_id (-&gt; card :dataset_query source-card-id))
+      public-settings/remove-public-uuid-if-public-sharing-is-disabled))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(t2/define-before-insert :model/Card
   [card]
   (-&gt; card
@@ -3584,7 +3602,7 @@ included, otherwise the metadata will be saved to the database asynchronously.</
   [_model-name]
   {:copy [:archived :archived_directly :collection_position :collection_preview :created_at :description :display
           :embedding_params :enable_embedding :entity_id :metabase_version :public_uuid :query_type :type :name]
-   :skip [ ;; always instance-specific
+   :skip [;; always instance-specific
           :id :updated_at
           ;; cache invalidation is instance-specific
           :cache_invalidated_at
@@ -3599,6 +3617,8 @@ included, otherwise the metadata will be saved to the database asynchronously.</
                              #(serdes/*import-fk-keyed* % 'Database :name)]
     :table_id               [serdes/*export-table-fk*
                              serdes/*import-table-fk*]
+    :source_card_id         [#(serdes/*export-fk* % :model/Card)
+                             #(serdes/*import-fk* % :model/Card)]
     :collection_id          [#(serdes/*export-fk* % 'Collection)
                              #(serdes/*import-fk* % 'Collection)]
     :creator_id             [serdes/*export-user*
@@ -3617,13 +3637,14 @@ included, otherwise the metadata will be saved to the database asynchronously.</
                              import-result-metadata]}})</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/dependencies &quot;Card&quot;
   [{:keys [collection_id database_id dataset_query parameters parameter_mappings
-           result_metadata table_id visualization_settings]}]
+           result_metadata table_id source_card_id visualization_settings]}]
   (set
    (concat
     (mapcat serdes/mbql-deps parameter_mappings)
     (serdes/parameters-deps parameters)
     [[{:model &quot;Database&quot; :id database_id}]]
     (when table_id #{(serdes/table-&gt;path table_id)})
+    (when source_card_id #{[{:model &quot;Card&quot; :id source_card_id}]})
     (when collection_id #{[{:model &quot;Collection&quot; :id collection_id}]})
     (result-metadata-deps result_metadata)
     (serdes/mbql-deps dataset_query)
