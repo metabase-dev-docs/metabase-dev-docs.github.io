@@ -3243,12 +3243,17 @@ driver can't be clearly determined, this simply returns the default set (driver.
                     (log/debug &quot;Redacting non-user-readable database settings during json encoding.&quot;)))))))
    json-generator))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------ Serialization ----------------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/extract-one &quot;Database&quot;
-  [_model-name {:keys [include-database-secrets]} entity]
-  (-&gt; (serdes/extract-one-basics &quot;Database&quot; entity)
-      (update :creator_id serdes/*export-user*)
-      (dissoc :features) ; This is a synthetic column that isn't in the real schema.
-      (cond-&gt; (not include-database-secrets) (dissoc :details))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/make-spec &quot;Database&quot;
+  [_model-name {:keys [include-database-secrets]}]
+  {:copy      [:auto_run_queries :cache_field_values_schedule :cache_ttl :caveats :created_at :dbms_version
+               :description :engine :is_audit :is_full_sync :is_on_demand :is_sample :metadata_sync_schedule :name
+               :points_of_interest :refingerprint :settings :timezone :uploads_enabled :uploads_schema_name
+               :uploads_table_prefix]
+   :skip      []
+   :transform {;; details should be imported if available regardless of options
+               :details             {:export #(when include-database-secrets %) :import identity}
+               :creator_id          (serdes/fk :model/User)
+               :initial_sync_status {:export identity :import (constantly &quot;complete&quot;)}}})</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/entity-id &quot;Database&quot;
   [_ {:keys [name]}]
   name)</pre></td></tr><tr><td class="docs">
@@ -3258,23 +3263,6 @@ driver can't be clearly determined, this simply returns the default set (driver.
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/load-find-local &quot;Database&quot;
   [[{:keys [id]}]]
   (t2/select-one Database :name id))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/load-xform &quot;Database&quot;
-  [database]
-  (-&gt; database
-      serdes/load-xform-basics
-      (update :creator_id serdes/*import-user*)
-      (assoc :initial_sync_status &quot;complete&quot;)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/load-insert! &quot;Database&quot; [_ ingested]
-  (let [m (get-method serdes/load-insert! :default)]
-    (m &quot;Database&quot;
-       (if (:details ingested)
-         ingested
-         (assoc ingested :details {})))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/load-update! &quot;Database&quot; [_ ingested local]
-  (let [m (get-method serdes/load-update! :default)]
-    (m &quot;Database&quot;
-       (update ingested :details #(or % (:details local) {}))
-       local)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/storage-path &quot;Database&quot; [{:keys [name]} _]
   ;; [&quot;databases&quot; &quot;db_name&quot; &quot;db_name&quot;] directory for the database with same-named file inside.
   [&quot;databases&quot; name name])</pre></td></tr><tr><td class="docs">

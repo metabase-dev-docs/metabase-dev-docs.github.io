@@ -2945,7 +2945,8 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(mu/defn v2-load-internal!
   [path :- :string
    opts :- [:map
-            [:backfill? {:optional true} [:maybe :boolean]]]
+            [:backfill? {:optional true} [:maybe :boolean]]
+            [:continue-on-error {:optional true} [:maybe :boolean]]]
    ;; Deliberately separate from the opts so it can't be set from the CLI.
    &amp; {:keys [token-check?
              require-initialized-db?]
@@ -2968,7 +2969,8 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(mu/defn v2-load!
   [path :- :string
    opts :- [:map
-            [:backfill? {:optional true} [:maybe :boolean]]]]
+            [:backfill? {:optional true} [:maybe :boolean]]
+            [:continue-on-error {:optional true} [:maybe :int]]]]
   (let [start    (System/nanoTime)
         err      (atom nil)
         report   (try
@@ -2984,6 +2986,7 @@ net.brehaut.ClojureTools = (function (SH) {
                             :count         (if (contains? imported &quot;Setting&quot;)
                                              (inc (count (remove #(= &quot;Setting&quot; (:model (first %))) (:seen report))))
                                              (count (:seen report)))
+                            :error_count   (count (:errors report))
                             :success       (nil? @err)
                             :error_message (some-&gt; @err str)})
     (when @err
@@ -3086,15 +3089,12 @@ the value is passed as <code>:all</code>).</p>
       (throw (ex-info (format &quot;Destination path is not writeable: %s&quot; path) {:filename path}))))
   (let [start  (System/nanoTime)
         err    (atom nil)
+        opts   (cond-&gt; opts
+                 (seq collection-ids)
+                 (assoc :targets (v2.extract/make-targets-of-type &quot;Collection&quot; collection-ids)))
         report (try
                  (serdes/with-cache
-                   (-&gt; (cond-&gt; opts
-                         (seq collection-ids)
-                         (assoc :targets
-                                (v2.extract/make-targets-of-type
-                                 &quot;Collection&quot;
-                                 collection-ids)))
-                       v2.extract/extract
+                   (-&gt; (v2.extract/extract opts)
                        (v2.storage/store! path)))
                  (catch Exception e
                    (reset! err e)))]
@@ -3103,6 +3103,7 @@ the value is passed as <code>:all</code>).</p>
                             :source          &quot;cli&quot;
                             :duration_ms     (int (/ (- (System/nanoTime) start) 1e6))
                             :count           (count (:seen report))
+                            :error_count     (count (:errors report))
                             :collection      (str/join &quot;,&quot; collection-ids)
                             :all_collections (and (empty? collection-ids)
                                                   (not (:no-collections opts)))

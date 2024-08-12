@@ -2942,40 +2942,48 @@ that clojure.tools.logging uses.</p>
     (or (first (keep #(.getLayout ^AbstractAppender (val %)) (.getAppenders logger)))
         (recur (.getParent logger)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defprotocol MakeAppender
-  (make-appender ^AbstractAppender [out ns-name layout]))</pre></td></tr><tr><td class="docs">
+  (make-appender ^AbstractAppender [out layout]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(extend-protocol MakeAppender
   java.io.File
-  (make-appender [^java.io.File out ns-name layout]
+  (make-appender [^java.io.File out layout]
     (.build
      (doto (FileAppender/newBuilder)
-       (.setName (str ns-name &quot;-file&quot;))
+       (.setName &quot;shared-appender-file&quot;)
        (.setLayout layout)
        (.withFileName (.getPath out)))))
 
   java.io.OutputStream
-  (make-appender [^java.io.OutputStream out ns-name layout]
+  (make-appender [^java.io.OutputStream out layout]
     (.build
      (doto (OutputStreamAppender/newBuilder)
-       (.setName (str ns-name &quot;-os&quot;))
+       (.setName &quot;shared-appender-os&quot;)
        (.setLayout layout)
-       (.setTarget out)))))</pre></td></tr><tr><td class="docs"><p>Create separate logger for a given namespace to fork out some logs.</p>
+       (.setTarget out)))))</pre></td></tr><tr><td class="docs"><p>Add a logger for a given namespace to the configuration.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn add-ns-logger
+  [ns appender level additive]
+  (let [logger-name (str ns)
+        ns-logger   (LoggerConfig. logger-name level additive)]
+    (.addAppender ns-logger appender level nil)
+    (.addLogger (configuration) logger-name ns-logger)
+    ns-logger))</pre></td></tr><tr><td class="docs"><p>Create separate logger for a given namespace(s) to fork out some logs.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn for-ns
-  ^AutoCloseable [ns out &amp; [{:keys [additive level]
-                             :or   {additive true
-                                    level    Level/INFO}}]]
-  (let [config        (configuration)
-        parent-logger (effective-ns-logger ns)
-        appender      (make-appender out (logger-name ns) (find-logger-layout parent-logger))
-        logger        (LoggerConfig. (logger-name ns) level additive)]
+  ^AutoCloseable [out nses &amp; [{:keys [additive level]
+                               :or   {additive true
+                                      level    Level/INFO}}]]
+  (let [nses     (if (vector? nses) nses [nses])
+        config   (configuration)
+        parents  (mapv effective-ns-logger nses)
+        appender (make-appender out (find-logger-layout (first parents)))
+        loggers  (vec (for [ns nses]
+                        (add-ns-logger ns appender level additive)))]
     (.start appender)
     (.addAppender config appender)
-    (.addAppender logger appender (.getLevel logger) nil)
-    (.addLogger config (.getName logger) logger)
     (.updateLoggers (context))
     (reify AutoCloseable
       (close [_]
         (let [^AbstractConfiguration config (configuration)]
-          (.removeLogger config (.getName logger))
+          (doseq [logger loggers]
+            (.removeLogger config (.getName ^LoggerConfig logger)))
           (.stop appender)
           ;; this method is only present in AbstractConfiguration
           (.removeAppender config (.getName appender))

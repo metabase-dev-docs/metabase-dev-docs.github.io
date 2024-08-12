@@ -2931,7 +2931,8 @@ net.brehaut.ClojureTools = (function (SH) {
         dst      (io/file (str (.getPath path) &quot;.tar.gz&quot;))
         log-file (io/file path &quot;export.log&quot;)
         err      (atom nil)
-        report   (with-open [_logger (logger/for-ns 'metabase-enterprise.serialization log-file
+        report   (with-open [_logger (logger/for-ns log-file ['metabase-enterprise.serialization
+                                                              'metabase.models.serialization]
                                                     {:additive *additive-logging*})]
                    (try                 ; try/catch inside logging to log errors
                      (let [report (serdes/with-cache
@@ -2942,7 +2943,10 @@ net.brehaut.ClojureTools = (function (SH) {
                        report)
                      (catch Exception e
                        (reset! err e)
-                       (log/error e &quot;Error during serialization&quot;))))]
+                       (log/errorf &quot;Error during serialization: %s %s&quot;
+                                   (ex-message e)
+                                   (-&gt; (ex-data e)
+                                       (dissoc :toucan2/context-trace))))))]
     {:archive       (when (.exists dst)
                       dst)
      :log-file      (when (.exists log-file)
@@ -2961,11 +2965,12 @@ things.</p>
        (u/seek (fn [^File f]
                  (and (.isDirectory f)
                       (some v2.ingest/legal-top-level-paths (.list f)))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- unpack&amp;import [^File file &amp; [size]]
+</td><td class="codes"><pre class="brush: clojure">(defn- unpack&amp;import [^File file &amp; [{:keys [size continue-on-error]}]]
   (let [dst      (io/file parent-dir (u.random/random-name))
         log-file (io/file dst &quot;import.log&quot;)
         err      (atom nil)
-        report   (with-open [_logger (logger/for-ns 'metabase-enterprise.serialization log-file
+        report   (with-open [_logger (logger/for-ns log-file ['metabase-enterprise.serialization
+                                                              'metabase.models.serialization]
                                                     {:additive *additive-logging*})]
                    (try                 ; try/catch inside logging to log errors
                      (log/infof &quot;Serdes import, size %s&quot; size)
@@ -2977,10 +2982,13 @@ things.</p>
                        (log/infof &quot;In total %s entries unpacked, detected source dir: %s&quot; cnt (.getName path))
                        (serdes/with-cache
                          (-&gt; (v2.ingest/ingest-yaml (.getPath path))
-                             (v2.load/load-metabase!))))
+                             (v2.load/load-metabase! {:continue-on-error continue-on-error}))))
                      (catch Exception e
                        (reset! err e)
-                       (log/error e &quot;Error during serialization&quot;))))]
+                       (log/errorf &quot;Error during deserialization: %s %s&quot;
+                                   (ex-message e)
+                                   (-&gt; (ex-data e)
+                                       (dissoc :toucan2/context-trace))))))]
     {:log-file      log-file
      :error-message (some-&gt; @err str)
      :report        report
@@ -2991,7 +2999,7 @@ things.</p>
   &quot;Serialize and retrieve Metabase instance.
   Outputs `.tar.gz` file with serialization results and an `export.log` file.
   On error outputs serialization logs directly.&quot;
-  [:as {{:strs [all_collections collection settings data_model field_values database_secrets dirname]
+  [:as {{:strs [all_collections collection settings data_model field_values database_secrets dirname continue_on_error]
          :or   {all_collections true
                 settings        true
                 data_model      true}}
@@ -3007,17 +3015,20 @@ things.</p>
                              {:default     true
                               :description &quot;Serialize all collections (`true` unless you specify `collection`)&quot;})
    settings         (mu/with [:maybe ms/BooleanValue]
-                             {:default true
+                             {:default     true
                               :description &quot;Serialize Metabase settings&quot;})
    data_model       (mu/with [:maybe ms/BooleanValue]
-                             {:default true
+                             {:default     true
                               :description &quot;Serialize Metabase data model&quot;})
    field_values     (mu/with [:maybe ms/BooleanValue]
-                             {:default false
+                             {:default     false
                               :description &quot;Serialize cached field values&quot;})
    database_secrets (mu/with [:maybe ms/BooleanValue]
-                             {:default false
-                              :description &quot;Serialize details how to connect to each db&quot;})}
+                             {:default     false
+                              :description &quot;Serialize details how to connect to each db&quot;})
+   continue_on_error      (mu/with [:maybe ms/BooleanValue]
+                             {:default     false
+                              :description &quot;Do not break execution on errors&quot;})}
   (api/check-superuser)
   (let [start              (System/nanoTime)
         opts               {:targets                  (mapv #(vector &quot;Collection&quot; %)
@@ -3028,7 +3039,8 @@ things.</p>
                             :no-settings              (not settings)
                             :include-field-values     field_values
                             :include-database-secrets database_secrets
-                            :dirname                  dirname}
+                            :dirname                  dirname
+                            :continue-on-error        continue_on_error}
         {:keys [archive
                 log-file
                 report
@@ -3039,6 +3051,7 @@ things.</p>
                             :source          &quot;api&quot;
                             :duration_ms     (int (/ (- (System/nanoTime) start) 1e6))
                             :count           (count (:seen report))
+                            :error_count     (count (:errors report))
                             :collection      (str/join &quot;,&quot; (map str collection))
                             :all_collections (and (empty? collection)
                                                   (not (:no-collections opts)))
@@ -3061,15 +3074,22 @@ things.</p>
   Parameters:
   - `file`: archive encoded as `multipart/form-data` (required).
   Returns logs of deserialization.&quot;
-  [:as {raw-params :params}]
+  [:as {{:strs [continue_on_error]} :query-params
+        {:strs [file]}              :multipart-params}]
+  {continue_on_error (mu/with [:maybe ms/BooleanValue]
+                              {:default     false
+                               :description &quot;Do not break execution on errors&quot;})
+   file              (mu/with ms/File
+                              {:description &quot;.tgz with serialization data&quot;})}
   (api/check-superuser)
   (try
     (let [start              (System/nanoTime)
           {:keys [log-file
                   error-message
                   report
-                  callback]} (unpack&amp;import (get-in raw-params [&quot;file&quot; :tempfile])
-                                            (get-in raw-params [&quot;file&quot; :size]))
+                  callback]} (unpack&amp;import (:tempfile file)
+                                            {:size              (:size file)
+                                             :continue-on-error continue_on_error})
           imported           (into (sorted-set) (map (comp :model last)) (:seen report))]
       (snowplow/track-event! ::snowplow/serialization api/*current-user-id*
                              {:direction     &quot;import&quot;
@@ -3079,13 +3099,14 @@ things.</p>
                               :count         (if (contains? imported &quot;Setting&quot;)
                                                (inc (count (remove #(= &quot;Setting&quot; (:model (first %))) (:seen report))))
                                                (count (:seen report)))
+                              :error_count   (count (:errors report))
                               :success       (not error-message)
                               :error_message error-message})
       {:status  200
        :headers {&quot;Content-Type&quot; &quot;text/plain&quot;}
        :body    (on-response! log-file callback)})
     (finally
-      (io/delete-file (get-in raw-params [&quot;file&quot; :tempfile])))))</pre></td></tr><tr><td class="docs">
+      (io/delete-file (:tempfile file)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(api/define-routes +auth)</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 

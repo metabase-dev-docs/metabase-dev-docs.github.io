@@ -2874,8 +2874,8 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.util.i18n :refer [tru]])
   (:import
    (java.text NumberFormat ParsePosition)
-   (java.time LocalDate)
-   (java.time.format DateTimeFormatter DateTimeFormatterBuilder ResolverStyle)
+   (java.time LocalDate OffsetDateTime)
+   (java.time.format DateTimeFormatter DateTimeFormatterBuilder DateTimeParseException ResolverStyle)
    (java.util Locale)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Supported currency signs</p>
 </td><td class="codes"><pre class="brush: clojure">(def currency-regex  #&quot;[$€£¥₹₪₩₿¢\s]&quot;)</pre></td></tr><tr><td class="docs"><p>Settings that determine how the CSV is parsed.</p>
@@ -2955,7 +2955,25 @@ already a built-in DateTimeFormatter for that: [[DateTimeFormatter/ISO<em>LOCAL<
         (parse-local-datetime s)
         (catch Exception _
           (throw (IllegalArgumentException.
-                  (tru &quot;''{0}'' is not a recognizable datetime&quot; s))))))))</pre></td></tr><tr><td class="docs"><p>Parses a string representing an offset datetime into an OffsetDateTime.</p>
+                  (tru &quot;''{0}'' is not a recognizable datetime&quot; s))))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private auxillary-offset-datetime-formatter
+  (-&gt; (DateTimeFormatterBuilder.)
+    (.parseCaseInsensitive)
+    (.append DateTimeFormatter/ISO_LOCAL_DATE_TIME)
+    (.optionalStart)
+    (.appendPattern &quot;ss&quot;)
+    (.optionalEnd)
+    (.optionalStart)
+    (.appendPattern &quot;.SSS&quot;)
+    (.optionalEnd)
+    (.optionalStart)
+    (.appendZoneOrOffsetId)
+    (.optionalEnd)
+    (.optionalStart)
+    (.appendOffset &quot;+HHMM&quot;, &quot;Z&quot;)
+    (.optionalEnd)
+    (.toFormatter)
+    (.withResolverStyle ResolverStyle/STRICT)))</pre></td></tr><tr><td class="docs"><p>Parses a string representing an offset datetime into an OffsetDateTime.</p>
 
 <p>The format consists of:
   1) The a date and time, with the formats:
@@ -2967,15 +2985,20 @@ already a built-in DateTimeFormatter for that: [[DateTimeFormatter/ISO<em>LOCAL<
     - Z (for UTC)
     - +HH or -HH
     - +HH:mm or -HH:mm
-    - +HH:mm:ss or -HH:mm:ss</p>
+    - +HH:mm:ss or -HH:mm:ss
+    - +HHmm (see auxillary-offset-datetime-formatter)</p>
 
 <p>Parsing is case-insensitive.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn parse-offset-datetime
   [s]
-  (try
-    (-&gt; s (str/replace \space \T) t/offset-date-time)
-    (catch Exception _
-      (throw (IllegalArgumentException. (tru &quot;''{0}'' is not a recognizable zoned datetime&quot; s))))))</pre></td></tr><tr><td class="docs"><p>Remove any recognized currency signs from the string (c.f. [[currency-regex]]).</p>
+  (let [ss (str/replace s \space \T)]
+    (try
+      (try
+        (OffsetDateTime/parse ss)
+        (catch DateTimeParseException _
+          (OffsetDateTime/parse ss auxillary-offset-datetime-formatter)))
+      (catch Exception _
+        (throw (IllegalArgumentException. (tru &quot;''{0}'' is not a recognizable zoned datetime&quot; s)))))))</pre></td></tr><tr><td class="docs"><p>Remove any recognized currency signs from the string (c.f. [[currency-regex]]).</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- remove-currency-signs
   [s]
   (str/replace s currency-regex &quot;&quot;))</pre></td></tr><tr><td class="docs">

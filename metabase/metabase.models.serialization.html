@@ -2891,9 +2891,11 @@ exported or not, and a test enforces this so serialization isn't forgotten for n
    [metabase.shared.models.visualization-settings :as mb.viz]
    [metabase.util :as u]
    [metabase.util.connection :as u.conn]
+   [metabase.util.date-2 :as u.date]
    [metabase.util.log :as log]
    [toucan2.core :as t2]
-   [toucan2.model :as t2.model]))</pre></td></tr><tr><td class="docs">
+   [toucan2.model :as t2.model]
+   [toucan2.realize :as t2.realize]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><h1>Serialization Overview</h1>
 
 <p>Serialization (or "serdes") is a system for exporting entities (Dashboards, Cards, Collections, etc.) from one
@@ -2936,7 +2938,8 @@ pulse/dashboard subscription are reduced to a list of email addresses.</li>
 <li>For entities that existed before the column was added, have a portable way to rebuild them (see below on
 hashing).</li></ul></li>
 </ol>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Given the model name and an entity, returns its entity ID (which might be nil).</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Instance/map being exported/imported currently</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^:dynamic *current*  nil)</pre></td></tr><tr><td class="docs"><p>Given the model name and an entity, returns its entity ID (which might be nil).</p>
 
 <p>This abstracts over the exact definition of the "entity ID" for a given entity.
 By default this is a column, <code>:entity_id</code>.</p>
@@ -2945,8 +2948,8 @@ By default this is a column, <code>:entity_id</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti entity-id
   {:arglists '([model-name instance])}
   (fn [model-name _instance] model-name))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod entity-id :default [_ {:keys [entity_id]}]
-  (str/trim entity_id))</pre></td></tr><tr><td class="docs"><p>Given model name and its entity id, returns it database-local id.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmethod entity-id :default [_ instance]
+  (some-&gt; instance :entity_id str/trim))</pre></td></tr><tr><td class="docs"><p>Given model name and its entity id, returns it database-local id.</p>
 
 <p>Is kind of reverse transformation to <code>entity-id</code> function defined here.</p>
 
@@ -3050,6 +3053,8 @@ For example:</p>
 
 <p>The path is a vector of maps, root first and this entity itself last. Each map looks like:
 <code>{:model "ModelName" :id "entity ID, identity hash, or custom ID" :label "optional human label"}</code></p>
+
+<p>Nested models with no entity_id need to return nil for generate-path.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti generate-path
   {:arglists '([model-name instance])}
   (fn [model-name _instance] model-name))</pre></td></tr><tr><td class="docs"><p>Returns <code>{:model "ModelName" :id "id-string"}</code></p>
@@ -3067,12 +3072,11 @@ For example:</p>
 </td><td class="codes"><pre class="brush: clojure">(defn maybe-labeled
   [model-name entity slug-key]
   (let [self  (infer-self-path model-name entity)
-        label (get entity slug-key)]
-    [(if label
-       (assoc self :label (u/slugify label {:unicode? true}))
-       self)]))</pre></td></tr><tr><td class="docs">
+        label (slug-key entity)]
+    [(-&gt; self
+         (m/assoc-some :label (some-&gt; label (u/slugify {:unicode? true}))))]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod generate-path :default [model-name entity]
-  ;; This default works for most models, but needs overriding for nested ones.
+  ;; This default works for most models, but needs overriding for those that don't rely on entity_id.
   (maybe-labeled model-name entity :name))</pre></td></tr><tr><td class="docs"><h1>Export Process</h1>
 
 <p>An <em>export</em> (writing a Metabase instance's entities to disk) happens in two stages: <em>extraction</em> and <em>storage</em>.
@@ -3166,15 +3170,26 @@ mentioned.</p>
 <p><code>:transform</code> is a map from field name to a <code>{:ser (fn [v] ...) :des (fn [v] ...)}</code> map with functions to
 serialize/deserialize data.</p>
 
-<p>For behavior, see <code>extract-by-spec</code> and <code>load-by-spec</code>.</p>
+<p>For behavior, see <code>extract-by-spec</code> and <code>xform-by-spec</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti make-spec
-  (fn [model-name] model-name))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod make-spec :default [_] nil)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- extract-by-spec [model-name _opts instance]
-  (when-let [spec (make-spec model-name)]
-    (into (select-keys instance (:copy spec))
-          (for [[k [ser _des]] (:transform spec)]
-            [k (ser (get instance k))]))))</pre></td></tr><tr><td class="docs"><p>Entry point for extracting all entities of a particular model:
+  (fn [model-name _opts] model-name))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod make-spec :default [_ _] nil)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- extract-by-spec [model-name opts instance]
+  (try
+    (binding [*current* instance]
+      (when-let [spec (make-spec model-name opts)]
+        (-&gt; (select-keys instance (:copy spec))
+            ;; won't assoc if `generate-path` returned `nil`
+            (m/assoc-some :serdes/meta (generate-path model-name instance))
+            (into (for [[k transform] (:transform spec)
+                        :let [res ((:export transform) (get instance k))]
+                        ;; include only non-nil transform results
+                        :when res]
+                    [k res])))))
+    (catch Exception e
+      (throw (ex-info (format &quot;Error extracting %s %s&quot; model-name (:id instance))
+                      (assoc (ex-data e) :model model-name :id (:id instance))
+                      e)))))</pre></td></tr><tr><td class="docs"><p>Entry point for extracting all entities of a particular model:
 <code>(extract-all "ModelName" {opts...})</code>
 Keyed on the model name.</p>
 
@@ -3215,38 +3230,43 @@ They should follow the pattern of:
 <p>Keyed by the model name of the entity, the first argument.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti extract-one
   {:arglists '([model-name opts instance])}
-  (fn [model-name _opts _instance] model-name))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- log-and-extract-one
+  (fn [model-name _opts _instance] model-name))</pre></td></tr><tr><td class="docs"><p>Extracts a single entity; will replace <code>extract-one</code> as public interface once <code>extract-one</code> overrides are gone.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn log-and-extract-one
   [model opts instance]
-  (log/infof &quot;Extracting %s %s&quot; model (:id instance))
+  (log/infof &quot;Extracting %s %s %s&quot; model (:id instance) (entity-id model instance))
   (try
     (extract-one model opts instance)
     (catch Exception e
-      (if (:skip (ex-data e))
-        (log/warnf &quot;Skipping %s %s because of an error extracting it: %s %s&quot;
-                   model (:id instance) (.getMessage e) (dissoc (ex-data e) :skip))
+      (when-not (or (:skip (ex-data e))
+                    (:continue-on-error opts))
         (throw (ex-info (format &quot;Exception extracting %s %s&quot; model (:id instance))
                         {:model     model
                          :id        (:id instance)
                          :entity_id (:entity_id instance)
                          :cause     (.getMessage e)}
-                        e))))))</pre></td></tr><tr><td class="docs">
+                        e)))
+      (log/warnf &quot;Skipping %s %s because of an error extracting it: %s %s&quot;
+                 model (:id instance) (.getMessage e) (dissoc (ex-data e) :skip))
+      ;; return error as an entity so it can be used in the report
+      e)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod extract-all :default [model opts]
   (eduction (map (partial log-and-extract-one model opts))
             (extract-query model opts)))</pre></td></tr><tr><td class="docs"><p>Helper for the common (but not default) [[extract-query]] case of fetching everything that isn't in a personal
 collection.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn extract-query-collections
-  [model {:keys [collection-set]}]
+  [model {:keys [collection-set where]}]
   (if collection-set
     ;; If collection-set is defined, select everything in those collections, or with nil :collection_id.
     (t2/reducible-select model {:where [:or
                                         [:in :collection_id collection-set]
                                         (when (contains? collection-set nil)
-                                          [:= :collection_id nil])]})
+                                          [:= :collection_id nil])
+                                        (when where
+                                          where)]})
     ;; If collection-set is nil, just select everything.
-    (t2/reducible-select model)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod extract-query :default [model-name _]
-  (t2/reducible-select (symbol model-name)))</pre></td></tr><tr><td class="docs"><p>A helper for writing [[extract-one]] implementations. It takes care of the basics:
+    (t2/reducible-select model {:where (or where true)})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod extract-query :default [model-name {:keys [where]}]
+  (t2/reducible-select (symbol model-name) {:where (or where true)}))</pre></td></tr><tr><td class="docs"><p>A helper for writing [[extract-one]] implementations. It takes care of the basics:
 - Convert to a vanilla Clojure map.
 - Add <code>:serdes/meta</code> by calling [[generate-path]].
 - Drop the primary key.
@@ -3263,8 +3283,7 @@ collection.</p>
         (dissoc pk :updated_at))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod extract-one :default [model-name opts entity]
   ;; `extract-by-spec` is called here since most of tests use `extract-one` right now
-  (or (some-&gt; (extract-by-spec model-name opts entity)
-              (assoc :serdes/meta (generate-path model-name entity)))
+  (or (extract-by-spec model-name opts entity)
       (extract-one-basics model-name entity)))</pre></td></tr><tr><td class="docs"><p>Returns set of <code>[model-name database-id]</code> pairs for all entities contained or used by this entity. e.g. the Dashboard
  implementation should return pairs for all DashboardCard entities it contains, etc.</p>
 
@@ -3484,22 +3503,33 @@ exists, or [[load-insert!]] if it's <code>nil</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti load-one!
   (fn [ingested _]
     (ingested-model ingested)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- load-by-spec [ingested]
-  (let [model-name (ingested-model ingested)
-        spec       (make-spec model-name)]
+</td><td class="codes"><pre class="brush: clojure">(defn- xform-by-spec [model-name ingested]
+  (let [spec (make-spec model-name nil)]
     (when spec
-      (into (select-keys ingested (:copy spec))
-            (for [[k [_ser des]] (:transform spec)]
-              [k (des (get ingested k))])))))</pre></td></tr><tr><td class="docs"><p>Default implementation of <code>load-one!</code></p>
+      (-&gt; (select-keys ingested (:copy spec))
+          (into (for [[k transform] (:transform spec)
+                      :when         (not (::nested transform))
+                      :let          [res ((:import transform) (get ingested k))]
+                      ;; do not try to insert nil values if transformer returns nothing
+                      :when         res]
+                  [k res]))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- spec-nested! [model-name ingested instance]
+  (binding [*current* instance]
+    (let [spec (make-spec model-name nil)]
+      (doseq [[k transform] (:transform spec)
+              :when         (::nested transform)]
+        ((:import transform) (get ingested k))))))</pre></td></tr><tr><td class="docs"><p>Default implementation of <code>load-one!</code></p>
 </td><td class="codes"><pre class="brush: clojure">(defn default-load-one!
   [ingested maybe-local]
-  (let [model    (ingested-model ingested)
-        adjusted (or (load-by-spec ingested)
-                     (load-xform ingested))]
-    (binding [mi/*deserializing?* true]
-      (if (nil? maybe-local)
-        (load-insert! model adjusted)
-        (load-update! model adjusted maybe-local)))))</pre></td></tr><tr><td class="docs">
+  (let [model-name (ingested-model ingested)
+        adjusted   (or (xform-by-spec model-name ingested)
+                       (load-xform ingested))
+        instance (binding [mi/*deserializing?* true]
+                   (if (nil? maybe-local)
+                     (load-insert! model-name adjusted)
+                     (load-update! model-name adjusted maybe-local)))]
+    (spec-nested! model-name ingested instance)
+    instance))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod load-one! :default [ingested maybe-local]
   (default-load-one! ingested maybe-local))</pre></td></tr><tr><td class="docs"><p>Checks if the given string is a 21-character NanoID. Useful for telling entity IDs apart from identity hashes.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn entity-id?
@@ -3517,6 +3547,7 @@ details of the two hashing schemes.</p>
   [model id-hash]
   (-&gt;&gt; (t2/reducible-select model)
        (into [] (comp (filter #(= id-hash (identity-hash %)))
+                      (map t2.realize/realize)
                       (take 1)))
        first))</pre></td></tr><tr><td class="docs"><p>Given an ID string, this endeavours to find the matching entity, whether it's an entity ID or identity hash.
 This is useful when writing [[load-xform]] to turn a foreign key from a portable form to an appdb ID.
@@ -3578,7 +3609,6 @@ portable ID string.. Nested entities are returned as a vector of such ID strings
   [id model]
   (when id
     (let [model-name (name model)
-          model      (t2.model/resolve-model (symbol model-name))
           entity     (t2/select-one model (first (t2/primary-keys model)) id)
           path       (when entity
                        (mapv :id (generate-path model-name entity)))]
@@ -3600,12 +3630,10 @@ compound IDs needed for nested entities like <code>DashboardCard</code>s to get 
 </td><td class="codes"><pre class="brush: clojure">(defn ^:dynamic ^::cache *import-fk*
   [eid model]
   (when eid
-    (let [model-name (name model)
-          model      (t2.model/resolve-model (symbol model-name))
-          eid        (if (vector? eid)
-                       (last eid)
-                       eid)
-          entity     (lookup-by-id model eid)]
+    (let [eid    (if (vector? eid)
+                   (last eid)
+                   eid)
+          entity (lookup-by-id model eid)]
       (if entity
         (get entity (first (t2/primary-keys model)))
         (throw (ex-info &quot;Could not find foreign key target - bad serdes dependencies or other serialization error&quot;
@@ -4138,7 +4166,74 @@ descendant. Always returns an empty set even if the input is nil.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn visualization-settings-descendants
   [viz]
   (set/union (viz-click-behavior-descendants  viz)
-             (viz-column-settings-descendants viz)))</pre></td></tr><tr><td class="docs"><h2>Memoizing appdb lookups</h2>
+             (viz-column-settings-descendants viz)))</pre></td></tr><tr><td class="docs"><p>Common transformers</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Export Foreign Key</p>
+</td><td class="codes"><pre class="brush: clojure">(defn fk  [model &amp; [field-name]]
+  (cond
+    ;; this `::fk` is used in tests to determine that foreign keys are handled
+    (= model :model/User)  {::fk true :export *export-user* :import *import-user*}
+    (= model :model/Table) {::fk true :export *export-table-fk* :import *import-table-fk*}
+    (= model :model/Field) {::fk true :export *export-field-fk* :import *import-field-fk*}
+    field-name             {::fk    true
+                            :export #(*export-fk-keyed* % model field-name)
+                            :import #(*import-fk-keyed* % model field-name)}
+    :else                  {::fk true :export #(*export-fk* % model) :import #(*import-fk* % model)}))</pre></td></tr><tr><td class="docs"><p>Nested entities</p>
+</td><td class="codes"><pre class="brush: clojure">(defn nested  [model backward-fk opts]
+  (let [model-name (name model)
+        sorter     (:sort-by opts :created_at)
+        key-field  (:key-field opts :entity_id)]
+    {::nested     true
+     :model       model
+     :backward-fk backward-fk
+     :export      (fn [data]
+                    (assert (every? #(t2/instance-of? model %) data)
+                            (format &quot;Nested data is expected to be a %s, not %s&quot; model (t2/model (first data))))
+                    ;; `nil? data` check is for `extract-one` case in tests; make sure to add empty vectors in
+                    ;; `extract-query` implementations for nested collections
+                    (try
+                      (-&gt;&gt; (or data (when (nil? data)
+                                      (t2/select model backward-fk (:id *current*))))
+                           (sort-by sorter)
+                           (mapv #(extract-one model-name opts %)))
+                      (catch Exception e
+                        (throw (ex-info (format &quot;Error exporting nested %s&quot; model)
+                                        {:model     model
+                                         :parent-id (:id *current*)}
+                                        e)))))
+     :import      (fn [lst]
+                    (let [parent-id (:id *current*)
+                          first-eid (some-&gt;&gt; (first lst)
+                                             (entity-id model-name))
+                          enrich    (fn [ingested]
+                                      (-&gt; ingested
+                                          (assoc backward-fk parent-id)
+                                          (update :serdes/meta #(or % [{:model model-name :id (get ingested key-field)}]))))]
+                      (cond
+                        (nil? first-eid) ; no entity id, just drop existing stuff
+                        (do (t2/delete! model backward-fk parent-id)
+                            (doseq [ingested lst]
+                              (load-one! (enrich ingested) nil)))
+                        (entity-id? first-eid) ; proper entity id, match by them
+                        (do (t2/delete! model backward-fk parent-id :entity_id [:not-in (map :entity_id lst)])
+                            (doseq [ingested lst
+                                    :let     [ingested (enrich ingested)
+                                              local    (lookup-by-id model (entity-id model-name ingested))]]
+                              (load-one! ingested local)))
+                        :else           ; identity hash
+                        (let [incoming  (set (map #(entity-id model-name %) lst))
+                              local     (-&gt;&gt; (t2/reducible-select model backward-fk parent-id)
+                                             (into [] (map t2.realize/realize))
+                                             (m/index-by identity-hash))
+                              to-delete (into [] (comp (filter #(contains? incoming (key %)))
+                                                       (map #(:id (val %))))
+                                              local)]
+                          (t2/delete! model :id [:in (map :id to-delete)])
+                          (doseq [ingested lst]
+                            (load-one! (enrich ingested) (get local (entity-id model-name ingested))))))))}))</pre></td></tr><tr><td class="docs"><p>Transformer for parent id for nested entities</p>
+</td><td class="codes"><pre class="brush: clojure">(defn parent-ref  []
+  {::fk true :export (constantly nil) :import identity})</pre></td></tr><tr><td class="docs"><p>Transformer to parse the dates</p>
+</td><td class="codes"><pre class="brush: clojure">(defn date  []
+  {:export identity :import #(if (string? %) (u.date/parse %) %)})</pre></td></tr><tr><td class="docs"><h2>Memoizing appdb lookups</h2>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Runs body with all functions marked with ::cache re-bound to memoized versions for performance.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmacro with-cache
   [&amp; body]

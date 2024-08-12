@@ -3172,12 +3172,16 @@ a trio of strings with schema maybe nil.</p>
                     {:model &quot;Field&quot;    :id field}])))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/entity-id &quot;Field&quot; [_ {:keys [name]}]
   name)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/extract-query &quot;Field&quot; [_model-name _opts]
-  (let [d (t2/select Dimension)
+</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/load-find-local &quot;Field&quot;
+  [path]
+  (let [table (serdes/load-find-local (pop path))]
+    (t2/select-one Field :name (-&gt; path last :id) :table_id (:id table))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/extract-query &quot;Field&quot; [_model-name opts]
+  (let [d          (t2/select Dimension)
         dimensions (-&gt;&gt; d
                         (group-by :field_id))]
     (eduction (map #(assoc % :dimensions (get dimensions (:id %))))
-              (t2/reducible-select Field))))</pre></td></tr><tr><td class="docs">
+              (t2/reducible-select Field {:where (:where opts true)}))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/dependencies &quot;Field&quot; [field]
   ;; Fields depend on their parent Table, plus any foreign Fields referenced by their Dimensions.
   ;; Take the path, but drop the Field section to get the parent Table's path instead.
@@ -3191,44 +3195,20 @@ a trio of strings with schema maybe nil.</p>
     (cond-&gt; (set/union #{table} human)
       fks   (set/union #{fks})
       true  (disj this))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- extract-dimensions [dimensions]
-  (-&gt;&gt; (for [dim dimensions]
-         (-&gt; (into (sorted-map) dim)
-             (dissoc :field_id :updated_at) ; :field_id is implied by the nesting under that field.
-             (update :human_readable_field_id serdes/*export-field-fk*)))
-       (sort-by :created_at)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/extract-one &quot;Field&quot;
-  [_model-name _opts field]
-  (let [field (if (contains? field :dimensions)
-                field
-                (assoc field :dimensions (t2/select Dimension :field_id (:id field))))]
-    (-&gt; (serdes/extract-one-basics &quot;Field&quot; field)
-        (update :dimensions         extract-dimensions)
-        (update :table_id           serdes/*export-table-fk*)
-        (update :fk_target_field_id serdes/*export-field-fk*)
-        (update :parent_id          serdes/*export-field-fk*)
-        (dissoc :fingerprint :last_analyzed :fingerprint_version))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/load-xform &quot;Field&quot;
-  [field]
-  (-&gt; (serdes/load-xform-basics field)
-      (update :table_id           serdes/*import-table-fk*)
-      (update :fk_target_field_id serdes/*import-field-fk*)
-      (update :parent_id          serdes/*import-field-fk*)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/load-find-local &quot;Field&quot;
-  [path]
-  (let [table (serdes/load-find-local (pop path))]
-    (t2/select-one Field :name (-&gt; path last :id) :table_id (:id table))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/load-one! &quot;Field&quot; [ingested maybe-local]
-  (let [field ((get-method serdes/load-one! :default) (dissoc ingested :dimensions) maybe-local)]
-    (doseq [dim (:dimensions ingested)]
-      (let [local (t2/select-one Dimension :entity_id (:entity_id dim))
-            dim   (assoc dim
-                         :field_id    (:id field)
-                         :serdes/meta [{:model &quot;Dimension&quot; :id (:entity_id dim)}])]
-        (serdes/load-one! dim local)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/make-spec &quot;Field&quot; [_model-name opts]
+  {:copy      [:active :base_type :caveats :coercion_strategy :custom_position :database_indexed
+               :database_is_auto_increment :database_partitioned :database_position :database_required :database_type
+               :description :display_name :effective_type :has_field_values :is_defective_duplicate :json_unfolding
+               :name :nfc_path :points_of_interest :position :preview_display :semantic_type :settings
+               :unique_field_helper :visibility_type]
+   :skip      [:fingerprint :fingerprint_version :last_analyzed]
+   :transform {:created_at         (serdes/date)
+               :table_id           (serdes/fk :model/Table)
+               :fk_target_field_id (serdes/fk :model/Field)
+               :parent_id          (serdes/fk :model/Field)
+               :dimensions         (serdes/nested :model/Dimension :field_id opts)}})</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/storage-path &quot;Field&quot; [field _]
-  (-&gt; field
-      serdes/path
+  (-&gt; (serdes/path field)
       drop-last
       serdes/storage-table-path-prefix
       (concat [&quot;fields&quot; (:name field)])))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;

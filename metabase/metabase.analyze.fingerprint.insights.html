@@ -2881,7 +2881,9 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.util.date-2 :as u.date]
    [redux.core :as redux])
   (:import
+   (java.util Random)
    (java.time Instant LocalDate LocalDateTime LocalTime OffsetDateTime OffsetTime ZonedDateTime)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- last-n
   [n]
   (fn
@@ -2901,20 +2903,22 @@ net.brehaut.ClojureTools = (function (SH) {
         (every? neg? [x1 x2])     (change (- x1) (- x2))
         (and (neg? x1) (pos? x2)) (- (change x1 x2))
         (neg? x1)                 (- (change x2 (- x1)))
-        :else                     (/ (- x2 x1) x1)))))</pre></td></tr><tr><td class="docs"><p>Transducer that samples a fixed number <code>n</code> of samples.
- https://en.wikipedia.org/wiki/Reservoir_sampling</p>
+        :else                     (/ (- x2 x1) x1)))))</pre></td></tr><tr><td class="docs"><p>Transducer that samples a fixed number <code>n</code> of samples consistently.
+ https://en.wikipedia.org/wiki/Reservoir_sampling. Uses java.util.Random
+with a seed of <code>n</code> to ensure a consistent sample if a dataset has not changed.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn reservoir-sample
   [n]
-  (fn
-    ([] [[] 0])
-    ([[reservoir c] x]
-     (let [c   (inc c)
-           idx (rand-int c)]
-       (cond
-         (&lt;= c n)  [(conj reservoir x) c]
-         (&lt; idx n) [(assoc reservoir idx x) c]
-         :else     [reservoir c])))
-    ([[reservoir _]] reservoir)))</pre></td></tr><tr><td class="docs"><p>Given two functions: (fŷ input) and (fy input), returning the predicted and actual values of y
+  (let [rng (Random. n)]
+    (fn
+      ([] [[] 0])
+      ([[reservoir c] x]
+       (let [c   (inc c)
+             idx (.nextInt rng c)]
+         (cond
+           (&lt;= c n)  [(conj reservoir x) c]
+           (&lt; idx n) [(assoc reservoir idx x) c]
+           :else     [reservoir c])))
+      ([[reservoir _]] reservoir))))</pre></td></tr><tr><td class="docs"><p>Given two functions: (fŷ input) and (fy input), returning the predicted and actual values of y
  respectively, calculates the mean absolute error of the estimate.
  https://en.wikipedia.org/wiki/Mean<em>absolute</em>error</p>
 </td><td class="codes"><pre class="brush: clojure">(defn mae
@@ -2990,10 +2994,9 @@ net.brehaut.ClojureTools = (function (SH) {
               (apply min-key :mae)
               :formula))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- timeseries?
-  [{:keys [numbers datetimes others]}]
+  [{:keys [numbers datetimes]}]
   (and (pos? (count numbers))
-       (= (count datetimes) 1)
-       (empty? others)))</pre></td></tr><tr><td class="docs"><p>We downsize UNIX timestamps to lessen the chance of overflows and numerical instabilities.</p>
+       (= (count datetimes) 1)))</pre></td></tr><tr><td class="docs"><p>We downsize UNIX timestamps to lessen the chance of overflows and numerical instabilities.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^Long ^:const ^:private ms-in-a-day (* 1000 60 60 24))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- ms-&gt;day
   [dt]
@@ -3034,7 +3037,7 @@ net.brehaut.ClojureTools = (function (SH) {
         x-position (:position datetime)
         xfn        #(some-&gt; %
                             (nth x-position)
-                            ;; at this point in the pipeline, dates are still stings
+                            ;; at this point in the pipeline, dates are still strings
                             fingerprinters/-&gt;temporal
                             -&gt;millis-from-epoch
                             ms-&gt;day)]
