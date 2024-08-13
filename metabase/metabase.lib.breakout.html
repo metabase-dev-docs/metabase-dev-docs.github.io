@@ -2878,6 +2878,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.lib.schema.expression :as lib.schema.expression]
    [metabase.lib.schema.metadata :as lib.schema.metadata]
    [metabase.lib.schema.ref :as lib.schema.ref]
+   [metabase.lib.schema.util :as lib.schema.util]
    [metabase.lib.temporal-bucket :as lib.temporal-bucket]
    [metabase.lib.util :as lib.util]
    [metabase.shared.util.i18n :as i18n]
@@ -2889,17 +2890,6 @@ net.brehaut.ClojureTools = (function (SH) {
               (str/join (str \space (i18n/tru &quot;and&quot;) \space)
                         (for [breakout breakouts]
                           (lib.metadata.calculation/display-name query stage-number breakout :long))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn breakout :- ::lib.schema/query
-  &quot;Add a new breakout on an expression, presumably a Field reference.&quot;
-  ([query expr]
-   (breakout query -1 expr))
-  ([query        :- ::lib.schema/query
-    stage-number :- :int
-    expr         :- some?]
-   (let [expr (lib.ref/ref (if (fn? expr)
-                             (expr query stage-number)
-                             expr))]
-     (lib.util/add-summary-clause query stage-number :breakout expr))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn breakouts :- [:maybe [:sequential ::lib.schema.expression/expression]]
   &quot;Return the current breakouts&quot;
   ([query]
@@ -2917,6 +2907,17 @@ net.brehaut.ClojureTools = (function (SH) {
             (mapv (fn [field-ref]
                     (-&gt; (lib.metadata.calculation/metadata query stage-number field-ref)
                         (assoc :lib/source :source/breakouts)))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn breakout :- ::lib.schema/query
+  &quot;Add a new breakout on an expression, presumably a Field reference. Ignores attempts to add a duplicate breakout.&quot;
+  ([query expr]
+   (breakout query -1 expr))
+  ([query        :- ::lib.schema/query
+    stage-number :- :int
+    expr         :- some?]
+   (let [expr (if (fn? expr) (expr query stage-number) expr)]
+     (if (lib.schema.util/distinct-refs? (map lib.ref/ref (cons expr (breakouts query stage-number))))
+       (lib.util/add-summary-clause query stage-number :breakout expr)
+       query))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn breakoutable-columns :- [:sequential ::lib.schema.metadata/column]
   &quot;Get column metadata for all the columns that can be broken out by in
   the stage number `stage-number` of the query `query`
@@ -2931,24 +2932,23 @@ net.brehaut.ClojureTools = (function (SH) {
    (breakoutable-columns query -1))
   ([query        :- ::lib.schema/query
     stage-number :- :int]
-   (let [cols (let [stage   (lib.util/query-stage query stage-number)
-                    options {:include-implicitly-joinable-for-source-card? false}]
-                (lib.metadata.calculation/visible-columns query stage-number stage options))]
-     (when (seq cols)
-       (let [matching (into {} (keep-indexed (fn [index a-breakout]
-                                               (when-let [col (lib.equality/find-matching-column
-                                                               query stage-number a-breakout cols
-                                                               {:generous? true})]
-                                                 [col [index a-breakout]]))
-                                             (or (breakouts query stage-number) [])))]
-         (mapv #(let [[pos a-breakout] (matching %)
-                      binning (lib.binning/binning a-breakout)
-                      {:keys [unit]} (lib.temporal-bucket/temporal-bucket a-breakout)]
-                  (cond-&gt; (assoc % :lib/hide-bin-bucket? true)
-                    binning (lib.binning/with-binning binning)
-                    unit (lib.temporal-bucket/with-temporal-bucket unit)
-                    pos (assoc :breakout-position pos)))
-               cols))))))</pre></td></tr><tr><td class="docs">
+   (let [columns (let [stage   (lib.util/query-stage query stage-number)
+                       options {:include-implicitly-joinable-for-source-card? false}]
+                   (lib.metadata.calculation/visible-columns query stage-number stage options))]
+     (when (seq columns)
+       (let [existing-breakouts         (breakouts query stage-number)
+             column-&gt;breakout-positions (group-by
+                                         (fn [position]
+                                           (lib.equality/find-matching-column query
+                                                                              stage-number
+                                                                              (get existing-breakouts position)
+                                                                              columns
+                                                                              {:generous? true}))
+                                         (range (count existing-breakouts)))]
+         (mapv #(let [positions  (column-&gt;breakout-positions %)]
+                 (cond-&gt; (assoc % :lib/hide-bin-bucket? true)
+                   positions (assoc :breakout-positions positions)))
+               columns))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn existing-breakouts :- [:maybe [:sequential {:min 1} ::lib.schema.ref/ref]]
   &quot;Returns existing breakouts (as MBQL expressions) for `column` in a stage if there are any. Returns `nil` if there
   are no existing breakouts.&quot;
@@ -2987,11 +2987,20 @@ net.brehaut.ClojureTools = (function (SH) {
     (existing-breakouts query stage-number column))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn breakout-column :- ::lib.schema.metadata/column
   &quot;Returns the input column used for this breakout.&quot;
-  [query        :- ::lib.schema/query
+  ([query        :- ::lib.schema/query
+    breakout-ref  :- ::lib.schema.ref/ref]
+  (breakout-column query -1 breakout-ref))
+  ([query       :- ::lib.schema/query
    stage-number :- :int
    breakout-ref :- ::lib.schema.ref/ref]
-  (-&gt;&gt; (breakoutable-columns query stage-number)
-       (lib.equality/find-matching-column breakout-ref)))</pre></td></tr><tr><td class="docs">
+  (when-let [column (lib.equality/find-matching-column breakout-ref
+                                                       (breakoutable-columns query stage-number)
+                                                       {:generous? true})]
+    (let [binning (lib.binning/binning breakout-ref)
+          bucket  (lib.temporal-bucket/temporal-bucket breakout-ref)]
+      (cond-&gt; column
+        binning (lib.binning/with-binning binning)
+        bucket  (lib.temporal-bucket/with-temporal-bucket bucket))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn remove-all-breakouts :- ::lib.schema/query
   &quot;Remove all breakouts from a query stage.&quot;
   ([query]
