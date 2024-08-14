@@ -2911,10 +2911,10 @@ that a non-empty list is returned.</p>
    [metabase.lib.types.isa :as lib.types.isa]
    [metabase.lib.util :as lib.util]
    [metabase.util.malli :as mu]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn prepare-query-for-drill-addition :- [:map
-                                              [:query ::lib.schema/query]
-                                              [:stage-number :int]
-                                              [:column lib.filter/ColumnWithOperators]]
+</td><td class="codes"><pre class="brush: clojure">(mu/defn prepare-query-for-drill-addition :- [:maybe [:map
+                                                       [:query ::lib.schema/query]
+                                                       [:stage-number :int]
+                                                       [:column lib.filter/ColumnWithOperators]]]
   &quot;If the column we're filtering on is an aggregation, the filtering must happen in a later stage. This function returns
   a map with that possibly-updated `:query` and `:stage-number`, plus the `:column` for filtering in that stage (with
   filter operators, as returned by [[lib.filter/filterable-columns]]).
@@ -2954,7 +2954,9 @@ that a non-empty list is returned.</p>
                           (and (:lib/source-uuid column)
                                (m/find-first #(= (:lib/source-uuid %) (:lib/source-uuid column))
                                              columns)))]
-    (assoc base :column filter-column)))</pre></td></tr><tr><td class="docs">
+    ;; If we cannot find the matching column, don't allow to drill
+    (when filter-column
+      (assoc base :column filter-column))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn column-filter-drill :- [:maybe ::lib.schema.drill-thru/drill-thru.column-filter]
   &quot;Filtering at the column level, based on its type. Displays a submenu of eg. \&quot;Today\&quot;, \&quot;This Week\&quot;, etc. for date
   columns.
@@ -2963,21 +2965,21 @@ that a non-empty list is returned.</p>
   [query                             :- ::lib.schema/query
    stage-number                      :- :int
    {:keys [column column-ref value]} :- ::lib.schema.drill-thru/context]
-  ;; Note: original code uses an addition `clicked.column.field_ref != null` condition.
   (when (and (lib.drill-thru.common/mbql-stage? query stage-number)
              column
              (nil? value)
              (not (lib.types.isa/structured? column)))
-    (let [initial-op (when-not (lib.types.isa/temporal? column) ; Date fields have special handling in the FE.
-                       (-&gt; (lib.filter.operator/filter-operators column)
-                           first
-                           (assoc :lib/type :operator/filter)))]
-      (merge
-        {:lib/type   :metabase.lib.drill-thru/drill-thru
-         :type       :drill-thru/column-filter
-         :initial-op initial-op}
-        ;; When the column we would be filtering on is an aggregation, it can't be filtered without adding a stage.
-        (prepare-query-for-drill-addition query stage-number column column-ref :filter)))))</pre></td></tr><tr><td class="docs">
+    ;; When the column we would be filtering on is an aggregation, it can't be filtered without adding a stage.
+    (when-let [drill-details (prepare-query-for-drill-addition query stage-number column column-ref :filter)]
+      (let [initial-op (when-not (lib.types.isa/temporal? column) ; Date fields have special handling in the FE.
+                         (-&gt; (lib.filter.operator/filter-operators column)
+                             first
+                             (assoc :lib/type :operator/filter)))]
+        (merge
+          drill-details
+          {:lib/type   :metabase.lib.drill-thru/drill-thru
+           :type       :drill-thru/column-filter
+           :initial-op initial-op})))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod lib.drill-thru.common/drill-thru-info-method :drill-thru/column-filter
   [_query _stage-number {:keys [initial-op]}]
   {:type       :drill-thru/column-filter
