@@ -2899,7 +2899,9 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.util.i18n :refer [deferred-trs trs]]
    [metabase.util.log :as log]
    [metabase.util.malli :as mu]
-   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
+   [toucan2.core :as t2])
+  (:import
+   (clojure.lang ExceptionInfo)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private Mode
   (mu/with-api-error-message [:enum :skip :update]
@@ -2963,7 +2965,10 @@ net.brehaut.ClojureTools = (function (SH) {
   ;  (log/warn &quot;Dump was produced using a different version of Metabase. Things may break!&quot;))
   (log/infof &quot;Loading serialized Metabase files from %s&quot; path)
   (serdes/with-cache
-    (v2.load/load-metabase! (v2.ingest/ingest-yaml path) opts)))</pre></td></tr><tr><td class="docs"><p>SerDes v2 load entry point.</p>
+    (v2.load/load-metabase! (v2.ingest/ingest-yaml path) opts)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- stripped-error [e]
+  (let [m (ex-data e)]
+    (ex-info (ex-message e) m)))</pre></td></tr><tr><td class="docs"><p>SerDes v2 load entry point.</p>
 
 <p> opts are passed to load-metabase</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn v2-load!
@@ -2971,17 +2976,21 @@ net.brehaut.ClojureTools = (function (SH) {
    opts :- [:map
             [:backfill? {:optional true} [:maybe :boolean]]
             [:continue-on-error {:optional true} [:maybe :int]]]]
-  (let [start    (System/nanoTime)
+  (let [timer    (u/start-timer)
         err      (atom nil)
         report   (try
                    (v2-load-internal! path opts :token-check? true)
+                   (catch ExceptionInfo e
+                     (if (:error (ex-data e))
+                       (reset! err (stripped-error e))
+                       (reset! err e)))
                    (catch Exception e
                      (reset! err e)))
         imported (into (sorted-set) (map (comp :model last)) (:seen report))]
     (snowplow/track-event! ::snowplow/serialization nil
                            {:direction     &quot;import&quot;
                             :source        &quot;cli&quot;
-                            :duration_ms   (int (/ (- (System/nanoTime) start) 1e6))
+                            :duration_ms   (int (u/since-ms timer))
                             :models        (str/join &quot;,&quot; imported)
                             :count         (if (contains? imported &quot;Setting&quot;)
                                              (inc (count (remove #(= &quot;Setting&quot; (:model (first %))) (:seen report))))
