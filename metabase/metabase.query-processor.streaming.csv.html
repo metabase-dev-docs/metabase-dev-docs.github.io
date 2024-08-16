@@ -2868,14 +2868,15 @@ net.brehaut.ClojureTools = (function (SH) {
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.query-processor.streaming.csv" name="metabase.query-processor.streaming.csv"><h1 class="project-name">metabase.query-processor.streaming.csv</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.query-processor.streaming.csv
   (:require
-   [clojure.data.csv :as csv]
+   [clojure.data.csv]
    [java-time.api :as t]
    [metabase.formatter :as formatter]
    [metabase.query-processor.pivot.postprocess :as qp.pivot.postprocess]
    [metabase.query-processor.streaming.common :as common]
    [metabase.query-processor.streaming.interface :as qp.si]
    [metabase.shared.models.visualization-settings :as mb.viz]
-   [metabase.util.date-2 :as u.date])
+   [metabase.util.date-2 :as u.date]
+   [metabase.util.performance :as perf])
   (:import
    (java.io BufferedWriter OutputStream OutputStreamWriter)
    (java.nio.charset StandardCharsets)))</pre></td></tr><tr><td class="docs">
@@ -2898,7 +2899,35 @@ The post processing is disabled completely.
 This should remain <code>false</code> until it's fixed
 TODO: rework this post-processing once there's a clear way in app to enable/disable it, or to select alternate download options</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *pivot-export-post-processing-enabled*
-  false)</pre></td></tr><tr><td class="docs">
+  false)</pre></td></tr><tr><td class="docs"><p>Custom implementation of <code>clojure.data.csv/write-csv</code> with a more efficient quote? predicate and no support for
+options (we don't use them).</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- write-csv
+  [writer data]
+  (let [separator \,
+        quote \&quot;
+        quote? (fn [^String s]
+                 (let [n (.length s)]
+                   (loop [i 0]
+                     (if (&gt;= i n) false
+                         (let [ch (.charAt s (unchecked-int i))]
+                           (if (or (= ch \,) ;; separator
+                                   (= ch \&quot;) ;; quote
+                                   (= ch \return)
+                                   (= ch \newline))
+                             true
+                             (recur (unchecked-inc i))))))))
+        newline &quot;\n&quot;]
+    (#'clojure.data.csv/write-csv* writer data separator quote quote? newline)))</pre></td></tr><tr><td class="docs"><p>Rebind write-cell to avoid using clojure.core/escape. Instead, use String.replace with known arguments (we never
+change quote symbol anyway).</p>
+</td><td class="codes"><pre class="brush: clojure">(.bindRoot #'clojure.data.csv/write-cell
+           (fn [^java.io.Writer writer obj _ _ quote?]
+             (let [^String string (str obj)
+                   must-quote (quote? string)]
+               (when must-quote (.write writer &quot;\&quot;&quot;))
+               (.write writer (if must-quote
+                                (.replace string &quot;\&quot;&quot; &quot;\&quot;\&quot;&quot;)
+                                string))
+               (when must-quote (.write writer &quot;\&quot;&quot;)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod qp.si/streaming-results-writer :csv
   [_ ^OutputStream os]
   (let [writer             (BufferedWriter. (OutputStreamWriter. os StandardCharsets/UTF_8))
@@ -2922,7 +2951,7 @@ TODO: rework this post-processing once there's a clear way in app to enable/disa
                      (vec (repeat (count ordered-cols) identity))))
           ;; write the column names for non-pivot tables
           (when col-names
-            (csv/write-csv writer [col-names])
+            (write-csv writer [col-names])
             (.flush writer))))
 
       (write-row! [_ row _row-num _ {:keys [output-order]}]
@@ -2930,15 +2959,15 @@ TODO: rework this post-processing once there's a clear way in app to enable/disa
                             (let [row-v (into [] row)]
                               (for [i output-order] (row-v i)))
                             row)
-              xf-row      (mapv (fn [formatter r]
-                                  (formatter (common/format-value r)))
-                                @ordered-formatters ordered-row)]
+              xf-row      (perf/mapv (fn [formatter r]
+                                       (formatter (common/format-value r)))
+                                     @ordered-formatters ordered-row)]
           (if @pivot-options
             ;; if we're processing a pivot result, we don't write it out yet, just store it
             ;; so that we can post process the full set of results in finish!
             (swap! rows! conj xf-row)
             (do
-              (csv/write-csv writer [xf-row])
+              (write-csv writer [xf-row])
               (.flush writer)))))
 
       (finish! [_ _]
@@ -2946,7 +2975,7 @@ TODO: rework this post-processing once there's a clear way in app to enable/disa
         (when @pivot-options
           (let [pivot-table-rows (qp.pivot.postprocess/pivot-builder @rows! @pivot-options)]
             (doseq [xf-row pivot-table-rows]
-              (csv/write-csv writer [xf-row]))))
+              (write-csv writer [xf-row]))))
         (.flush writer)
         (.flush os)
         (.close writer)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;

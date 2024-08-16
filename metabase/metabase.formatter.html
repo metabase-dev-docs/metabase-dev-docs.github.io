@@ -2925,8 +2925,10 @@ net.brehaut.ClojureTools = (function (SH) {
                             java.lang.Float      (format &quot;%.20f&quot; value)
                             (str value))
                           (strip-trailing-zeroes (str decimal)))
-           d          (last (str/split val-string #&quot;[^\d*]&quot;))]
-       (count d)))))</pre></td></tr><tr><td class="docs">
+           decimal-idx (str/index-of val-string decimal)]
+       (if decimal-idx
+         (- (count val-string) decimal-idx 1)
+         0)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- sig-figs-after-decimal
   [value decimal]
   (if (zero? value)
@@ -2977,6 +2979,8 @@ perhaps that implementation needs to move here, or to a new <code>metabase.forma
                                                                    (:type/Currency global-settings))
                                                                  (:type/Number global-settings)
                                                                  column-settings)
+        currency        (when currency?
+                          (keyword (or currency &quot;USD&quot;)))
         integral?       (isa? (or effective_type base_type) :type/Integer)
         relation?       (isa? semantic_type :Relation/*)
         percent?        (or (isa? semantic_type :type/Percentage) (= number-style &quot;percent&quot;))
@@ -2988,7 +2992,10 @@ perhaps that implementation needs to move here, or to a new <code>metabase.forma
                              (cond-&gt; decimal (.setDecimalSeparator decimal))
                              (cond-&gt; grouping (.setGroupingSeparator grouping)))
         base               (cond-&gt; (if (or scientific? relation?) &quot;0&quot; &quot;#,##0&quot;)
-                             (not grouping) (str/replace #&quot;,&quot; &quot;&quot;))]
+                             (not grouping) (str/replace #&quot;,&quot; &quot;&quot;))
+        ;; A small cache of decimal-digits-&gt;formatter to avoid creating new ones all the time. This cache is bound by
+        ;; the maximum number of decimal digits we can format which is 20 (constrained by `digits-after-decimal`).
+        fmtr-cache         (volatile! {})]
     (fn [value]
       (if (number? value)
         (let [scaled-value      (cond-&gt; (* value (or scale 1))
@@ -2998,7 +3005,12 @@ perhaps that implementation needs to move here, or to a new <code>metabase.forma
               decimal-digits (cond
                                decimals decimals ;; if user ever specifies # of decimals, use that
                                integral? 0
-                               currency? (get-in currency/currency [(keyword (or currency &quot;USD&quot;)) :decimal_digits])
+                               scientific? (min 2 (max decimals-in-value
+                                                       ;; Scientific representation can introduce its own decimal
+                                                       ;; digits even in integer numbers. Count how many integer
+                                                       ;; digits are in the number (but limit to 2).
+                                                       (int (Math/log10 (abs scaled-value)))))
+                               currency? (get-in currency/currency [currency :decimal_digits])
                                percent?  (min 2 decimals-in-value) ;; 5.5432 -&gt; %554.32
                                :else (if (&gt;= (abs scaled-value) 1)
                                        (min 2 decimals-in-value) ;; values greater than 1 round to 2 decimal places
@@ -3006,27 +3018,36 @@ perhaps that implementation needs to move here, or to a new <code>metabase.forma
                                          (if (&gt; n-figs 2)
                                            (max 2 (- decimals-in-value (- n-figs 2))) ;; values less than 1 round to 2 sig-dig
                                            decimals-in-value))))
-              fmt-str (cond-&gt; base
-                        (not (zero? decimal-digits)) (str &quot;.&quot; (apply str (repeat decimal-digits &quot;0&quot;)))
-                        scientific? (str &quot;E0&quot;))
-              fmtr (doto (DecimalFormat. fmt-str symbols) (.setRoundingMode RoundingMode/HALF_UP))]
-          (map-&gt;NumericWrapper
-           {:num-value value
-            :num-str   (let [inline-currency? (and currency?
-                                                   (false? (::mb.viz/currency-in-header column-settings)))]
-                         (str (when prefix prefix)
-                              (when (and inline-currency? (or (nil? currency-style)
-                                                              (= currency-style &quot;symbol&quot;)))
-                                (get-in currency/currency [(keyword (or currency &quot;USD&quot;)) :symbol]))
-                              (when (and inline-currency? (= currency-style &quot;code&quot;))
-                                (str (get-in currency/currency [(keyword (or currency &quot;USD&quot;)) :code]) \space))
-                              (cond-&gt; (.format fmtr scaled-value)
-                                (and (not currency?) (not decimals))
-                                (strip-trailing-zeroes decimal)
-                                percent?    (str &quot;%&quot;))
-                              (when (and inline-currency? (= currency-style &quot;name&quot;))
-                                (str \space (get-in currency/currency [(keyword (or currency &quot;USD&quot;)) :name_plural])))
-                              (when suffix suffix)))}))
+              fmtr (or (@fmtr-cache decimal-digits)
+                       (let [fmt-str (cond-&gt; base
+                                       (not (zero? decimal-digits)) (str &quot;.&quot; (apply str (repeat decimal-digits &quot;0&quot;)))
+                                       scientific? (str &quot;E0&quot;))
+                             fmtr (doto (DecimalFormat. fmt-str symbols) (.setRoundingMode RoundingMode/HALF_UP))]
+                         (vswap! fmtr-cache assoc decimal-digits fmtr)
+                         fmtr))]
+          (-&gt;NumericWrapper
+           (let [inline-currency? (and currency?
+                                       (false? (::mb.viz/currency-in-header column-settings)))
+                 sb (StringBuilder.)]
+             ;; Using explicit StringBuilder to avoid touching the slow `clojure.core/str` multi-arity.
+             (when prefix (.append sb prefix))
+             (when (and inline-currency? (or (nil? currency-style)
+                                             (= currency-style &quot;symbol&quot;)))
+               (.append sb (get-in currency/currency [currency :symbol])))
+             (when (and inline-currency? (= currency-style &quot;code&quot;))
+               (.append sb (get-in currency/currency [currency :code]))
+               (.append sb \space))
+             (.append sb (cond-&gt; (.format ^DecimalFormat fmtr scaled-value)
+                           (and (not currency?) (not decimals))
+                           (strip-trailing-zeroes decimal)))
+             (when percent?
+               (.append sb &quot;%&quot;))
+             (when (and inline-currency? (= currency-style &quot;name&quot;))
+               (.append sb \space)
+               (.append sb (get-in currency/currency [currency :name_plural])))
+             (when suffix (.append sb suffix))
+             (str sb))
+           value))
         value))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn format-number :- (ms/InstanceOfClass NumericWrapper)
   &quot;Format a number `n` and return it as a NumericWrapper; this type is used to do special formatting in other
