@@ -2865,347 +2865,187 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.models.field" name="metabase.models.field"><h1 class="project-name">metabase.models.field</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.models.field
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#capture.cljc" name="capture.cljc"><h1 class="project-name">capture.cljc</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Only used in tests and dev runs.</p>
+
+<p>Basic idea is we have a dynamic variable called [[<em>capture-logs-fn</em>]] with the signature</p>
+
+<p>  (f namespace-str level-int)</p>
+
+<p>and if the logs should be captured at that level, it returns a function with the signature</p>
+
+<p>  (f e message)</p>
+
+<p>that you should call with the logged exception (if any) and logged message to capture the message.</p>
+
+<p>Then the actual implementation can basically compose [[<em>capture-logs-fn</em>]] so you can have multiple functions capturing
+logs.</p>
+
+<p>The impl can store the logs in an atom or whatever that you can get later.</p>
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.util.log.capture
   (:require
    [clojure.set :as set]
+   [clojure.spec.alpha :as s]
    [clojure.string :as str]
-   [medley.core :as m]
-   [metabase.api.common :as api]
-   [metabase.db :as mdb]
-   [metabase.lib.field :as lib.field]
-   [metabase.lib.metadata.jvm :as lib.metadata.jvm]
-   [metabase.models.data-permissions :as data-perms]
-   [metabase.models.database :as database]
-   [metabase.models.dimension :refer [Dimension]]
-   [metabase.models.field-values :as field-values :refer [FieldValues]]
-   [metabase.models.humanization :as humanization]
-   [metabase.models.interface :as mi]
-   [metabase.models.serialization :as serdes]
-   [metabase.public-settings.premium-features
-    :as premium-features
-    :refer [defenterprise]]
-   [metabase.util :as u]
-   [metabase.util.i18n :refer [tru]]
-   [metabase.util.log :as log]
-   [metabase.util.malli :as mu]
-   [metabase.util.malli.schema :as ms]
-   [methodical.core :as methodical]
-   [toucan2.core :as t2]
-   [toucan2.tools.hydrate :as t2.hydrate]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>------------------------------------------------- Type Mappings --------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Possible values for <code>Field.visibility_type</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(def visibility-types
-  #{:normal         ; Default setting.  field has no visibility restrictions.
-    :details-only   ; For long blob like columns such as JSON.  field is not shown in some places on the frontend.
-    :hidden         ; Lightweight hiding which removes field as a choice in most of the UI.  should still be returned in queries.
-    :sensitive      ; Strict removal of field from all places except data model listing.  queries should error if someone attempts to access.
-    :retired})      ; For fields that no longer exist in the physical db.  automatically set by Metabase.  QP should error if encountered in a query.</pre></td></tr><tr><td class="docs"><p>----------------------------------------------- Entity &amp; Lifecycle -----------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Used to be the toucan1 model name defined using [[toucan.models/defmodel]]; now it's a reference to the toucan2 model name.
-We'll keep this till we replace all the Field symbol in our codebase.</p>
-</td><td class="codes"><pre class="brush: clojure">(def Field
-  :model/Field)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/table-name :model/Field [_model] :metabase_field)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/model-for-automagic-hydration [:default :destination]          [_model _k]  :model/Field)
-(methodical/defmethod t2/model-for-automagic-hydration [:default :field]                [_model _k]  :model/Field)
-(methodical/defmethod t2/model-for-automagic-hydration [:default :origin]               [_model _k]  :model/Field)
-(methodical/defmethod t2/model-for-automagic-hydration [:default :human_readable_field] [_model _k]  :model/Field)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- hierarchy-keyword-in [column-name &amp; {:keys [ancestor-types]}]
-  (fn [k]
-    (when-let [k (keyword k)]
-      (when-not (some
-                 (partial isa? k)
-                 ancestor-types)
-        (let [message (tru &quot;Invalid value for Field column {0}: {1} is not a descendant of any of these types: {2}&quot;
-                           (pr-str column-name) (pr-str k) (pr-str ancestor-types))]
-          (throw (ex-info message
-                          {:status-code       400
-                           :errors            {column-name message}
-                           :value             k
-                           :allowed-ancestors ancestor-types}))))
-      (u/qualified-name k))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- hierarchy-keyword-out [column-name &amp; {:keys [fallback-type ancestor-types]}]
-  (fn [s]
-    (when (seq s)
-      (let [k (keyword s)]
-        (if (some
-             (partial isa? k)
-             ancestor-types)
-          k
-          (do
-            (log/warnf &quot;Invalid Field %s %s: falling back to %s&quot; column-name k fallback-type)
-            fallback-type))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private transform-field-base-type
-  {:in  (hierarchy-keyword-in  :base_type :ancestor-types [:type/*])
-   :out (hierarchy-keyword-out :base_type :ancestor-types [:type/*], :fallback-type :type/*)})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private transform-field-effective-type
-  {:in  (hierarchy-keyword-in  :effective_type :ancestor-types [:type/*])
-   :out (hierarchy-keyword-out :effective_type :ancestor-types [:type/*], :fallback-type :type/*)})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private transform-field-semantic-type
-  {:in  (hierarchy-keyword-in  :semantic_type :ancestor-types [:Semantic/* :Relation/*])
-   :out (hierarchy-keyword-out :semantic_type :ancestor-types [:Semantic/* :Relation/*], :fallback-type nil)})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private transform-field-coercion-strategy
-  {:in  (hierarchy-keyword-in  :coercion_strategy :ancestor-types [:Coercion/*])
-   :out (hierarchy-keyword-out :coercion_strategy :ancestor-types [:Coercion/*], :fallback-type nil)})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- maybe-parse-semantic-numeric-values [maybe-double-value]
-  (if (string? maybe-double-value)
-    (or (u/ignore-exceptions (Double/parseDouble maybe-double-value)) maybe-double-value)
-    maybe-double-value))</pre></td></tr><tr><td class="docs"><p>When fingerprinting decimal columns, NaN and Infinity values are possible. Serializing these values to JSON just
-yields a string, not a value double. This function will attempt to coerce any of those values to double objects</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- update-semantic-numeric-values
-  [fingerprint]
-  (m/update-existing-in fingerprint [:type :type/Number]
-                        (partial m/map-vals maybe-parse-semantic-numeric-values)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private transform-json-fingerprints
-  {:in  mi/json-in
-   :out (comp update-semantic-numeric-values mi/json-out-with-keywordization)})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(t2/deftransforms :model/Field
-  {:base_type         transform-field-base-type
-   :effective_type    transform-field-effective-type
-   :coercion_strategy transform-field-coercion-strategy
-   :semantic_type     transform-field-semantic-type
-   :visibility_type   mi/transform-keyword
-   :has_field_values  mi/transform-keyword
-   :fingerprint       transform-json-fingerprints
-   :settings          mi/transform-json
-   :nfc_path          mi/transform-json})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(doto :model/Field
-  (derive :metabase/model)
-  (derive :hook/timestamped?))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(t2/define-after-select :model/Field
-  [field]
-  (dissoc field :is_defective_duplicate :unique_field_helper))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(t2/define-before-insert :model/Field
-  [field]
-  (let [defaults {:display_name (humanization/name-&gt;human-readable-name (:name field))}]
-    (merge defaults field)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(t2/define-before-update :model/Field
-  [field]
-  (u/prog1 (t2/changes field)
-    (when (false? (:active &lt;&gt;))
-      (t2/update! :model/Field {:fk_target_field_id (:id field)} {:semantic_type      nil
-                                                                  :fk_target_field_id nil}))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(t2/define-before-delete :model/Field
-  [field]
-  ; Cascading deletes through parent_id cannot be done with foreign key constraints in the database
-  ; because parent_id constributes to a generated column, and MySQL doesn't support columns with cascade delete
-  ;; foreign key constraints in generated columns. #44866
-  (t2/delete! :model/Field :parent_id (:id field)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- field-&gt;db-id
-  [{table-id :table_id, {db-id :db_id} :table}]
-  (or db-id (database/table-id-&gt;database-id table-id)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod mi/can-read? :model/Field
-  ([instance]
-   (and (data-perms/user-has-permission-for-table?
-         api/*current-user-id*
-         :perms/view-data
-         :unrestricted
-         (field-&gt;db-id instance)
-         (:table_id instance))
-        (data-perms/user-has-permission-for-table?
-         api/*current-user-id*
-         :perms/create-queries
-         :query-builder
-         (field-&gt;db-id instance)
-         (:table_id instance))))
-  ([model pk]
-   (mi/can-read? (t2/select-one model pk))))</pre></td></tr><tr><td class="docs"><p>OSS implementation. Returns a boolean whether the current user can write the given field.</p>
-</td><td class="codes"><pre class="brush: clojure">(defenterprise current-user-can-write-field?
-  metabase-enterprise.advanced-permissions.common
-  [_instance]
-  (mi/superuser?))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod mi/can-write? :model/Field
-  ([instance]
-   (current-user-can-write-field? instance))
-  ([model pk]
-   (mi/can-write? (t2/select-one model pk))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/hash-fields :model/Field
-  [_field]
-  [:name (serdes/hydrated-hash :table)])</pre></td></tr><tr><td class="docs"><p>---------------------------------------------- Hydration / Util Fns ----------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Return the <code>FieldValues</code> associated with this <code>field</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn values
-  [{:keys [id]}]
-  (t2/select [FieldValues :field_id :values], :field_id id :type :full))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn nested-field-names-&gt;field-id :- [:maybe ms/PositiveInt]
-  &quot;Recusively find the field id for a nested field name, return nil if not found.
-  Nested field here refer to a field that has another field as its parent_id, like nested field in Mongo DB.
-  This is to differentiate from the json nested field in, which the path is defined in metabase_field.nfc_path.&quot;
-  [table-id    :- ms/PositiveInt
-   field-names :- [:sequential ms/NonBlankString]]
-  (loop [field-names field-names
-         field-id    nil]
-    (if (seq field-names)
-      (let [field-name (first field-names)
-            field-id   (t2/select-one-pk :model/Field :name field-name :parent_id field-id :table_id table-id)]
-        (if field-id
-          (recur (rest field-names) field-id)
-          nil))
-      field-id)))</pre></td></tr><tr><td class="docs"><p>Select instances of <code>model</code> related by <code>field_id</code> FK to a Field in <code>fields</code>, and return a map of Field ID -> model
-instance. This only returns a single instance for each Field! Duplicates are discarded!</p>
+   #?@(:cljs
+       [[goog.string :as gstring]])))</pre></td></tr><tr><td class="docs"><p>Function with the signature that given a namespace string and log level (as an int), returns a function that should
+be used to capture a log message, if messages at that level should be captured. Its signature is</p>
 
-<p>  (select-field-id->instance [(Field 1) (Field 2)] FieldValues)
-  ;; -> {1 #FieldValues{...}, 2 #FieldValues{...}}</p>
+<p>  (f namespace-str level-int) => (f e message) </p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *capture-logs-fn*
+  (constantly nil))</pre></td></tr><tr><td class="docs"><p>Code below converts log levels to integers right away, because a simple int comparison like <code>(&lt;= 5 4)</code> is super
+quick, and definitely quicker than <code>(&lt;= (level-&gt;int :trace) (level-&gt;int :debug))</code>. So we do the conversions at
+macroexpansion time</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private level-&gt;int
+  {:explode 0
+   :fatal   1
+   :error   2
+   :warn    3
+   :info    4
+   :debug   5
+   :trace   6
+   :whisper 7})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private int-&gt;level
+  (set/map-invert level-&gt;int))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- capture-logs-fn [logs captured-namespace captured-level-int]
+  ;; the prefix stuff is calculated outside of the function so we can be SUPER OPTIMIZED and not do anything
+  ;; allocation in cases where we're not going to capture anything.
+  (let [captured-namespace-prefix (str captured-namespace \.)]
+    (fn [message-namespace message-level-int]
+      ;; similarly, the level comparison is done first, because it's faster and will hopefully filter out a lot of
+      ;; things we weren't going to capture anyway before we do the more expensive namespace check
+      (when (and (&lt;= message-level-int captured-level-int)
+                 (or (= message-namespace captured-namespace)
+                     (str/starts-with? message-namespace captured-namespace-prefix)))
+        ;; VERY IMPORTANT! Only return the capturing function if we actually want to capture a log message.
+        (fn capture-fn [e message]
+          (swap! logs conj {:namespace (symbol message-namespace)
+                            :level     (int-&gt;level message-level-int)
+                            :e         e
+                            :message   message}))))))</pre></td></tr><tr><td class="docs"><p>Impl for [[with-log-messages-for-level]].</p>
+</td><td class="codes"><pre class="brush: clojure">(defn do-with-log-messages-for-level
+  [captured-namespace captured-level-int f]
+  (let [logs           (atom [])
+        old-capture-fn *capture-logs-fn*
+        capture-fn     (capture-logs-fn logs captured-namespace captured-level-int)]
+    (binding [*capture-logs-fn* (fn composed-fn [a-message message-level-int]
+                                  (let [f1 (old-capture-fn a-message message-level-int)
+                                        f2 (capture-fn a-message message-level-int)]
+                                    (cond
+                                      (and f1 f2) (fn [e message]
+                                                    (f1 e message)
+                                                    (f2 e message))
+                                      f1          f1
+                                      f2          f2)))]
+      (f (fn [] @logs)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(s/def ::namespace
+  (some-fn symbol? string?))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(s/def ::level
+  #{:explode :fatal :error :warn :info :debug :trace :whisper})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(s/def ::with-log-messages-for-level-args
+  (s/cat :bindings (s/spec (s/+ (s/cat :messages-fn-binding symbol?
+                                       :ns-level            (s/or :ns-level (s/spec (s/cat :ns-str ::namespace
+                                                                                           :level  ::level))
+                                                                  :ns       ::namespace
+                                                                  :level    ::level))))
+         :body     (s/+ any?)))</pre></td></tr><tr><td class="docs"><p>Capture log messages at a given level in a given namespace and all 'child' namespaces inside <code>body</code>.</p>
 
-<p>(select-field-id->instance [(Field 1) (Field 2)] FieldValues :type :full)
-  -> returns Fieldvalues of type :full for fields: [(Field 1) (Field 2)] </p>
-</td><td class="codes"><pre class="brush: clojure">(defn- select-field-id-&gt;instance
-  [fields model &amp; conditions]
-  (let [field-ids (set (map :id fields))]
-    (m/index-by :field_id (when (seq field-ids)
-                            (apply t2/select model :field_id [:in field-ids] conditions)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mi/define-batched-hydration-method with-values
-  :values
-  &quot;Efficiently hydrate the `FieldValues` for a collection of `fields`.&quot;
-  [fields]
-  ;; In 44 we added a new concept of Advanced FieldValues, so FieldValues are no longer have an one-to-one relationship
-  ;; with Field. See the doc in [[metabase.models.field-values]] for more.
-  ;; We filter down to only :type =:full values, as they contain configured labels which must be preserved. The Advanced
-  ;; FieldValues can then be regenerated without loss given these Full entities.
-  (let [id-&gt;field-values (select-field-id-&gt;instance fields FieldValues :type :full)]
-    (for [field fields]
-      (assoc field :values (get id-&gt;field-values (:id field) [])))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mi/define-batched-hydration-method with-normal-values
-  :normal_values
-  &quot;Efficiently hydrate the `FieldValues` for visibility_type normal `fields`.&quot;
-  [fields]
-  (let [id-&gt;field-values (select-field-id-&gt;instance (filter field-values/field-should-have-field-values? fields)
-                                                    [FieldValues :id :human_readable_values :values :field_id]
-                                                    :type :full)]
-    (for [field fields]
-      (assoc field :values (get id-&gt;field-values (:id field) [])))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mi/define-batched-hydration-method with-dimensions
-  :dimensions
-  &quot;Efficiently hydrate the `Dimension` for a collection of `fields`.
-  NOTE! Despite the name, this only returns at most one dimension. This is for historic reasons; see #13350 for more
-  details.
-  Despite the weirdness, this used to be even worse -- due to a bug in the code, this originally returned a *map* if
-  there was a matching Dimension, or an empty vector if there was not. In 0.46.0 I fixed this to return either a
-  vector with the matching Dimension, or an empty vector. At least the response shape is consistent now. Maybe in the
-  future we can change this key to `:dimension` and return it that way. -- Cam&quot;
-  [fields]
-  (let [id-&gt;dimensions (select-field-id-&gt;instance fields Dimension)]
-    (for [field fields
-          :let  [dimension (get id-&gt;dimensions (:id field))]]
-      (assoc field :dimensions (if dimension [dimension] [])))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2.hydrate/simple-hydrate [#_model :default #_k :has_field_values]
-  &quot;Infer what the value of the `has_field_values` should be for Fields where it's not set. See documentation for
-  [[metabase.lib.schema.metadata/column-has-field-values-options]] for a more detailed explanation of what these
-  values mean.
-  This does one important thing: if `:has_field_values` is already present and set to `:auto-list`, it is replaced by
-  `:list` -- presumably because the frontend doesn't need to know `:auto-list` even exists?
-  See [[lib.field/infer-has-field-values]] for more info.&quot;
-  [_model k field]
-  (when field
-    (let [has-field-values (lib.field/infer-has-field-values (lib.metadata.jvm/instance-&gt;metadata field :metadata/column))]
-      (assoc field k has-field-values))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2.hydrate/needs-hydration? [#_model :default #_k :has_field_values]
-  &quot;Always (re-)hydrate `:has_field_values`. This is used to convert an existing value of `:auto-list` to
-  `:list` (see [[infer-has-field-values]]).&quot;
-  [_model _k _field]
-  true)</pre></td></tr><tr><td class="docs"><p>Efficiently checks if each field is readable and returns only readable fields</p>
-</td><td class="codes"><pre class="brush: clojure">(defn readable-fields-only
-  [fields]
-  (for [field (t2/hydrate fields :table)
-        :when (mi/can-read? field)]
-    (dissoc field :table)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mi/define-batched-hydration-method with-targets
-  :target
-  &quot;Efficiently hydrate the FK target fields for a collection of `fields`.&quot;
-  [fields]
-  (let [target-field-ids (set (for [field fields
-                                    :when (and (isa? (:semantic_type field) :type/FK)
-                                               (:fk_target_field_id field))]
-                                (:fk_target_field_id field)))
-        id-&gt;target-field (m/index-by :id (when (seq target-field-ids)
-                                           (readable-fields-only (t2/select Field :id [:in target-field-ids]))))]
-    (for [field fields
-          :let  [target-id (:fk_target_field_id field)]]
-      (assoc field :target (id-&gt;target-field target-id)))))</pre></td></tr><tr><td class="docs"><p>Hydrates :target on field, but if the <code>:fk_target_field_id</code> field is not writable, <code>:target</code> will be nil.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn hydrate-target-with-write-perms
-  [field]
-  (let [target-field-id (when (isa? (:semantic_type field) :type/FK)
-                          (:fk_target_field_id field))
-        target-field    (when-let [target-field (and target-field-id (t2/select-one Field :id target-field-id))]
-                          (when (mi/can-write? (t2/hydrate target-field :table))
-                            target-field))]
-    (assoc field :target target-field)))</pre></td></tr><tr><td class="docs"><p>Return the pieces that represent a path to <code>field</code>, of the form <code>[table-name parent-fields-name* field-name]</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn qualified-name-components
-  [{field-name :name, table-id :table_id, parent-id :parent_id}]
-  (conj (vec (if-let [parent (t2/select-one Field :id parent-id)]
-               (qualified-name-components parent)
-               (let [{table-name :name, schema :schema} (t2/select-one ['Table :name :schema], :id table-id)]
-                 (conj (when schema
-                         [schema])
-                       table-name))))
-        field-name))</pre></td></tr><tr><td class="docs"><p>Return a combined qualified name for <code>field</code>, e.g. <code>table_name.parent_field_name.field_name</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn qualified-name
-  [field]
-  (str/join \. (qualified-name-components field)))</pre></td></tr><tr><td class="docs"><p>Return the ID of the Table this Field belongs to.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^{:arglists '([field-id])} field-id-&gt;table-id
-  (mdb/memoize-for-application-db
-   (fn [field-id]
-     {:pre [(integer? field-id)]}
-     (t2/select-one-fn :table_id Field, :id field-id))))</pre></td></tr><tr><td class="docs"><p>Return the ID of the Database this Field belongs to.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn field-id-&gt;database-id
-  [field-id]
-  {:pre [(integer? field-id)]}
-  (let [table-id (field-id-&gt;table-id field-id)]
-    (database/table-id-&gt;database-id table-id)))</pre></td></tr><tr><td class="docs"><p>Return the <code>Table</code> associated with this <code>Field</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn table
-  {:arglists '([field])}
-  [{:keys [table_id]}]
-  (t2/select-one 'Table, :id table_id))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------- Serialization -------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>In order to retrieve the dependencies for a field its table_id needs to be serialized as [database schema table],
-a trio of strings with schema maybe nil.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/generate-path &quot;Field&quot; [_ {table_id :table_id field :name}]
-  (let [table (when (number? table_id)
-                   (t2/select-one 'Table :id table_id))
-        db    (when table
-                (t2/select-one-fn :name 'Database :id (:db_id table)))
-        [db schema table] (if (number? table_id)
-                            [db (:schema table) (:name table)]
-                            ;; If table_id is not a number, it's already been exported as a [db schema table] triple.
-                            table_id)]
-    (filterv some? [{:model &quot;Database&quot; :id db}
-                    (when schema {:model &quot;Schema&quot; :id schema})
-                    {:model &quot;Table&quot;    :id table}
-                    {:model &quot;Field&quot;    :id field}])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/entity-id &quot;Field&quot; [_ {:keys [name]}]
-  name)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/load-find-local &quot;Field&quot;
-  [path]
-  (let [table (serdes/load-find-local (pop path))]
-    (t2/select-one Field :name (-&gt; path last :id) :table_id (:id table))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/dependencies &quot;Field&quot; [field]
-  ;; Fields depend on their parent Table, plus any foreign Fields referenced by their Dimensions.
-  ;; Take the path, but drop the Field section to get the parent Table's path instead.
-  (let [this  (serdes/path field)
-        table (pop this)
-        fks   (some-&gt;&gt; field :fk_target_field_id serdes/field-&gt;path)
-        human (-&gt;&gt; (:dimensions field)
-                   (keep :human_readable_field_id)
-                   (map serdes/field-&gt;path)
-                   set)]
-    (cond-&gt; (set/union #{table} human)
-      fks   (set/union #{fks})
-      true  (disj this))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/make-spec &quot;Field&quot; [_model-name opts]
-  {:copy      [:active :base_type :caveats :coercion_strategy :custom_position :database_indexed
-               :database_is_auto_increment :database_partitioned :database_position :database_required :database_type
-               :description :display_name :effective_type :has_field_values :is_defective_duplicate :json_unfolding
-               :name :nfc_path :points_of_interest :position :preview_display :semantic_type :settings
-               :unique_field_helper :visibility_type]
-   :skip      [:fingerprint :fingerprint_version :last_analyzed]
-   :transform {:created_at         (serdes/date)
-               :table_id           (serdes/fk :model/Table)
-               :fk_target_field_id (serdes/fk :model/Field)
-               :parent_id          (serdes/fk :model/Field)
-               :dimensions         (serdes/nested :model/Dimension :field_id opts)}})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/storage-path &quot;Field&quot; [field _]
-  (-&gt; (serdes/path field)
-      drop-last
-      serdes/storage-table-path-prefix
-      (concat [&quot;fields&quot; (:name field)])))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+<p>Captured logs can be accessed by invoking <code>messages-fn-binding</code>. <code>ns-level</code> can be either a namespace, level, or
+both, i.e. one of the following options:</p>
+
+<ol>
+<li><p>A namespace string or symbol; assumes level <code>:trace</code>. Capture all log message in that namespace and any 'child'
+namespaces</p></li>
+<li><p>A level keyword like <code>:trace</code>; assumes namespace is <code>metabase</code>, i.e. captures log messages from any namespace
+that starts with <code>metabase.</code></p></li>
+<li><p>A vector of [namespace level], e.g. <code>[my.namespace :debug]</code>, which would capture all <code>:debug</code> and <code>:trace</code>
+messages inside <code>my.namespace</code>, <code>my.namespace.x</code>, etc.</p></li>
+</ol>
+
+<p>A code example is worth a thousand-word docstring, so here is an example</p>
+
+<p>(log.capture/with-log-messages-for-level [messages [metabase.util.log.capture-test :trace]]
+  (is (= []
+         (messages)))
+  (log/trace "message")
+  (is (= [{:namespace 'metabase.util.log.capture-test
+           :level     :trace
+           :e         nil
+           :message   "message"}]
+         (messages))))</p>
+
+<p>See [[metabase.util.log.capture-test]] for more example usages.</p>
+
+<p>You can pass multiple bindings to this macro without them affecting one another, regardless of whether the things
+they capture overlap or not. See [[metabase.util.log.capture-test/multiple-captures-test]] for an example.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro with-log-messages-for-level
+  {:arglists '([[messages-fn-binding ns-level &amp; more-bindings] &amp; body])}
+  [&amp; args]
+  (let [{:keys [bindings body]} (s/conform ::with-log-messages-for-level-args args)]
+    (reduce
+     (fn [form bindings]
+       (let [{:keys [messages-fn-binding ns-level]} bindings
+             [ns-level-type ns-level]               ns-level
+             {:keys [ns-str level]}                 (case ns-level-type
+                                                      :ns-level ns-level
+                                                      :ns       {:ns-str ns-level, :level :trace}
+                                                      :level    {:ns-str &quot;metabase&quot;, :level ns-level})]
+         `(do-with-log-messages-for-level ~(str ns-str) ~(level-&gt;int level) (fn [~messages-fn-binding] ~form))))
+     `(do ~@body)
+     bindings)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(s/fdef with-log-messages-for-level
+  :args ::with-log-messages-for-level-args
+  :ret  any?)</pre></td></tr><tr><td class="docs"><p>The macroexpansion of something like</p>
+
+<p>   (log/trace "a picture")</p>
+
+<p>becomes</p>
+
+<p>   (do
+     (metabase.util.log.capture/capture-logp
+      "metabase.util.log.capture-test"
+      :trace
+      "a picture")
+     ;; clojure.tools.logging stuff
+     ...)</p>
+
+<p>becomes</p>
+
+<p>   (do
+     (when-let [f# (metabase.util.log.capture/<em>capture-logs-fn</em>
+                    "metabase.util.log.capture-test"
+                    5)]
+         (metabase.util.log.capture/capture-logp! f# "a picture"))
+     ...)</p>
+
+<p>VERY VERY IMPORTANT! [[<em>capture-logs-fn</em>]] only returns a function if logs for that namespace AND level are to be
+captured! Only then is [[capture-logp!]] or [[capture-logf!]], which ultimately call the returned function <code>f#</code>,
+called with the args to the logging macro -- and only then do they get evaluated! It's super important not to
+evaluate the log args unless we actually want to capture them! They might be very expensive!</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- parse-args [[x &amp; more]]
+  (if (instance? #?(:clj Throwable :cljs js/Error) x)
+    {:e x, :args more}
+    {:args (cons x more)}))</pre></td></tr><tr><td class="docs"><p>Impl for log message capturing for [[metabase.util.log/logp]].</p>
+</td><td class="codes"><pre class="brush: clojure">(defn capture-logp!
+  [f &amp; args]
+  (let [{:keys [e args]} (parse-args args)]
+    (f e (str/join \space (map print-str args)))))</pre></td></tr><tr><td class="docs"><p>Impl for log message capturing for [[metabase.util.log/logf]].</p>
+</td><td class="codes"><pre class="brush: clojure">(defn capture-logf!
+  [f &amp; args]
+  (let [{e :e, [format-string &amp; args] :args} (parse-args args)]
+    #_{:clj-kondo/ignore [:unresolved-namespace]}
+    (f e (apply #?(:clj format
+                   :cljs gstring/format)
+                format-string args))))</pre></td></tr><tr><td class="docs"><p>Impl for log message capturing for [[metabase.util.log/logp]].</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro capture-logp
+  [namespace-str level &amp; args]
+  `(when-let [f# (*capture-logs-fn* ~namespace-str ~(level-&gt;int level))]
+     (capture-logp! f# ~@args)))</pre></td></tr><tr><td class="docs"><p>Impl for log message capturing for [[metabase.util.log/logf]].</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro capture-logf
+  [namespace-str level &amp; args]
+  `(when-let [f# (*capture-logs-fn* ~namespace-str ~(level-&gt;int level))]
+     (capture-logf! f# ~@args)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
