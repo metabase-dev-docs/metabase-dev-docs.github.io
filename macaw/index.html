@@ -3135,10 +3135,10 @@ the query'; this function doesn't do additional inference work to find out a tab
   ;; This may result in duplicate components, which are left to the caller to deduplicate.
   ;; In Metabase's case, this is done during the stage where the database metadata is queried.
   (-&gt;&gt; (collect/query-&gt;components statement (merge {:preserve-identifiers? true} opts))
-       (walk/prewalk (fn [x]
-                       (if (string? x)
-                         (unescape-keywords x (:non-reserved-words opts))
-                         x)))))</pre></td></tr><tr><td class="docs"><p>Given an SQL query, apply the given table, column, and schema renames.</p>
+       (walk/postwalk (fn [x]
+                        (if (string? x)
+                          (unescape-keywords x (:non-reserved-words opts))
+                          x)))))</pre></td></tr><tr><td class="docs"><p>Given an SQL query, apply the given table, column, and schema renames.</p>
 
 <p>Supported options:</p>
 
@@ -3157,11 +3157,11 @@ the query'; this function doesn't do additional inference work to find out a tab
   ;; If we decide that it's OK to normalize whitespace etc. during replacement, then we can use the same helper.
   (let [sql'     (escape-keywords (str/replace sql #&quot;(?m)^\n&quot; &quot; \n&quot;) (:non-reserved-words opts))
         opts'    (select-keys opts [:case-insensitive :quotes-preserve-case? :allow-unused?])
-        renames' (walk/prewalk (fn [x]
-                                 (if (string? x)
-                                   (escape-keywords x (:non-reserved-words opts))
-                                   x))
-                               renames)
+        renames' (walk/postwalk (fn [x]
+                                  (if (string? x)
+                                    (escape-keywords x (:non-reserved-words opts))
+                                    x))
+                                renames)
         parsed   (parsed-query sql' opts)]
     (-&gt; (rewrite/replace-names sql' parsed renames' opts')
         (str/replace #&quot;(?m)^ \n&quot; &quot;\n&quot;)
@@ -4009,18 +4009,26 @@ from foo&quot;)</pre></td></tr><tr><td class="docs">
                           :preserve-identifiers? false})
              raw-components)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(comment
- (require 'hashp.core)
- (require 'virgil)
- (require 'clojure.tools.namespace.repl)
- (virgil/watch-and-recompile [&quot;java&quot;] :post-hook clojure.tools.namespace.repl/refresh-all)
-
- (source-columns &quot;WITH cte AS (SELECT x FROM t1) SELECT x, y FROM t2&quot;)
-
- (anonymize-query &quot;SELECT x FROM a&quot;)
- (anonymize-fixture :snowflake)
- (anonymize-fixture :snowflakelet)
-
- )</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.test.util" name="macaw.test.util"><h1 class="project-name">macaw.test.util</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+  (require 'user) ;; kondo, really
+  (require '[clj-async-profiler.core :as prof])
+  (prof/serve-ui 8080)
+  (defn- simple-benchmark []
+    (source-columns &quot;SELECT x FROM t&quot;))
+  (defn- complex-benchmark []
+    (count
+     (source-columns
+      (query-fixture :snowflake))))
+  (user/time+ (simple-benchmark))
+  (prof/profile {:event :alloc}
+    (dotimes [_ 1000] (simple-benchmark)))
+  (user/time+ (complex-benchmark))
+  (prof/profile {:event :alloc}
+    (dotimes [_ 100] (complex-benchmark)))
+  (anonymize-query &quot;SELECT x FROM a&quot;)
+  (anonymize-fixture :snowflakelet)
+  (require 'virgil)
+  (require 'clojure.tools.namespace.repl)
+  (virgil/watch-and-recompile [&quot;java&quot;] :post-hook clojure.tools.namespace.repl/refresh-all))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.test.util" name="macaw.test.util"><h1 class="project-name">macaw.test.util</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns macaw.test.util
   (:require
    [clojure.string :as str]

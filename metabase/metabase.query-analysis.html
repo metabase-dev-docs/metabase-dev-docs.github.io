@@ -3048,7 +3048,7 @@ Returns <code>nil</code> and leaves the database records as-is if analysis is di
       (cond
         (not card)       (log/warnf &quot;Card not found: %s&quot; card-id)
         (:archived card) (log/warnf &quot;Skipping archived card: %s&quot; card-id)
-        :else            (log/infof &quot;Performing query analysis for card %s&quot; card-id))
+        :else            (log/debugf &quot;Performing query analysis for card %s&quot; card-id))
       (when (and card (not (:archived card)))
         (update-query-analysis-for-card! card))))</pre></td></tr><tr><td class="docs"><p>Get the id of the next card id to be analyzed. May block indefinitely, relies on producer.
 Should only be called from [[metabase.task.analyze-queries]].</p>
@@ -3064,12 +3064,22 @@ Should only be called from [[metabase.task.analyze-queries]].</p>
   (case (execution)
     ::immediate (analyze-card! card-or-id)
     ::queued    (offer-fn! card-or-id)
-    ::disabled  nil))</pre></td></tr><tr><td class="docs"><p>Asynchronously hand-off the given card for analysis, at a high priority. This is typically the method you want.</p>
+    ::disabled  nil))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- maybe-enqueue! [queue card-or-id]
+  (let [id        (u/the-id card-or-id)
+        enqueued? (queue/maybe-put! queue card-or-id)]
+    (if enqueued?
+      (log/debugf &quot;Queued Card %s for async analysis&quot; id)
+      (log/warnf &quot;Deferred analysis of Card %s, as the queue is full&quot; id))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- blocking-put! [queue timeout card-or-id]
+  (let [id (u/the-id card-or-id)]
+    (log/debugf &quot;Synchronously analyzing Card %s&quot; id)
+    (queue/blocking-put! queue timeout card-or-id)))</pre></td></tr><tr><td class="docs"><p>Asynchronously hand-off the given card for analysis, at a high priority. This is typically the method you want.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn analyze-async!
   ([card-or-id]
    (analyze-async! worker-queue card-or-id))
   ([queue card-or-id]
-   (queue-or-analyze! (partial queue/maybe-put! queue) card-or-id)))</pre></td></tr><tr><td class="docs"><p>Synchronously hand-off the given card for analysis, at a low priority. May block indefinitely, relies on consumer.</p>
+   (queue-or-analyze! (partial maybe-enqueue! queue) card-or-id)))</pre></td></tr><tr><td class="docs"><p>Synchronously hand-off the given card for analysis, at a low priority. May block indefinitely, relies on consumer.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn analyze-sync!
   ([card-or-id]
    (analyze-sync! card-or-id worker-queue))
