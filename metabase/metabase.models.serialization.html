@@ -2942,7 +2942,7 @@ pulse/dashboard subscription are reduced to a list of email addresses.</li>
 hashing).</li></ul></li>
 </ol>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Instance/map being exported/imported currently</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^:dynamic *current*  nil)</pre></td></tr><tr><td class="docs"><p>Given the model name and an entity, returns its entity ID (which might be nil).</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *current*  nil)</pre></td></tr><tr><td class="docs"><p>Given the model name and an entity, returns its entity ID (which might be nil).</p>
 
 <p>This abstracts over the exact definition of the "entity ID" for a given entity.
 By default this is a column, <code>:entity_id</code>.</p>
@@ -3536,13 +3536,14 @@ exists, or [[load-insert!]] if it's <code>nil</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- xform-by-spec [model-name ingested]
   (let [spec (make-spec model-name nil)]
     (when spec
-      (-&gt; (select-keys ingested (:copy spec))
-          (into (for [[k transform] (:transform spec)
-                      :when         (not (::nested transform))
-                      :let          [res ((:import transform) (get ingested k))]
-                      ;; do not try to insert nil values if transformer returns nothing
-                      :when         res]
-                  [k res]))))))</pre></td></tr><tr><td class="docs">
+      (binding [*current* ingested]
+        (-&gt; (select-keys ingested (:copy spec))
+            (into (for [[k transform] (:transform spec)
+                        :when         (not (::nested transform))
+                        :let          [res ((:import transform) (get ingested k))]
+                        ;; do not try to insert nil values if transformer returns nothing
+                        :when         res]
+                    [k res])))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- spec-nested! [model-name ingested instance]
   (binding [*current* instance]
     (let [spec (make-spec model-name nil)]
@@ -4222,8 +4223,9 @@ descendant. Always returns an empty set even if the input is nil.</p>
                     ;; `nil? data` check is for `extract-one` case in tests; make sure to add empty vectors in
                     ;; `extract-query` implementations for nested collections
                     (try
-                      (-&gt;&gt; (sort-by sorter data)
-                           (mapv #(extract-one model-name opts %)))
+                      (when (seq data)
+                        (-&gt;&gt; (sort-by sorter data)
+                             (mapv #(extract-one model-name opts %))))
                       (catch Exception e
                         (throw (ex-info (format &quot;Error exporting nested %s&quot; model)
                                         {:model     model
@@ -4258,11 +4260,18 @@ descendant. Always returns an empty set even if the input is nil.</p>
                                               local)]
                           (t2/delete! model :id [:in (map :id to-delete)])
                           (doseq [ingested lst]
-                            (load-one! (enrich ingested) (get local (entity-id model-name ingested))))))))}))</pre></td></tr><tr><td class="docs"><p>Transformer for parent id for nested entities</p>
-</td><td class="codes"><pre class="brush: clojure">(defn parent-ref  []
-  {::fk true :export (constantly nil) :import identity})</pre></td></tr><tr><td class="docs"><p>Transformer to parse the dates</p>
-</td><td class="codes"><pre class="brush: clojure">(defn date  []
-  {:export identity :import #(if (string? %) (u.date/parse %) %)})</pre></td></tr><tr><td class="docs"><h2>Memoizing appdb lookups</h2>
+                            (load-one! (enrich ingested) (get local (entity-id model-name ingested))))))))}))</pre></td></tr><tr><td class="docs"><p>Transformer for parent id for nested entities.</p>
+</td><td class="codes"><pre class="brush: clojure">(def parent-ref 
+  (constantly
+   {::fk true :export (constantly nil) :import identity}))</pre></td></tr><tr><td class="docs"><p>Transformer to parse the dates.</p>
+</td><td class="codes"><pre class="brush: clojure">(def date 
+  (constantly
+   {:export u.date/format :import #(if (string? %) (u.date/parse %) %)}))</pre></td></tr><tr><td class="docs"><p>Transformer for keywordized values.</p>
+
+<p>Used so various comparisons in hooks work, like <code>t2/changes</code> will not indicate a changed property.</p>
+</td><td class="codes"><pre class="brush: clojure">(def kw 
+  (constantly
+   {:export name :import keyword}))</pre></td></tr><tr><td class="docs"><h2>Memoizing appdb lookups</h2>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Runs body with all functions marked with ::cache re-bound to memoized versions for performance.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmacro with-cache
   [&amp; body]

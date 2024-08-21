@@ -3340,23 +3340,27 @@ Database that is set to do 'On-Demand' syncing.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/dependencies &quot;FieldValues&quot; [fv]
   ;; Take the path, but drop the FieldValues section at the end, to get the parent Field's path instead.
   [(pop (serdes/path fv))])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/extract-one &quot;FieldValues&quot; [_model-name _opts fv]
-  (-&gt; (serdes/extract-one-basics &quot;FieldValues&quot; fv)
-      (dissoc :field_id)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/load-xform &quot;FieldValues&quot; [fv]
-  (let [[db schema table field :as field-ref] (map :id (pop (serdes/path fv)))
-        field-ref (if field
-                    field-ref
-                    ;; It's too short, so no schema. Shift them over and add a nil schema.
-                    [db nil schema table])]
-    (-&gt; (serdes/load-xform-basics fv)
-        (assoc :field_id (serdes/*import-field-fk* field-ref))
-        (update :type keyword))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/load-find-local &quot;FieldValues&quot; [path]
   ;; Delegate to finding the parent Field, then look up its corresponding FieldValues.
   (let [field (serdes/load-find-local (pop path))]
     ;; We only serialize the full values, see [[metabase.models.field/with-values]]
     (get-latest-full-field-values (:id field))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- field-path-&gt;field-ref [field-values-path]
+  (let [[db schema table field :as field-ref] (map :id (pop field-values-path))]
+    (if field
+      field-ref
+      ;; It's too short, so no schema. Shift them over and add a nil schema.
+      [db nil schema table])))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/make-spec &quot;FieldValues&quot; [_model-name _opts]
+  {:copy      [:values :human_readable_values :has_more_values :hash_key]
+   :transform {:created_at   (serdes/date)
+               :last_used_at (serdes/date)
+               :type         (serdes/kw)
+               :field_id     {::serdes/fk true
+                              :export     (constantly nil)
+                              :import     (fn [_]
+                                            (let [field-ref (field-path-&gt;field-ref (serdes/path serdes/*current*))]
+                                              (serdes/*import-field-fk* field-ref)))}}})</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/load-update! &quot;FieldValues&quot; [_ ingested local]
   ;; It's illegal to change the :type and :hash_key fields, and there's a pre-update check for this.
   ;; This drops those keys from the incoming FieldValues iff they match the local one. If they are actually different,
