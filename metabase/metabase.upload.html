@@ -3045,7 +3045,7 @@ Empty strings are parsed as nil.</p>
       (map (partial remove-indices auto-pk-indices)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- file-size-mb [csv-file]
   (/ (.length ^File csv-file) 1048576.0))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private separators &quot;,;\t&quot;)</pre></td></tr><tr><td class="docs"><p>This number was chosen arbitrarily. There is robustness / performance trade-off.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private separators &quot;,;\t|&quot;)</pre></td></tr><tr><td class="docs"><p>This number was chosen arbitrarily. There is robustness / performance trade-off.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private max-inferred-lines 10)</pre></td></tr><tr><td class="docs"><p>Prefer separators according to the follow criteria, in order:</p>
 
 <ul>
@@ -3073,7 +3073,9 @@ Empty strings are parsed as nil.</p>
   (when filename
     (-&gt; filename (str/split #&quot;\.&quot;) rest last)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- file-mime-type [^File file]
-  (.detect tika file))</pre></td></tr><tr><td class="docs"><p>Guess at what symbol is being used as a separator in the given CSV-like file.
+  (.detect tika file))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- assert-separator-chosen [s]
+  (or s (throw (IllegalArgumentException. &quot;Unable to determine separator&quot;))))</pre></td></tr><tr><td class="docs"><p>Guess at what symbol is being used as a separator in the given CSV-like file.
 Our heuristic is to use the separator that gives us the most number of columns.
 Exclude separators which give incompatible column counts between the header and the first row.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- infer-separator
@@ -3085,10 +3087,12 @@ Exclude separators which give incompatible column counts between the header and 
                                      (comp (take max-inferred-lines)
                                            (map count))
                                      (csv/read-csv reader :separator s))
-                               (catch Exception _e nil))))]
+                               (catch Exception _e :invalid))))]
     (-&gt;&gt; (map (juxt identity count-columns) separators)
+         (remove (comp #{:invalid} second))
          (sort-by (comp separator-priority second) u/reverse-compare)
-         ffirst)))</pre></td></tr><tr><td class="docs"><p>Currently this only infers the separator, but in future it may also handle different quoting options.</p>
+         ffirst
+         assert-separator-chosen)))</pre></td></tr><tr><td class="docs"><p>Currently this only infers the separator, but in future it may also handle different quoting options.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- infer-parser
   [filename ^File file]
   (let [s (if (= &quot;tsv&quot; (file-extension filename))

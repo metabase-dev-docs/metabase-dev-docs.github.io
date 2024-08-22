@@ -2886,10 +2886,7 @@ net.brehaut.ClojureTools = (function (SH) {
   ([key-name xf]
    (fn item-conjer [results component context]
      (update results key-name conj {:component (xf component)
-                                    :context   (mapv
-                                                 (fn [^AstWalker$Scope x]
-                                                   [(keyword (.getType x)) (.getLabel x) (.getId x)])
-                                                 context)}))))</pre></td></tr><tr><td class="docs">
+                                    :context   context}))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- query-&gt;raw-components
   [^Statement parsed-ast]
   (mw/fold-query parsed-ast
@@ -2936,7 +2933,7 @@ net.brehaut.ClojureTools = (function (SH) {
             relax-case (when-not (and quotes-preserve-case? quoted)
                          (setting-&gt;relax-case opts))]
         (cond-&gt; s
-          quoted     strip-quotes
+          quoted strip-quotes
           relax-case relax-case)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- find-table [{:keys [alias-&gt;table name-&gt;table keep-internal-tables?] :as opts} ^Table t]
   (let [n      (normalize-reference (.getName t) opts)
@@ -2973,20 +2970,20 @@ referenced in a table-wildcard (as far as can be determined from the query).</p>
     ;; if we see only a single table, we can safely say it's the table of that column
     (when (and (= (count name-&gt;table) 1) (not (alias? (.getColumnName c))))
       (:component (val (first name-&gt;table))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- scope-type [^AstWalker$Scope s] (keyword (.getType s)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- make-column [aliases opts ^Column c ctx]
   (let [{:keys [schema table]} (maybe-column-table aliases opts c)]
     (u/strip-nils
      {:schema    schema
       :table     table
       :column    (normalize-reference (.getColumnName c) opts)
-      :alias     (let [[k y] (first ctx)]
-                   (when (= k :alias) y))
+      :alias     (when-let [s (first ctx)]
+                   (when (= :alias (scope-type s))
+                     (.getLabel ^AstWalker$Scope s)))
       :instances (when (:with-instance opts) [c])})))</pre></td></tr><tr><td class="docs"><p>get them together</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- only-query-context [ctx]
-  (into [] (comp (filter #(= (first %) :query))
-                 (map (comp vec rest)))
-    ctx))</pre></td></tr><tr><td class="docs">
+  (filter #(= (scope-type %) :query) ctx))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private strip-non-query-contexts
   (map #(update % :context only-query-context)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- update-components
@@ -3087,6 +3084,7 @@ referenced in a table-wildcard (as far as can be determined from the query).</p>
    [macaw.collect :as collect]
    [macaw.rewrite :as rewrite])
   (:import
+   (com.metabase.macaw AstWalker$Scope)
    (java.util.function Consumer)
    (net.sf.jsqlparser.parser CCJSqlParser CCJSqlParserUtil)
    (net.sf.jsqlparser.parser.feature Feature)))</pre></td></tr><tr><td class="docs">
@@ -3125,7 +3123,13 @@ referenced in a table-wildcard (as far as can be determined from the query).</p>
   (-&gt; query
       (str/replace #&quot;\n{2,}&quot; &quot;\n&quot;)
       (escape-keywords (:non-reserved-words opts))
-      (CCJSqlParserUtil/parse (-&gt;parser-fn opts))))</pre></td></tr><tr><td class="docs"><p>Given a parsed query (i.e., a [subclass of] <code>Statement</code>) return a map with the elements found within it.</p>
+      (CCJSqlParserUtil/parse (-&gt;parser-fn opts))))</pre></td></tr><tr><td class="docs"><p>A unique identifier for the given scope.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn scope-id
+  [^AstWalker$Scope s]
+  (.getId s))</pre></td></tr><tr><td class="docs"><p>The type of scope we're talking about e.g., a top-level SELECT.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn scope-label
+  [^AstWalker$Scope s]
+  (.getLabel s))</pre></td></tr><tr><td class="docs"><p>Given a parsed query (i.e., a [subclass of] <code>Statement</code>) return a map with the elements found within it.</p>
 
 <p>(Specifically, it returns their fully-qualified names as strings, where 'fully-qualified' means 'as referred to in
 the query'; this function doesn't do additional inference work to find out a table's schema.)</p>
@@ -3502,15 +3506,17 @@ This map gives a pattern in the exception message we expect to receive when tryi
   (walk/prewalk
    (fn [x]
      (if (:context x)
-       (update x :context (partial mapv first))
+       (update x :context (partial mapv m/scope-label))
        x))
-   m))</pre></td></tr><tr><td class="docs"><p>Replace full context stack with a reference to the local scope, only.</p>
+   m))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn scope-&gt;vec [s]
+  [(m/scope-label s) (m/scope-id s)])</pre></td></tr><tr><td class="docs"><p>Replace full context stack with a reference to the local scope, only.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn contexts-&gt;scopes
   [m]
   (walk/prewalk
    (fn [x]
      (if-let [context (:context x)]
-       (-&gt; x (dissoc :context) (assoc :scope (first context)))
+       (-&gt; x (dissoc :context) (assoc :scope (scope-&gt;vec (first context))))
        x))
    m))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn column-qualifiers
