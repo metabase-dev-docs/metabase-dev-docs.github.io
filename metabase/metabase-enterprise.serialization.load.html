@@ -3049,11 +3049,12 @@ vectors).</p>
     (terminal-dir path)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- load-dimensions!
   [path context]
-  (maybe-upsert-many! context Dimension
-    (for [dimension (yaml/from-file (str path &quot;/dimensions.yaml&quot;))]
-      (-&gt; dimension
-          (update :human_readable_field_id (comp :field fully-qualified-name-&gt;context))
-          (update :field_id (comp :field fully-qualified-name-&gt;context))))))</pre></td></tr><tr><td class="docs">
+  (maybe-upsert-many!
+   context Dimension
+   (for [dimension (yaml/from-file (str path &quot;/dimensions.yaml&quot;))]
+     (-&gt; dimension
+         (update :human_readable_field_id (comp :field fully-qualified-name-&gt;context))
+         (update :field_id (comp :field fully-qualified-name-&gt;context))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod load! &quot;databases&quot;
   [path context]
   (doseq [path (list-dirs path)]
@@ -3068,9 +3069,10 @@ vectors).</p>
 </td><td class="codes"><pre class="brush: clojure">(defmethod load! &quot;tables&quot;
   [path context]
   (let [paths     (list-dirs path)
-        table-ids (maybe-upsert-many! context Table
-                    (for [table (slurp-many paths)]
-                      (assoc table :db_id (:database context))))]
+        table-ids (maybe-upsert-many!
+                   context Table
+                   (for [table (slurp-many paths)]
+                     (assoc table :db_id (:database context))))]
     ;; First load fields ...
     (doseq [[path table-id] (map vector paths table-ids)
             :when table-id]
@@ -3088,18 +3090,20 @@ vectors).</p>
   [path context]
   (let [fields       (slurp-dir path)
         field-values (map :values fields)
-        field-ids    (maybe-upsert-many! context Field
-                       (for [field fields]
-                         (-&gt; field
-                             (update :parent_id (comp :field fully-qualified-name-&gt;context))
-                             (update :last_analyzed u.date/parse)
-                             (update :fk_target_field_id (comp :field fully-qualified-name-&gt;context))
-                             (dissoc :values)
-                             (assoc :table_id (:table context)))))]
-    (maybe-upsert-many! context FieldValues
-      (for [[field-value field-id] (map vector field-values field-ids)
-            :when field-id]
-        (assoc field-value :field_id field-id)))))</pre></td></tr><tr><td class="docs">
+        field-ids    (maybe-upsert-many!
+                      context Field
+                      (for [field fields]
+                        (-&gt; field
+                            (update :parent_id (comp :field fully-qualified-name-&gt;context))
+                            (update :last_analyzed u.date/parse)
+                            (update :fk_target_field_id (comp :field fully-qualified-name-&gt;context))
+                            (dissoc :values)
+                            (assoc :table_id (:table context)))))]
+    (maybe-upsert-many!
+     context FieldValues
+     (for [[field-value field-id] (map vector field-values field-ids)
+           :when field-id]
+       (assoc field-value :field_id field-id)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod load! &quot;fields&quot;
   [path context]
   (load-fields! path context))</pre></td></tr><tr><td class="docs">
@@ -3108,13 +3112,14 @@ vectors).</p>
   (load-fields! path context))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod load! &quot;segments&quot;
   [path context]
-  (maybe-upsert-many! context Segment
-    (for [metric (slurp-dir path)]
-      (-&gt; metric
-          (assoc :table_id   (:table context)
-                 :creator_id (default-user-id))
-          (assoc-in [:definition :source-table] (:table context))
-          (update :definition mbql-fully-qualified-names-&gt;ids)))))</pre></td></tr><tr><td class="docs">
+  (maybe-upsert-many!
+   context Segment
+   (for [metric (slurp-dir path)]
+     (-&gt; metric
+         (assoc :table_id   (:table context)
+                :creator_id (default-user-id))
+         (assoc-in [:definition :source-table] (:table context))
+         (update :definition mbql-fully-qualified-names-&gt;ids)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- update-card-parameter-mappings
   [parameter-mappings]
   (for [parameter-mapping parameter-mappings]
@@ -3136,8 +3141,8 @@ vectors).</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- resolve-param-ref [param-ref]
   (cond-&gt; param-ref
     (= &quot;dimension&quot; (::mb.viz/param-ref-type param-ref))
-    (-&gt; ; from outer cond-&gt;
-        (m/update-existing ::mb.viz/param-ref-id mbql-fully-qualified-names-&gt;ids)
+    ;; from outer cond-&gt;
+    (-&gt; (m/update-existing ::mb.viz/param-ref-id mbql-fully-qualified-names-&gt;ids)
         (m/update-existing ::mb.viz/param-dimension resolve-dimension))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- resolve-param-mapping-val [v]
   (-&gt; v
@@ -3149,7 +3154,7 @@ vectors).</p>
        mb.viz/db-&gt;norm-param-mapping
        (reduce-kv (fn [acc k v]
                     (assoc acc (resolve-param-mapping-key k)
-                               (resolve-param-mapping-val v))) {})
+                           (resolve-param-mapping-val v))) {})
        mb.viz/norm-&gt;db-param-mapping))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- resolve-click-behavior
   [click-behavior]
@@ -3253,14 +3258,15 @@ dashboard card holding these visualization settings can be revisited in a future
 </td><td class="codes"><pre class="brush: clojure">(defn load-dashboards!
   {:added &quot;0.40.0&quot;}
   [context dashboards]
-  (let [dashboard-ids   (maybe-upsert-many! context Dashboard
-                                            (for [dashboard dashboards]
-                                              (-&gt; dashboard
-                                                  (update :parameters resolve-dashboard-parameters)
-                                                  (update :last_viewed_at parse-timestamp)
-                                                  (dissoc :dashboard_cards)
-                                                  (assoc :collection_id (:collection context)
-                                                         :creator_id    (default-user-id)))))
+  (let [dashboard-ids   (maybe-upsert-many!
+                         context Dashboard
+                         (for [dashboard dashboards]
+                           (-&gt; dashboard
+                               (update :parameters resolve-dashboard-parameters)
+                               (update :last_viewed_at parse-timestamp)
+                               (dissoc :dashboard_cards)
+                               (assoc :collection_id (:collection context)
+                                      :creator_id    (default-user-id)))))
         ;; MEGA HACK -- if `load` is ran with `--mode update` we should delete any Cards that were removed from a
         ;; Dashboard (according to #20786). However there are literally zero facilities for doing this sort of thing in
         ;; the current dump/load codebase. So for now we'll just delete ALL DashboardCards for the dumped Dashboard when
@@ -3306,13 +3312,14 @@ dashboard card holding these visualization settings can be revisited in a future
         proceed-cards   (vec (::process filtered-cards))
         dashcard-ids    (maybe-upsert-many! context DashboardCard (map #(dissoc % :series) proceed-cards))
         series-pairs    (map vector (map :series proceed-cards) dashcard-ids)]
-    (maybe-upsert-many! context DashboardCardSeries
-                        (for [[series dashboard-card-id] series-pairs
-                              dashboard-card-series      series
-                              :when (and dashboard-card-series dashboard-card-id)]
-                          (-&gt; dashboard-card-series
-                              (assoc :dashboardcard_id dashboard-card-id)
-                              (update :card_id fully-qualified-name-&gt;card-id))))
+    (maybe-upsert-many!
+     context DashboardCardSeries
+     (for [[series dashboard-card-id] series-pairs
+           dashboard-card-series      series
+           :when (and dashboard-card-series dashboard-card-id)]
+       (-&gt; dashboard-card-series
+           (assoc :dashboardcard_id dashboard-card-id)
+           (update :card_id fully-qualified-name-&gt;card-id))))
     (let [revisit-dashboards (map (partial nth dashboards) revisit-indexes)]
       (when (seq revisit-dashboards)
         (let [revisit-map    (::revisit filtered-cards)
@@ -3338,12 +3345,13 @@ dashboard card holding these visualization settings can be revisited in a future
 </td><td class="codes"><pre class="brush: clojure">(defn- load-pulses! [pulses context]
   (let [cards       (map :cards pulses)
         channels    (map :channels pulses)
-        pulse-ids   (maybe-upsert-many! context Pulse
-                      (for [pulse pulses]
-                        (-&gt; pulse
-                            (assoc :collection_id (:collection context)
-                                   :creator_id    (default-user-id))
-                            (dissoc :channels :cards))))
+        pulse-ids   (maybe-upsert-many!
+                     context Pulse
+                     (for [pulse pulses]
+                       (-&gt; pulse
+                           (assoc :collection_id (:collection context)
+                                  :creator_id    (default-user-id))
+                           (dissoc :channels :cards))))
         pulse-cards (for [[cards pulse-id pulse-idx] (map vector cards pulse-ids (range 0 (count pulse-ids)))
                           card             cards
                           :when pulse-id]
@@ -3357,11 +3365,12 @@ dashboard card holding these visualization settings can be revisited in a future
         process     (get grouped true)
         revisit     (get grouped false)]
     (maybe-upsert-many! context PulseCard (map #(dissoc % ::pulse-index ::pulse-name) process))
-    (maybe-upsert-many! context PulseChannel
-      (for [[channels pulse-id] (map vector channels pulse-ids)
-            channel             channels
-            :when pulse-id]
-        (assoc channel :pulse_id pulse-id)))
+    (maybe-upsert-many!
+     context PulseChannel
+     (for [[channels pulse-id] (map vector channels pulse-ids)
+           channel             channels
+           :when pulse-id]
+       (assoc channel :pulse_id pulse-id)))
     (when (seq revisit)
       (let [revisit-info-map (group-by ::pulse-name revisit)]
         (log/infof &quot;Unresolved references for pulses in collection %s; will reload after first pass complete:%n%s%n&quot;
@@ -3369,8 +3378,8 @@ dashboard card holding these visualization settings can be revisited in a future
                    (str/join &quot;\n&quot; (map
                                    (fn [[pulse-name revisit-cards]]
                                      (format &quot; for %s:%n%s&quot;
-                                           pulse-name
-                                           (str/join &quot;\n&quot; (map (comp unresolved-names-&gt;string #(into {} %)) revisit-cards))))
+                                             pulse-name
+                                             (str/join &quot;\n&quot; (map (comp unresolved-names-&gt;string #(into {} %)) revisit-cards))))
                                    revisit-info-map)))
         (fn []
           (log/infof &quot;Reloading pulses from collection %d&quot; (:collection context))
@@ -3423,16 +3432,16 @@ dashboard card holding these visualization settings can be revisited in a future
       (update-in [:dataset_query :database] (comp :database fully-qualified-name-&gt;context))
       resolve-visualization-settings
       (cond-&gt;
-          (-&gt; card
-              :dataset_query
-              :type
-              mbql.u/normalize-token
-              (= :query)) resolve-card-dataset-query
-          (-&gt; card
-              :dataset_query
-              :native
-              :template-tags
-              not-empty) (resolve-native))))</pre></td></tr><tr><td class="docs"><p>Make a dummy card for first pass insertion</p>
+       (-&gt; card
+           :dataset_query
+           :type
+           mbql.u/normalize-token
+           (= :query)) resolve-card-dataset-query
+       (-&gt; card
+           :dataset_query
+           :native
+           :template-tags
+           not-empty) (resolve-native))))</pre></td></tr><tr><td class="docs"><p>Make a dummy card for first pass insertion</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- make-dummy-card
   [card]
   (-&gt; card
@@ -3509,9 +3518,10 @@ when enabled in a future release; see <code>defmethod load "users"</code> below<
   [path context]
   ;; Currently we only serialize the new owner user, so it's fine to ignore mode setting
   ;; add :post-insert-fn post-insert-user back to start sending password reset emails
-  (maybe-upsert-many! (assoc context :pre-insert-fn pre-insert-user) User
-    (for [user (slurp-dir path)]
-      (dissoc user :password))))</pre></td></tr><tr><td class="docs">
+  (maybe-upsert-many!
+   (assoc context :pre-insert-fn pre-insert-user) User
+   (for [user (slurp-dir path)]
+     (dissoc user :password))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- derive-location
   [context]
   (if-let [parent-id (:collection context)]
@@ -3537,12 +3547,12 @@ when enabled in a future release; see <code>defmethod load "users"</code> below<
                           first)
         results      (for [path entity-paths]
                        (let [context (assoc context
-                                       :collection (-&gt;&gt; (slurp-dir path)
-                                                        (map #(assoc % :location  (derive-location context)
-                                                                       :namespace (-&gt; context
-                                                                                      :collection-namespace)))
-                                                        (maybe-upsert-many! context Collection)
-                                                        first))]
+                                            :collection (-&gt;&gt; (slurp-dir path)
+                                                             (map #(assoc % :location  (derive-location context)
+                                                                          :namespace (-&gt; context
+                                                                                         :collection-namespace)))
+                                                             (maybe-upsert-many! context Collection)
+                                                             first))]
                          (log/infof &quot;Processing collection at path %s&quot; path)
                          [(load! (str path &quot;/collections&quot;) context)
                           (load! (str path &quot;/cards&quot;) context)
@@ -3559,7 +3569,7 @@ when enabled in a future release; see <code>defmethod load "users"</code> below<
   (load-collections! path context))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- prepare-snippet [context snippet]
   (assoc snippet :creator_id    (default-user-id)
-                 :collection_id (:collection context)))</pre></td></tr><tr><td class="docs">
+         :collection_id (:collection context)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod load! &quot;snippets&quot;
   [path context]
   (let [paths       (list-dirs path)
