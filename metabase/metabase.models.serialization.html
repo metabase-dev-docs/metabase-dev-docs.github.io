@@ -3187,7 +3187,13 @@ serialize/deserialize data.</p>
             (into (for [[k transform] (:transform spec)
                         :let  [res ((:export transform) (get instance k))]
                         :when (not= res ::skip)]
-                    [k res])))))
+                    (do
+                      (when-not (contains? instance k)
+                        (throw (ex-info (format &quot;Key %s not found, make sure it was hydrated&quot; k)
+                                        {:model    model-name
+                                         :key      k
+                                         :instance instance})))
+                      [k res]))))))
     (catch Exception e
       (throw (ex-info (format &quot;Error extracting %s %s&quot; model-name (:id instance))
                       (assoc (ex-data e) :model model-name :id (:id instance))
@@ -3285,10 +3291,11 @@ collection.</p>
             (nil? (-&gt; spec :transform :collection_id)))
       ;; either no collections specified or our model has no collection
       (t2/reducible-select model {:where (or where true)})
-      (t2/reducible-select model {:where [:or
-                                          [:in :collection_id collection-set]
-                                          (when (contains? collection-set nil)
-                                            [:= :collection_id nil])
+      (t2/reducible-select model {:where [:and
+                                          [:or
+                                           [:in :collection_id collection-set]
+                                           (when (contains? collection-set nil)
+                                             [:= :collection_id nil])]
                                           (when where
                                             where)]}))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod extract-query :default [model-name opts]
