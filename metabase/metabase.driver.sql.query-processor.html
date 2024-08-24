@@ -3447,11 +3447,20 @@ appropriately.</p>
         id-or-name)
       (when (integer? id-or-name)
         (:name (lib.metadata/field (qp.store/metadata-provider) id-or-name)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- field-nfc-path
+  [[_field id-or-name {::add/keys [nfc-path]}]]
+  (or nfc-path
+      (when (integer? id-or-name)
+        (:nfc-path (lib.metadata/field (qp.store/metadata-provider) id-or-name)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;honeysql [:sql ::nfc-path]
+  [_driver [_ _nfc-path]]
+  nil)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;honeysql [:sql :field]
   [driver [_ id-or-name {:keys [database-type] :as options}
            :as field-clause]]
   (try
     (let [source-table-aliases (field-source-table-aliases field-clause)
+          source-nfc-path      (field-nfc-path field-clause)
           source-alias         (field-source-alias field-clause)
           field                (when (integer? id-or-name)
                                  (lib.metadata/field (qp.store/metadata-provider) id-or-name))
@@ -3461,7 +3470,7 @@ appropriately.</p>
                                    (:database-type field))
           ;; preserve metadata attached to the original field clause, for example BigQuery temporal type information.
           identifier           (-&gt; (apply h2x/identifier :field
-                                          (concat source-table-aliases [source-alias]))
+                                          (concat source-table-aliases (-&gt;honeysql driver [::nfc-path source-nfc-path]) [source-alias]))
                                    (with-meta (meta field-clause)))
           identifier           (-&gt;honeysql driver identifier)
           maybe-add-db-type    (fn [expr]

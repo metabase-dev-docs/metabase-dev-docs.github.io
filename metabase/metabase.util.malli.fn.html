@@ -2912,10 +2912,21 @@ correctly, so just add default schemas manually to circumvent Malli's weird beha
           acc)))))</pre></td></tr><tr><td class="docs"><p>Given a <code>fn</code> arity as parsed by [[SchematizedParams]] an <code>return-schema</code>, return an appropriate <code>:=&gt;</code> schema for
 the arity.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- arity-schema
-  [{:keys [args], :as _arity} return-schema]
-  [:=&gt;
-   (:schema (md/parse (add-default-schemas args)))
-   return-schema])</pre></td></tr><tr><td class="docs"><p>This is exactly the same as [[malli.experimental/SchematizedParams]], but it preserves metadata from the arglists.</p>
+  [{:keys [args], :as _arity} return-schema {:keys [target], :as _options}]
+  (let [parsed       (md/parse (add-default-schemas args))
+        varargs-info (get-in parsed [:parsed :rest :arg :arg])
+        varargs-type (cond
+                       (= (first varargs-info) :map) :varargs/map
+                       (seq varargs-info)            :varargs/sequential)
+        schema       (case target
+                       :target/metadata        (if (= varargs-type :varargs/map)
+                                                 (vec (concat (butlast (:schema parsed)) [[:* :any]]))
+                                                 (:schema parsed))
+                       :target/instrumentation (:schema parsed))]
+    [:=&gt;
+     (cond-&gt; schema
+       varargs-type (vary-meta assoc :varargs/type varargs-type))
+     return-schema]))</pre></td></tr><tr><td class="docs"><p>This is exactly the same as [[malli.experimental/SchematizedParams]], but it preserves metadata from the arglists.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private SchematizedParams
   (mc/schema
    [:schema
@@ -2958,16 +2969,28 @@ the arity.</p>
                          :humanized humanized}))))
     parsed))</pre></td></tr><tr><td class="docs"><p>Implementation for [[fn]] and [[metabase.util.malli.defn/defn]]. Given an unparsed parametered fn tail, extract the
 annotations and return a <code>:=&gt;</code> or <code>:function</code> schema.</p>
+
+<p><code>options</code> can contain <code>:target</code> which is either</p>
+
+<ul>
+<li><p><code>:target/metadata</code>: generate the schema to attach to the metadata for a [[metabase.util.malli.defn/defn]]. For
+key-value varargs like <code>&amp; {:as kvs}</code> get a schema like <code>[:* :any]</code> in this case since the args aren't parsed to a
+map yet</p></li>
+<li><p><code>:target/instrumentation</code>: generate a schema for use in generating the instrumented <code>fn</code> form. <code>&amp; {:as kvs}</code> can
+have a real map schema here.</p></li>
+</ul>
 </td><td class="codes"><pre class="brush: clojure">(defn fn-schema
-  [parsed]
-  (let [{:keys [return arities]}     parsed
-        return-schema                (:schema return :any)
-        [arities-type arities-value] arities]
-    (case arities-type
-      :single   (arity-schema arities-value return-schema)
-      :multiple (into [:function]
-                      (for [arity (:arities arities-value)]
-                        (arity-schema arity return-schema))))))</pre></td></tr><tr><td class="docs">
+  ([parsed]
+   (fn-schema parsed {:target :target/instrumentation}))
+  ([parsed options]
+   (let [{:keys [return arities]}     parsed
+         return-schema                (:schema return :any)
+         [arities-type arities-value] arities]
+     (case arities-type
+       :single   (arity-schema arities-value return-schema options)
+       :multiple (into [:function]
+                       (for [arity (:arities arities-value)]
+                         (arity-schema arity return-schema options)))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- deparameterized-arity [{:keys [body args prepost], :as _arity}]
   (concat
    [(:arglist (md/parse args))]
@@ -3029,38 +3052,40 @@ and throws an exception if the check fails. Returns validated value.</p>
   [error-context schema value]
   (validate error-context schema value ::invalid-output)
   value)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- varargs-schema? [[_cat &amp; args :as _input-schema]]
-  (letfn [(star-schema? [schema]
-            (and (sequential? schema)
-                 (= (first schema) :*)))]
-    (star-schema? (last args))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- varargs-type [input-schema]
+  (-&gt; input-schema meta :varargs/type))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- input-schema-arg-names [[_cat &amp; args :as input-schema]]
-  (let [varargs?    (varargs-schema? input-schema)
-        normal-args (if varargs?
-                      (butlast args)
-                      args)]
+  (let [varargs-type (varargs-type input-schema)
+        normal-args  (if varargs-type
+                       (butlast args)
+                       args)]
     (concat
      (for [n (range (count normal-args))]
        (symbol (str (char (+ (int \a) n)))))
-     (when varargs?
-       ['more]))))</pre></td></tr><tr><td class="docs">
+     (case varargs-type
+       :varargs/sequential ['more]
+       :varargs/map        ['kvs]
+       nil))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- input-schema-&gt;arglist [input-schema]
   (let [arg-names (input-schema-arg-names input-schema)]
-    (vec (if (varargs-schema? input-schema)
-           (concat (butlast arg-names) ['&amp; (last arg-names)])
+    (vec (if-let [varargs-type (varargs-type input-schema)]
+           (concat (butlast arg-names) ['&amp; (case varargs-type
+                                             :varargs/sequential (last arg-names)
+                                             :varargs/map        {:as (last arg-names)})])
            arg-names))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- input-schema-&gt;validation-forms [error-context [_cat &amp; schemas :as input-schema]]
   (let [arg-names (input-schema-arg-names input-schema)
-        schemas   (if (varargs-schema? input-schema)
+        schemas   (if (= (varargs-type input-schema) :varargs/sequential)
                     (concat (butlast schemas) [[:maybe (last schemas)]])
                     schemas)]
     (-&gt;&gt; (map (core/fn [arg-name schema]
                 ;; 1. Skip checks against `:any` schema, there is no situation where it would fail.
                 ;;
-                ;; 2. Skip checks against the default varargs schema, there is no situation where [:maybe [:* :any]] is
+                ;; 2. Skip checks against the default varargs schemas, there is no situation where [:maybe [:* :any]] is
                 ;; going to fail.
-                (when-not (= schema (if (= arg-name 'more)
-                                      [:maybe [:* :any]]
+                (when-not (= schema (condp = arg-name
+                                      'more [:maybe [:* :any]]
+                                      'kvs  [:* :any]
                                       :any))
                   `(validate-input ~error-context ~schema ~arg-name)))
               arg-names
@@ -3068,7 +3093,7 @@ and throws an exception if the check fails. Returns validated value.</p>
          (filter some?))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- input-schema-&gt;application-form [input-schema]
   (let [arg-names (input-schema-arg-names input-schema)]
-    (if (varargs-schema? input-schema)
+    (if (= (varargs-type input-schema) :varargs/sequential)
       (list* `apply '&amp;f arg-names)
       (list* '&amp;f arg-names))))</pre></td></tr><tr><td class="docs"><p>If exception is thrown from the [[validate]] machinery, remove those stack trace elements so the top of the stack is
 the calling function.</p>
@@ -3152,7 +3177,8 @@ like</p>
 
 <p>  {:fn-name 'whatever/my-multimethod, :dispatch-value :field}</p>
 
-<p>If compiled in a namespace in [[namespaces-toskip]], during <code>config/is-prod?</code>, it will be emitted as a vanilla clojure.core/fn form.</p>
+<p>If compiled in a namespace in [[namespaces-toskip]], during <code>config/is-prod?</code>, it will be emitted as a vanilla
+clojure.core/fn form.</p>
 
 <p>Known issue: this version of <code>fn</code> does not capture the optional function name and make it available, e.g. you can't
 do</p>

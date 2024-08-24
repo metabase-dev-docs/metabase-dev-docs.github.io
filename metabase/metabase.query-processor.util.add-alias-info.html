@@ -3156,10 +3156,13 @@ parent fields into account.</p>
       (field-reference driver
                        #_{:clj-kondo/ignore [:deprecated-var]}
                        (qp.store/-&gt;legacy-metadata field)))
-    (:name field)))</pre></td></tr><tr><td class="docs"><p>JSON extraction fields need to be named with their outer <code>field-name</code>, not use any existing <code>::desired-alias</code>.</p>
+    (:name field)))</pre></td></tr><tr><td class="docs"><p>Nested field components path for field, so drivers can use in identifiers.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- field-nfc-path
+  [field-clause]
+  (some-&gt; field-clause field-instance :nfc-path not-empty vec))</pre></td></tr><tr><td class="docs"><p>JSON extraction fields need to be named with their outer <code>field-name</code>, not use any existing <code>::desired-alias</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- field-requires-original-field-name
   [field-clause]
-  (boolean (some-&gt; field-clause field-instance :nfc-path)))</pre></td></tr><tr><td class="docs"><p><em>Actual</em> name of a <code>:field</code> from the database or source query (for Field literals).</p>
+  (boolean (field-nfc-path field-clause)))</pre></td></tr><tr><td class="docs"><p><em>Actual</em> name of a <code>:field</code> from the database or source query (for Field literals).</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- field-name
   [_inner-query [_ id-or-name :as field-clause]]
   (or (some-&gt;&gt; field-clause
@@ -3170,11 +3173,14 @@ parent fields into account.</p>
 it around instead of recalculating it a bunch of times.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- expensive-field-info
   [inner-query field-clause]
-  {:field-name              (field-name inner-query field-clause)
-   :override-alias?         (field-requires-original-field-name field-clause)
-   :join-is-this-level?     (field-is-from-join-in-this-level? inner-query field-clause)
-   :alias-from-join         (field-alias-in-join-at-this-level inner-query field-clause)
-   :alias-from-source-query (field-alias-in-source-query inner-query field-clause)})</pre></td></tr><tr><td class="docs"><p>Determine the appropriate <code>::source-alias</code> for a <code>field-clause</code>.</p>
+  (merge
+   {:field-name              (field-name inner-query field-clause)
+    :override-alias?         (field-requires-original-field-name field-clause)
+    :join-is-this-level?     (field-is-from-join-in-this-level? inner-query field-clause)
+    :alias-from-join         (field-alias-in-join-at-this-level inner-query field-clause)
+    :alias-from-source-query (field-alias-in-source-query inner-query field-clause)}
+   (when-let [nfc-path (field-nfc-path field-clause)]
+     {:nfc-path nfc-path})))</pre></td></tr><tr><td class="docs"><p>Determine the appropriate <code>::source-alias</code> for a <code>field-clause</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- field-source-alias
   {:arglists '([inner-query field-clause expensive-field-info])}
   [{:keys [_source-table], :as _inner-query}
@@ -3217,6 +3223,8 @@ it around instead of recalculating it a bunch of times.</p>
   (let [expensive-info (expensive-field-info inner-query field-clause)]
     (merge {::source-table (field-source-table-alias inner-query field-clause)
             ::source-alias (field-source-alias inner-query field-clause expensive-info)}
+           (when-let [nfc-path (:nfc-path expensive-info)]
+             {::nfc-path nfc-path})
            (when-let [position (clause-&gt;position inner-query field-clause)]
              {::desired-alias (unique-alias-fn position (field-desired-alias inner-query field-clause expensive-info))
               ::position      position}))))</pre></td></tr><tr><td class="docs">
