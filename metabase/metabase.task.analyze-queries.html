@@ -2896,29 +2896,32 @@ worker to sleep such that it is active at most [[max-cpu-usage-fraction]] of the
 </td><td class="codes"><pre class="brush: clojure">(defn- wait-fail ^long [time-taken-ms]
   (max fail-wait-ms (wait-proportional time-taken-ms)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- analyzer-loop* [stop-after next-card-id-fn]
-  (loop [remaining stop-after]
-    (when (public-settings/query-analysis-enabled)
+  (try
+    (loop [remaining stop-after]
       (let [card-or-id (next-card-id-fn)
             card-id    (u/the-id card-or-id)
             timer      (u/start-timer)
             card       (query-analysis/-&gt;analyzable card-or-id)]
-        (if (failure-map/non-retryable? card)
-          (log/warnf &quot;Skipping analysis of Card %s as its query has caused failures in the past.&quot; card-id)
-          (try
-            (query-analysis/analyze-card! card)
-            (failure-map/track-success! card)
-            (let [taken-ms (Math/ceil (u/since-ms timer))
-                  sleep-ms (wait-proportional taken-ms)]
-              (log/debugf &quot;Query analysis for Card %s took %sms (incl. persisting)&quot; card-id taken-ms)
-              (log/debugf &quot;Waiting %sms before analysing further cards&quot; sleep-ms)
-              (Thread/sleep sleep-ms))
-            (catch Exception e
-              (log/errorf e &quot;Error analysing and updating query for Card %s&quot; card-id)
-              (failure-map/track-failure! card)
-              (Thread/sleep (wait-fail (u/since-ms timer))))))
-        (cond
-          (nil? remaining) (recur nil)
-          (&gt; remaining 1) (recur (dec remaining)))))))</pre></td></tr><tr><td class="docs">
+        (when (public-settings/query-analysis-enabled)
+          (if (failure-map/non-retryable? card)
+            (log/warnf &quot;Skipping analysis of Card %s as its query has caused failures in the past.&quot; card-id)
+            (try
+              (query-analysis/analyze-card! card)
+              (failure-map/track-success! card)
+              (let [taken-ms (Math/ceil (u/since-ms timer))
+                    sleep-ms (wait-proportional taken-ms)]
+                (log/debugf &quot;Query analysis for Card %s took %sms (incl. persisting)&quot; card-id taken-ms)
+                (log/debugf &quot;Waiting %sms before analysing further cards&quot; sleep-ms)
+                (Thread/sleep sleep-ms))
+              (catch Exception e
+                (log/errorf e &quot;Error analysing and updating query for Card %s&quot; card-id)
+                (failure-map/track-failure! card)
+                (Thread/sleep (wait-fail (u/since-ms timer))))))
+          (cond
+            (nil? remaining) (recur nil)
+            (&gt; remaining 1)  (recur (dec remaining))))))
+    (catch Exception e
+      (log/error e &quot;Unhandled error when attempting to analyse the next card in the queue&quot;))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- analyzer-loop!
   ([]
    (analyzer-loop! nil))

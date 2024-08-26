@@ -4014,25 +4014,41 @@ If matching case insensitively, <code>pattern</code> is lowercased earlier in [[
   [driver [_ field arg options]]
   (like-clause (-&gt;honeysql driver (maybe-cast-uuid-for-text-compare field))
                (generate-pattern driver &quot;%&quot; arg nil options) options))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- parent-honeysql-col-base-type-map
+  [field]
+  (when (and (vector? field)
+             (= 3 (count field))
+             (= :field (first field))
+             (map? (field 2)))
+    (select-keys (field 2) [:base-type])))</pre></td></tr><tr><td class="docs"><p>To be bound in <code>-&gt;honeysql &lt;driver&gt; &lt;op&gt;</code> where op is on of {:>, :>=, :&lt;, :&lt;=, :=, :between}`. Its value should be
+<code>{:base-type keyword? :database-type string?}</code>. The value is used in <code>-&gt;honeysql &lt;driver&gt; :relative-datetime</code>,
+the :snowflake implementation at the time of writing, and later in the [[metabase.query-processor.util.relative-datetime/maybe-cacheable-relative-datetime-honeysql]]
+to determine (1) format of server-side generated sql temporal string and (2) the database type it should be cast to.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *parent-honeysql-col-type-info*
+  nil)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;honeysql [:sql :between]
   [driver [_ field min-val max-val]]
-  [:between (-&gt;honeysql driver field) (-&gt;honeysql driver min-val) (-&gt;honeysql driver max-val)])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;honeysql [:sql :&gt;]
-  [driver [_ field value]]
-  [:&gt; (-&gt;honeysql driver field) (-&gt;honeysql driver value)])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;honeysql [:sql :&lt;]
-  [driver [_ field value]]
-  [:&lt; (-&gt;honeysql driver field) (-&gt;honeysql driver value)])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;honeysql [:sql :&gt;=]
-  [driver [_ field value]]
-  [:&gt;= (-&gt;honeysql driver field) (-&gt;honeysql driver value)])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;honeysql [:sql :&lt;=]
-  [driver [_ field value]]
-  [:&lt;= (-&gt;honeysql driver field) (-&gt;honeysql driver value)])</pre></td></tr><tr><td class="docs">
+  (let [field-honeysql (-&gt;honeysql driver field)]
+    (binding [*parent-honeysql-col-type-info* (merge (when-let [database-type (h2x/database-type field-honeysql)]
+                                                       {:database-type database-type})
+                                                     (parent-honeysql-col-base-type-map field))]
+      [:between field-honeysql (-&gt;honeysql driver min-val) (-&gt;honeysql driver max-val)])))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(doseq [operator [:&gt; :&gt;= :&lt; :&lt;=]]
+  (defmethod -&gt;honeysql [:sql operator] ; [:&gt; :&gt;= :&lt; :&lt;=] -- For grep.
+    [driver [_ field value]]
+    (let [field-honeysql (-&gt;honeysql driver field)]
+      (binding [*parent-honeysql-col-type-info* (merge (when-let [database-type (h2x/database-type field-honeysql)]
+                                                         {:database-type database-type})
+                                                       (parent-honeysql-col-base-type-map field))]
+        [operator field-honeysql (-&gt;honeysql driver value)]))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;honeysql [:sql :=]
   [driver [_ field value]]
   (assert field)
-  [:= (-&gt;honeysql driver (maybe-cast-uuid-for-equality driver field value)) (-&gt;honeysql driver value)])</pre></td></tr><tr><td class="docs">
+  (let [field-honeysql (-&gt;honeysql driver (maybe-cast-uuid-for-equality driver field value))]
+    (binding [*parent-honeysql-col-type-info* (merge (when-let [database-type (h2x/database-type field-honeysql)]
+                                                       {:database-type database-type})
+                                                     (parent-honeysql-col-base-type-map field))]
+      [:= field-honeysql (-&gt;honeysql driver value)])))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- correct-null-behaviour
   [driver [op &amp; args :as clause]]
   (if-let [field-arg (lib.util.match/match-one args

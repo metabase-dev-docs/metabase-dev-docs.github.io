@@ -3044,12 +3044,19 @@ Returns <code>nil</code> if the conversion is not necessary for this <code>field
        :prepared-statement-args (concat (:param-values start) (:param-values end))})))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;replacement-snippet-info [:sql DateTimeRange]
   [driver {:keys [start end]} &amp; [field-identifier]]
-  (let [[start end] (map (fn [s]
-                           (-&gt;prepared-substitution driver (maybe-parse-temporal-literal s)))
-                         [start end])]
-    {:replacement-snippet     (format &quot;%s &gt;= %s AND %s &lt; %s&quot;
-                                      field-identifier (:sql-string start) field-identifier (:sql-string end))
-     :prepared-statement-args (concat (:param-values start) (:param-values end))}))</pre></td></tr><tr><td class="docs"><p>------------------------------------- Field Filter replacement snippet info --------------------------------------</p>
+  (let [[start end]       (map (fn [s]
+                                 (when s
+                                   (-&gt;prepared-substitution driver (maybe-parse-temporal-literal s))))
+                               [start end])
+        start-expr-native (when start
+                            (format &quot;%s &gt;= %s&quot; field-identifier (:sql-string start)))
+        end-expr-native   (when end
+                            (format &quot;%s &lt; %s&quot; field-identifier (:sql-string end)))]
+    {:replacement-snippet     (str/join &quot; AND &quot; (remove nil? [start-expr-native end-expr-native]))
+     :prepared-statement-args (into []
+                                    (comp (keep :param-values)
+                                          cat)
+                                    [start end])}))</pre></td></tr><tr><td class="docs"><p>------------------------------------- Field Filter replacement snippet info --------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn- combine-replacement-snippet-maps :- ParamSnippetInfo
   &quot;Combine multiple `replacement-snippet-maps` into a single map using a SQL `AND` clause.&quot;

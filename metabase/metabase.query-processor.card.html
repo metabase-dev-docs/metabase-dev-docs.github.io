@@ -2873,6 +2873,8 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.api.common :as api]
    [metabase.legacy-mbql.normalize :as mbql.normalize]
    [metabase.legacy-mbql.schema :as mbql.s]
+   [metabase.legacy-mbql.util :as mbql.u]
+   [metabase.lib.core :as lib]
    [metabase.lib.schema.id :as lib.schema.id]
    [metabase.lib.schema.parameter :as lib.schema.parameter]
    [metabase.lib.schema.template-tag :as lib.schema.template-tag]
@@ -2905,18 +2907,31 @@ net.brehaut.ClojureTools = (function (SH) {
   (case (:type strategy)
     :ttl (let [et (query/average-execution-time-ms (qp.util/query-hash query))]
            (assoc strategy :avg-execution-ms (or et 0)))
-    strategy))</pre></td></tr><tr><td class="docs"><p>Generate a query for a saved Card</p>
+    strategy))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- filter-stage-used?
+  [parameters]
+  (boolean
+   (some (fn [{:keys [target]}]
+           (and (mbql.u/is-clause? :dimension target)
+                (contains? (get target 2) :stage-number)))
+         parameters)))</pre></td></tr><tr><td class="docs"><p>Generate a query for a saved Card</p>
 </td><td class="codes"><pre class="brush: clojure">(defn query-for-card
   [{query :dataset_query
     :as   card} parameters constraints middleware &amp; [ids]]
-  (let [query     (-&gt; query
-                      ;; don't want default constraints overridding anything that's already there
-                      (m/dissoc-in [:middleware :add-default-userland-constraints?])
-                      (assoc :constraints constraints
-                             :parameters  parameters
-                             :middleware  middleware))
-        cs        (-&gt; (cache-strategy card (:dashboard-id ids))
-                      (enrich-strategy query))]
+  (let [query (-&gt; query
+                  ;; don't want default constraints overridding anything that's already there
+                  (m/dissoc-in [:middleware :add-default-userland-constraints?])
+                  (assoc :constraints constraints
+                         :parameters  parameters
+                         :middleware  middleware))
+        query (cond-&gt; query
+                ;; If query has aggregation and breakout at the top level,
+                ;; parameters refer to stages as if a new stage was appended.
+                ;; This is so that we can distinguish if a filter should be applied
+                ;; before of after summarizing.
+                (filter-stage-used? parameters) lib/ensure-filter-stage)
+        cs    (-&gt; (cache-strategy card (:dashboard-id ids))
+                  (enrich-strategy query))]
     (assoc query :cache-strategy cs)))</pre></td></tr><tr><td class="docs"><p>In 0.41.0+ you can no longer add arbitrary <code>:parameters</code> to a query for a saved question -- only parameters for
 template tags that are part of a /native/ query may be supplied (only native queries can have template tags); the
 type of the parameter has to agree with the type of the template tag as well. This variable controls whether or not
