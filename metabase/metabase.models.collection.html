@@ -4045,35 +4045,6 @@ macros.)</p>
                              [:= :personal_owner_id nil]
                              not-trash-clause
                              (or where true)]}))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/extract-one &quot;Collection&quot;
-  ;; Transform :location (which uses database IDs) into a portable :parent_id with the parent's entity ID.
-  ;; Also transform :personal_owner_id from a database ID to the email string, if it's defined.
-  ;; Use the :slug as the human-readable label.
-  [_model-name _opts coll]
-  (let [fetch-collection    (fn [id]
-                              (t2/select-one Collection :id id))
-        {:keys [parent_id]} (some-&gt; coll :id fetch-collection (t2/hydrate :parent_id))
-        parent              (some-&gt; parent_id fetch-collection)
-        parent-id           (when parent
-                              (or (:entity_id parent) (serdes/identity-hash parent)))
-        owner-email         (when (:personal_owner_id coll)
-                              (t2/select-one-fn :email 'User :id (:personal_owner_id coll)))]
-    (-&gt; (serdes/extract-one-basics &quot;Collection&quot; coll)
-        (dissoc :location)
-        (assoc :parent_id parent-id
-               :personal_owner_id owner-email)
-        (assoc-in [:serdes/meta 0 :label] (:slug coll)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/load-xform &quot;Collection&quot; [{:keys [parent_id] :as contents}]
-  (let [loc (fn [col-id]
-              (if col-id
-                (let [{:keys [id location]} (serdes/lookup-by-id Collection col-id)]
-                  (str location id &quot;/&quot;))
-                &quot;/&quot;))]
-    (-&gt; contents
-        (dissoc :parent_id)
-        (assoc :location (loc parent_id))
-        (update :personal_owner_id serdes/*import-user*)
-        serdes/load-xform-basics)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/dependencies &quot;Collection&quot;
   [{:keys [parent_id]}]
   (when parent_id
@@ -4099,7 +4070,34 @@ macros.)</p>
     (set/union child-colls dashboards cards)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/storage-path &quot;Collection&quot; [coll {:keys [collections]}]
   (let [parental (get collections (:entity_id coll))]
-    (concat [&quot;collections&quot;] parental [(last parental)])))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
+    (concat [&quot;collections&quot;] parental [(last parental)])))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- parent-id-&gt;location-path [parent-id]
+  (if-not parent-id
+    &quot;/&quot;
+    ;; It would be great to use a cache rather than a database call to fetch the parent.
+    (let [{:keys [id location]} (t2/select-one Collection parent-id)]
+      (str location id &quot;/&quot;))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/make-spec &quot;Collection&quot; [_model-name _opts]
+  {:copy [:archive_operation_id
+          :archived
+          :archived_directly
+          :authority_level
+          :description
+          :entity_id
+          :is_sample
+          :name
+          :namespace
+          :slug
+          :type]
+   :skip []
+   :transform {:created_at        (serdes/date)
+               ;; We only dump the parent id, and recalculate the location from that on load.
+               :location          (serdes/as :parent_id
+                                             (serdes/compose
+                                              (serdes/fk :model/Collection)
+                                              {:export location-path-&gt;parent-id
+                                               :import parent-id-&gt;location-path}))
+               :personal_owner_id (serdes/fk :model/User)}})</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
 |                                           Perms Checking Helper Fns                                            |
 +----------------------------------------------------------------------------------------------------------------+</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Check that we have write permissions for Collection with <code>collection-id</code>, or throw a 403 Exception. If

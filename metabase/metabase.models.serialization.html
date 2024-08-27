@@ -3185,7 +3185,8 @@ serialize/deserialize data.</p>
             ;; won't assoc if `generate-path` returned `nil`
             (m/assoc-some :serdes/meta (generate-path model-name instance))
             (into (for [[k transform] (:transform spec)
-                        :let  [res ((:export transform) (get instance k))]
+                        :let  [export-k (:as transform k)
+                               res ((:export transform) (get instance k))]
                         :when (not= res ::skip)]
                     (do
                       (when-not (contains? instance k)
@@ -3193,7 +3194,7 @@ serialize/deserialize data.</p>
                                         {:model    model-name
                                          :key      k
                                          :instance instance})))
-                      [k res]))))))
+                      [export-k res]))))))
     (catch Exception e
       (throw (ex-info (format &quot;Error extracting %s %s&quot; model-name (:id instance))
                       (assoc (ex-data e) :model model-name :id (:id instance))
@@ -3546,10 +3547,11 @@ exists, or [[load-insert!]] if it's <code>nil</code>.</p>
         (-&gt; (select-keys ingested (:copy spec))
             (into (for [[k transform] (:transform spec)
                         :when         (not (::nested transform))
-                        :let          [res ((:import transform) (get ingested k))]
+                        :let          [import-k (:as transform k)
+                                       res ((:import transform) (get ingested import-k))]
                         :when         (and (not= res ::skip)
                                            (or (some? res)
-                                               (contains? ingested k)))]
+                                               (contains? ingested import-k)))]
                     [k res])))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- spec-nested! [model-name ingested instance]
   (binding [*current* instance]
@@ -3722,9 +3724,13 @@ The input might be nil, in which case so is the output. This is legal for a nati
 </td><td class="codes"><pre class="brush: clojure">(defn ^:dynamic ^::cache *import-table-fk*
   [[db-name schema table-name :as table-id]]
   (when table-id
-    (or (t2/select-one-fn :id 'Table :name table-name :schema schema :db_id (t2/select-one-fn :id 'Database :name db-name))
-        (throw (ex-info (format &quot;table id present, but no table found: %s&quot; table-id)
-                        {:table-id table-id})))))</pre></td></tr><tr><td class="docs"><p>Given a <code>table_id</code> as exported by [[export-table-fk]], turn it into a <code>[{:model ...}]</code> path for the Table.
+    (if-let [db-id (t2/select-one-fn :id 'Database :name db-name)]
+      (or (t2/select-one-fn :id 'Table :name table-name :schema schema :db_id db-id)
+          (throw (ex-info (format &quot;table id present, but no table found: %s&quot; table-id)
+                          {:table-id table-id})))
+      (throw (ex-info (format &quot;table id present, but database not found: %s&quot; table-id)
+                      {:table-id table-id
+                       :database-names (sort (t2/select-fn-vec :name 'Table))})))))</pre></td></tr><tr><td class="docs"><p>Given a <code>table_id</code> as exported by [[export-table-fk]], turn it into a <code>[{:model ...}]</code> path for the Table.
 This is useful for writing [[dependencies]] implementations.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn table-&gt;path
   [[db-name schema table-name]]
@@ -4279,7 +4285,14 @@ descendant. Always returns an empty set even if the input is nil.</p>
 <p>Used so various comparisons in hooks work, like <code>t2/changes</code> will not indicate a changed property.</p>
 </td><td class="codes"><pre class="brush: clojure">(def kw 
   (constantly
-   {:export name :import keyword}))</pre></td></tr><tr><td class="docs"><h2>Memoizing appdb lookups</h2>
+   {:export name :import keyword}))</pre></td></tr><tr><td class="docs"><p>Serialize this field under the given key instead, typically because it has been logically transformed.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn as
+  [k xform]
+  (assoc xform :as k))</pre></td></tr><tr><td class="docs"><p>Compose two transformations.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn compose
+  [inner-xform outer-xform]
+  {:export (comp (:export inner-xform) (:export outer-xform))
+   :import (comp (:import outer-xform) (:import inner-xform))})</pre></td></tr><tr><td class="docs"><h2>Memoizing appdb lookups</h2>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Runs body with all functions marked with ::cache re-bound to memoized versions for performance.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmacro with-cache
   [&amp; body]
