@@ -2909,7 +2909,9 @@ For most tests, this is an unnecessary expense; hence we disable analysis by def
   `(with-execution* ::immediate ~@body))</pre></td></tr><tr><td class="docs"><p>Override the default execution mode to always use the current thread. Does nothing in prod - only use this in tests.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmacro without-analysis
   [&amp; body]
-  `(with-execution* ::disabled ~@body))</pre></td></tr><tr><td class="docs"><p>The execution strategy for analysis, which can be overridden in dev and tests. In production, it is always async.</p>
+  `(with-execution* ::disabled ~@body))</pre></td></tr><tr><td class="docs"><p>The execution strategy for analysis. It can be overridden by a dynamic variable in dev and tests.</p>
+
+<p>By default, it is async in production for the backfill.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- execution
   []
   (case config/run-mode
@@ -2920,8 +2922,8 @@ For most tests, this is an unnecessary expense; hence we disable analysis by def
   [query-type]
   (and (public-settings/query-analysis-enabled)
        (case query-type
-         :native (public-settings/sql-parsing-enabled)
-         :query true
+         :native     (public-settings/sql-parsing-enabled)
+         :query      true
          :mbql/query true
          false)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- explicit-field-references [field-ids]
@@ -3045,17 +3047,18 @@ Returns <code>nil</code> and leaves the database records as-is if analysis is di
   (if (every? #(some? (% card-or-id)) [:id :dataset_query])
     card-or-id
     ;; If we need to query the database though, find out for sure.
-    (t2/select-one [:model/Card :id :archived :dataset_query] (u/the-id card-or-id))))</pre></td></tr><tr><td class="docs"><p>Update the analysis for a given card if it is active. Should only be called from [[metabase.task.analyze-queries]].</p>
-</td><td class="codes"><pre class="brush: clojure">(defn analyze-card!
+    (t2/select-one [:model/Card :id :archived :dataset_query] (u/the-id card-or-id))))</pre></td></tr><tr><td class="docs"><p>Update the analysis for a given card if it is active. Should only be called from [[metabase.task.analyze-queries]];
+otherwise favor [[analyze!]]</p>
+</td><td class="codes"><pre class="brush: clojure">(defn analyze!*
   [card-or-id]
   (let [card    (-&gt;analyzable card-or-id)
         card-id (:id card)]
     (cond
       (not card)       (log/warnf &quot;Card not found: %s&quot; card-id)
       (:archived card) (log/warnf &quot;Skipping archived card: %s&quot; card-id)
-      :else            (log/debugf &quot;Performing query analysis for card %s&quot; card-id))
-    (when (and card (not (:archived card)))
-      (update-query-analysis-for-card! card))))</pre></td></tr><tr><td class="docs"><p>Get the id of the next card id to be analyzed. May block indefinitely, relies on producer.
+      :else            (do
+                         (log/debugf &quot;Performing query analysis for card %s&quot; card-id)
+                         (update-query-analysis-for-card! card)))))</pre></td></tr><tr><td class="docs"><p>Get the id of the next card id to be analyzed. May block indefinitely, relies on producer.
 Should only be called from [[metabase.task.analyze-queries]].</p>
 </td><td class="codes"><pre class="brush: clojure">(defn next-card-or-id!
   ([]
@@ -3067,31 +3070,24 @@ Should only be called from [[metabase.task.analyze-queries]].</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- queue-or-analyze!
   [offer-fn! card-or-id]
   (case (execution)
-    ::immediate (analyze-card! card-or-id)
+    ::immediate (analyze!* card-or-id)
     ::queued    (offer-fn! card-or-id)
     ::disabled  nil))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- maybe-enqueue! [queue card-or-id]
-  (let [id        (u/the-id card-or-id)
-        enqueued? (queue/maybe-put! queue card-or-id)]
-    (if enqueued?
-      (log/debugf &quot;Queued Card %s for async analysis&quot; id)
-      (log/warnf &quot;Deferred analysis of Card %s, as the queue is full&quot; id))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- blocking-put! [queue timeout card-or-id]
   (let [id (u/the-id card-or-id)]
     (log/debugf &quot;Synchronously analyzing Card %s&quot; id)
-    (queue/blocking-put! queue timeout card-or-id)))</pre></td></tr><tr><td class="docs"><p>Asynchronously hand-off the given card for analysis, at a high priority. This is typically the method you want.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn analyze-async!
+    (queue/blocking-put! queue timeout card-or-id)))</pre></td></tr><tr><td class="docs"><p>Assuming analysis is enabled, analyze the card immediately (and in the current thread).</p>
+</td><td class="codes"><pre class="brush: clojure">(defn analyze!
+  [card-or-id]
+  (when-not (= ::disabled (execution))
+    (analyze!* card-or-id)))</pre></td></tr><tr><td class="docs"><p>Synchronously hand off the given card for analysis, at a low priority. May block indefinitely, relies on consumer.</p>
+
+<p>Note that only the <em>hand-off</em> is sync; if we're using the queue the processing could happen asynchronously.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn queue-analysis!
   ([card-or-id]
-   (analyze-async! worker-queue card-or-id))
-  ([queue card-or-id]
-   (queue-or-analyze! (partial maybe-enqueue! queue) card-or-id)))</pre></td></tr><tr><td class="docs"><p>Synchronously hand-off the given card for analysis, at a low priority. May block indefinitely, relies on consumer.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn analyze-sync!
-  ([card-or-id]
-   (analyze-sync! card-or-id worker-queue))
+   (queue-analysis! card-or-id worker-queue))
   ([card-or-id queue]
-   (analyze-sync! card-or-id queue Long/MAX_VALUE))
-  ([card-or-id queue timeout]
-   (queue-or-analyze! (partial queue/blocking-put! queue timeout) card-or-id)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+   (queue-or-analyze! (partial queue/blocking-put! queue Long/MAX_VALUE) card-or-id)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

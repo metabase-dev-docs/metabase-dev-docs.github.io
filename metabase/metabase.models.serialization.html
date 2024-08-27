@@ -2883,14 +2883,12 @@ exported or not, and a test enforces this so serialization isn't forgotten for n
    [clojure.set :as set]
    [clojure.string :as str]
    [medley.core :as m]
-   [metabase.db :as mdb]
    [metabase.legacy-mbql.normalize :as mbql.normalize]
    [metabase.lib.schema.id :as lib.schema.id]
    [metabase.lib.util.match :as lib.util.match]
    [metabase.models.interface :as mi]
    [metabase.shared.models.visualization-settings :as mb.viz]
    [metabase.util :as u]
-   [metabase.util.connection :as u.conn]
    [metabase.util.date-2 :as u.date]
    [metabase.util.log :as log]
    [toucan2.core :as t2]
@@ -3168,37 +3166,14 @@ NativeQuerySnippet.</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Return specification for serialization. This should be a map of three keys: <code>:copy</code>, <code>:skip</code>, <code>:transform</code>.</p>
 
 <p><code>:copy</code> and <code>:skip</code> are vectors of field names. <code>:skip</code> is only used in tests to check that all fields were
-mentioned.</p>
-
-<p><code>:transform</code> is a map from field name to a <code>{:ser (fn [v] ...) :des (fn [v] ...)}</code> map with functions to
+mentioned.
+j
 serialize/deserialize data.</p>
 
-<p>For behavior, see <code>extract-by-spec</code> and <code>xform-by-spec</code>.</p>
+<p>For behavior, see <code>extract-one</code> and <code>xform-one</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti make-spec
   (fn [model-name _opts] model-name))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod make-spec :default [_ _] nil)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- extract-by-spec [model-name opts instance]
-  (try
-    (binding [*current* instance]
-      (when-let [spec (make-spec model-name opts)]
-        (-&gt; (select-keys instance (:copy spec))
-            ;; won't assoc if `generate-path` returned `nil`
-            (m/assoc-some :serdes/meta (generate-path model-name instance))
-            (into (for [[k transform] (:transform spec)
-                        :let  [export-k (:as transform k)
-                               res ((:export transform) (get instance k))]
-                        :when (not= res ::skip)]
-                    (do
-                      (when-not (contains? instance k)
-                        (throw (ex-info (format &quot;Key %s not found, make sure it was hydrated&quot; k)
-                                        {:model    model-name
-                                         :key      k
-                                         :instance instance})))
-                      [export-k res]))))))
-    (catch Exception e
-      (throw (ex-info (format &quot;Error extracting %s %s&quot; model-name (:id instance))
-                      (assoc (ex-data e) :model model-name :id (:id instance))
-                      e)))))</pre></td></tr><tr><td class="docs"><p>Entry point for extracting all entities of a particular model:
+</td><td class="codes"><pre class="brush: clojure">(defmethod make-spec :default [_ _] nil)</pre></td></tr><tr><td class="docs"><p>Entry point for extracting all entities of a particular model:
 <code>(extract-all "ModelName" {opts...})</code>
 Keyed on the model name.</p>
 
@@ -3225,21 +3200,36 @@ from [[extract-all]]'s default implementation.</p>
   (fn [model-name _opts] model-name))</pre></td></tr><tr><td class="docs"><p>Extracts a single entity retrieved from the database into a portable map with <code>:serdes/meta</code> attached.
 <code>(extract-one "ModelName" opts entity)</code></p>
 
-<p>The default implementation uses [[generate-path]] to build the <code>:serdes/meta</code>. It also strips off the
-database's numeric primary key.</p>
-
-<p>That suffices for a few simple entities, but most entities will need to override this.
-They should follow the pattern of:
-- Convert to a vanilla Clojure map, not a modeled Toucan 2 entity.
-- Drop the numeric database primary key (usually <code>:id</code>)
-- Replace any foreign keys with portable values (eg. entity IDs, or a user ID with their email, etc.)</p>
-
-<p>When overriding this, [[extract-one-basics]] is probably a useful starting point.</p>
-
-<p>Keyed by the model name of the entity, the first argument.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti extract-one
-  {:arglists '([model-name opts instance])}
-  (fn [model-name _opts _instance] model-name))</pre></td></tr><tr><td class="docs"><p>Extracts a single entity; will replace <code>extract-one</code> as public interface once <code>extract-one</code> overrides are gone.</p>
+<ul>
+<li>Convert to a vanilla Clojure map, not a modeled Toucan 2 entity.</li>
+<li>Drop the numeric database primary key (usually <code>:id</code>)</li>
+<li>Drop the updated_at timestamp, if it exists.</li>
+<li>Replace any foreign keys with portable values (eg. entity IDs, or a user ID with their email, etc.)</li>
+</ul>
+</td><td class="codes"><pre class="brush: clojure">(defn extract-one
+  [model-name opts instance]
+  (try
+    (binding [*current* instance]
+      (let [spec (make-spec model-name opts)]
+        (assert spec (str &quot;No serialization spec defined for model &quot; model-name))
+        (-&gt; (select-keys instance (:copy spec))
+            ;; won't assoc if `generate-path` returned `nil`
+            (m/assoc-some :serdes/meta (generate-path model-name instance))
+            (into (for [[k transform] (:transform spec)
+                        :let  [export-k (:as transform k)
+                               res ((:export transform) (get instance k))]
+                        :when (not= res ::skip)]
+                    (do
+                      (when-not (contains? instance k)
+                        (throw (ex-info (format &quot;Key %s not found, make sure it was hydrated&quot; k)
+                                        {:model    model-name
+                                         :key      k
+                                         :instance instance})))
+                      [export-k res]))))))
+    (catch Exception e
+      (throw (ex-info (format &quot;Error extracting %s %s&quot; model-name (:id instance))
+                      (assoc (ex-data e) :model model-name :id (:id instance))
+                      e)))))</pre></td></tr><tr><td class="docs"><p>Extracts a single entity; will replace <code>extract-one</code> as public interface once <code>extract-one</code> overrides are gone.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn log-and-extract-one
   [model opts instance]
   (log/infof &quot;Extracting %s %s %s&quot; model (:id instance) (entity-id model instance))
@@ -3303,25 +3293,7 @@ collection.</p>
   (let [spec    (make-spec model-name opts)
         nested? (some ::nested (vals (:transform spec)))]
     (cond-&gt;&gt; (extract-query-collections (keyword &quot;model&quot; model-name) opts)
-      nested? (extract-reducible-nested model-name (dissoc opts :where)))))</pre></td></tr><tr><td class="docs"><p>A helper for writing [[extract-one]] implementations. It takes care of the basics:
-- Convert to a vanilla Clojure map.
-- Add <code>:serdes/meta</code> by calling [[generate-path]].
-- Drop the primary key.
-- Drop :updated_at; it's noisy in git and not really used anywhere.</p>
-
-<p>Returns the Clojure map.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn extract-one-basics
-  [model-name entity]
-  (let [model (t2.model/resolve-model (symbol model-name))
-        pk    (first (t2/primary-keys model))]
-    (-&gt; (into {} entity)
-        (m/update-existing :entity_id str/trim)
-        (assoc :serdes/meta (generate-path model-name entity))
-        (dissoc pk :updated_at))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod extract-one :default [model-name opts entity]
-  ;; `extract-by-spec` is called here since most of tests use `extract-one` right now
-  (or (extract-by-spec model-name opts entity)
-      (extract-one-basics model-name entity)))</pre></td></tr><tr><td class="docs"><p>Returns set of <code>[model-name database-id]</code> pairs for all entities contained or used by this entity. e.g. the Dashboard
+      nested? (extract-reducible-nested model-name (dissoc opts :where)))))</pre></td></tr><tr><td class="docs"><p>Returns set of <code>[model-name database-id]</code> pairs for all entities contained or used by this entity. e.g. the Dashboard
  implementation should return pairs for all DashboardCard entities it contains, etc.</p>
 
 <p> Dispatched on model-name.</p>
@@ -3387,8 +3359,7 @@ Then for each ingested entity:</p>
 <p><code>load-one!</code> has a default implementation that works for most models:</p>
 
 <ul>
-<li>Call <code>(load-xform ingested)</code> to transform the ingested map as needed.
-<ul><li>Override [[load-xform]] to convert any foreign keys from portable entity IDs to the local database FKs.</li></ul></li>
+<li>Call <code>(xform-one ingested)</code> to transform the ingested map as needed.</li>
 <li>Then call either:
 <ul><li><code>(load-update! ingested local-entity)</code> if the local entity exists, or</li>
 <li><code>(load-insert! ingested)</code> if it's new.</li></ul></li>
@@ -3441,55 +3412,7 @@ Default implementation returns an empty vector, so only models that have depende
   {:arglists '([ingested])}
   ingested-model)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod dependencies :default [_]
-  [])</pre></td></tr><tr><td class="docs"><p>Given the incoming vanilla map as ingested, transform it so it's suitable for sending to the database (in eg.
-[[t2/insert!]]).
-For example, this should convert any foreign keys back from a portable entity ID or identity hash into a numeric
-database ID. This is the mirror of [[extract-one]], in spirit. (They're not strictly inverses - [[extract-one]] drops
-the primary key but this need not put one back, for example.)</p>
-
-<p>By default, this just calls [[load-xform-basics]].
-If you override this, call [[load-xform-basics]] as well.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti load-xform
-  {:arglists '([ingested])}
-  ingested-model)</pre></td></tr><tr><td class="docs"><p>Given a table name, returns a map of column<em>name -> column</em>type</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private fields-for-table
-  (mdb/memoize-for-application-db
-   (fn fields-for-table [table-name]
-     (u.conn/app-db-column-types (mdb/app-db) table-name))))</pre></td></tr><tr><td class="docs"><p>Returns the table name that a particular ingested entity should finally be inserted into.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- -&gt;table-name
-  [ingested]
-  (-&gt;&gt; ingested ingested-model (keyword &quot;model&quot;) t2/table-name))</pre></td></tr><tr><td class="docs"><p>Called by <code>drop-excess-keys</code> (which is in turn called by <code>load-xform-basics</code>) to determine the full set of keys that
-should be on the map returned by <code>load-xform-basics</code>. The default implementation looks in the application DB for the
-table associated with the ingested model and returns the set of keywordized columns, but for some models (e.g.
-Actions) there is not a 1:1 relationship between a model and a table, so we need this multimethod to allow the
-model to override when necessary.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti ingested-model-columns
-  ingested-model)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod ingested-model-columns :default
-  ;; this works for most models - it just returns a set of keywordized column names from the database.
-  [ingested]
-  (-&gt;&gt; ingested
-       -&gt;table-name
-       fields-for-table
-       keys
-       (map (comp keyword u/lower-case-en))
-       set))</pre></td></tr><tr><td class="docs"><p>Given an ingested entity, removes keys that will not 'fit' into the current schema, because the column no longer
-exists. This can happen when serialization dumps generated on an earlier version of Metabase are loaded into a
-later version of Metabase, when a column gets removed. (At the time of writing I am seeing this happen with
-color on collections).</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- drop-excess-keys
-  [ingested]
-  (select-keys ingested (ingested-model-columns ingested)))</pre></td></tr><tr><td class="docs"><p>Performs the usual steps for an incoming entity:
-- removes extraneous keys (e.g. <code>:serdes/meta</code>)</p>
-
-<p>You should call this as part of any implementation of [[load-xform]].</p>
-
-<p>This is a mirror (but not precise inverse) of [[extract-one-basics]].</p>
-</td><td class="codes"><pre class="brush: clojure">(defn load-xform-basics
-  [ingested]
-  (drop-excess-keys ingested))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod load-xform :default [ingested]
-  (load-xform-basics ingested))</pre></td></tr><tr><td class="docs"><p>Called by the default [[load-one!]] if there is a corresponding entity already in the appdb.
+  [])</pre></td></tr><tr><td class="docs"><p>Called by the default [[load-one!]] if there is a corresponding entity already in the appdb.
 <code>(load-update! "ModelName" ingested-and-xformed local-Toucan-entity)</code></p>
 
 <p>Defaults to a straightforward [[t2/update!]], and you may not need to update it.</p>
@@ -3529,10 +3452,10 @@ on the [[mi/<em>deserializing?</em>]] dynamic var.</p>
 <p><code>ingested</code> is the vanilla map from ingestion, with the <code>:serdes/meta</code> key on it.
 <code>maybe-local</code> is either <code>nil</code>, or the corresponding Toucan entity from the appdb.</p>
 
-<p>Defaults to calling [[load-xform]] to massage the incoming map, then either [[load-update!]] if <code>maybe-local</code>
+<p>Defaults to calling [[xform-one]] to massage the incoming map, then either [[load-update!]] if <code>maybe-local</code>
 exists, or [[load-insert!]] if it's <code>nil</code>.</p>
 
-<p>Prefer overriding [[load-xform]], and if necessary [[load-update!]] and [[load-insert!]], rather than this.</p>
+<p>Prefer overriding [[load-update!]] and [[load-insert!]] if necessary, rather than this.</p>
 
 <p>Keyed on the model name.</p>
 
@@ -3540,19 +3463,19 @@ exists, or [[load-insert!]] if it's <code>nil</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti load-one!
   (fn [ingested _]
     (ingested-model ingested)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- xform-by-spec [model-name ingested]
+</td><td class="codes"><pre class="brush: clojure">(defn- xform-one [model-name ingested]
   (let [spec (make-spec model-name nil)]
-    (when spec
-      (binding [*current* ingested]
-        (-&gt; (select-keys ingested (:copy spec))
-            (into (for [[k transform] (:transform spec)
-                        :when         (not (::nested transform))
-                        :let          [import-k (:as transform k)
-                                       res ((:import transform) (get ingested import-k))]
-                        :when         (and (not= res ::skip)
-                                           (or (some? res)
-                                               (contains? ingested import-k)))]
-                    [k res])))))))</pre></td></tr><tr><td class="docs">
+    (assert spec (str &quot;No serialization spec defined for model &quot; model-name))
+    (binding [*current* ingested]
+      (-&gt; (select-keys ingested (:copy spec))
+          (into (for [[k transform] (:transform spec)
+                      :when         (not (::nested transform))
+                      :let          [import-k (:as transform k)
+                                     res ((:import transform) (get ingested import-k))]
+                      :when         (and (not= res ::skip)
+                                         (or (some? res)
+                                             (contains? ingested import-k)))]
+                  [k res]))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- spec-nested! [model-name ingested instance]
   (binding [*current* instance]
     (let [spec (make-spec model-name nil)]
@@ -3562,8 +3485,7 @@ exists, or [[load-insert!]] if it's <code>nil</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn default-load-one!
   [ingested maybe-local]
   (let [model-name (ingested-model ingested)
-        adjusted   (or (xform-by-spec model-name ingested)
-                       (load-xform ingested))
+        adjusted   (xform-one model-name ingested)
         instance (binding [mi/*deserializing?* true]
                    (if (nil? maybe-local)
                      (load-insert! model-name adjusted)
@@ -3590,7 +3512,7 @@ details of the two hashing schemes.</p>
                       (map t2.realize/realize)
                       (take 1)))
        first))</pre></td></tr><tr><td class="docs"><p>Given an ID string, this endeavours to find the matching entity, whether it's an entity ID or identity hash.
-This is useful when writing [[load-xform]] to turn a foreign key from a portable form to an appdb ID.
+This is useful when writing [[xform-one]] to turn a foreign key from a portable form to an appdb ID.
 Returns a Toucan entity or nil.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn lookup-by-id
   [model id-str]
