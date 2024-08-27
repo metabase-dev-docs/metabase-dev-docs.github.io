@@ -3165,12 +3165,24 @@ We'll keep this till we replace all the symbols in our codebase.</p>
 </td><td class="codes"><pre class="brush: clojure">(def Permissions
   :model/Permissions)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/table-name :model/Permissions [_model] :permissions)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :model/Permissions :metabase/model)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(derive :model/Permissions :metabase/model)</pre></td></tr><tr><td class="docs"><p>Given a <code>Permissions</code> model, add <code>:collection_id</code>, <code>:perm_type</code>, and <code>:perm_value</code> iff we know how to break that out.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- maybe-break-out-permission-data
+  [permissions]
+  (let [[match? coll-id-str read?] (re-matches #&quot;^/collection/(\d+)/(read/)?&quot; (:object permissions))]
+    (cond-&gt; permissions
+      match? (assoc :collection_id (parse-long coll-id-str)
+                    :perm_type :perms/collection-access
+                    :perm_value (if read?
+                                  :read
+                                  :read-and-write)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(t2/define-before-insert :model/Permissions
   [permissions]
-  (u/prog1 permissions
+  (u/prog1 (maybe-break-out-permission-data permissions)
     (assert-valid permissions)
     (log/debug (u/format-color :green &quot;Granting permissions for group %s: %s&quot; (:group_id permissions) (:object permissions)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(t2/deftransforms :model/Permissions
+  {:perm_type mi/transform-keyword
+   :perm_value mi/transform-keyword})</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(t2/define-before-update :model/Permissions
   [_]
   (throw (Exception. (tru &quot;You cannot update a permissions entry! Delete it and create a new one.&quot;))))</pre></td></tr><tr><td class="docs">

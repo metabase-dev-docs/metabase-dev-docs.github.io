@@ -2943,7 +2943,7 @@ archived is falsey).</p>
 <p>To select only personal collections, pass in <code>personal-only</code> as <code>true</code>.
 This will select only collections where <code>personal_owner_id</code> is not <code>nil</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- select-collections
-  [{:keys [archived exclude-other-user-collections namespace shallow collection-id personal-only permissions-set]}]
+  [{:keys [archived exclude-other-user-collections namespace shallow collection-id personal-only]}]
   (cond-&gt;&gt;
    (t2/select :model/Collection
               {:where [:and
@@ -2962,16 +2962,14 @@ This will select only collections where <code>personal_owner_id</code> is not <c
                        (when exclude-other-user-collections
                          [:or [:= :personal_owner_id nil] [:= :personal_owner_id api/*current-user-id*]])
                        (perms/audit-namespace-clause :namespace namespace)
-                       (collection/visible-collection-ids-&gt;honeysql-filter-clause
+                       (collection/visible-collection-filter-clause
                         :id
-                        (collection/permissions-set-&gt;visible-collection-ids
-                         permissions-set
-                         {:include-archived-items (if archived
-                                                    :only
-                                                    :exclude)
-                          :include-trash-collection? true
-                          :permission-level :read
-                          :archive-operation-id nil}))]
+                        {:include-archived-items (if archived
+                                                   :only
+                                                   :exclude)
+                         :include-trash-collection? true
+                         :permission-level :read
+                         :archive-operation-id nil})]
                ;; Order NULL collection types first so that audit collections are last
                :order-by [[[[:case [:= :authority_level &quot;official&quot;] 0 :else 1]] :asc]
                           [[[:case
@@ -2998,8 +2996,7 @@ This will select only collections where <code>personal_owner_id</code> is not <c
                         :exclude-other-user-collections exclude-other-user-collections
                         :namespace                      namespace
                         :shallow                        false
-                        :personal-only                  personal-only
-                        :permissions-set                @api/*current-user-permissions-set*}) collections
+                        :personal-only                  personal-only}) collections
     ;; include Root Collection at beginning or results if archived or personal-only isn't `true`
     (if (or archived personal-only)
       collections
@@ -3064,8 +3061,7 @@ This will select only collections where <code>personal_owner_id</code> is not <c
                                          :exclude-other-user-collections exclude-other-user-collections
                                          :namespace                      namespace
                                          :shallow                        shallow
-                                         :collection-id                  collection-id
-                                         :permissions-set                @api/*current-user-permissions-set*})]
+                                         :collection-id                  collection-id})]
     (if shallow
       (shallow-tree-from-collection-id collections)
       (let [collection-type-ids (reduce (fn [acc {collection-id :collection_id, card-type :type, :as _card}]
@@ -3254,14 +3250,12 @@ collections are an EE feature.</p>
                                    [:= :r.model (h2x/literal &quot;Card&quot;)]]
                    [:core_user :u] [:= :u.id :r.user_id]]
        :where     [:and
-                   (collection/visible-collection-ids-&gt;honeysql-filter-clause
-                    :collection_id
-                    (collection/permissions-set-&gt;visible-collection-ids @api/*current-user-permissions-set*
-                                                                        {:include-archived-items :all
-                                                                         :permission-level (if archived?
-                                                                                             :write
-                                                                                             :read)
-                                                                         :archive-operation-id nil}))
+                   (collection/visible-collection-filter-clause :collection_id
+                                                                {:include-archived-items :all
+                                                                 :permission-level (if archived?
+                                                                                     :write
+                                                                                     :read)
+                                                                 :archive-operation-id nil})
                    (if (collection/is-trash? collection)
                      [:= :c.archived_directly true]
                      [:and
@@ -3372,14 +3366,12 @@ seem to be useful any way, but if the user said it is required, we honor this fl
                                    [:= :r.model (h2x/literal &quot;Dashboard&quot;)]]
                    [:core_user :u] [:= :u.id :r.user_id]]
        :where     [:and
-                   (collection/visible-collection-ids-&gt;honeysql-filter-clause
-                    :collection_id
-                    (collection/permissions-set-&gt;visible-collection-ids @api/*current-user-permissions-set*
-                                                                        {:include-archived-items :all
-                                                                         :archive-operation-id nil
-                                                                         :permission-level (if archived?
-                                                                                             :write
-                                                                                             :read)}))
+                   (collection/visible-collection-filter-clause :collection_id
+                                                                {:include-archived-items :all
+                                                                 :archive-operation-id nil
+                                                                 :permission-level (if archived?
+                                                                                     :write
+                                                                                     :read)})
                    (if (collection/is-trash? collection)
                      [:= :d.archived_directly true]
                      [:and
@@ -3440,13 +3432,10 @@ snippet-collections. EE implementation returns <code>nil</code>, so as to not fi
   (collection-query collection options))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- annotate-collections
   [parent-coll colls]
-  (let [visible-collection-ids (collection/permissions-set-&gt;visible-collection-ids @api/*current-user-permissions-set*
-                                                                                   {:include-archived-items :all
-                                                                                    :archive-operation-id nil
-                                                                                    :permission-level :read})
-        descendant-collections (collection/descendants-flat parent-coll (collection/visible-collection-ids-&gt;honeysql-filter-clause
+  (let [visible-collection-ids (collection/visible-collection-ids {:include-archived-items :all})
+        descendant-collections (collection/descendants-flat parent-coll (collection/visible-collection-filter-clause
                                                                          :id
-                                                                         visible-collection-ids))
+                                                                         {:include-archived-items :all}))
         descendant-collection-ids (map u/the-id descendant-collections)
         child-type-&gt;coll-id-set
         (reduce (fn [acc {collection-id :collection_id, card-type :type, :as _card}]
@@ -3725,10 +3714,8 @@ Works for either a normal Collection or the Root Collection.</p>
   {id ms/PositiveInt}
   (collection-detail (api/read-check Collection id)))</pre></td></tr><tr><td class="docs"><p>Returns effective children ids for collection.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- effective-children-ids
-  [collection permissions-set]
-  (let [visible-collection-ids (set (collection/permissions-set-&gt;visible-collection-ids
-                                     permissions-set
-                                     {:permission-level :write}))
+  [collection _permissions-set]
+  (let [visible-collection-ids (set (collection/visible-collection-ids {:permission-level :write}))
         all-descendants (map :id (collection/descendants-flat collection))]
     (filterv visible-collection-ids all-descendants)))</pre></td></tr><tr><td class="docs"><p>Given a model and a list of items, return the items in the format the API client expects. Note that order does not
 matter! The calling function, <code>present-items</code>, is responsible for ensuring the order is maintained.</p>

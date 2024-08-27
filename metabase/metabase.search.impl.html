@@ -2966,22 +2966,18 @@ so we can return its <code>:name</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn add-collection-join-and-where-clauses
   [honeysql-query                                :- ms/Map
    model                                         :- :string
-   {:keys [current-user-perms
-           filter-items-in-personal-collection
+   {:keys [filter-items-in-personal-collection
            archived]} :- SearchContext]
-  (let [visible-collections      (collection/permissions-set-&gt;visible-collection-ids
-                                  current-user-perms
+  (let [collection-id-col        (if (= model &quot;collection&quot;)
+                                   :collection.id
+                                   :collection_id)
+        collection-filter-clause (collection/visible-collection-filter-clause
+                                  collection-id-col
                                   {:include-archived-items :all
                                    :include-trash-collection? true
                                    :permission-level (if archived
                                                        :write
-                                                       :read)})
-        collection-id-col        (if (= model &quot;collection&quot;)
-                                   :collection.id
-                                   :collection_id)
-        collection-filter-clause (collection/visible-collection-ids-&gt;honeysql-filter-clause
-                                  collection-id-col
-                                  visible-collections)]
+                                                       :read)})]
     (cond-&gt; honeysql-query
       true
       (sql.helpers/where collection-filter-clause (perms/audit-namespace-clause :collection.namespace nil))
@@ -3120,27 +3116,10 @@ Used in data picker for joins because we can't join across DB's.</p>
       (add-collection-join-and-where-clauses model search-ctx)
       (with-last-editing-info &quot;dashboard&quot;)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- add-model-index-permissions-clause
-  [query current-user-perms]
-  (let [build-path (fn [x y z] (h2x/concat (h2x/literal x) y (h2x/literal z)))
-        has-perm-clause (fn [x y z] [:in (build-path x y z) current-user-perms])]
-    (if (contains? current-user-perms &quot;/&quot;)
-      query
-      ;; User has /collection/:id/ or /collection/:id/read/ for the collection the model is in. We will check
-      ;; permissions on the database after the query is complete, in `check-permissions-for-model`
-      (let [has-root-access?
-            (or (contains? current-user-perms &quot;/collection/root/&quot;)
-                (contains? current-user-perms &quot;/collection/root/read/&quot;))
-            collection-perm-clause
-            [:or
-             (when has-root-access? [:= :collection_id nil])
-             [:and
-              [:not= :collection_id nil]
-              [:or
-               (has-perm-clause &quot;/collection/&quot; :collection_id &quot;/&quot;)
-               (has-perm-clause &quot;/collection/&quot; :collection_id &quot;/read/&quot;)]]]]
-        (sql.helpers/where
-         query
-         collection-perm-clause)))))</pre></td></tr><tr><td class="docs">
+  [query _current-user-perms]
+  (sql.helpers/where
+   query
+   (collection/visible-collection-filter-clause)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod search-query-for-model &quot;indexed-entity&quot;
   [model {:keys [current-user-perms] :as search-ctx}]
   (-&gt; (base-query-for-model model search-ctx)
