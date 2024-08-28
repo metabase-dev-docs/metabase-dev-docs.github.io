@@ -3396,15 +3396,25 @@ collection.</p>
                                              (visible-collection-filter-clause :c2.id (dissoc visibility-config :effective-child-of))
                                              [:= :c.location [:concat :c2.location :c2.id (h2x/literal &quot;/&quot;)]]
                                              (when-not (collection.root/is-root-collection? parent-coll)
-                                               [:not= :c2.id (u/the-id parent-coll)])]}]]]))]}]])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn visible-collection-ids :- VisibleCollections
-  &quot;Returns all collection IDs that are visible given the `visibility-config` passed in. (Config provides knobs for
-  toggling permission level, trash/archive visibility, etc). If you're trying to filter based on this, you should
-  probably try to use `visible-collection-filter-clause` instead.&quot;
-  [visibility-config]
-  (cond-&gt; (t2/select-pks-set :model/Collection {:where (visible-collection-filter-clause :id visibility-config)})
-    (should-display-root-collection? visibility-config)
-    (conj &quot;root&quot;)))</pre></td></tr><tr><td class="docs">
+                                               [:not= :c2.id (u/the-id parent-coll)])]}]]]))]}]])))</pre></td></tr><tr><td class="docs"><p>Returns all collection IDs that are visible given the <code>visibility-config</code> passed in. (Config provides knobs for
+toggling permission level, trash/archive visibility, etc). If you're trying to filter based on this, you should
+probably try to use <code>visible-collection-filter-clause</code> instead.</p>
+
+<p>Cached for the lifetime of the request, maximum 10 seconds.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^{:arglists '([visibility-config])} visible-collection-ids
+  (memoize/ttl
+   ^{::memoize/args-fn (fn [[visibility-config]]
+                         (if-let [req-id *request-id*]
+                           [req-id api/*current-user-id* visibility-config]
+                           [(random-uuid) api/*current-user-id* visibility-config]))}
+   (fn visible-collection-ids*
+     [visibility-config]
+     (cond-&gt; (t2/select-pks-set :model/Collection {:where (visible-collection-filter-clause :id visibility-config)})
+       (should-display-root-collection? visibility-config)
+       (conj &quot;root&quot;)))
+   ;; cache the results for 60 minutes; TTL is here only to eventually clear out old entries/keep it from growing too
+   ;; large
+   :ttl/threshold (* 60 60 1000)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn- effective-location-path* :- [:maybe LocationPath]
   ([collection :- CollectionWithLocationOrRoot]
    (when-not (collection.root/is-root-collection? collection)
