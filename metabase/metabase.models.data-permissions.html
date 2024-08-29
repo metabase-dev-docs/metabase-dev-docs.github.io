@@ -2939,7 +2939,7 @@ value for the permission in the database.</p>
   (when-not (contains? (set (get-in Permissions [perm-type :values])) perm-value)
     (throw (ex-info (tru &quot;Permission type {0} cannot be set to {1}&quot; perm-type perm-value)
                     {perm-type (Permissions perm-type)}))))</pre></td></tr><tr><td class="docs"><p>---------------------------------------- Caching ------------------------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Returns all relevant rows for a given user and db_id, for storing in the permissions cache.</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Returns all relevant rows for permissions for the user, excluding permissions for deactivated tables.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- relevant-permissions-for-user-and-db
   [user-id db-id]
   (t2/select :model/DataPermissions
@@ -2947,9 +2947,14 @@ value for the permission in the database.</p>
               :from [[:permissions_group_membership :pgm]]
               :join [[:permissions_group :pg] [:= :pg.id :pgm.group_id]
                      [:data_permissions :p] [:= :p.group_id :pg.id]]
+              :left-join [[:metabase_table :mt] [:= :mt.id :p.table_id]]
               :where [:and
                       [:= :pgm.user_id user-id]
-                      [:= :p.db_id db-id]]}))</pre></td></tr><tr><td class="docs"><p>Returns all relevant rows for a given user, permission type, and db_id.</p>
+                      [:= :p.db_id db-id]
+                      [:or
+                       [:= :p.table_id nil]
+                       [:= :mt.active true]]]}))</pre></td></tr><tr><td class="docs"><p>Returns all relevant rows for a given user, permission type, and db_id, excluding permissions for deactivated
+tables.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- relevant-permissions-for-user-perm-and-db
   [user-id perm-type db-id]
   (t2/select :model/DataPermissions
@@ -2957,10 +2962,14 @@ value for the permission in the database.</p>
               :from [[:permissions_group_membership :pgm]]
               :join [[:permissions_group :pg] [:= :pg.id :pgm.group_id]
                      [:data_permissions :p] [:= :p.group_id :pg.id]]
+              :left-join [[:metabase_table :mt] [:= :mt.id :p.table_id]]
               :where [:and
                       [:= :pgm.user_id user-id]
                       [:= :p.perm_type (u/qualified-name perm-type)]
-                      [:= :p.db_id db-id]]}))</pre></td></tr><tr><td class="docs"><p>A dynamically-bound atom containing a cache of data permissions that have been fetched so far for the current user.
+                      [:= :p.db_id db-id]
+                      [:or
+                       [:= :p.table_id nil]
+                       [:= :mt.active true]]]}))</pre></td></tr><tr><td class="docs"><p>A dynamically-bound atom containing a cache of data permissions that have been fetched so far for the current user.
  Keys are:
   - :db-ids -> A set of the IDs of databases which have already been fetched.
   - :perms  -> A map of permissions, with the structure <code>{user-id {perm-type {db-id perms }</code> so that we NEVER
