@@ -2898,16 +2898,38 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.query-processor.pivot :as qp.pivot]
    [metabase.util :as u]
    [metabase.util.embed :as embed]
+   [metabase.util.malli :as mu]
    [metabase.util.malli.schema :as ms]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>------------------------------------------- /api/embed/card endpoints --------------------------------------------</p>
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ResourceId [:or ms/PositiveInt ms/NanoIdString])
+(def ^:private Token [:map
+                      [:resource [:map
+                                  [:question  {:optional true} ResourceId]
+                                  [:dashboard {:optional true} ResourceId]]]
+                      [:params :any]])</pre></td></tr><tr><td class="docs"><p>If there's a value at <code>path</code>, apply <code>f</code>, otherwise return <code>m</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- conditional-update-in
+  [m path f]
+  (if-let [value (get-in m path)]
+    (assoc-in m path (f value))
+    m))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn translate-token-ids :- Token
+  &quot;Translate `entity_id` keys to `card_id` and `dashboard_id` respectively.&quot;
+  [unsigned :- Token]
+  (-&gt; unsigned
+      (conditional-update-in [:resource :question]  #(api.embed.common/-&gt;id :model/Card %))
+      (conditional-update-in [:resource :dashboard] #(api.embed.common/-&gt;id :model/Dashboard %))))</pre></td></tr><tr><td class="docs"><p>Unsign a JWT and translate <code>entity_id</code> keys to <code>card_id</code> and <code>dashboard_id</code> respectively. If they are already
+ sequential ids, they are left as is.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn unsign-and-translate-ids
+  [message]
+  (translate-token-ids (embed/unsign message)))</pre></td></tr><tr><td class="docs"><p>------------------------------------------- /api/embed/card endpoints --------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>/card/:token</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
   &quot;Fetch a Card via a JSON Web Token signed with the `embedding-secret-key`.
    Token should have the following format:
      {:resource {:question &lt;card-id&gt;}}&quot;
   [token]
-  (let [unsigned (embed/unsign token)]
+  (let [unsigned (unsign-and-translate-ids token)]
     (api.embed.common/check-embedding-enabled-for-card (embed/get-in-unsigned-token-or-throw unsigned [:resource :question]))
     (u/prog1 (api.embed.common/card-for-unsigned-token unsigned, :constraints [:enable_embedding true])
       (events/publish-event! :event/card-read {:object-id (:id &lt;&gt;), :user-id api/*current-user-id*, :context :question}))))</pre></td></tr><tr><td class="docs"><p>Run the query belonging to Card identified by <code>unsigned-token</code>. Checks that embedding is enabled both globally and
@@ -2934,14 +2956,14 @@ for this Card. Returns core.async channel to fetch the results.</p>
      {:resource {:question &lt;card-id&gt;}
       :params   &lt;parameters&gt;}&quot;
   [token &amp; query-params]
-  (run-query-for-unsigned-token-async (embed/unsign token) :api (api.embed.common/parse-query-params query-params)))</pre></td></tr><tr><td class="docs">
+  (run-query-for-unsigned-token-async (unsign-and-translate-ids token) :api (api.embed.common/parse-query-params query-params)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET [&quot;/card/:token/query/:export-format&quot;, :export-format api.dataset/export-format-regex]
   &quot;Like `GET /api/embed/card/query`, but returns the results as a file in the specified format.&quot;
   [token export-format format_rows :as {:keys [query-params]}]
   {export-format (into [:enum] api.dataset/export-formats)
    format_rows   [:maybe :boolean]}
   (run-query-for-unsigned-token-async
-   (embed/unsign token)
+   (unsign-and-translate-ids token)
    export-format
    (api.embed.common/parse-query-params (dissoc (m/map-keys keyword query-params) :format_rows))
    :constraints nil
@@ -2954,13 +2976,13 @@ for this Card. Returns core.async channel to fetch the results.</p>
    Token should have the following format:
      {:resource {:dashboard &lt;dashboard-id&gt;}}&quot;
   [token]
-  (let [unsigned (embed/unsign token)]
+  (let [unsigned (unsign-and-translate-ids token)]
     (api.embed.common/check-embedding-enabled-for-dashboard (embed/get-in-unsigned-token-or-throw unsigned [:resource :dashboard]))
     (u/prog1 (api.embed.common/dashboard-for-unsigned-token unsigned, :constraints [:enable_embedding true])
       (events/publish-event! :event/dashboard-read {:object-id (:id &lt;&gt;), :user-id api/*current-user-id*}))))</pre></td></tr><tr><td class="docs"><p>Fetch the results of running a Card belonging to a Dashboard using a JSON Web Token signed with the
  <code>embedding-secret-key</code>.</p>
 
-<p> Token should have the following format:</p>
+<p> [[Token]] should have the following format:</p>
 
 <p>   {:resource {:dashboard <dashboard-id>}
     :params   <parameters>}</p>
@@ -2973,7 +2995,7 @@ for this Card. Returns core.async channel to fetch the results.</p>
    &amp; {:keys [constraints qp middleware]
       :or   {constraints (qp.constraints/default-query-constraints)
              qp          qp.card/process-query-for-card-default-qp}}]
-  (let [unsigned-token (embed/unsign token)
+  (let [unsigned-token (unsign-and-translate-ids token)
         dashboard-id   (embed/get-in-unsigned-token-or-throw unsigned-token [:resource :dashboard])]
     (api.embed.common/check-embedding-enabled-for-dashboard dashboard-id)
     (api.embed.common/process-query-for-dashcard
@@ -3004,7 +3026,7 @@ for this Card. Returns core.async channel to fetch the results.</p>
   &quot;Fetch FieldValues for a Field that is referenced by an embedded Card.&quot;
   [token field-id]
   {field-id ms/PositiveInt}
-  (let [unsigned-token (embed/unsign token)
+  (let [unsigned-token (unsign-and-translate-ids token)
         card-id        (embed/get-in-unsigned-token-or-throw unsigned-token [:resource :question])]
     (api.embed.common/check-embedding-enabled-for-card card-id)
     (api.public/card-and-field-id-&gt;values card-id field-id)))</pre></td></tr><tr><td class="docs"><p>/dashboard/:token/field/:field-id/values</p>
@@ -3012,7 +3034,7 @@ for this Card. Returns core.async channel to fetch the results.</p>
   &quot;Fetch FieldValues for a Field that is used as a param in an embedded Dashboard.&quot;
   [token field-id]
   {field-id ms/PositiveInt}
-  (let [unsigned-token (embed/unsign token)
+  (let [unsigned-token (unsign-and-translate-ids token)
         dashboard-id   (embed/get-in-unsigned-token-or-throw unsigned-token [:resource :dashboard])]
     (api.embed.common/check-embedding-enabled-for-dashboard dashboard-id)
     (api.public/dashboard-and-field-id-&gt;values dashboard-id field-id)))</pre></td></tr><tr><td class="docs"><p>--------------------------------------------------- Searching ----------------------------------------------------</p>
@@ -3024,7 +3046,7 @@ for this Card. Returns core.async channel to fetch the results.</p>
    search-field-id ms/PositiveInt
    value           ms/NonBlankString
    limit           [:maybe ms/PositiveInt]}
-  (let [unsigned-token (embed/unsign token)
+  (let [unsigned-token (unsign-and-translate-ids token)
         card-id        (embed/get-in-unsigned-token-or-throw unsigned-token [:resource :question])]
     (api.embed.common/check-embedding-enabled-for-card card-id)
     (api.public/search-card-fields card-id field-id search-field-id value (when limit (Integer/parseInt limit)))))</pre></td></tr><tr><td class="docs"><p>/dashboard/:token/field/:field-id/search/:search-field-id</p>
@@ -3035,7 +3057,7 @@ for this Card. Returns core.async channel to fetch the results.</p>
    search-field-id ms/PositiveInt
    value           ms/NonBlankString
    limit           [:maybe ms/PositiveInt]}
-  (let [unsigned-token (embed/unsign token)
+  (let [unsigned-token (unsign-and-translate-ids token)
         dashboard-id   (embed/get-in-unsigned-token-or-throw unsigned-token [:resource :dashboard])]
     (api.embed.common/check-embedding-enabled-for-dashboard dashboard-id)
     (api.public/search-dashboard-fields dashboard-id field-id search-field-id value (when limit
@@ -3048,7 +3070,7 @@ for this Card. Returns core.async channel to fetch the results.</p>
   {field-id    ms/PositiveInt
    remapped-id ms/PositiveInt
    value       ms/NonBlankString}
-  (let [unsigned-token (embed/unsign token)
+  (let [unsigned-token (unsign-and-translate-ids token)
         card-id        (embed/get-in-unsigned-token-or-throw unsigned-token [:resource :question])]
     (api.embed.common/check-embedding-enabled-for-card card-id)
     (api.public/card-field-remapped-values card-id field-id remapped-id value)))</pre></td></tr><tr><td class="docs"><p>/dashboard/:token/field/:field-id/remapping/:remapped-id</p>
@@ -3059,7 +3081,7 @@ for this Card. Returns core.async channel to fetch the results.</p>
   {field-id    ms/PositiveInt
    remapped-id ms/PositiveInt
    value       ms/NonBlankString}
-  (let [unsigned-token (embed/unsign token)
+  (let [unsigned-token (unsign-and-translate-ids token)
         dashboard-id   (embed/get-in-unsigned-token-or-throw unsigned-token [:resource :dashboard])]
     (api.embed.common/check-embedding-enabled-for-dashboard dashboard-id)
     (api.public/dashboard-field-remapped-values dashboard-id field-id remapped-id value)))</pre></td></tr><tr><td class="docs">
@@ -3100,7 +3122,7 @@ includes <code>slug-</code> are keyed by slug.</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
   &quot;Embedded version of api.card filter values endpoint.&quot;
   [token param-key]
-  (let [unsigned (embed/unsign token)
+  (let [unsigned (unsign-and-translate-ids token)
         card-id  (embed/get-in-unsigned-token-or-throw unsigned [:resource :question])
         card     (t2/select-one Card :id card-id)]
     (api.embed.common/check-embedding-enabled-for-card card-id)
@@ -3110,7 +3132,7 @@ includes <code>slug-</code> are keyed by slug.</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
   &quot;Embedded version of chain filter search endpoint.&quot;
   [token param-key prefix]
-  (let [unsigned (embed/unsign token)
+  (let [unsigned (unsign-and-translate-ids token)
         card-id  (embed/get-in-unsigned-token-or-throw unsigned [:resource :question])
         card     (t2/select-one Card :id card-id)]
     (api.embed.common/check-embedding-enabled-for-card card-id)
@@ -3124,7 +3146,7 @@ includes <code>slug-</code> are keyed by slug.</p>
      {:resource {:question &lt;card-id&gt;}
       :params   &lt;parameters&gt;}&quot;
   [token &amp; query-params]
-  (run-query-for-unsigned-token-async (embed/unsign token)
+  (run-query-for-unsigned-token-async (unsign-and-translate-ids token)
                                       :api (api.embed.common/parse-query-params query-params)
                                       :qp qp.pivot/run-pivot-query))</pre></td></tr><tr><td class="docs"><p>/pivot/dashboard/:token/dashcard/:dashcard-id/card/:card-id</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 

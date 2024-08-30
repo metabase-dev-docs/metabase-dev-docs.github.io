@@ -3104,13 +3104,88 @@ make these parameters visible at all to the frontend.</p>
                          value)]
           :when (contains? slug-&gt;value slug)]
       (assoc (select-keys param [:type :target :slug])
-             :value value))))</pre></td></tr><tr><td class="docs"><p>---------------------------- Card Fns used by both /api/embed and /api/preview_embed -----------------------------</p>
+             :value value))))</pre></td></tr><tr><td class="docs"><p>-------------------------------------- Entity ID transformation functions ------------------------------------------</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>The models that we will service for entity-id transformations.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private api-models
+  (-&gt;&gt; (descendants :metabase/model)
+       (filter #(= (namespace %) &quot;model&quot;))
+       (filter (fn has-entity-id?
+                 [model] (or ;; toucan1 models
+                          (isa? model :metabase.models.interface/entity-id)
+                          ;; toucan2 models
+                          (isa? model :hook/entity-id))))
+       (map keyword)
+       set))</pre></td></tr><tr><td class="docs"><p>Map of model names used on the API to their corresponding model.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private api-name-&gt;model
+  (-&gt;&gt; api/model-&gt;db-model
+       (map (fn [[k v]] [(keyword k) (:db-model v)]))
+       (filter (fn [[_ v]] (contains? api-models v)))
+       (into {})))</pre></td></tr><tr><td class="docs"><p>Takes a model keyword or an api-name and returns the corresponding model keyword.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- -&gt;model
+  [model-or-api-name]
+  (if (contains? api-models model-or-api-name)
+    model-or-api-name
+    (api-name-&gt;model model-or-api-name)))</pre></td></tr><tr><td class="docs"><p>Sorted vec of api models that have an entity_id column</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private eid-api-models
+  (vec (sort (keys api-name-&gt;model))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ApiModel (into [:enum] eid-api-models))</pre></td></tr><tr><td class="docs"><p>A Malli schema for an entity id, this is a little looser because it needs to be fast.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private EntityId
+  [:and {:description &quot;entity_id&quot;}
+   :string
+   [:fn {:error/fn (fn [{:keys [value]} _]
+                     (str &quot;\&quot;&quot; value &quot;\&quot; should be 21 characters long, but it is &quot; (count value)))}
+    (fn eid-length-good? [eid] (= 21 (count eid)))]])</pre></td></tr><tr><td class="docs"><p>A Malli schema for a map of model names to a sequence of entity ids.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ModelToEntityIds
+  (mc/schema [:map-of ApiModel [:sequential :string]]))</pre></td></tr><tr><td class="docs"><p>Given a model and a sequence of entity ids on that model, return a pairs of entity-id, id.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- entity-ids-&gt;id-for-model
+  [api-name eids]
+  (let [model (-&gt;model api-name) ;; This lookup is safe because we've already validated the api-names
+        eid-&gt;id (into {} (t2/select-fn-&gt;fn :entity_id :id [model :id :entity_id] :entity_id [:in eids]))]
+    (mapv (fn entity-id-info [entity-id]
+            [entity-id (if-let [id (get eid-&gt;id entity-id)]
+                         {:id id :type api-name :status &quot;ok&quot;}
+                         ;; handle errors
+                         (if (mc/validate EntityId entity-id)
+                           {:type api-name
+                            :status &quot;not-found&quot;}
+                           {:type api-name
+                            :status &quot;invalid-format&quot;
+                            :reason (me/humanize (mc/explain EntityId entity-id))}))])
+          eids)))</pre></td></tr><tr><td class="docs"><p>Given a map of model names to a sequence of entity-ids for each, return a map from entity-id -> id.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn model-&gt;entity-ids-&gt;ids
+  [model-key-&gt;entity-ids]
+  (when-not (mc/validate ModelToEntityIds model-key-&gt;entity-ids)
+    (throw (ex-info &quot;Invalid format.&quot; {:explanation (me/humanize
+                                                     (me/with-spell-checking
+                                                       (mc/explain ModelToEntityIds model-key-&gt;entity-ids)))
+                                       :allowed-models (sort (keys api-name-&gt;model))
+                                       :status-code 400})))
+  (into {}
+        (mapcat
+         (fn [[model eids]] (entity-ids-&gt;id-for-model model eids))
+         model-key-&gt;entity-ids)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn -&gt;id :- :int
+  &quot;Translates a single entity_id -&gt; id. This reuses the batched version: [[model-&gt;entity-ids-&gt;ids]].
+   Please use that if you have to do man lookups at once.&quot;
+  [pre-model id :- [:or :int :string]]
+  (if (string? id)
+    (let [model (-&gt;model pre-model)
+          [[_ {:keys [status] :as info}]] (entity-ids-&gt;id-for-model model [id])]
+      (if-not (= &quot;ok&quot; status)
+        (throw (ex-info &quot;problem looking up id from entity_id&quot;
+                        {:pre-model pre-model
+                         :model model
+                         :id id
+                         :status status}))
+        (:id info)))
+    id))</pre></td></tr><tr><td class="docs"><p>---------------------------- Card Fns used by both /api/embed and /api/preview_embed -----------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Return the info needed for embedding about Card specified in <code>token</code>. Additional <code>constraints</code> can be passed to the
 <code>public-card</code> function that fetches the Card.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn card-for-unsigned-token
   [unsigned-token &amp; {:keys [embedding-params constraints]}]
   {:pre [((some-fn empty? sequential?) constraints) (even? (count constraints))]}
-  (let [card-id      (embed/get-in-unsigned-token-or-throw unsigned-token [:resource :question])
+  (let [pre-card-id  (embed/get-in-unsigned-token-or-throw unsigned-token [:resource :question])
+        card-id      (-&gt;id :model/Card pre-card-id)
         token-params (embed/get-in-unsigned-token-or-throw unsigned-token [:params])]
     (-&gt; (apply api.public/public-card :id card-id, constraints)
         api.public/combine-parameters-and-template-tags
@@ -3172,7 +3247,8 @@ the <code>public-dashboard</code> function that fetches the Dashboard.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn dashboard-for-unsigned-token
   [unsigned-token &amp; {:keys [embedding-params constraints]}]
   {:pre [((some-fn empty? sequential?) constraints) (even? (count constraints))]}
-  (let [dashboard-id (embed/get-in-unsigned-token-or-throw unsigned-token [:resource :dashboard])
+  (let [pre-dashboard-id (embed/get-in-unsigned-token-or-throw unsigned-token [:resource :dashboard])
+        dashboard-id (-&gt;id :model/Dashboard pre-dashboard-id)
         embedding-params (or embedding-params
                              (t2/select-one-fn :embedding_params :model/Dashboard, :id dashboard-id))
         token-params (embed/get-in-unsigned-token-or-throw unsigned-token [:params])]
@@ -3257,7 +3333,8 @@ The <code>:preview</code> key will default to <code>false</code>.</p>
   [token searched-param-id prefix id-query-params
    &amp; {:keys [preview] :or {preview false}}]
   (let [unsigned-token                                 (embed/unsign token)
-        dashboard-id                                   (embed/get-in-unsigned-token-or-throw unsigned-token [:resource :dashboard])
+        pre-dashboard-id                               (embed/get-in-unsigned-token-or-throw unsigned-token [:resource :dashboard])
+        dashboard-id                                   (-&gt;id :model/Dashboard pre-dashboard-id)
         _                                              (when-not preview (check-embedding-enabled-for-dashboard dashboard-id))
         slug-token-params                              (embed/get-in-unsigned-token-or-throw unsigned-token [:params])
         {parameters                 :parameters
@@ -3303,55 +3380,7 @@ The <code>:preview</code> key will default to <code>false</code>.</p>
                           :token-params        slug-token-params}
                          e)]
           (log/errorf e &quot;Chain filter error\n%s&quot; (u/pprint-to-str (u/all-ex-data e)))
-          (throw e))))))</pre></td></tr><tr><td class="docs"><p>-------------------------------------- Entity ID transformation functions ------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>The models that we will service for entity-id transformations.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private api-models
-  (-&gt;&gt; (descendants :metabase/model)
-       (filter #(= (namespace %) &quot;model&quot;))
-       (filter (fn has-entity-id?
-                 [model] (or ;; toucan1 models
-                          (isa? model :metabase.models.interface/entity-id)
-                          ;; toucan2 models
-                          (isa? model :hook/entity-id))))
-       (map keyword)
-       set))</pre></td></tr><tr><td class="docs"><p>Map of model names used on the API to their corresponding model.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private api-name-&gt;model
-  (-&gt;&gt; api/model-&gt;db-model
-       (map (fn [[k v]] [(keyword k) (:db-model v)]))
-       (filter (fn [[_ v]] (contains? api-models v)))
-       (into {})))</pre></td></tr><tr><td class="docs"><p>Sorted vec of api models that have an entity_id column</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private eid-api-models
-  (vec (sort (keys api-name-&gt;model))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ApiModel (into [:enum] eid-api-models))</pre></td></tr><tr><td class="docs"><p>A Malli schema for an entity id, this is a little looser because it needs to be fast.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private EntityId
-  [:and {:description &quot;entity_id&quot;}
-   :string
-   [:fn {:error/fn (fn [{:keys [value]} _]
-                     (str &quot;\&quot;&quot; value &quot;\&quot; should be 21 characters long, but it is &quot; (count value)))}
-    (fn eid-length-good? [eid] (= 21 (count eid)))]])</pre></td></tr><tr><td class="docs"><p>A Malli schema for a map of model names to a sequence of entity ids.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ModelToEntityIds
-  (mc/schema [:map-of ApiModel [:sequential EntityId]]))</pre></td></tr><tr><td class="docs"><p>Given a model and a sequence of entity ids on that model, return a pairs of entity-id, id.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- entity-ids-&gt;id-for-model
-  [api-name eids]
-  (let [model (api-name-&gt;model api-name) ;; This lookup is safe because we've already validated the api-names
-        eid-&gt;id (into {} (t2/select-fn-&gt;fn :entity_id :id [model :id :entity_id] :entity_id [:in eids]))]
-    (mapv (fn [entity-id]
-            [entity-id (if-let [id (get eid-&gt;id entity-id)]
-                         {:id id :type api-name}
-                         {:type api-name :status &quot;not-found&quot;})])
-          eids)))</pre></td></tr><tr><td class="docs"><p>Given a map of model names to a sequence of entity-ids for each, return a map from entity-id -> id.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn model-&gt;entity-ids-&gt;ids
-  [model-key-&gt;entity-ids]
-  (when-not (mc/validate ModelToEntityIds model-key-&gt;entity-ids)
-    (throw (ex-info &quot;Invalid format.&quot; {:explanation (me/humanize
-                                                     (me/with-spell-checking
-                                                       (mc/explain ModelToEntityIds model-key-&gt;entity-ids)))
-                                       :allowed-models (sort (keys api-name-&gt;model))
-                                       :status-code 400})))
-  (into {}
-        (mapcat
-         (fn [[model eids]] (entity-ids-&gt;id-for-model model eids))
-         model-key-&gt;entity-ids)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+          (throw e))))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
