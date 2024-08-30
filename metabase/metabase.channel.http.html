@@ -2865,234 +2865,90 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.analyze.fingerprint.insights" name="metabase.analyze.fingerprint.insights"><h1 class="project-name">metabase.analyze.fingerprint.insights</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Deeper statistical analysis of results.</p>
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.analyze.fingerprint.insights
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.channel.http" name="metabase.channel.http"><h1 class="project-name">metabase.channel.http</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.channel.http
   (:require
+   [cheshire.core :as json]
+   [clj-http.client :as http]
    [java-time.api :as t]
-   [kixi.stats.core :as stats]
-   [kixi.stats.math :as math]
-   [kixi.stats.protocols :as p]
-   [medley.core :as m]
-   [metabase.analyze.fingerprint.fingerprinters :as fingerprinters]
-   [metabase.legacy-mbql.util :as mbql.u]
-   [metabase.models.interface :as mi]
-   [metabase.sync.util :as sync-util]
-   [metabase.util :as u]
-   [metabase.util.date-2 :as u.date]
-   [redux.core :as redux])
-  (:import
-   (java.time Instant LocalDate LocalDateTime LocalTime OffsetDateTime OffsetTime ZonedDateTime)
-   (java.util Random)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- last-n
-  [n]
-  (fn
-    ([] [])
-    ([acc]
-     (concat (repeat (- n (count acc)) nil) acc))
-    ([acc x]
-     (if (&lt; (count acc) n)
-       (conj acc x)
-       (conj (subvec acc 1) x)))))</pre></td></tr><tr><td class="docs"><p>Relative difference between <code>x1</code> an <code>x2</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn change
-  [x2 x1]
-  (when (and x1 x2 (not (zero? x1)))
-    (let [x2 (double x2)
-          x1 (double x1)]
-      (cond
-        (every? neg? [x1 x2])     (change (- x1) (- x2))
-        (and (neg? x1) (pos? x2)) (- (change x1 x2))
-        (neg? x1)                 (- (change x2 (- x1)))
-        :else                     (/ (- x2 x1) x1)))))</pre></td></tr><tr><td class="docs"><p>Transducer that samples a fixed number <code>n</code> of samples consistently.
- https://en.wikipedia.org/wiki/Reservoir_sampling. Uses java.util.Random
-with a seed of <code>n</code> to ensure a consistent sample if a dataset has not changed.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn reservoir-sample
-  [n]
-  (let [rng (Random. n)]
-    (fn
-      ([] [[] 0])
-      ([[reservoir c] x]
-       (let [c   (inc c)
-             idx (.nextInt rng c)]
-         (cond
-           (&lt;= c n)  [(conj reservoir x) c]
-           (&lt; idx n) [(assoc reservoir idx x) c]
-           :else     [reservoir c])))
-      ([[reservoir _]] reservoir))))</pre></td></tr><tr><td class="docs"><p>Given two functions: (fŷ input) and (fy input), returning the predicted and actual values of y
- respectively, calculates the mean absolute error of the estimate.
- https://en.wikipedia.org/wiki/Mean<em>absolute</em>error</p>
-</td><td class="codes"><pre class="brush: clojure">(defn mae
-  [fy-hat fy]
-  ((map (fn [x]
-          (when x
-            (math/abs (- (fy x) (fy-hat x))))))
-   stats/mean))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private trendline-function-families
-  ;; http://mathworld.wolfram.com/LeastSquaresFitting.html
-  [{:x-link-fn identity
-    :y-link-fn identity
-    :model     (fn [offset slope]
-                 (fn [x]
-                   (+ offset (* slope x))))
-    :formula   (fn [offset slope]
-                 [:+ offset [:* slope :x]])}
-   ;; http://mathworld.wolfram.com/LeastSquaresFittingExponential.html
-   {:x-link-fn identity
-    :y-link-fn math/log
-    :model     (fn [offset slope]
-                 (fn [x]
-                   (* (math/exp offset) (math/exp (* slope x)))))
-    :formula   (fn [offset slope]
-                 [:* (math/exp offset) [:exp [:* slope :x]]])}
-   ;; http://mathworld.wolfram.com/LeastSquaresFittingLogarithmic.html
-   {:x-link-fn math/log
-    :y-link-fn identity
-    :model     (fn [offset slope]
-                 (fn [x]
-                   (+ offset (* slope (math/log x)))))
-    :formula   (fn [offset slope]
-                 [:+ offset [:* slope [:log :x]]])}
-   ;; http://mathworld.wolfram.com/LeastSquaresFittingPowerLaw.html
-   {:x-link-fn math/log
-    :y-link-fn math/log
-    :model     (fn [offset slope]
-                 (fn [x]
-                   (* (math/exp offset) (math/pow x slope))))
-    :formula   (fn [offset slope]
-                 [:* (math/exp offset) [:pow :x slope]])}])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^:const ^Long validation-set-size 20)</pre></td></tr><tr><td class="docs"><p>Fit curves from <code>trendline-function-families</code> and pick the one with the smallest RMSE.
- To keep the operation single pass we collect a small validation set as we go using reservoir
- sampling, and use it to calculate RMSE.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- best-fit
-  [fx fy]
-  (redux/post-complete
-   (fingerprinters/robust-fuse
-    {:fits           (-&gt;&gt; (for [{:keys [x-link-fn y-link-fn formula model]} trendline-function-families]
-                            (redux/post-complete
-                             (stats/simple-linear-regression (comp (stats/somef x-link-fn) fx)
-                                                             (comp (stats/somef y-link-fn) fy))
-                             (fn [fit]
-                               (let [[offset slope] (some-&gt; fit p/parameters)]
-                                 (when (every? u/real-number? [offset slope])
-                                   {:model   (model offset slope)
-                                    :formula (formula offset slope)})))))
-                          (apply redux/juxt))
-     :validation-set ((keep (fn [row]
-                              (let [x (fx row)
-                                    y (fy row)]
-                                (when (and x y)
-                                  [x y]))))
-                      (reservoir-sample validation-set-size))})
-   (fn [{:keys [validation-set fits]}]
-     (some-&gt;&gt; fits
-              (remove nil?)
-              (map #(assoc % :mae (transduce identity
-                                             (mae (comp (:model %) first) second)
-                                             validation-set)))
-              (filter (comp u/real-number? :mae))
-              not-empty
-              (apply min-key :mae)
-              :formula))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- timeseries?
-  [{:keys [numbers datetimes]}]
-  (and (pos? (count numbers))
-       (= (count datetimes) 1)))</pre></td></tr><tr><td class="docs"><p>We downsize UNIX timestamps to lessen the chance of overflows and numerical instabilities.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^Long ^:const ^:private ms-in-a-day (* 1000 60 60 24))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- ms-&gt;day
-  [dt]
-  (/ dt ms-in-a-day))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- about=
-  [a b]
-  (&lt; 0.9 (/ a b) 1.1))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private unit-&gt;duration
-  {:minute  (/ 1 24 60)
-   :hour    (/ 24)
-   :day     1
-   :week    7
-   :month   30.5
-   :quarter (* 30.4 3)
-   :year    365.1})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- valid-period?
-  [from to unit]
-  (when (and from to unit)
-    ;; Make sure we work for both ascending and descending time series
-    (let [[from to] (sort [from to])]
-      (about= (- to from) (unit-&gt;duration unit)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- infer-unit
-  [from to]
-  (m/find-first (partial valid-period? from to) (keys unit-&gt;duration)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- -&gt;millis-from-epoch [t]
-  (when t
-    (condp instance? t
-      Instant        (.toEpochMilli ^Instant t)
-      OffsetDateTime (.toEpochMilli (.toInstant ^OffsetDateTime t))
-      ZonedDateTime  (.toEpochMilli (.toInstant ^ZonedDateTime t))
-      LocalDate      (-&gt;millis-from-epoch (t/offset-date-time t (t/local-time 0) (t/zone-offset 0)))
-      LocalDateTime  (-&gt;millis-from-epoch (t/offset-date-time t (t/zone-offset 0)))
-      LocalTime      (-&gt;millis-from-epoch (t/offset-date-time (t/local-date &quot;1970-01-01&quot;) t (t/zone-offset 0)))
-      OffsetTime     (-&gt;millis-from-epoch (t/offset-date-time (t/local-date &quot;1970-01-01&quot;) t (t/zone-offset t))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- timeseries-insight
-  [{:keys [numbers datetimes]}]
-  (let [datetime   (first datetimes)
-        x-position (:position datetime)
-        xfn        #(nth % x-position)]
-    (fingerprinters/with-error-handling
-      ((map (fn [row]
-              ;; Convert string datetime into days-from-epoch early.
-              (update (vec row) x-position #(some-&gt; %
-                                                    fingerprinters/-&gt;temporal
-                                                    -&gt;millis-from-epoch
-                                                    ms-&gt;day))))
-       (apply redux/juxt
-              (for [number-col numbers]
-                (redux/post-complete
-                 (let [y-position (:position number-col)
-                       yfn        #(nth % y-position)]
-                   ((filter (comp u/real-number? yfn))
-                    (redux/juxt ((map yfn) (last-n 2))
-                                ((map xfn) (last-n 2))
-                                (stats/simple-linear-regression xfn yfn)
-                                (best-fit xfn yfn))))
-                 (fn [[[y-previous y-current] [x-previous x-current] fit best-fit-equation]]
-                   (let [[offset slope] (some-&gt; fit p/parameters)
-                         unit         (let [unit (some-&gt; datetime :unit mbql.u/normalize-token)]
-                                        (if (or (nil? unit)
-                                                (= unit :default))
-                                          (infer-unit x-previous x-current)
-                                          unit))
-                         show-change? (valid-period? x-previous x-current unit)]
-                     (fingerprinters/robust-map
-                      :last-value     y-current
-                      :previous-value (when show-change?
-                                        y-previous)
-                      :last-change    (when show-change?
-                                        (change y-current y-previous))
-                      :slope          slope
-                      :offset         offset
-                      :best-fit       best-fit-equation
-                      :col            (:name number-col)
-                      :unit           unit)))))))
-      (format &quot;Error generating timeseries insight keyed by: %s&quot;
-              (sync-util/name-for-logging (mi/instance :model/Field datetime))))))</pre></td></tr><tr><td class="docs"><p>Based on the shape of returned data construct a transducer to statistically analyize data.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn insights
-  [cols]
-  (let [cols-by-type (-&gt;&gt; cols
-                          (map-indexed (fn [idx col]
-                                         (assoc col :position idx)))
-                          (group-by (fn [{base-type      :base_type
-                                          effective-type :effective_type
-                                          semantic-type  :semantic_type
-                                          unit           :unit}]
-                                      (cond
-                                        (isa? semantic-type :Relation/*)                    :others
-                                        (= unit :year)                                      :datetimes
-                                        (u.date/extract-units unit)                         :numbers
-                                        (isa? (or effective-type base-type) :type/Temporal) :datetimes
-                                        (isa? base-type :type/Number)                       :numbers
-                                        :else                                               :others))))]
-    (cond
-      (timeseries? cols-by-type) (timeseries-insight cols-by-type)
-      :else                      (fingerprinters/constant-fingerprinter nil))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+   [metabase.channel.core :as channel]
+   [metabase.channel.shared :as channel.shared]
+   [metabase.pulse.render :as render]
+   [metabase.util.i18n :refer [tru]]
+   [metabase.util.malli :as mu]
+   [metabase.util.malli.schema :as ms]
+   [metabase.util.urls :as urls]))</pre></td></tr><tr><td class="docs"><p>Maximum width of the rendered PNG of HTML to be sent to HTTP Content that exceeds this width (e.g. a table with
+many columns) is truncated.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private image-width
+  1200)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private string-or-keyword
+  [:or :string :keyword])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private HTTPDetails
+  [:map {:closed true}
+   [:url                           ms/Url]
+   [:auth-method                   [:enum &quot;none&quot; &quot;header&quot; &quot;query-param&quot; &quot;request-body&quot;]]
+   [:auth-info    {:optional true} [:map-of string-or-keyword :any]]
+   ;; used by the frontend to display the auth info properly
+   [:fe-form-type {:optional true} [:enum &quot;api-key&quot; &quot;bearer&quot; &quot;basic&quot; &quot;none&quot;]]
+   ;; request method
+   [:method       {:optional true} [:enum &quot;get&quot; &quot;post&quot; &quot;put&quot;]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private HTTPChannel
+  [:map
+   [:type    [:= :channel/http]]
+   [:details HTTPDetails]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defmethod channel/send! :channel/http
+  [{{:keys [url method auth-method auth-info]} :details} :- HTTPChannel
+   request]
+  (let [req (merge
+             {:accept       :json
+              :content-type :json
+              :method       :post
+              :url          url}
+             (when method
+               {:method (keyword method)})
+             (cond-&gt; request
+               (= &quot;request-body&quot; auth-method) (update :body merge auth-info)
+               (= &quot;header&quot; auth-method)       (update :headers merge auth-info)
+               (= &quot;query-param&quot; auth-method)  (update :query-params merge auth-info)))]
+    (http/request (cond-&gt; req
+                    (map? (:body req)) (update :body json/generate-string)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod channel/can-connect? :channel/http
+  [_channel-type details]
+  (channel.shared/validate-channel-details HTTPDetails details)
+  (try
+    (channel/send! {:type :channel/http :details details} {})
+    true
+    (catch Exception e
+      (let [data (ex-data e)]
+        ;; throw an appriopriate error if it's a connection error
+        (if (= ::http/unexceptional-status (:type data))
+          (throw (ex-info (tru &quot;Failed to connect to channel&quot;) {:request-status (:status data)
+                                                                :request-body   (:body data)}))
+          (throw e))))))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------------------------------------------------------;;
+                                          Alerts                                                ;;
+------------------------------------------------------------------------------------------------;;</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- qp-result-&gt;raw-data
+  [qp-result]
+  (let [data (:data qp-result)]
+    {:cols (map :name (:cols data))
+     :rows (:rows data)}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defmethod channel/render-notification [:channel/http :notification/alert]
+  [_channel-type {:keys [card pulse payload]} _recipients]
+  (let [request-body      {:type               &quot;alert&quot;
+                           :alert_id           (:id pulse)
+                           :alert_creator_id   (get-in pulse [:creator :id])
+                           :alert_creator_name (get-in pulse [:creator :common_name])
+                           :data               {:type          &quot;question&quot;
+                                                :question_id   (:id card)
+                                                :question_name (:name card)
+                                                :question_url  (urls/card-url (:id card))
+                                                :visualization (let [{:keys [card dashcard result]} payload]
+                                                                 (render/render-pulse-card-to-base64
+                                                                  (channel.shared/defaulted-timezone card) card dashcard result image-width))
+                                                :raw_data      (qp-result-&gt;raw-data (:result payload))}
+                           :sent_at            (t/offset-date-time)}]
+    [{:body request-body}]))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

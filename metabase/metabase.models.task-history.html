@@ -2931,13 +2931,17 @@ This is intended for a quick cleanup of old rows. Returns <code>true</code> if s
                                   {:offset offset}))))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
 |                                            with-task-history macro                                             |
 +----------------------------------------------------------------------------------------------------------------+</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Schema for <code>info</code> passed to the <code>with-task-history</code> macro.</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private TaskHistoryCallBackInfo
+  [:map {:closed true}
+   [:status                        (into [:enum] task-history-status)]
+   [:task_details {:optional true} [:maybe :map]]])</pre></td></tr><tr><td class="docs"><p>Schema for <code>info</code> passed to the <code>with-task-history</code> macro.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private TaskHistoryInfo
   [:map {:closed true}
    [:task                             ms/NonBlankString] ; task name, i.e. `send-pulses`. Conventionally lisp-cased
    [:db_id           {:optional true} [:maybe :int]]     ; DB involved, for sync operations or other tasks where this is applicable.
-   ;; a function that takes the result of the task and returns a map of additional info to update task history when the task succeeds
-   [:on-success-info {:optional true} [:maybe [:=&gt; [:cat :any] :map]]]
+   [:on-success-info {:optional true} [:maybe [:=&gt; [:cat TaskHistoryCallBackInfo :any] :map]]]
+   [:on-fail-info    {:optional true} [:maybe [:=&gt; [:cat TaskHistoryCallBackInfo :any] :map]]]
    [:task_details    {:optional true} [:maybe :map]]])   ; additional map of details to include in the recorded row</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private ns-&gt;ms #(int (/ % 1e6)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- update-task-history!
@@ -2948,8 +2952,9 @@ This is intended for a quick cleanup of old rows. Returns <code>true</code> if s
     (t2/update! :model/TaskHistory th-id updated-info)))</pre></td></tr><tr><td class="docs"><p>Impl for <code>with-task-history</code> macro; see documentation below.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn do-with-task-history
   [info :- TaskHistoryInfo f]
-  (let [on-success-info (:on-success-info info)
-        info            (dissoc info :on-success-info)
+  (let [on-success-info (or (:on-success-info info) (fn [&amp; args] (first args)))
+        on-fail-info    (or (:on-fail-info info) (fn [&amp; args] (first args)))
+        info            (dissoc info :on-success-info :on-fail-info)
         start-time-ns   (System/nanoTime)
         th-id           (t2/insert-returning-pk! :model/TaskHistory
                                                  (assoc info
@@ -2957,25 +2962,34 @@ This is intended for a quick cleanup of old rows. Returns <code>true</code> if s
                                                         :started_at (t/instant)))]
     (try
       (u/prog1 (f)
-        (update-task-history! th-id start-time-ns (cond-&gt; {:status :success}
-                                                    (some? on-success-info)
-                                                    (merge (on-success-info &lt;&gt;)))))
+        (update-task-history! th-id start-time-ns (on-success-info {:status       :success
+                                                                    :task_details (:task_details info)}
+                                                                   &lt;&gt;)))
       (catch Throwable e
-        (update-task-history! th-id start-time-ns {:task_details {:status        :failed
-                                                                  :exception     (class e)
-                                                                  :message       (.getMessage e)
-                                                                  :stacktrace    (u/filtered-stacktrace e)
-                                                                  :ex-data       (ex-data e)
-                                                                  :original-info (:task_details info)}
-                                                   :status       :failed})
+        (update-task-history! th-id start-time-ns
+                              (on-fail-info {:task_details {:status        :failed
+                                                            :exception     (class e)
+                                                            :message       (.getMessage e)
+                                                            :stacktrace    (u/filtered-stacktrace e)
+                                                            :ex-data       (ex-data e)
+                                                            :original-info (:task_details info)}
+                                             :status       :failed}
+                                            e))
         (throw e)))))</pre></td></tr><tr><td class="docs"><p>Record a TaskHistory before executing the body, updating TaskHistory accordingly when the body completes.
-<code>info</code> should contain at least a name for the task (conventionally
-lisp-cased) as <code>:task</code>; see the <code>TaskHistoryInfo</code> schema in this namespace for other optional keys.</p>
+<code>info</code> should contain at least a name for the task (conventionally lisp-cased) as <code>:task</code>;
+see the <code>TaskHistoryInfo</code> schema in this namespace for other optional keys.</p>
 
 <p>  (with-task-history {:task "send-pulses"
                       :db_id 1
-                      :on-success-info (fn [thunk-result] {:status :failed})}
+                      :on-success-info (fn [info thunk-result] (assoc-in info [:task-details :thunk-result] thunk-result)})
+                      :on-fail-info (fn [info e] (assoc-in info [:task-details :exception-class] (class e)))}
     ...)</p>
+
+<p>Optionally takes:
+  - on-success-info: a function that takes the updated task history and the result of the task,
+    returns a map of task history info to update when the task succeeds.
+  - on-fail-info: a function that takes the updated task history and the exception thrown by the task,
+    returns a map of task history info to update when the task fails.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmacro with-task-history
   {:style/indent 1}
   [info &amp; body]
