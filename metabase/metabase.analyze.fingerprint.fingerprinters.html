@@ -2877,6 +2877,8 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.sync.util :as sync-util]
    [metabase.util :as u]
    [metabase.util.date-2 :as u.date]
+   [metabase.util.log]
+   [metabase.util.performance :as perf]
    [redux.core :as redux])
   (:import
    (com.bigml.histogram Histogram)
@@ -2887,20 +2889,21 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Apply reducing functinons <code>rfs</code> coll-wise to a seq of seqs.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn col-wise
   [&amp; rfs]
-  (fn
-    ([] (mapv (fn [rf] (rf)) rfs))
-    ([accs] (mapv (fn [rf acc] (rf (unreduced acc))) rfs accs))
-    ([accs row]
-     (let [all-reduced? (volatile! true)
-           results      (mapv (fn [rf acc x]
-                                (if-not (reduced? acc)
-                                  (do (vreset! all-reduced? false)
-                                      (rf acc x))
-                                  acc))
-                              rfs accs row)]
-       (if @all-reduced?
-         (reduced results)
-         results)))))</pre></td></tr><tr><td class="docs"><p>Constantly return <code>init</code>.</p>
+  (let [rfs (vec rfs)]
+    (fn
+      ([] (perf/mapv (fn [rf] (rf)) rfs))
+      ([accs] (perf/mapv (fn [rf acc] (rf (unreduced acc))) rfs accs))
+      ([accs row]
+       (let [all-reduced? (volatile! true)
+             results      (perf/mapv (fn [rf acc x]
+                                       (if-not (reduced? acc)
+                                         (do (vreset! all-reduced? false)
+                                             (rf acc x))
+                                         acc))
+                                     rfs accs row)]
+         (if @all-reduced?
+           (reduced results)
+           results))))))</pre></td></tr><tr><td class="docs"><p>Constantly return <code>init</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn constant-fingerprinter
   [init]
   (fn
@@ -2919,24 +2922,28 @@ net.brehaut.ClojureTools = (function (SH) {
   `(hash-map ~@(apply concat (for [[k v] (partition 2 kvs)]
                                `[~k (try
                                       ~v
-                                      (catch Throwable _#))]))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmacro ^:private with-reduced-error
-  [msg &amp; body]
-  `(let [result# (sync-util/with-error-handling ~msg ~@body)]
-     (if (instance? Throwable result#)
-       (reduced result#)
-       result#)))</pre></td></tr><tr><td class="docs"><p>Wrap <code>rf</code> in an error-catching transducer.</p>
+                                      (catch Throwable _#))]))))</pre></td></tr><tr><td class="docs"><p>This macro and its usage is written in a specific way to ensure that try-catch blocks don't produce closures.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro ^:private do-with-error-handling
+  [form action-on-exception msg]
+  `(if sync-util/*log-exceptions-and-continue?*
+     (try ~form
+          (catch Throwable e#
+            (metabase.util.log/warn e# ~msg)
+            (~action-on-exception e#)))
+     ~form))</pre></td></tr><tr><td class="docs"><p>Wrap <code>rf</code> in an error-catching transducer.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn with-error-handling
   [rf msg]
+  ;; This function is written in a specific way to ensure that try-catch blocks don't produce closures.
   (fn
-    ([] (with-reduced-error msg (rf)))
+    ([]
+     (do-with-error-handling (rf) reduced msg))
     ([acc]
-     (unreduced
-      (if (or (reduced? acc)
-              (instance? Throwable acc))
-        acc
-        (with-reduced-error msg (rf acc)))))
-    ([acc e] (with-reduced-error msg (rf acc e)))))</pre></td></tr><tr><td class="docs"><p>Like <code>redux/fuse</code> but wraps every reducing fn in <code>with-error-handling</code> and returns <code>nil</code> for
+     (if (or (reduced? acc)
+             (instance? Throwable acc))
+       (unreduced acc)
+       (do-with-error-handling (unreduced (rf acc)) identity msg)))
+    ([acc e]
+     (do-with-error-handling (rf acc e) reduced msg))))</pre></td></tr><tr><td class="docs"><p>Like <code>redux/fuse</code> but wraps every reducing fn in <code>with-error-handling</code> and returns <code>nil</code> for
  that fn if an error has been encountered during transducing.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn robust-fuse
   [kfs]
@@ -2965,17 +2972,17 @@ net.brehaut.ClojureTools = (function (SH) {
      (if (isa? semantic-type :Relation/*)
        semantic-type
        :Relation/*)]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private global-fingerprinter
+</td><td class="codes"><pre class="brush: clojure">(defn- global-fingerprinter []
   (redux/post-complete
    (robust-fuse {:distinct-count cardinality
                  :nil%           (stats/share nil?)})
    (partial hash-map :global)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod fingerprinter :default
   [_]
-  global-fingerprinter)</pre></td></tr><tr><td class="docs">
+  (global-fingerprinter))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod fingerprinter [:type/* :Semantic/* :type/FK]
   [_]
-  global-fingerprinter)</pre></td></tr><tr><td class="docs">
+  (global-fingerprinter))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod fingerprinter [:type/* :Semantic/* :type/PK]
   [_]
   (constant-fingerprinter nil))</pre></td></tr><tr><td class="docs">
@@ -2990,7 +2997,7 @@ net.brehaut.ClojureTools = (function (SH) {
   (redux/post-complete
    (redux/juxt
     fingerprinter
-    global-fingerprinter)
+    (global-fingerprinter))
    (fn [[type-fingerprint global-fingerprint]]
      (merge global-fingerprint
             type-fingerprint))))</pre></td></tr><tr><td class="docs">
