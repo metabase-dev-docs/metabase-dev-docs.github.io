@@ -3179,6 +3179,7 @@ would compare things. This works inside collections as well.</p>
   (:require
    [clojure.java.classpath :as classpath]
    [clojure.java.io :as io]
+   [clojure.math :as math]
    [clojure.pprint :as pprint]
    [clojure.set :as set]
    [clojure.string :as str]
@@ -3271,14 +3272,53 @@ collection of one or more of the above.</p>
     (find-tests-for-namespace-symbol symb options)))</pre></td></tr><tr><td class="docs"><p>default -- look in all dirs on the classpath</p>
 </td><td class="codes"><pre class="brush: clojure">(defmethod find-tests nil
   [_nil options]
-  (find-tests (classpath/system-classpath) options))</pre></td></tr><tr><td class="docs"><p>Find tests using the options map as passed to <code>clojure -X</code>.</p>
+  (find-tests (classpath/system-classpath) options))</pre></td></tr><tr><td class="docs"><p>Split sequence <code>xs</code> into <code>num-partitions</code> as equally as possible. Guaranteed to return <code>num-partitions</code>. This custom
+function is used instead of [[partition-all]] or whatever because we want to make sure every partition gets tests,
+even with weird combinations like 4 tests with 3 partitions or 29 tests with 10 partitions.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- partition-all-into-n-partitions
+  [num-partitions xs]
+  {:post [(= (count %) num-partitions)]}
+  ;; make sure the partitioning is deterministic -- `xs` should always come back in the same order but we should sort
+  ;; just to be safe.
+  (let [xs             (sort-by str xs)
+        partition-size (/ (count xs) num-partitions)]
+    (into []
+          (comp (map-indexed (fn [i x]
+                               [(long (math/floor (/ i partition-size))) x]))
+                (partition-by first)
+                (map (fn [partition]
+                       (map second partition))))
+          xs)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- partition-tests [tests {num-partitions :partition/total, partition-index :partition/index, :as _options}]
+  (if (or num-partitions partition-index)
+    (do
+      (assert (and num-partitions partition-index)
+              &quot;:partition/total and :partition/index must be set together&quot;)
+      (assert (pos-int? num-partitions)
+              &quot;Invalid :partition/total - must be a positive integer&quot;)
+      (assert (&lt;= num-partitions (count tests))
+              &quot;Invalid :partition/total - cannot have more partitions than number of tests&quot;)
+      (assert (int? partition-index)
+              &quot;Invalid :partition/index - must be an integer&quot;)
+      (assert (&lt;= 0 partition-index (dec num-partitions))
+              (format &quot;Invalid :partition/index - must be between 0 and %d&quot; (dec num-partitions)))
+      (let [partitions (partition-all-into-n-partitions num-partitions tests)
+            partition  (nth partitions partition-index)]
+        (printf &quot;Running tests in partition %d of %d (%d tests of %d)...\n&quot;
+                (inc partition-index)
+                num-partitions
+                (count partition)
+                (count tests))
+        partition))
+    tests))</pre></td></tr><tr><td class="docs"><p>Find tests using the options map as passed to <code>clojure -X</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn find-tests-with-options
   [{:keys [only], :as options}]
   (println &quot;Running tests with options&quot; (pr-str options))
   (when only
     (println &quot;Running tests in&quot; (pr-str only)))
   (let [start-time-ms (System/currentTimeMillis)
-        tests         (find-tests only options)]
+        tests         (-&gt; (find-tests only options)
+                          (partition-tests options))]
     (printf &quot;Finding tests took %s.\n&quot; (u/format-milliseconds (- (System/currentTimeMillis) start-time-ms)))
     (println &quot;Running&quot; (count tests) &quot;tests&quot;)
     tests))</pre></td></tr><tr><td class="docs"><p>Running tests &amp; reporting the output</p>
