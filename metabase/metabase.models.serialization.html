@@ -2865,16 +2865,59 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.models.serialization" name="metabase.models.serialization"><h1 class="project-name">metabase.models.serialization</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Defines several helper functions and multimethods for the serialization system.
-Serialization is an enterprise feature, but in the interest of keeping all the code for an entity in one place, these
-methods are defined here and implemented for all the exported models.</p>
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.models.serialization" name="metabase.models.serialization"><h1 class="project-name">metabase.models.serialization</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Defines core interfaces for serialization.</p>
 
-<p>Whether to export a new model:
-- Generally, the high-profile user facing things (databases, questions, dashboards, snippets, etc.) are exported.
-- Internal or automatic things (users, activity logs, permissions) are not.</p>
+<p>Serialization is an enterprise feature, but in the interest of keeping all the code for an entity in one place,
+these methods are defined here and implemented for all the exported models.</p>
 
-<p>If the model is not exported, add it to the exclusion lists in the tests. Every model should be explicitly listed as
-exported or not, and a test enforces this so serialization isn't forgotten for new models.</p>
+<h2>Whether to export a new model</h2>
+
+<p>Export if it's a high-profile user facing entity: Database, Question, Dashboard, Snippet, etc.
+Do not export if it's internal or automatic: Users (created automatically), logs, revisions, cache, permissions.</p>
+
+<h2>How to deal with serialization for a new model</h2>
+
+<ul>
+<li>Add it to the appropriate list in [[metabase-enterprise.serialization.v2.models]]</li>
+<li>If it is in the <code>excluded-models</code> list, then your job is done</li>
+<li>Define serialization multi-methods on a model (see <code>Card</code> and <code>Collection</code> for more complex examples or <code>Action</code>
+and <code>Segment</code> for less involved stuff)
+<ul><li><code>serdes/make-spec</code> - this is the main entry point. Should list every field in the model (this is checked in
+tests)</li>
+<li><code>serdes/descendants</code> - if model should be extracted along with some support (like Collection and all its
+children), you need to specify what to fetch - see <code>Card</code> for an example (used during export)</li>
+<li><code>serdes/dependencies</code> - if model references other models, you need to declare which ones, see <code>Action</code> for an
+example (used during import)</li></ul></li>
+<li>Write tests
+<ul><li>basic layout (that all entity fields are mentioned, fks are marked as such) is tested automatically</li>
+<li>see [[metabase-enterprise.serialization.v2.extract-test]] and [[metabase-enterprise.serialization.v2.load-test]]
+for examples</li>
+<li>basically try to think what special stuff is happening and test for corner cases</li>
+<li>do you store mbql? some other json structure? See <code>Card</code> for examples</li></ul></li>
+</ul>
+
+<h2>Existing transformations</h2>
+
+<ul>
+<li><code>(serdes/fk :model/Card)</code> or <code>(serdes/fk :model/Database :name)</code> - export foreign key in a portable way</li>
+<li><code>(serdes/nested :model/DashboardCard :dashboard_id opts)</code> - include some entities in your entity export</li>
+<li><code>(serdes/parent-ref)</code> - symmetrical call for <code>serdes/nested</code> to handle parent ids (you'd use it on <code>:dashboard_id</code>
+in that case)</li>
+<li><code>(serdes/date)</code> - format/parse dates with a stable format</li>
+<li><code>(serdes/kw)</code> - de/keywordize values during de/serialization</li>
+<li><code>(serdes/as :parent_id)</code> - store value as a different key</li>
+<li><code>(serdes/compose inner outer)</code> - compose two transformations</li>
+</ul>
+
+<h2>Use cases</h2>
+
+<h3>Skip value depending on data</h3>
+
+<p>See <code>Database/details</code>, but overall:
+- Put it in <code>:skip</code> if this column shouldn't be synchronized
+- You have to make decisions inside <code>:transform</code> column <code>:export</code> function (or <code>:import</code>)
+- To prevent value being serialized, return <code>::serdes/skip</code> instead of <code>nil</code> (the reason being that serialization
+  format distinguishes between <code>nil</code> and absence)</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.models.serialization
   (:refer-clojure :exclude [descendants])
   (:require
@@ -3166,11 +3209,18 @@ NativeQuerySnippet.</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Return specification for serialization. This should be a map of three keys: <code>:copy</code>, <code>:skip</code>, <code>:transform</code>.</p>
 
 <p><code>:copy</code> and <code>:skip</code> are vectors of field names. <code>:skip</code> is only used in tests to check that all fields were
-mentioned.
-j
-serialize/deserialize data.</p>
+mentioned. <code>:transform</code> is a map from field name to an <code>{:import (fn [v] ...) :export (fn [v] ...)}</code> map.</p>
 
-<p>For behavior, see <code>extract-one</code> and <code>xform-one</code>.</p>
+<p>For behavior, see <code>extract-one</code> and <code>xform-one</code>. Two fields - <code>id</code> and <code>updated_at</code> - are always skipped, no need to
+mention them in <code>:skip</code>.</p>
+
+<p>Example:</p>
+
+<p>(defmethod serdes/make-spec "ModelName" [_model-name _opts]
+  {:copy [:name :description]
+   :skip [;; it's nice to comment why it's skipped
+          :internal_data]
+   :transform {:card_id (serdes/fk :model/Card)}})</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti make-spec
   (fn [model-name _opts] model-name))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod make-spec :default [_ _] nil)</pre></td></tr><tr><td class="docs"><p>Entry point for extracting all entities of a particular model:
