@@ -2907,6 +2907,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [toucan2.core :as t2])
   (:import
    (java.io File)
+   (java.nio.charset StandardCharsets)
    (org.apache.tika Tika)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>This tracks the size of various text fields in bytes.</p>
 
@@ -2920,14 +2921,35 @@ net.brehaut.ClojureTools = (function (SH) {
     :name 256))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod max-bytes :model/Field [_ column]
   (case column
-    :name 254))</pre></td></tr><tr><td class="docs">
+    :name 254
+    :display_name 254))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod max-bytes :model/Card  [_ column]
   (case column
     :name 254))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private min-safe (fnil min Long/MAX_VALUE Long/MAX_VALUE))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- max-column-bytes [driver]
   (let [column-limit (some-&gt; driver driver/column-name-length-limit)]
-    (min-safe column-limit (max-bytes :model/Field :name))))</pre></td></tr><tr><td class="docs">
+    (min-safe column-limit (max-bytes :model/Field :name))))</pre></td></tr><tr><td class="docs"><p>Truncates a string to at most n bytes in UTF-8 encoding, removing whole characters.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn truncate-utf8-bytes
+  [^String s ^long n]
+  (let [bytes (.getBytes s StandardCharsets/UTF_8)]
+    (if (&lt;= (alength bytes) n)
+      s
+      (loop [byte-index 0
+             char-index 0]
+        (if (&gt;= byte-index n)
+          (subs s 0 char-index)
+          (let [char-size  (Character/charCount (.codePointAt s char-index))
+                byte-count (count (.getBytes (subs s char-index (+ char-index char-size)) StandardCharsets/UTF_8))]
+            (if (&lt;= (+ byte-index byte-count) n)
+              (recur (+ byte-index byte-count)
+                     (+ char-index char-size))
+              (subs s 0 char-index))))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- normalize-display-name
+  [raw-name]
+  (if (str/blank? raw-name)
+    &quot;unnamed column&quot;
+    (truncate-utf8-bytes (str/trim raw-name) (max-bytes :model/Field :display_name))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- normalize-column-name
   [driver raw-name]
   (if (str/blank? raw-name)
@@ -3106,14 +3128,20 @@ Exclude separators which give incompatible column counts between the header and 
 </td><td class="codes"><pre class="brush: clojure">(defn- auto-pk-column?
   [driver db]
   (driver.u/supports? driver :upload-with-auto-pk db))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- unique-alias-fn [driver]
+</td><td class="codes"><pre class="brush: clojure">(defn- unique-alias-fn [driver separator]
   (let [max-length (max-column-bytes driver)]
     (fn [base suffix]
-      (as-&gt; (str base &quot;_&quot; suffix) %
+      (as-&gt; (str base separator suffix) %
         (driver/escape-alias driver %)
         (lib.util/truncate-alias % max-length)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- derive-display-names [driver header]
+  (let [generator-fn (mbql.u/unique-name-generator :unique-alias-fn (unique-alias-fn driver &quot; &quot;))]
+    (mapv generator-fn
+          (for [h header]
+            (humanization/name-&gt;human-readable-name
+             (normalize-display-name h))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- derive-column-names [driver header]
-  (let [generator-fn (mbql.u/unique-name-generator :unique-alias-fn (unique-alias-fn driver))]
+  (let [generator-fn (mbql.u/unique-name-generator :unique-alias-fn (unique-alias-fn driver &quot;_&quot;))]
     (mapv (comp keyword generator-fn)
           (for [h header] (normalize-column-name driver h)))))</pre></td></tr><tr><td class="docs"><p>Creates a table from a CSV file. If the table already exists, it will throw an error.
  Returns the file size, number of rows, and number of columns.</p>
@@ -3126,6 +3154,7 @@ Exclude separators which give incompatible column counts between the header and 
                                 auto-pk?
                                 without-auto-pk-columns)
             settings          (upload-parsing/get-settings)
+            display-names     (derive-display-names driver header)
             column-names      (derive-column-names driver header)
             cols-&gt;upload-type (detect-schema settings column-names rows)
             col-definitions   (column-definitions driver (cond-&gt; cols-&gt;upload-type
@@ -3142,10 +3171,11 @@ Exclude separators which give incompatible column counts between the header and 
                                 {:primary-key [auto-pk-column-keyword]}))
         (try
           (driver/insert-into! driver (:id db) table-name csv-col-names parsed-rows)
-          {:num-rows          (count rows)
-           :num-columns       (count cols-&gt;upload-type)
-           :generated-columns (if auto-pk? 1 0)
-           :size-mb           (file-size-mb csv-file)}
+          {:columns (zipmap column-names display-names)
+           :stats   {:num-rows          (count rows)
+                     :num-columns       (count cols-&gt;upload-type)
+                     :generated-columns (if auto-pk? 1 0)
+                     :size-mb           (file-size-mb csv-file)}}
           (catch Throwable e
             (driver/drop-table! driver (:id db) table-name)
             (throw (ex-info (ex-message e) {:status-code 400} e))))))))</pre></td></tr><tr><td class="docs"><p>+------------------+
@@ -3162,6 +3192,24 @@ Exclude separators which give incompatible column counts between the header and 
     :asynchronous (future (sync/sync-table! table))
     :synchronous (sync/sync-table! table)
     :never nil))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- set-display-names!
+  [table-id field-&gt;display-name]
+  (let [field-&gt;display-name (update-keys field-&gt;display-name (comp u/lower-case-en name))
+        case-statement      (into [:case]
+                                  (mapcat identity)
+                                  (for [[n display-name] field-&gt;display-name]
+                                    [[:= [:lower :name] n] display-name]))]
+    ;; Using t2/update! results in an invalid query for certain versions of PostgreSQL
+    ;; SELECT * FROM \&quot;metabase_field\&quot; WHERE \&quot;id\&quot; AND (\&quot;table_id\&quot; = ?) AND ...
+    ;;                                        ^^^^^
+    ;; ERROR: argument of AND must be type boolean, not type integer
+    (t2/query {:update (t2/table-name :model/Field)
+               :set {:display_name case-statement}
+               :where [:and
+                       [:= :table_id table-id]
+                       [:in [:lower :name] (keys field-&gt;display-name)]
+                       ;; Only replace display names that have not been overridden already.
+                       [:= [:lower :name] [:lower :display_name]]]})))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- uploads-enabled? []
   (some? (:db_id (public-settings/uploads-settings))))</pre></td></tr><tr><td class="docs"><p>Returns an ExceptionInfo object if the user cannot upload to the given database for the subset of reasons common to all uploads
 entry points. Returns nil otherwise.</p>
@@ -3233,13 +3281,14 @@ It may involve redundantly reading the file, or even failing again if the file i
         schema            (some-&gt;&gt; schema (ddl.i/format-name driver))
         table-name        (some-&gt;&gt; table-name (ddl.i/format-name driver))
         schema+table-name (table-identifier {:schema schema :name table-name})
-        stats             (create-from-csv! driver db schema+table-name filename file)
+        {:keys [columns stats]} (create-from-csv! driver db schema+table-name filename file)
         ;; Sync immediately to create the Table and its Fields; the scan is settings-dependent and can be async
         table             (sync-tables/create-table! db {:name         table-name
                                                          :schema       (not-empty schema)
                                                          :display_name display-name})
         _set_is_upload    (t2/update! :model/Table (:id table) {:is_upload true})
         _sync             (scan-and-sync-table! db table)
+        _set_names        (set-display-names! (:id table) columns)
         ;; Set the display_name of the auto-generated primary key column to the same as its name, so that if users
         ;; download results from the table as a CSV and reupload, we'll recognize it as the same column
         _ (when (auto-pk-column? driver db)
@@ -3439,15 +3488,16 @@ Returns the newly created model. May throw validation, permimissions, or DB erro
                                    without-auto-pk-columns)
               normed-name-&gt;field (m/index-by #(normalize-column-name driver (:name %))
                                              (t2/select :model/Field :table_id (:id table) :active true))
-              normalized-header  (for [h header] (normalize-column-name driver h))
+              column-names       (for [h header] (normalize-column-name driver h))
+              display-names      (for [h header] (normalize-display-name h))
               create-auto-pk?    (and
                                   auto-pk?
                                   (driver/create-auto-pk-with-append-csv? driver)
                                   (not (contains? normed-name-&gt;field auto-pk-column-name)))
               normed-name-&gt;field (cond-&gt; normed-name-&gt;field auto-pk? (dissoc auto-pk-column-name))
-              _                  (check-schema normed-name-&gt;field normalized-header)
+              _                  (check-schema normed-name-&gt;field column-names)
               settings           (upload-parsing/get-settings)
-              old-types          (map (comp upload-types/base-type-&gt;upload-type :base_type normed-name-&gt;field) normalized-header)
+              old-types          (map (comp upload-types/base-type-&gt;upload-type :base_type normed-name-&gt;field) column-names)
               ;; in the happy, and most common, case all the values will match the existing types
               ;; for now we just plan for the worst and perform a fairly expensive operation to detect any type changes
               ;; we can come back and optimize this to an optimistic-with-fallback approach later.
@@ -3458,7 +3508,7 @@ Returns the newly created model. May throw validation, permimissions, or DB erro
               ;; be parsed as its existing type - there is scope to improve these error messages in the future.
               modify-schema?     (and (not= old-types new-types) (= detected-types new-types))
               _                  (when modify-schema?
-                                   (let [changes (field-changes normalized-header old-types new-types)]
+                                   (let [changes (field-changes column-names old-types new-types)]
                                      (add-columns! driver database table (:added changes))
                                      (alter-columns! driver database table (:updated changes))))
               ;; this will fail if any of our required relaxations were rejected.
@@ -3472,7 +3522,7 @@ Returns the newly created model. May throw validation, permimissions, or DB erro
           (try
             (when replace-rows?
               (driver/truncate! driver (:id database) (table-identifier table)))
-            (driver/insert-into! driver (:id database) (table-identifier table) normalized-header parsed-rows)
+            (driver/insert-into! driver (:id database) (table-identifier table) column-names parsed-rows)
             (catch Throwable e
               (throw (ex-info (ex-message e) {:status-code 422}))))
           (when create-auto-pk?
@@ -3480,6 +3530,7 @@ Returns the newly created model. May throw validation, permimissions, or DB erro
                           {auto-pk-column-keyword ::upload-types/auto-incrementing-int-pk}
                           :primary-key [auto-pk-column-keyword]))
           (scan-and-sync-table! database table)
+          (set-display-names! (:id table) (zipmap column-names display-names))
           (when create-auto-pk?
             (let [auto-pk-field (table-id-&gt;auto-pk-column driver (:id table))]
               (t2/update! :model/Field (:id auto-pk-field) {:display_name (:name auto-pk-field)})))

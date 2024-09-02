@@ -2899,7 +2899,19 @@ Card [Collection] perms checking rather than ad-hoc perms checking.</p>
                    additional-ex-data))))</pre></td></tr><tr><td class="docs"><p>OSS implementation always returns <code>nil</code> because block permissions are an EE-only feature.</p>
 </td><td class="codes"><pre class="brush: clojure">(defenterprise check-block-permissions
   metabase-enterprise.advanced-permissions.models.permissions.block-permissions
-  [_query])</pre></td></tr><tr><td class="docs"><p>Throws an exception if any of the tables referenced by this query are marked as inactive in the app DB.
+  [_query])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- throw-inactive-table-error
+  [{db-id :id db-name :name} {table-id :id table-name :name schema :schema}]
+  ;; We don't cache perms for inactive tables, so we need to manually bypass the cache here
+  (binding [data-perms/*use-perms-cache?* false]
+    (let [show-table-name? (data-perms/user-has-permission-for-table? *current-user-id*
+                                                                      :perms/view-data
+                                                                      :unrestricted
+                                                                      db-id
+                                                                      table-id)]
+      (throw (Exception. (tru &quot;Table {0} is inactive.&quot; (if show-table-name?
+                                                         (format &quot;\&quot;%s.%s.%s\ db-name schema table-name)
+                                                         table-id)))))))</pre></td></tr><tr><td class="docs"><p>Throws an exception if any of the tables referenced by this query are marked as inactive in the app DB.
 These queries would (likely) fail anyway since an inactive table one is either deleted, or Metabase's connection
 doesn't have access to it. But we can reject them preemptively for a more consistent experience, and to avoid
 needing to cache permissions for inactive tables.</p>
@@ -2910,8 +2922,8 @@ needing to cache permissions for inactive tables.</p>
       (doseq [table-id table-ids]
         (let [table (lib.metadata.protocols/table (qp.store/metadata-provider) table-id)]
           (when-not (:active table)
-            (throw (ex-info (tru &quot;Table {0} is inactive.&quot; table-id)
-                            (select-keys table [:name :id])))))))))</pre></td></tr><tr><td class="docs"><p>Check that the current user has permissions to read Card with <code>card-id</code>, or throw an Exception. </p>
+            (throw-inactive-table-error (lib.metadata.protocols/database (qp.store/metadata-provider))
+                                        table)))))))</pre></td></tr><tr><td class="docs"><p>Check that the current user has permissions to read Card with <code>card-id</code>, or throw an Exception. </p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn- check-card-read-perms
   [database-id :- ::lib.schema.id/database
    card-id     :- ::lib.schema.id/card]
