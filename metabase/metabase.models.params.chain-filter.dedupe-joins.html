@@ -2868,88 +2868,80 @@ net.brehaut.ClojureTools = (function (SH) {
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.models.params.chain-filter.dedupe-joins" name="metabase.models.params.chain-filter.dedupe-joins"><h1 class="project-name">metabase.models.params.chain-filter.dedupe-joins</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.models.params.chain-filter.dedupe-joins
   (:require
-   [clojure.core.logic :as l]
-   [clojure.set :as set]))</pre></td></tr><tr><td class="docs"><p>A relation such that the left-hand side (LHS) of <code>join</code> is <code>lhs</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- lhso
-  [join lhs]
-  (l/featurec join {:lhs {:table lhs}}))</pre></td></tr><tr><td class="docs"><p>A relation such that the right-hand side (RHS) of <code>join</code> is <code>rhs</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- rhso
-  [join rhs]
-  (l/featurec join {:rhs {:table rhs}}))</pre></td></tr><tr><td class="docs"><p>A psuedo-relation such that goal <code>g</code> succeeds for at least one item in <code>coll</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- anyg
-  [g coll]
-  (l/conda
-   ((l/fresh [head]
-      (l/firsto coll head)
-      (g head)))
-   ((l/fresh [more]
-      (l/resto coll more)
-      (anyg g more)))))</pre></td></tr><tr><td class="docs"><p>A relation such that <code>joins</code> has a join whose RHS is <code>rhs</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- has-joino
-  [joins rhs]
-  (anyg #(rhso % rhs) joins))</pre></td></tr><tr><td class="docs"><p>True if <code>join-1</code> can be considered a 'parent' of <code>join-2</code> -- if the Table made available by <code>join-1</code> (its RHS) is
-needed for <code>join-2</code> (its LHS).</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- parent-joino
-  [join-1 join-2]
-  (l/fresh [id]
-    (rhso join-1 id)
-    (lhso join-2 id)))</pre></td></tr><tr><td class="docs"><p>A relation such that <code>sublist</code> is all items in <code>lst</code> up to (but not including) <code>item</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- list-beforeo
-  [lst sublist item]
-  #_:clj-kondo/ignore
-  (l/matcha [lst sublist]
-    ([[] []])
-    ([[item . _] []])
-    ([[?x . ?list-more] [?x . ?sublist-more]]
-     (list-beforeo ?list-more ?sublist-more item))))</pre></td></tr><tr><td class="docs"><p>A relationship such that the parent join of <code>join</code> appears before it in <code>joins</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- parent-beforeo
-  [joins join]
-  (l/fresh [joins-before parent]
-    (list-beforeo joins joins-before join)
-    (parent-joino parent join)
-    (l/membero parent joins-before)))</pre></td></tr><tr><td class="docs"><p>A relationship such that all RHS tables in <code>joins</code> are distinct.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- distinct-rhso
-  [joins]
-  (let [rhses (vec (l/lvars (count joins)))]
-    (dorun (map rhso joins rhses))
-    (l/all
-     (l/distincto rhses))))</pre></td></tr><tr><td class="docs"><p>Remove unnecessary joins from a collection of <code>in-joins</code>.</p>
+   [clojure.set :as set]
+   [medley.core :as m]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private source-node (comp :table :lhs))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private target-node (comp :table :rhs))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private edge-nodes (juxt source-node target-node))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- weight
+  [terminal-ids edge]
+  (let [[s e] (edge-nodes edge)]
+    (+ (if (terminal-ids s) 0 1)
+       (if (terminal-ids e) 0 1))))</pre></td></tr><tr><td class="docs"><p>Return a map from the nodes in <code>nodes</code> to their degree in the graph with <code>edges</code>.
+The degree of a node is the number of edges incident to it. A loop edge contributes 2 to the degree.
+Nodes without any edges are not included in the map.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- node-degrees
+  [nodes edges]
+  (reduce (fn [degrees edge]
+            (reduce #(update %1 %2 (fnil inc 0))
+                    degrees
+                    (filter nodes (edge-nodes edge))))
+          {}
+          edges))</pre></td></tr><tr><td class="docs"><p>Return a subset of <code>edges</code> forming a tree starting from node <code>source-id</code> and
+containing all nodes in <code>terminal-ids</code>.
+The tree is built greedily, there is no guarantee that we find the optimal one.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- make-tree
+  [source-id edges terminal-ids]
+  (loop [s #{source-id}, edges edges, tree-edges []]
+    (if (set/subset? terminal-ids s)
+      tree-edges
+      (if-let [out-edges (seq (filter (comp s source-node) edges))]
+        (let [edge (apply min-key #(weight terminal-ids %) out-edges)
+              s' (conj s (target-node edge))]
+          (recur s'
+                 (remove (comp s' target-node) edges)
+                 (conj tree-edges edge)))
+        tree-edges))))</pre></td></tr><tr><td class="docs"><p>Return the transitive closure of nodes reachable from <code>start-nodes</code> by a single edge only.
+<code>node-fn</code> selects the target node of an edge returned by <code>node-&gt;edges</code>.  <code>node-&gt;edges</code> is a function returning the
+edges going from a node. (Note that source and target nodes can be both lhs and rhs tables depending on <code>node-fn</code>
+and <code>node-&gt;edges</code>.)</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- forced-nodes
+  [node-fn start-nodes node-&gt;edges]
+  (loop [[node &amp; nodes] start-nodes, result start-nodes]
+    (if (nil? node)
+      result
+      (let [[edge &amp; more] (node-&gt;edges node)]
+        (if (or (nil? edge) (seq more))
+          (recur nodes result)
+          (let [next-node (node-fn edge)]
+            (recur (cons next-node nodes) (conj result next-node))))))))</pre></td></tr><tr><td class="docs"><p>Remove unnecessary joins from a collection of <code>in-joins</code>.</p>
 
 <p><code>keep-ids</code> = the IDs of Tables that we want to keep joins for. Joins that are not needed to keep these Tables may be
 removed.</p>
+
+<p>Note that this function implements a simple greedy algorithm, replacing the previous optimal, but exponential
+implementation.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn dedupe-joins
   [source-id in-joins keep-ids]
-  ;; we can't keep any joins that don't exist in `in-joins`, so go ahead and remove IDs for those joins if they're not
-  ;; present
-  (let [keep-ids (set/intersection (set keep-ids)
-                                   (set (map #(get-in % [:rhs :table]) in-joins)))]
-    (first
-     (some
-      seq
-      (for [num-joins (range (count keep-ids) (inc (count in-joins)))]
-        (let [out-joins (vec (l/lvars num-joins))]
-          (l/run 1 [q]
-            (l/== q out-joins)
-            ;; every join in out-joins must be present in the original non-deduped set of joins
-            (l/everyg (fn [join]
-                        (l/membero join in-joins))
-                      out-joins)
-            ;; no duplicate joins (this is mostly for optimization since we also deduplicate RHSes below)
-            (l/distincto out-joins)
-            ;; a join for every rhs must be present
-            (l/everyg (fn [id]
-                        (has-joino out-joins id))
-                      keep-ids)
-            ;; no duplicate rhses
-            (distinct-rhso out-joins)
-            ;; joins must be in order (e.g. parent join must come first)
-            (l/everyg (fn [join]
-                        (l/conda
-                         ;; either the LHS is the source Table...
-                         ((lhso join source-id))
-                         ;; or its LHS must have already been joined
-                         ((parent-beforeo out-joins join))))
-                      out-joins))))))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+  (let [;; get rid of parallel edges, for our purposes they are equivalent
+        edges (m/distinct-by edge-nodes in-joins)
+        out-edges (group-by source-node edges)
+        in-edges (group-by target-node edges)
+        ;; Collect the IDs that must be included either way to prefer them
+        ;; during the construction of the tree.
+        transitive-keep-ids (forced-nodes source-node keep-ids in-edges)
+        transitive-source-ids (forced-nodes target-node #{source-id} out-edges)
+        terminal-ids (set/union transitive-source-ids transitive-keep-ids)
+        tree (make-tree source-id edges terminal-ids)
+        ;; The tree might contain nodes we don't need: any non-terminal node with degree less than 2 is redundant.
+        intermediate-ids (into #{}
+                               (comp (mapcat edge-nodes)
+                                     (remove terminal-ids))
+                               edges)
+        degrees (node-degrees intermediate-ids tree)
+        redundant-nodes (into #{} (keep (fn [[n d]] (when (&lt; d 2) n))) degrees)]
+    ;; Return the tree with edges incident to redundant nodes removed.
+    (into [] (remove #(some redundant-nodes (edge-nodes %))) tree)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
