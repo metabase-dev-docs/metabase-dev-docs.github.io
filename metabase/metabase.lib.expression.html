@@ -2895,9 +2895,12 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(mu/defn column-metadata-&gt;expression-ref :- :mbql.clause/expression
   &quot;Given `:metadata/column` column metadata for an expression, construct an `:expression` reference.&quot;
   [metadata :- ::lib.schema.metadata/column]
-  (let [options {:lib/uuid       (str (random-uuid))
-                 :base-type      (:base-type metadata)
-                 :effective-type ((some-fn :effective-type :base-type) metadata)}]
+  (let [options (merge
+                 {:lib/uuid       (str (random-uuid))
+                  :base-type      (:base-type metadata)
+                  :effective-type ((some-fn :effective-type :base-type) metadata)}
+                 (when-let [unit (:metabase.lib.field/temporal-unit metadata)]
+                   {:temporal-unit unit}))]
     [:expression options ((some-fn :lib/expression-name :name) metadata)]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn resolve-expression :- ::lib.schema.expression/expression
   &quot;Find the expression with `expression-name` in a given stage of a `query`, or throw an Exception if it doesn't
@@ -2920,13 +2923,15 @@ net.brehaut.ClojureTools = (function (SH) {
     (lib.metadata.calculation/type-of query stage-number expression)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/metadata-method :expression
   [query stage-number [_expression opts expression-name, :as expression-ref-clause]]
-  {:lib/type            :metadata/column
-   :lib/source-uuid     (:lib/uuid opts)
-   :name                expression-name
-   :lib/expression-name expression-name
-   :display-name        (lib.metadata.calculation/display-name query stage-number expression-ref-clause)
-   :base-type           (lib.metadata.calculation/type-of query stage-number expression-ref-clause)
-   :lib/source          :source/expressions})</pre></td></tr><tr><td class="docs">
+  (merge {:lib/type            :metadata/column
+          :lib/source-uuid     (:lib/uuid opts)
+          :name                expression-name
+          :lib/expression-name expression-name
+          :display-name        (lib.metadata.calculation/display-name query stage-number expression-ref-clause)
+          :base-type           (lib.metadata.calculation/type-of query stage-number expression-ref-clause)
+          :lib/source          :source/expressions}
+         (when-let [unit (lib.temporal-bucket/raw-temporal-bucket expression-ref-clause)]
+           {:metabase.lib.field/temporal-unit unit})))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/display-name-method :dispatch-type/integer
   [_query _stage-number n _style]
   (str n))</pre></td></tr><tr><td class="docs">
@@ -2940,8 +2945,13 @@ net.brehaut.ClojureTools = (function (SH) {
   [_query _stage-number s _style]
   (str s))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/display-name-method :expression
-  [_query _stage-number [_expression _opts expression-name] _style]
-  expression-name)</pre></td></tr><tr><td class="docs">
+  [_query _stage-number [_expression {:keys [temporal-unit] :as _opts} expression-name] _style]
+  (letfn [(temporal-format [display-name]
+            (lib.util/format &quot;%s: %s&quot; display-name (-&gt; (name temporal-unit)
+                                                       (str/replace \- \space)
+                                                       u/capitalize-en)))]
+    (cond-&gt; expression-name
+      temporal-unit temporal-format)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/column-name-method :expression
   [_query _stage-number [_expression _opts expression-name]]
   expression-name)</pre></td></tr><tr><td class="docs"><p>Whether the display name we are generated is recursively nested inside another display name. For infix math operators
@@ -3023,6 +3033,12 @@ we'll wrap the results in parentheses to make the display name more obvious.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/column-name-method :coalesce
   [query stage-number [_coalesce _opts expr _null-expr]]
   (lib.metadata.calculation/column-name query stage-number expr))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod lib.temporal-bucket/with-temporal-bucket-method :expression
+  [expr-ref unit]
+  (lib.temporal-bucket/add-temporal-bucket-to-ref expr-ref unit))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod lib.temporal-bucket/temporal-bucket-method :expression
+  [[_expression {:keys [temporal-unit]} _expr-name]]
+  temporal-unit)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">#_(defn- conflicting-name? [query stage-number expression-name]
     (let [stage     (lib.util/query-stage query stage-number)
           cols      (lib.metadata.calculation/visible-columns query stage-number stage)

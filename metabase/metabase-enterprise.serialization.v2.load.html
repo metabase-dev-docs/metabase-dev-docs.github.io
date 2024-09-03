@@ -2912,8 +2912,8 @@ our database.</p>
       (reduce loader ctx deps))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- path-error-data [error-type expanding path]
   (let [last-model (:model (last path))]
-    {:path       path
-     :deps-chain expanding
+    {:path       (mapv (partial into {}) path)
+     :deps-chain (set (map #(mapv (partial into {}) %) expanding))
      :model      last-model
      :table      (some-&gt;&gt; last-model (keyword &quot;model&quot;) t2/table-name)
      :error      error-type}))</pre></td></tr><tr><td class="docs"><p>Loads a single entity, specified by its <code>:serdes/meta</code> abstract path, into the appdb, doing some bookkeeping to
@@ -2932,7 +2932,7 @@ local version, and storing in the db).</p>
   [{:keys [expanding ingestion seen] :as ctx} path &amp; [modfn]]
   (log/infof &quot;Loading %s&quot; (serdes/log-path-str path))
   (cond
-    (expanding path) (throw (ex-info (format &quot;Circular dependency on %s&quot; (pr-str path))
+    (expanding path) (throw (ex-info (format &quot;Circular dependency on %s&quot; (serdes/log-path-str path))
                                      (path-error-data ::circular expanding path)))
     (seen path) ctx ; Already been done, can skip it.
     :else (let [ingested (try
@@ -2957,7 +2957,8 @@ local version, and storing in the db).</p>
               (serdes/load-one! ingested local-or-nil)
               ctx
               (catch Exception e
-                (throw (ex-info (format &quot;Failed to load into database for %s&quot; (pr-str path))
+                ;; ugly mapv here to convered #ordered/map into normal map so it's readable in the logs
+                (throw (ex-info (format &quot;Failed to load into database for %s&quot; (serdes/log-path-str path))
                                 (path-error-data ::load-failure expanding path)
                                 e)))))))</pre></td></tr><tr><td class="docs"><p>Loads in a database export from an ingestion source, which is any Ingestable instance.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn load-metabase!
