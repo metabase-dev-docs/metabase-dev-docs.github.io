@@ -2875,6 +2875,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [medley.core :as m]
    [metabase.analytics.snowplow :as snowplow]
    [metabase.config :as config]
+   [metabase.db :as db]
    [metabase.db.query :as mdb.query]
    [metabase.driver :as driver]
    [metabase.email :as email]
@@ -2888,7 +2889,6 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.models.humanization :as humanization]
    [metabase.models.interface :as mi]
    [metabase.public-settings :as public-settings]
-   [metabase.util :as u]
    [metabase.util.honey-sql-2 :as h2x]
    [metabase.util.log :as log]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
@@ -2923,18 +2923,7 @@ considered to add a count of <code>1</code>, while non-truthy values do not affe
     (&lt;= 26 x 50)   &quot;26-50&quot;
     (&lt;= 51 x 100)  &quot;51-100&quot;
     (&lt;= 101 x 250) &quot;101-250&quot;
-    (&gt; x 250)      &quot;250+&quot;))</pre></td></tr><tr><td class="docs"><p>Return large bin number. Assumes positive inputs.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- bin-large-number
-  [x]
-  (cond
-    (= 0 x)           &quot;0&quot;
-    (&lt; x 1)           &quot;&lt; 1&quot;
-    (&lt;= 1 x 10)       &quot;1-10&quot;
-    (&lt;= 11 x 50)      &quot;11-50&quot;
-    (&lt;= 51 x 250)     &quot;51-250&quot;
-    (&lt;= 251 x 1000)   &quot;251-1000&quot;
-    (&lt;= 1001 x 10000) &quot;1001-10000&quot;
-    (&gt; x 10000)       &quot;10000+&quot;))</pre></td></tr><tr><td class="docs"><p>Go through a bunch of maps and count the frequency a given key's values.</p>
+    (&gt; x 250)      &quot;250+&quot;))</pre></td></tr><tr><td class="docs"><p>Go through a bunch of maps and count the frequency a given key's values.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- value-frequencies
   [many-maps k]
   (frequencies (map k many-maps)))</pre></td></tr><tr><td class="docs"><p>Bin some frequencies using a passed in <code>binning-fn</code>.</p>
@@ -3173,33 +3162,73 @@ TODO: characterize by non-user account emails, # emails</p>
   []
   {:metrics (t2/count LegacyMetric)})</pre></td></tr><tr><td class="docs"><p>Execution Metrics</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private query-execution-window-days 30)</pre></td></tr><tr><td class="docs"><p>Summarize <code>executions</code>, by incrementing approriate counts in a summary map.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- summarize-executions
-  ([]
-   (summarize-executions (t2/reducible-query {:select [:executor_id :running_time [[:case
-                                                                                    [:= :error nil] false
-                                                                                    [:= :error &quot;&quot;] false
-                                                                                    :else true] :has_error]]
-                                              :from   [:query_execution]
-                                              :where  [:&gt; :started_at (t/minus (t/offset-date-time) (t/days query-execution-window-days))]})))
-  ([executions]
-   (reduce summarize-executions {:executions 0, :by_status {}, :num_per_user {}, :num_by_latency {}} executions))
-  ([summary execution]
-   (-&gt; summary
-       (update :executions u/safe-inc)
-       ;; MYSQL is returning true as 1, false as 0! what!
-       (update-in [:by_status (if (#{1 true} (:has_error execution))
-                                &quot;failed&quot;
-                                &quot;completed&quot;)] u/safe-inc)
-       (update-in [:num_per_user (:executor_id execution)] u/safe-inc)
-       (update-in [:num_by_latency (bin-large-number (/ (:running_time execution) 1000))] u/safe-inc))))</pre></td></tr><tr><td class="docs"><p>Convert a map of <code>user-id-&gt;num-executions</code> to the histogram output format we expect.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- summarize-executions-per-user
-  [user-id-&gt;num-executions]
-  (frequencies (map bin-large-number (vals user-id-&gt;num-executions))))</pre></td></tr><tr><td class="docs"><p>Get metrics based on QueryExecutions.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- execution-metrics-sql []
+  (let [thirty-days-ago (case (db/db-type)
+                          :postgres &quot;CURRENT_TIMESTAMP - INTERVAL '30 days'&quot;
+                          :h2       &quot;DATEADD('DAY', -30, CURRENT_TIMESTAMP)&quot;
+                          :mysql    &quot;CURRENT_TIMESTAMP - INTERVAL 30 DAY&quot;)]
+    (str/join
+     &quot;\n&quot;
+     [&quot;WITH user_executions AS (&quot;
+      &quot;    SELECT executor_id, COUNT(*) AS num_executions&quot;
+      &quot;    FROM query_execution&quot;
+      &quot;    WHERE started_at &gt; &quot; thirty-days-ago
+      &quot;    GROUP BY executor_id&quot;
+      &quot;),&quot;
+      &quot;query_stats_1 AS (&quot;
+      &quot;    SELECT&quot;
+      &quot;        COUNT(*) AS executions,&quot;
+      &quot;        SUM(CASE WHEN error IS NULL OR length(error) = 0 THEN 1 ELSE 0 END) AS by_status__completed,&quot;
+      &quot;        SUM(CASE WHEN error IS NOT NULL OR length(error) &gt; 0 THEN 1 ELSE 0 END) AS by_status__failed,&quot;
+      &quot;        COALESCE(SUM(CASE WHEN running_time = 0 THEN 1 ELSE 0 END), 0) AS num_by_latency__0,&quot;
+      &quot;        COALESCE(SUM(CASE WHEN running_time &gt; 0 AND running_time &lt; 1000 THEN 1 ELSE 0 END), 0) AS num_by_latency__lt_1,&quot;
+      &quot;        COALESCE(SUM(CASE WHEN running_time &gt;= 1000 AND running_time &lt; 10000 THEN 1 ELSE 0 END), 0) AS num_by_latency__1_10,&quot;
+      &quot;        COALESCE(SUM(CASE WHEN running_time &gt;= 10000 AND running_time &lt; 50000 THEN 1 ELSE 0 END), 0) AS num_by_latency__11_50,&quot;
+      &quot;        COALESCE(SUM(CASE WHEN running_time &gt;= 50000 AND running_time &lt; 250000 THEN 1 ELSE 0 END), 0) AS num_by_latency__51_250,&quot;
+      &quot;        COALESCE(SUM(CASE WHEN running_time &gt;= 250000 AND running_time &lt; 1000000 THEN 1 ELSE 0 END), 0) AS num_by_latency__251_1000,&quot;
+      &quot;        COALESCE(SUM(CASE WHEN running_time &gt;= 1000000 AND running_time &lt; 10000000 THEN 1 ELSE 0 END), 0) AS num_by_latency__1001_10000,&quot;
+      &quot;        COALESCE(SUM(CASE WHEN running_time &gt;= 10000000 THEN 1 ELSE 0 END), 0) AS num_by_latency__10000_plus&quot;
+      &quot;    FROM query_execution&quot;
+      &quot;    WHERE started_at &gt; &quot; thirty-days-ago
+      &quot;),&quot;
+      &quot;query_stats_2 AS (&quot;
+      &quot;    SELECT&quot;
+      &quot;        COALESCE(SUM(CASE WHEN num_executions = 0 THEN 1 ELSE 0 END), 0) AS num_per_user__0,&quot;
+      &quot;        COALESCE(SUM(CASE WHEN num_executions &gt; 0 AND num_executions &lt; 1 THEN 1 ELSE 0 END), 0) AS num_per_user__lt_1,&quot;
+      &quot;        COALESCE(SUM(CASE WHEN num_executions &gt;= 1 AND num_executions &lt; 10 THEN 1 ELSE 0 END), 0) AS num_per_user__1_10,&quot;
+      &quot;        COALESCE(SUM(CASE WHEN num_executions &gt;= 10 AND num_executions &lt; 50 THEN 1 ELSE 0 END), 0) AS num_per_user__11_50,&quot;
+      &quot;        COALESCE(SUM(CASE WHEN num_executions &gt;= 50 AND num_executions &lt; 250 THEN 1 ELSE 0 END), 0) AS num_per_user__51_250,&quot;
+      &quot;        COALESCE(SUM(CASE WHEN num_executions &gt;= 250 AND num_executions &lt; 1000 THEN 1 ELSE 0 END), 0) AS num_per_user__251_1000,&quot;
+      &quot;        COALESCE(SUM(CASE WHEN num_executions &gt;= 1000 AND num_executions &lt; 10000 THEN 1 ELSE 0 END), 0) AS num_per_user__1001_10000,&quot;
+      &quot;        COALESCE(SUM(CASE WHEN num_executions &gt;= 10000 THEN 1 ELSE 0 END), 0) AS num_per_user__10000_plus&quot;
+      &quot;    FROM user_executions&quot;
+      &quot;)&quot;
+      &quot;SELECT q1.*, q2.* FROM query_stats_1 q1, query_stats_2 q2;&quot;])))</pre></td></tr><tr><td class="docs"><p>Get metrics based on QueryExecutions.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- execution-metrics
   []
-  (-&gt; (summarize-executions)
-      (update :num_per_user summarize-executions-per-user)))</pre></td></tr><tr><td class="docs"><p>Cache Metrics</p>
+  (let [maybe-rename-bin (fn [x]
+                           ({&quot;lt_1&quot;       &quot;&lt; 1&quot;
+                             &quot;1_10&quot;       &quot;1-10&quot;
+                             &quot;11_50&quot;      &quot;11-50&quot;
+                             &quot;51_250&quot;     &quot;51-250&quot;
+                             &quot;251_1000&quot;   &quot;251-1000&quot;
+                             &quot;1001_10000&quot; &quot;1001-10000&quot;
+                             &quot;10000_plus&quot; &quot;10000+&quot;} x x))
+        raw-results (-&gt; (first (t2/query (execution-metrics-sql)))
+                        ;; cast numbers to int because some DBs output bigdecimals
+                        (update-vals #(some-&gt; % int)))]
+    (reduce (fn [acc [k v]]
+              (let [[prefix bin] (str/split (name k) #&quot;__&quot;)]
+                (if bin
+                  (cond-&gt; acc
+                    (and (some? v) (pos? v))
+                    (update (keyword prefix) #(assoc % (maybe-rename-bin bin) v)))
+                  (assoc acc (keyword prefix) v))))
+            {:executions     0
+             :by_status      {}
+             :num_per_user   {}
+             :num_by_latency {}}
+            raw-results)))</pre></td></tr><tr><td class="docs"><p>Cache Metrics</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Metrics based on use of the QueryCache.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- cache-metrics
   []
