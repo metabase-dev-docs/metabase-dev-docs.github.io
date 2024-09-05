@@ -2882,6 +2882,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.driver.common.parameters.operators :as params.ops]
    [metabase.models.card :as card]
    [metabase.models.params :as params]
+   [metabase.models.setting :as setting :refer [defsetting]]
    [metabase.pulse.parameters :as pulse-params]
    [metabase.query-processor.card :as qp.card]
    [metabase.query-processor.middleware.constraints :as qp.constraints]
@@ -2889,7 +2890,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.util.embed :as embed]
    [metabase.util.i18n
     :as i18n
-    :refer [tru]]
+    :refer [deferred-tru tru]]
    [metabase.util.log :as log]
    [metabase.util.malli :as mu]
    [metabase.util.malli.schema :as ms]
@@ -3126,9 +3127,12 @@ make these parameters visible at all to the frontend.</p>
   (if (contains? api-models model-or-api-name)
     model-or-api-name
     (api-name-&gt;model model-or-api-name)))</pre></td></tr><tr><td class="docs"><p>Sorted vec of api models that have an entity_id column</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private eid-api-models
+</td><td class="codes"><pre class="brush: clojure">(def ^:private eid-api-names
   (vec (sort (keys api-name-&gt;model))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ApiModel (into [:enum] eid-api-models))</pre></td></tr><tr><td class="docs"><p>A Malli schema for an entity id, this is a little looser because it needs to be fast.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private eid-api-models
+  (vec (sort (vals api-name-&gt;model))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ApiName (into [:enum] eid-api-names))
+(def ^:private ApiModel (into [:enum] eid-api-models))</pre></td></tr><tr><td class="docs"><p>A Malli schema for an entity id, this is a little looser because it needs to be fast.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private EntityId
   [:and {:description &quot;entity_id&quot;}
    :string
@@ -3136,21 +3140,51 @@ make these parameters visible at all to the frontend.</p>
                      (str &quot;\&quot;&quot; value &quot;\&quot; should be 21 characters long, but it is &quot; (count value)))}
     (fn eid-length-good? [eid] (= 21 (count eid)))]])</pre></td></tr><tr><td class="docs"><p>A Malli schema for a map of model names to a sequence of entity ids.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private ModelToEntityIds
-  (mc/schema [:map-of ApiModel [:sequential :string]]))</pre></td></tr><tr><td class="docs"><p>Given a model and a sequence of entity ids on that model, return a pairs of entity-id, id.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- entity-ids-&gt;id-for-model
+  (mc/schema [:map-of ApiName [:sequential :string]]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private EidTranslationStatus
+  [:enum :ok :not-found :invalid-format])</pre></td></tr><tr><td class="docs"><p>-------------------- Entity Id Translation Analytics --------------------</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private
+  default-eid-translation-counter
+  (zipmap (rest EidTranslationStatus) (repeat 0)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defsetting entity-id-translation-counter
+  (deferred-tru &quot;A counter for tracking the number of entity_id -&gt; id translations. Whenever we call [[model-&gt;entity-ids-&gt;ids]], we increment this counter by the number of translations.&quot;)
+  :visibility :internal
+  :export?    false
+  :audit      :never
+  :type       :json
+  :default    default-eid-translation-counter)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- compute-result [processed-result current-count]
+  (merge-with + processed-result current-count))</pre></td></tr><tr><td class="docs"><p>Update the entity-id translation counter with the results of a batch of entity-id translations.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn update-translation-count!
+  [results :- [:sequential EidTranslationStatus]]
+  (let [processed-result (frequencies results)]
+    (entity-id-translation-counter!
+     (compute-result processed-result (entity-id-translation-counter)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- add-total [counter]
+  (merge counter {:total (apply + (vals counter))}))</pre></td></tr><tr><td class="docs"><p>Get and clear the entity-id translation counter. This is meant to be called during the daily stats collection process.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn get-and-clear-translation-count!
+  []
+  (u/prog1 (add-total (entity-id-translation-counter))
+    (entity-id-translation-counter! default-eid-translation-counter)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- entity-ids-&gt;id-for-model :- [:sequential [:tuple
+                                                    ;; We want to pass incorrectly formatted entity-ids through here,
+                                                    ;; but this is assumed to be an entity-id:
+                                                    :string
+                                                    [:map [:status EidTranslationStatus]]]]
+  &quot;Given a model and a sequence of entity ids on that model, return a pairs of entity-id, id.&quot;
   [api-name eids]
   (let [model (-&gt;model api-name) ;; This lookup is safe because we've already validated the api-names
         eid-&gt;id (into {} (t2/select-fn-&gt;fn :entity_id :id [model :id :entity_id] :entity_id [:in eids]))]
     (mapv (fn entity-id-info [entity-id]
             [entity-id (if-let [id (get eid-&gt;id entity-id)]
-                         {:id id :type api-name :status &quot;success&quot;}
+                         {:id id :type api-name :status :ok}
                          ;; handle errors
                          (if (mc/validate EntityId entity-id)
                            {:type api-name
-                            :id nil
-                            :status &quot;not-found&quot;}
+                            :status :not-found}
                            {:type api-name
-                            :status &quot;invalid-format&quot;
+                            :status :invalid-format
                             :reason (me/humanize (mc/explain EntityId entity-id))}))])
           eids)))</pre></td></tr><tr><td class="docs"><p>Given a map of model names to a sequence of entity-ids for each, return a map from entity-id -> id.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn model-&gt;entity-ids-&gt;ids
@@ -3161,20 +3195,22 @@ make these parameters visible at all to the frontend.</p>
                                                        (mc/explain ModelToEntityIds model-key-&gt;entity-ids)))
                                        :allowed-models (sort (keys api-name-&gt;model))
                                        :status-code 400})))
-  (into {}
-        (mapcat
-         (fn [[model eids]] (entity-ids-&gt;id-for-model model eids))
-         model-key-&gt;entity-ids)))</pre></td></tr><tr><td class="docs">
+  (u/prog1 (into {}
+                 (mapcat
+                  (fn [[model eids]] (entity-ids-&gt;id-for-model model eids))
+                  model-key-&gt;entity-ids))
+    (update-translation-count! (map :status (vals &lt;&gt;)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn -&gt;id :- :int
   &quot;Translates a single entity_id -&gt; id. This reuses the batched version: [[model-&gt;entity-ids-&gt;ids]].
    Please use that if you have to do man lookups at once.&quot;
-  [pre-model id :- [:or :int :string]]
+  [api-name-or-model :- [:or ApiName ApiModel] id :- [:or #_id :int #_entity-id :string]]
   (if (string? id)
-    (let [model (-&gt;model pre-model)
-          [[_ {:keys [status] :as info}]] (entity-ids-&gt;id-for-model model [id])]
-      (if-not (= &quot;success&quot; status)
+    (let [model (-&gt;model api-name-or-model)
+          [[_ {:keys [status] :as info}]] (entity-ids-&gt;id-for-model api-name-or-model [id])]
+      (update-translation-count! [status])
+      (if-not (= :ok status)
         (throw (ex-info &quot;problem looking up id from entity_id&quot;
-                        {:pre-model pre-model
+                        {:api-name-or-model api-name-or-model
                          :model model
                          :id id
                          :status status}))
