@@ -2870,6 +2870,7 @@ net.brehaut.ClojureTools = (function (SH) {
   (:require
    [cheshire.core :as json]
    [clojure.core.async :as a]
+   [clojure.walk :as walk]
    [compojure.response]
    [metabase.async.streaming-response.thread-pool :as thread-pool]
    [metabase.async.util :as async.u]
@@ -2905,19 +2906,28 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defn- format-exception [e]
   (assoc (Throwable-&gt;map e) :_status (ex-status-code e)))</pre></td></tr><tr><td class="docs"><p>Write an error to the output stream, formatting it nicely. Closes output stream afterwards.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn write-error!
-  [^OutputStream os obj]
+  [^OutputStream os obj export-format]
   (cond
     (some #(instance? % obj)
           [InterruptedException EofException])
     (log/trace &quot;Error is an InterruptedException or EofException, not writing to output stream&quot;)
     (instance? Throwable obj)
-    (recur os (format-exception obj))
+    (recur os (format-exception obj) export-format)
     :else
     (with-open [os os]
       (log/trace (u/pprint-to-str (list 'write-error! obj)))
       (try
-        (with-open [writer (BufferedWriter. (OutputStreamWriter. os StandardCharsets/UTF_8))]
-          (json/generate-stream obj writer))
+        (let [obj (-&gt; (if (not= :api export-format)
+                        (walk/prewalk
+                         (fn [x]
+                           (if (map? x)
+                             (apply dissoc x [:json_query :preprocessed])
+                             x))
+                         obj)
+                        obj)
+                      (dissoc :export-format))]
+          (with-open [writer (BufferedWriter. (OutputStreamWriter. os StandardCharsets/UTF_8))]
+            (json/generate-stream obj writer)))
         (catch EofException _)
         (catch Throwable e
           (log/error e &quot;Error writing error to output stream&quot; obj))))))</pre></td></tr><tr><td class="docs">
@@ -2932,7 +2942,7 @@ net.brehaut.ClojureTools = (function (SH) {
       nil)
     (catch Throwable e
       (log/error e &quot;Caught unexpected Exception in streaming response body&quot;)
-      (write-error! os e)
+      (write-error! os e nil)
       nil)))</pre></td></tr><tr><td class="docs"><p>Runs <code>f</code> asynchronously on the streaming response <code>thread-pool</code>, returning immediately. When <code>f</code> finishes,
 completes (i.e., closes) Jetty <code>async-context</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- do-f-async
