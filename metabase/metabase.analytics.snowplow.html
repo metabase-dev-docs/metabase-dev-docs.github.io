@@ -2871,6 +2871,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [clojure.string :as str]
    [java-time.api :as t]
    [medley.core :as m]
+   [metabase.api.common :as api]
    [metabase.config :as config]
    [metabase.models.setting :as setting :refer [defsetting Setting]]
    [metabase.models.user :refer [User]]
@@ -2878,17 +2879,22 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.util.date-2 :as u.date]
    [metabase.util.i18n :refer [deferred-tru]]
    [metabase.util.log :as log]
+   [metabase.util.malli :as mu]
    [toucan2.core :as t2])
   (:import
    (com.snowplowanalytics.snowplow.tracker Snowplow Subject Tracker)
-   (com.snowplowanalytics.snowplow.tracker.configuration EmitterConfiguration NetworkConfiguration SubjectConfiguration TrackerConfiguration)
+   (com.snowplowanalytics.snowplow.tracker.configuration
+    EmitterConfiguration
+    NetworkConfiguration
+    SubjectConfiguration
+    TrackerConfiguration)
    (com.snowplowanalytics.snowplow.tracker.events SelfDescribing SelfDescribing$Builder2)
    (com.snowplowanalytics.snowplow.tracker.http ApacheHttpClientAdapter)
    (com.snowplowanalytics.snowplow.tracker.payload SelfDescribingJson)
    (org.apache.http.client.config CookieSpecs RequestConfig)
    (org.apache.http.impl.client HttpClients)
    (org.apache.http.impl.conn PoolingHttpClientConnectionManager)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Adding or updating a Snowplow schema? Make sure that the two maps below are updated accordingly.</p>
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Adding or updating a Snowplow schema? Make sure that the map below is updated accordingly.</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>The most recent version for each event schema. This should be updated whenever a new version of a schema is added
 to SnowcatCloud, at the same time that the data sent to the collector is updated.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private schema-&gt;version
@@ -2909,41 +2915,9 @@ to SnowcatCloud, at the same time that the data sent to the collector is updated
    ::embed_share   &quot;1-0-0&quot;
    ::llm_usage     &quot;1-0-0&quot;
    ::serialization &quot;1-0-1&quot;
-   ::cleanup       &quot;1-0-0&quot;})</pre></td></tr><tr><td class="docs"><p>The schema to use for each analytics event.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private event-&gt;schema
-  {::new-instance-created           ::account
-   ::new-user-created               ::account
-   ::browse_data_model_clicked      ::browse_data
-   ::browse_data_table_clicked      ::browse_data
-   ::invite-sent                    ::invite
-   ::index-model-entities-enabled   ::model
-   ::dashboard-created              ::dashboard
-   ::question-added-to-dashboard    ::dashboard
-   ::dashboard-tab-created          ::dashboard
-   ::dashboard-tab-deleted          ::dashboard
-   ::database-connection-successful ::database
-   ::database-connection-failed     ::database
-   ::new-event-created              ::timeline
-   ::new-task-history               ::task
-   ::upsell_viewed                  ::upsell
-   ::upsell_clicked                 ::upsell
-   ::new-search-query               ::search
-   ::search-results-filtered        ::search
-   ::action-created                 ::action
-   ::action-updated                 ::action
-   ::action-deleted                 ::action
-   ::action-executed                ::action
-   ::csv-upload-successful          ::csvupload
-   ::csv-upload-failed              ::csvupload
-   ::csv-append-successful          ::csvupload
-   ::csv-append-failed              ::csvupload
-   ::metabot-feedback-received      ::metabot
-   ::embedding-enabled              ::embed_share
-   ::embedding-disabled             ::embed_share
-   ::llm-usage                      ::llm_usage
-   ::serialization                  ::serialization
-   ::stale-items-read               ::cleanup
-   ::stale-items-archived           ::cleanup})</pre></td></tr><tr><td class="docs">
+   ::cleanup       &quot;1-0-0&quot;})</pre></td></tr><tr><td class="docs"><p>Malli enum for valid Snowplow schemas</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private SnowplowSchema
+  (into [:enum] (keys schema-&gt;version)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defsetting analytics-uuid
   (deferred-tru
    (str &quot;Unique identifier to be used in Snowplow analytics, to identify this instance of Metabase. &quot;
@@ -2997,37 +2971,34 @@ by <code>track-event!</code>.</p>
                   ;; is first read.
                   (let [value (or (first-user-creation) (t/offset-date-time))]
                     (setting/set-value-of-type! :timestamp :instance-creation value)
-                    (track-event! ::new-instance-created)))
+                    (track-event! ::account {:event :new_instance_created} nil)))
                 (u.date/format-rfc3339 (setting/get-value-of-type :timestamp :instance-creation)))
-  :doc false)</pre></td></tr><tr><td class="docs"><p>Returns instance of a Snowplow tracker config</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private tracker-config
-  (let [tracker-config* (delay (TrackerConfiguration. &quot;sp&quot; &quot;metabase&quot;))]
-    (fn [] @tracker-config*)))</pre></td></tr><tr><td class="docs"><p>Returns instance of a Snowplow network config</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private network-config
-  (let [network-config* (delay
-                          (let [request-config (-&gt; (RequestConfig/custom)
-                                                  ;; Set cookie spec to `STANDARD` to avoid warnings about an invalid cookie
-                                                  ;; header in request response (PR #24579)
-                                                   (.setCookieSpec CookieSpecs/STANDARD)
-                                                   (.build))
-                                client (-&gt; (HttpClients/custom)
-                                           (.setConnectionManager (PoolingHttpClientConnectionManager.))
-                                           (.setDefaultRequestConfig request-config)
-                                           (.build))
-                                http-client-adapter (ApacheHttpClientAdapter. (snowplow-url) client)]
-                            (NetworkConfiguration. http-client-adapter)))]
-    (fn [] @network-config*)))</pre></td></tr><tr><td class="docs"><p>Returns an instance of a Snowplow emitter config</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private emitter-config
-  (let [emitter-config* (delay (-&gt; (EmitterConfiguration.)
-                                   (.batchSize 1)))]
-    (fn [] @emitter-config*)))</pre></td></tr><tr><td class="docs"><p>Returns instance of a Snowplow tracker</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private tracker
-  (let [tracker* (delay
-                   (Snowplow/createTracker
-                    ^TrackerConfiguration (tracker-config)
-                    ^NetworkConfiguration (network-config)
-                    ^EmitterConfiguration (emitter-config)))]
-    (fn [] @tracker*)))</pre></td></tr><tr><td class="docs"><p>Create a Subject object for a given user ID, to be included in analytics events</p>
+  :doc false)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- tracker-config
+  []
+  (TrackerConfiguration. &quot;sp&quot; &quot;metabase&quot;))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- network-config
+  []
+  (let [request-config (-&gt; (RequestConfig/custom)
+                           ;; Set cookie spec to `STANDARD` to avoid warnings about an invalid cookie
+                           ;; header in request response (PR #24579)
+                           (.setCookieSpec CookieSpecs/STANDARD)
+                           (.build))
+        client (-&gt; (HttpClients/custom)
+                   (.setConnectionManager (PoolingHttpClientConnectionManager.))
+                   (.setDefaultRequestConfig request-config)
+                   (.build))
+        http-client-adapter (ApacheHttpClientAdapter. (snowplow-url) client)]
+    (NetworkConfiguration. http-client-adapter)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- emitter-config
+  []
+  (-&gt; (EmitterConfiguration.)
+      (.batchSize 1)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defonce ^:private tracker
+  (Snowplow/createTracker
+   ^TrackerConfiguration (tracker-config)
+   ^NetworkConfiguration (network-config)
+   ^EmitterConfiguration (emitter-config)))</pre></td></tr><tr><td class="docs"><p>Create a Subject object for a given user ID, to be included in analytics events</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- subject
   [user-id]
   (Subject.
@@ -3059,31 +3030,32 @@ by <code>track-event!</code>.</p>
   (-&gt; kw name (str/replace #&quot;-&quot; &quot;_&quot;)))</pre></td></tr><tr><td class="docs"><p>A SelfDescribingJson object containing the provided event data, which can be included as the payload for an
 analytics event</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- payload
-  [schema version event-kw data]
+  [schema version data]
   (new SelfDescribingJson
        (format &quot;iglu:com.metabase/%s/jsonschema/%s&quot; (normalize-kw schema) version)
        ;; Make sure keywords in payload are converted to strings in snake-case
        (m/map-kv
         (fn [k v] [(normalize-kw k) (if (keyword? v) (normalize-kw v) v)])
-        (assoc data :event event-kw))))</pre></td></tr><tr><td class="docs"><p>Wrapper function around the <code>.track</code> method on a Snowplow tracker. Can be redefined in tests to instead append
+        data)))</pre></td></tr><tr><td class="docs"><p>Wrapper function around the <code>.track</code> method on a Snowplow tracker. Can be redefined in tests to instead append
 event data to an in-memory store.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- track-event-impl!
   [tracker event]
   (.track ^Tracker tracker ^SelfDescribing event))</pre></td></tr><tr><td class="docs"><p>Send a single analytics event to the Snowplow collector, if tracking is enabled for this MB instance and a collector
 is available.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn track-event!
-  [event-kw &amp; [user-id data]]
-  (when (snowplow-enabled)
-    (try
-      (let [schema (event-&gt;schema event-kw)
-            ^SelfDescribing$Builder2 builder (-&gt; (. SelfDescribing builder)
-                                                 (.eventData (payload schema (schema-&gt;version schema) event-kw data))
-                                                 (.customContext [(context)])
-                                                 (cond-&gt; user-id (.subject (subject user-id))))
-            ^SelfDescribing event (.build builder)]
-        (track-event-impl! (tracker) event))
-      (catch Throwable e
-        (log/errorf e &quot;Error sending Snowplow analytics event %s&quot; event-kw)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+</td><td class="codes"><pre class="brush: clojure">(mu/defn track-event!
+  ([schema :- SnowplowSchema data]
+   (track-event! schema data api/*current-user-id*))
+  ([schema :- SnowplowSchema data user-id]
+   (when (snowplow-enabled)
+     (try
+       (let [^SelfDescribing$Builder2 builder (-&gt; (. SelfDescribing builder)
+                                                  (.eventData (payload schema (schema-&gt;version schema) data))
+                                                  (.customContext [(context)])
+                                                  (cond-&gt; user-id (.subject (subject user-id))))
+             ^SelfDescribing event (.build builder)]
+         (track-event-impl! tracker event))
+       (catch Throwable e
+         (log/errorf e &quot;Error sending Snowplow analytics event for schema %s&quot; schema))))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
