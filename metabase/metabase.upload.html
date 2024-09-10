@@ -2871,6 +2871,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [clj-bom.core :as bom]
    [clojure.data :as data]
    [clojure.data.csv :as csv]
+   [clojure.java.io :as io]
    [clojure.string :as str]
    [flatland.ordered.map :as ordered-map]
    [java-time.api :as t]
@@ -2906,9 +2907,10 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.util.malli.schema :as ms]
    [toucan2.core :as t2])
   (:import
-   (java.io File)
+   (java.io File InputStreamReader Reader)
    (java.nio.charset StandardCharsets)
-   (org.apache.tika Tika)))</pre></td></tr><tr><td class="docs">
+   (org.apache.tika Tika)
+   (org.mozilla.universalchardet UniversalDetector)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>This tracks the size of various text fields in bytes.</p>
 
 <p>TODO: move these to a more appropriate namespace if they need to be reused</p>
@@ -3096,6 +3098,26 @@ Empty strings are parsed as nil.</p>
     (-&gt; filename (str/split #&quot;\.&quot;) rest last)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- file-mime-type [^File file]
   (.detect tika file))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- detect-charset ^String [file]
+  (try
+    (let [detector (UniversalDetector.)
+          buffer   (byte-array 8192)]
+      (with-open [input-stream (io/input-stream file)]
+        (loop []
+          (let [bytes-read (.read input-stream buffer)]
+            (if (pos? bytes-read)
+              (do
+                (.handleData detector buffer 0 bytes-read)
+                (when-not (.isDone detector)
+                  (recur)))
+              (.dataEnd detector)))))
+      (.getDetectedCharset detector))
+    (catch Exception _)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- -&gt;reader ^Reader [^File file]
+  ;; If we can't detect the encoding, just live with unrecognized characters.
+  (let [charset (or (detect-charset file) &quot;UTF-8&quot;)]
+    (-&gt; (bom/bom-input-stream file)
+        (InputStreamReader. charset))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- assert-separator-chosen [s]
   (or s (throw (IllegalArgumentException. &quot;Unable to determine separator&quot;))))</pre></td></tr><tr><td class="docs"><p>Guess at what symbol is being used as a separator in the given CSV-like file.
 Our heuristic is to use the separator that gives us the most number of columns.
@@ -3104,7 +3126,7 @@ Exclude separators which give incompatible column counts between the header and 
   [readable]
   (let [count-columns (fn [s]
                         ;; Create a separate reader per separator, as the line-breaking behavior depends on the parser.
-                        (with-open [reader (bom/bom-reader readable)]
+                        (with-open [reader (-&gt;reader readable)]
                           (try (into []
                                      (comp (take max-inferred-lines)
                                            (map count))
@@ -3148,7 +3170,7 @@ Exclude separators which give incompatible column counts between the header and 
 </td><td class="codes"><pre class="brush: clojure">(defn- create-from-csv!
   [driver db table-name filename ^File csv-file]
   (let [parse (infer-parser filename csv-file)]
-    (with-open [reader (bom/bom-reader csv-file)]
+    (with-open [reader (-&gt;reader csv-file)]
       (let [auto-pk?          (auto-pk-column? driver db)
             [header &amp; rows]   (cond-&gt; (parse reader)
                                 auto-pk?
@@ -3269,7 +3291,7 @@ It may involve redundantly reading the file, or even failing again if the file i
 </td><td class="codes"><pre class="brush: clojure">(defn- fail-stats
   [filename ^File file]
   (let [parse (infer-parser filename file)]
-    (with-open [reader (bom/bom-reader file)]
+    (with-open [reader (-&gt;reader file)]
       (let [rows (parse reader)]
         {:size-mb           (file-size-mb file)
          :num-columns       (count (first rows))
@@ -3482,7 +3504,7 @@ Returns the newly created model. May throw validation, permimissions, or DB erro
 </td><td class="codes"><pre class="brush: clojure">(defn- update-with-csv! [database table filename file &amp; {:keys [replace-rows?]}]
   (try
     (let [parse (infer-parser filename file)]
-      (with-open [reader (bom/bom-reader file)]
+      (with-open [reader (-&gt;reader file)]
         (let [timer              (u/start-timer)
               driver             (driver.u/database-&gt;driver database)
               auto-pk?           (auto-pk-column? driver database)
