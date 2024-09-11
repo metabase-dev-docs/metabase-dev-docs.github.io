@@ -3349,8 +3349,10 @@ collection.</p>
       [:in collection-id-field
        {:select :id
         ;; the `FROM` clause is where we limit the collections to the ones we have permissions on. For a superuser,
-        ;; that's all of them. For regular users, it's a) the collections they have permission in the DB for, and b)
-        ;; their personal collection and its descendants.
+        ;; that's all of them. For regular users, it's:
+        ;; a) the collections they have permission in the DB for,
+        ;; b) the trash collection, and
+        ;; c) their personal collection and its descendants
         :from [(if is-superuser?
                  [:collection :c]
                  [{:union-all [{:select [:c.*]
@@ -3366,6 +3368,9 @@ collection.</p>
                                           [:= :p.perm_value &quot;read-and-write&quot;]
                                           (when (= :read (:permission-level visibility-config))
                                             [:= :p.perm_value &quot;read&quot;])]]}
+                               {:select [[:c.*]]
+                                :from   [[:collection :c]]
+                                :where  [:= :type &quot;trash&quot;]}
                                (when-let [personal-collection-and-descendant-ids (user-&gt;personal-collection-and-descendant-ids current-user-id)]
                                  {:select [:c.*]
                                   :from   [[:collection :c]]
@@ -3405,18 +3410,14 @@ collection.</p>
                                              (visible-collection-filter-clause :c2.id (dissoc visibility-config :effective-child-of))
                                              [:= :c.location [:concat :c2.location :c2.id (h2x/literal &quot;/&quot;)]]
                                              (when-not (collection.root/is-root-collection? parent-coll)
-                                               [:not= :c2.id (u/the-id parent-coll)])]}]]]))]}]])))</pre></td></tr><tr><td class="docs"><p>Returns all collection IDs that are visible given the <code>visibility-config</code> passed in. (Config provides knobs for
-toggling permission level, trash/archive visibility, etc). If you're trying to filter based on this, you should
-probably try to use <code>visible-collection-filter-clause</code> instead.</p>
-
-<p>Cached for the lifetime of the request, maximum 10 seconds.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^{:arglists '([visibility-config])} visible-collection-ids
+                                               [:not= :c2.id (u/the-id parent-coll)])]}]]]))]}]])))</pre></td></tr><tr><td class="docs"><p>Impl for <code>visible-collection-ids</code>, caches for the lifetime of the request, maximum 10 seconds.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^{:arglists '([visibility-config])} visible-collection-ids*
   (memoize/ttl
    ^{::memoize/args-fn (fn [[visibility-config]]
                          (if-let [req-id *request-id*]
                            [req-id api/*current-user-id* visibility-config]
                            [(random-uuid) api/*current-user-id* visibility-config]))}
-   (fn visible-collection-ids*
+   (fn
      [visibility-config]
      (cond-&gt; (t2/select-pks-set :model/Collection {:where (visible-collection-filter-clause :id visibility-config)})
        (should-display-root-collection? visibility-config)
@@ -3424,35 +3425,31 @@ probably try to use <code>visible-collection-filter-clause</code> instead.</p>
    ;; cache the results for 60 minutes; TTL is here only to eventually clear out old entries/keep it from growing too
    ;; large
    :ttl/threshold (* 60 60 1000)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- effective-location-path* :- [:maybe LocationPath]
-  ([collection :- CollectionWithLocationOrRoot]
-   (when-not (collection.root/is-root-collection? collection)
-     (effective-location-path* (if (:archived_directly collection)
-                                 (trash-path)
-                                 (:location collection))
-                               (visible-collection-ids
-                                {:include-archived-items    (if (:archived collection)
-                                                              :only
-                                                              :exclude)
-                                 :include-trash-collection? true
-                                 :archive-operation-id      (:archive_operation_id collection)
-                                 :permission-level          :read}))))
-  ([real-location-path     :- LocationPath
-    allowed-collection-ids :- VisibleCollections]
-   (apply location-path (for [id    (location-path-&gt;ids real-location-path)
-                              :when (contains? allowed-collection-ids id)]
-                          id))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mi/define-simple-hydration-method effective-location-path
+</td><td class="codes"><pre class="brush: clojure">(mu/defn visible-collection-ids :- VisibleCollections
+  &quot;Returns all collection IDs that are visible given the `visibility-config` passed in. (Config provides knobs for
+  toggling permission level, trash/archive visibility, etc). If you're trying to filter based on this, you should
+  probably use `visible-collection-filter-clause` instead.&quot;
+  [visibility-config :- CollectionVisibilityConfig]
+  (visible-collection-ids* visibility-config))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mi/define-batched-hydration-method effective-location-path*
   :effective_location
-  &quot;Given a `location-path` and a set of Collection IDs one is allowed to view (obtained from
-  `visible-collection-ids` above), calculate the 'effective' location path (excluding IDs of
-  Collections for which we do not have read perms) we should show to the User.
-  When called with a single argument, `collection`, this is used as a hydration function to hydrate
-  `:effective_location`.&quot;
-  ([collection]
-   (effective-location-path* collection))
-  ([real-location-path allowed-collection-ids]
-   (effective-location-path* real-location-path allowed-collection-ids)))</pre></td></tr><tr><td class="docs"><p>Fields that should be included when hydrating the <code>:effective_parent</code> of a collection. Used for displaying recent views
+  &quot;Given a seq of `collections`, batch hydrates them with their effective location.&quot;
+  [collections]
+  (when (seq collections)
+    (let [collection-ids (visible-collection-ids {:include-archived-items :all
+                                                  :include-trash-collection? true})]
+      (for [collection collections]
+        (assoc collection :effective_location
+               (when-not (or (nil? collection) (collection.root/is-root-collection? collection))
+                 (let [real-location-path (if (:archived_directly collection)
+                                            (trash-path)
+                                            (:location collection))]
+                   (apply location-path (for [id    (location-path-&gt;ids real-location-path)
+                                              :when (contains? collection-ids id)]
+                                          id)))))))))</pre></td></tr><tr><td class="docs"><p>Given a collection, returns the effective location (hiding parts of the path that the current user doesn't have access to).</p>
+</td><td class="codes"><pre class="brush: clojure">(defn effective-location-path
+  [collection]
+  (:effective_location (t2/hydrate collection :effective_location)))</pre></td></tr><tr><td class="docs"><p>Fields that should be included when hydrating the <code>:effective_parent</code> of a collection. Used for displaying recent views
 and collection search results.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private effective-parent-fields
   [:id :name :authority_level :type])</pre></td></tr><tr><td class="docs">
