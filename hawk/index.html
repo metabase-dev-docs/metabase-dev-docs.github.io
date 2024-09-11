@@ -2866,7 +2866,7 @@ net.brehaut.ClojureTools = (function (SH) {
   };
 })(SyntaxHighlighter);
 </script><title>Hawk -- Marginalia</title></head><body><table><tr><td class="docs"><div class="header"><h1 class="project-name">Hawk</h1><h2 class="project-version">0.0.1-SNAPSHOT</h2><br /><p>It watches your code like a hawk! You like tests, right? Then run them with our state-of-the-art Clojure test runner. </p>
-</div></td><td class="codes" style="text-align: center; vertical-align: middle;color: #666;padding-right:20px"><br /><br /><br />(this space intentionally left almost blank)</td></tr><tr><td class="docs"><div class="toc"><a name="toc"><h3>namespaces</h3></a><ul><li><a href="#mb.hawk.assert-exprs">mb.hawk.assert-exprs</a></li><li><a href="#mb.hawk.assert-exprs.approximately-equal">mb.hawk.assert-exprs.approximately-equal</a></li><li><a href="#mb.hawk.core">mb.hawk.core</a></li><li><a href="#mb.hawk.hooks">mb.hawk.hooks</a></li><li><a href="#mb.hawk.init">mb.hawk.init</a></li><li><a href="#mb.hawk.junit">mb.hawk.junit</a></li><li><a href="#mb.hawk.junit.write">mb.hawk.junit.write</a></li><li><a href="#mb.hawk.parallel">mb.hawk.parallel</a></li><li><a href="#mb.hawk.speak">mb.hawk.speak</a></li><li><a href="#mb.hawk.util">mb.hawk.util</a></li></ul></div></td><td class="codes">&nbsp;</td></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#mb.hawk.assert-exprs" name="mb.hawk.assert-exprs"><h1 class="project-name">mb.hawk.assert-exprs</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Custom implementations of [[clojure.test/is]] expressions (i.e., implementations of [[clojure.test/assert-expr]]).
+</div></td><td class="codes" style="text-align: center; vertical-align: middle;color: #666;padding-right:20px"><br /><br /><br />(this space intentionally left almost blank)</td></tr><tr><td class="docs"><div class="toc"><a name="toc"><h3>namespaces</h3></a><ul><li><a href="#mb.hawk.assert-exprs">mb.hawk.assert-exprs</a></li><li><a href="#mb.hawk.assert-exprs.approximately-equal">mb.hawk.assert-exprs.approximately-equal</a></li><li><a href="#mb.hawk.core">mb.hawk.core</a></li><li><a href="#mb.hawk.hooks">mb.hawk.hooks</a></li><li><a href="#mb.hawk.init">mb.hawk.init</a></li><li><a href="#mb.hawk.junit">mb.hawk.junit</a></li><li><a href="#mb.hawk.junit.write">mb.hawk.junit.write</a></li><li><a href="#mb.hawk.parallel">mb.hawk.parallel</a></li><li><a href="#mb.hawk.partition">mb.hawk.partition</a></li><li><a href="#mb.hawk.speak">mb.hawk.speak</a></li><li><a href="#mb.hawk.util">mb.hawk.util</a></li></ul></div></td><td class="codes">&nbsp;</td></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#mb.hawk.assert-exprs" name="mb.hawk.assert-exprs"><h1 class="project-name">mb.hawk.assert-exprs</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Custom implementations of [[clojure.test/is]] expressions (i.e., implementations of [[clojure.test/assert-expr]]).
 <code>re=</code>, <code>schema=</code>, <code>=?</code>, and more.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns mb.hawk.assert-exprs
   (:require
@@ -3179,7 +3179,6 @@ would compare things. This works inside collections as well.</p>
   (:require
    [clojure.java.classpath :as classpath]
    [clojure.java.io :as io]
-   [clojure.math :as math]
    [clojure.pprint :as pprint]
    [clojure.set :as set]
    [clojure.string :as str]
@@ -3194,6 +3193,7 @@ would compare things. This works inside collections as well.</p>
    [mb.hawk.init :as hawk.init]
    [mb.hawk.junit :as hawk.junit]
    [mb.hawk.parallel :as hawk.parallel]
+   [mb.hawk.partition :as hawk.partition]
    [mb.hawk.speak :as hawk.speak]
    [mb.hawk.util :as u]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
@@ -3272,45 +3272,7 @@ collection of one or more of the above.</p>
     (find-tests-for-namespace-symbol symb options)))</pre></td></tr><tr><td class="docs"><p>default -- look in all dirs on the classpath</p>
 </td><td class="codes"><pre class="brush: clojure">(defmethod find-tests nil
   [_nil options]
-  (find-tests (classpath/system-classpath) options))</pre></td></tr><tr><td class="docs"><p>Split sequence <code>xs</code> into <code>num-partitions</code> as equally as possible. Guaranteed to return <code>num-partitions</code>. This custom
-function is used instead of [[partition-all]] or whatever because we want to make sure every partition gets tests,
-even with weird combinations like 4 tests with 3 partitions or 29 tests with 10 partitions.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- partition-all-into-n-partitions
-  [num-partitions xs]
-  {:post [(= (count %) num-partitions)]}
-  ;; make sure the partitioning is deterministic -- `xs` should always come back in the same order but we should sort
-  ;; just to be safe.
-  (let [xs             (sort-by str xs)
-        partition-size (/ (count xs) num-partitions)]
-    (into []
-          (comp (map-indexed (fn [i x]
-                               [(long (math/floor (/ i partition-size))) x]))
-                (partition-by first)
-                (map (fn [partition]
-                       (map second partition))))
-          xs)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- partition-tests [tests {num-partitions :partition/total, partition-index :partition/index, :as _options}]
-  (if (or num-partitions partition-index)
-    (do
-      (assert (and num-partitions partition-index)
-              &quot;:partition/total and :partition/index must be set together&quot;)
-      (assert (pos-int? num-partitions)
-              &quot;Invalid :partition/total - must be a positive integer&quot;)
-      (assert (&lt;= num-partitions (count tests))
-              &quot;Invalid :partition/total - cannot have more partitions than number of tests&quot;)
-      (assert (int? partition-index)
-              &quot;Invalid :partition/index - must be an integer&quot;)
-      (assert (&lt;= 0 partition-index (dec num-partitions))
-              (format &quot;Invalid :partition/index - must be between 0 and %d&quot; (dec num-partitions)))
-      (let [partitions (partition-all-into-n-partitions num-partitions tests)
-            partition  (nth partitions partition-index)]
-        (printf &quot;Running tests in partition %d of %d (%d tests of %d)...\n&quot;
-                (inc partition-index)
-                num-partitions
-                (count partition)
-                (count tests))
-        partition))
-    tests))</pre></td></tr><tr><td class="docs"><p>Find tests using the options map as passed to <code>clojure -X</code>.</p>
+  (find-tests (classpath/system-classpath) options))</pre></td></tr><tr><td class="docs"><p>Find tests using the options map as passed to <code>clojure -X</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn find-tests-with-options
   [{:keys [only], :as options}]
   (println &quot;Running tests with options&quot; (pr-str options))
@@ -3318,7 +3280,7 @@ even with weird combinations like 4 tests with 3 partitions or 29 tests with 10 
     (println &quot;Running tests in&quot; (pr-str only)))
   (let [start-time-ms (System/currentTimeMillis)
         tests         (-&gt; (find-tests only options)
-                          (partition-tests options))]
+                          (hawk.partition/partition-tests options))]
     (printf &quot;Finding tests took %s.\n&quot; (u/format-milliseconds (- (System/currentTimeMillis) start-time-ms)))
     (println &quot;Running&quot; (count tests) &quot;tests&quot;)
     tests))</pre></td></tr><tr><td class="docs"><p>Running tests &amp; reporting the output</p>
@@ -3785,7 +3747,138 @@ is encountered.</p>
   [disallowed-message]
   (when *parallel?*
     (let [e (ex-info (format &quot;%s is not allowed inside parallel tests.&quot; disallowed-message) {})]
-      (t/is (throw e)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#mb.hawk.speak" name="mb.hawk.speak"><h1 class="project-name">mb.hawk.speak</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+      (t/is (throw e)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#mb.hawk.partition" name="mb.hawk.partition"><h1 class="project-name">mb.hawk.partition</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns mb.hawk.partition
+  (:require
+   [clojure.math :as math]))</pre></td></tr><tr><td class="docs"><p>Like [[clojure.core/namespace]] but handles vars.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- namespace*
+  [x]
+  (cond
+    (instance? clojure.lang.Named x) (namespace x)
+    (var? x)                         (namespace (symbol x))
+    :else                            nil))</pre></td></tr><tr><td class="docs"><p>The test runner normally sorts the namespaces before running tests, so we should do the same before we partition things
+if we want them to make sense. Preserve the order of the vars inside each namespace.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- sort-tests-by-namespace
+  [test-vars]
+  (let [test-var-&gt;sort-position (into {}
+                                      (map-indexed
+                                       (fn [i varr]
+                                         [varr i]))
+                                      test-vars)]
+    (sort-by (juxt namespace* test-var-&gt;sort-position)
+             test-vars)))</pre></td></tr><tr><td class="docs"><p>Return a map of</p>
+
+<p>  namespace string =>  number of tests in that namespace</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- namespace-&gt;num-tests
+  [test-vars]
+  (reduce
+   (fn [m test-var]
+     (update m (namespace* test-var) (fnil inc 0)))
+   {}
+   test-vars))</pre></td></tr><tr><td class="docs"><p>Return a map of</p>
+
+<p>  test-var => ideal partition number</p>
+
+<p>'Ideal partition number' is the partition it would live in ideally if we weren't worried about making sure namespaces
+are grouped together.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- test-var-&gt;ideal-partition
+  [num-partitions test-vars]
+  (let [target-partition-size (/ (count test-vars) num-partitions)]
+    (into {}
+          (map-indexed (fn [i test-var]
+                         (let [ideal-partition (long (math/floor (/ i target-partition-size)))]
+                           (assert (&lt;= 0 ideal-partition (dec num-partitions)))
+                           [test-var ideal-partition]))
+                       test-vars))))</pre></td></tr><tr><td class="docs"><p>Return a map of</p>
+
+<p>  namespace string => set of possible partition numbers for its tests</p>
+
+<p>For most namespaces there should only be one possible partition but for some the ideal split happens in the middle of
+the namespace which means we have two possible candidate partitions to put it into.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- namespace-&gt;possible-partitions
+  [num-partitions test-vars]
+  (let [test-var-&gt;ideal-partition (test-var-&gt;ideal-partition num-partitions test-vars)]
+    (reduce
+     (fn [m test-var]
+       (update m (namespace* test-var) #(conj (set %) (test-var-&gt;ideal-partition test-var))))
+     {}
+     test-vars)))</pre></td></tr><tr><td class="docs"><p>Return a map of</p>
+
+<p>  namespace string => canonical partition number for its tests</p>
+
+<p>If there are multiple possible candidate partitions for a namespace, choose the one that has the least tests in it.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- namespace-&gt;partition
+  [num-partitions test-vars]
+  (let [namespace-&gt;num-tests           (namespace-&gt;num-tests test-vars)
+        namespace-&gt;possible-partitions (namespace-&gt;possible-partitions num-partitions test-vars)
+        ;; process all the namespaces that have no question about what partition they should go into first so we have as
+        ;; accurate a picture of the size of each partition as possible before dealing with the ambiguous ones
+        namespaces                    (distinct (map namespace* test-vars))
+        multiple-possible-partitions? (fn [nmspace]
+                                        (&gt; (count (namespace-&gt;possible-partitions nmspace))
+                                           1))
+        namespaces                     (concat (remove multiple-possible-partitions? namespaces)
+                                               (filter multiple-possible-partitions? namespaces))]
+    ;; Keep track of how many tests are in each partition so far
+    (:namespace-&gt;partition
+     (reduce
+      (fn [m nmspace]
+        (let [partition (first (sort-by (fn [partition]
+                                          (get-in m [:partition-&gt;size partition]))
+                                        (namespace-&gt;possible-partitions nmspace)))]
+          (-&gt; m
+              (update-in [:partition-&gt;size partition] (fnil + 0) (namespace-&gt;num-tests nmspace))
+              (assoc-in [:namespace-&gt;partition nmspace] partition))))
+      {}
+      namespaces))))</pre></td></tr><tr><td class="docs"><p>Return a function with the signature</p>
+
+<p>  (f test-var) => partititon-number</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- make-test-var-&gt;partition
+  [num-partitions test-vars]
+  (let [namespace-&gt;partition (namespace-&gt;partition num-partitions test-vars)]
+    (fn test-var-&gt;partition [test-var]
+      (get namespace-&gt;partition (namespace* test-var)))))</pre></td></tr><tr><td class="docs"><p>Split a sequence of <code>test-vars</code> into <code>num-partitions</code>, returning a map of</p>
+
+<p>  partition number => sequence of tests</p>
+
+<p>Attempts to divide tests up into partitions that are as equal as possible, but keeps tests in the same namespace
+grouped together.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- partition-tests-into-n-partitions
+  [num-partitions test-vars]
+  {:post [(= (count %) num-partitions)]}
+  (let [test-vars           (sort-tests-by-namespace test-vars)
+        test-var-&gt;partition (make-test-var-&gt;partition num-partitions test-vars)]
+    (reduce
+     (fn [m test-var]
+       (update m (test-var-&gt;partition test-var) #(conj (vec %) test-var)))
+     (sorted-map)
+     test-vars)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- validate-partition-options [tests {num-partitions :partition/total, partition-index :partition/index, :as _options}]
+  (assert (and num-partitions partition-index)
+          &quot;:partition/total and :partition/index must be set together&quot;)
+  (assert (pos-int? num-partitions)
+          &quot;Invalid :partition/total - must be a positive integer&quot;)
+  (assert (&lt;= num-partitions (count tests))
+          &quot;Invalid :partition/total - cannot have more partitions than number of tests&quot;)
+  (assert (int? partition-index)
+          &quot;Invalid :partition/index - must be an integer&quot;)
+  (assert (&lt;= 0 partition-index (dec num-partitions))
+          (format &quot;Invalid :partition/index - must be between 0 and %d&quot; (dec num-partitions))))</pre></td></tr><tr><td class="docs"><p>Return only <code>tests</code> to run for the current partition (if <code>:partition/total</code> and <code>:partition/index</code> are specified). If
+they are not specified this returns all <code>tests</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn partition-tests
+  [tests {num-partitions :partition/total, partition-index :partition/index, :as options}]
+  (if (or num-partitions partition-index)
+    (do
+      (validate-partition-options tests options)
+      (let [partition-index-&gt;tests (partition-tests-into-n-partitions num-partitions tests)
+            partition              (get partition-index-&gt;tests partition-index)]
+        (printf &quot;Running tests in partition %d of %d (%d tests of %d)...\n&quot;
+                (inc partition-index)
+                num-partitions
+                (count partition)
+                (count tests))
+        partition))
+    tests))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#mb.hawk.speak" name="mb.hawk.speak"><h1 class="project-name">mb.hawk.speak</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns mb.hawk.speak
   (:require [clojure.java.shell :as sh]))</pre></td></tr><tr><td class="docs"><p>Handles a test event by speaking(!?) it if appropriate</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti handle-event!
@@ -3829,7 +3922,7 @@ is encountered.</p>
   (format-nanoseconds (* 1000.0 microseconds)))</pre></td></tr><tr><td class="docs"><p>Format a time interval in milliseconds into something more readable.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn format-milliseconds
   ^String [milliseconds]
-  (format-microseconds (* 1000.0 milliseconds)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a><div id="floating-toc"><ul><li class="floating-toc-li" id="floating-toc_mb.hawk.assert-exprs">mb.hawk.assert-exprs</li><li class="floating-toc-li" id="floating-toc_mb.hawk.assert-exprs.approximately-equal">mb.hawk.assert-exprs.approximately-equal</li><li class="floating-toc-li" id="floating-toc_mb.hawk.core">mb.hawk.core</li><li class="floating-toc-li" id="floating-toc_mb.hawk.hooks">mb.hawk.hooks</li><li class="floating-toc-li" id="floating-toc_mb.hawk.init">mb.hawk.init</li><li class="floating-toc-li" id="floating-toc_mb.hawk.junit">mb.hawk.junit</li><li class="floating-toc-li" id="floating-toc_mb.hawk.junit.write">mb.hawk.junit.write</li><li class="floating-toc-li" id="floating-toc_mb.hawk.parallel">mb.hawk.parallel</li><li class="floating-toc-li" id="floating-toc_mb.hawk.speak">mb.hawk.speak</li><li class="floating-toc-li" id="floating-toc_mb.hawk.util">mb.hawk.util</li></ul></div></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+  (format-microseconds (* 1000.0 milliseconds)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a><div id="floating-toc"><ul><li class="floating-toc-li" id="floating-toc_mb.hawk.assert-exprs">mb.hawk.assert-exprs</li><li class="floating-toc-li" id="floating-toc_mb.hawk.assert-exprs.approximately-equal">mb.hawk.assert-exprs.approximately-equal</li><li class="floating-toc-li" id="floating-toc_mb.hawk.core">mb.hawk.core</li><li class="floating-toc-li" id="floating-toc_mb.hawk.hooks">mb.hawk.hooks</li><li class="floating-toc-li" id="floating-toc_mb.hawk.init">mb.hawk.init</li><li class="floating-toc-li" id="floating-toc_mb.hawk.junit">mb.hawk.junit</li><li class="floating-toc-li" id="floating-toc_mb.hawk.junit.write">mb.hawk.junit.write</li><li class="floating-toc-li" id="floating-toc_mb.hawk.parallel">mb.hawk.parallel</li><li class="floating-toc-li" id="floating-toc_mb.hawk.partition">mb.hawk.partition</li><li class="floating-toc-li" id="floating-toc_mb.hawk.speak">mb.hawk.speak</li><li class="floating-toc-li" id="floating-toc_mb.hawk.util">mb.hawk.util</li></ul></div></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
