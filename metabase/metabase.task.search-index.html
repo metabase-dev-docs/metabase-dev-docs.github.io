@@ -2865,94 +2865,37 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.search.postgres.core" name="metabase.search.postgres.core"><h1 class="project-name">metabase.search.postgres.core</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.search.postgres.core
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.task.search-index" name="metabase.task.search-index"><h1 class="project-name">metabase.task.search-index</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.task.search-index
   (:require
-   [honey.sql :as sql]
-   [honey.sql.helpers :as sql.helpers]
-   [metabase.api.common :as api]
-   [metabase.search.config :as search.config]
-   [metabase.search.impl :as search.impl]
-   [metabase.search.postgres.index :as search.index]
-   [metabase.search.postgres.ingestion :as search.ingestion]
-   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- user-params [search-ctx]
-  (cond
-    (:current-user-id search-ctx)
-    (select-keys search-ctx [:is-superuser? :current-user-id :current-user-perms])
-    api/*current-user-id*
-    {:is-superuser?      api/*is-superuser?*
-     :current-user-id    api/*current-user-id*
-     :current-user-perms @api/*current-user-permissions-set*}
-    :else
-    {:is-superuser?      true
-     ;; this does not matter, we won't use it.
-     :current-user-id    1
-     :current-user-perms #{&quot;/&quot;}}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- in-place-query [{:keys [models search-term archived?] :as search-ctx}]
-  (search.impl/full-search-query
-   (merge
-    (user-params search-ctx)
-    {:search-string      search-term
-     :models             (or models
-                             (if api/*current-user-id*
-                               search.config/all-models
-                               ;; For REPL convenience, skip these models as
-                               ;; they require the user to be initialized.
-                               (disj search.config/all-models &quot;indexed-entity&quot;)))
-     :archived?          archived?
-     :model-ancestors?   true})))</pre></td></tr><tr><td class="docs"><p>Use the index for appling the search string, but rely on the legacy code path for rendering
-the display data, applying permissions, additional filtering, etc.</p>
+   [clojurewerkz.quartzite.jobs :as jobs]
+   [clojurewerkz.quartzite.triggers :as triggers]
+   [metabase.public-settings :as public-settings]
+   [metabase.search :as search]
+   [metabase.task :as task]
+   [metabase.util.log :as log])
+  (:import
+   (org.quartz DisallowConcurrentExecution)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Populate Search Index</p>
 
-<p>NOTE: this is less efficient than legacy search even. We plan to replace it with something
-less feature complete, but much faster.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn hybrid
-  [search-term &amp; {:as search-ctx}]
-  (when-not @#'search.index/initialized?
-    (throw (ex-info &quot;Search index is not initialized. Use [[init!]] to ensure it exists.&quot;
-                    {:search-engine :postgres})))
-  (-&gt; (sql.helpers/with [:index-query (search.index/search-query search-term)]
-                        [:source-query (in-place-query search-ctx)])
-      (sql.helpers/select :sq.*)
-      (sql.helpers/from [:source-query :sq])
-      (sql.helpers/join [:index-query :iq] [:and
-                                            [:= :sq.model :iq.model]
-                                            [:= :sq.id :iq.model_id]])
-      (sql/format {:quoted true})
-      t2/reducible-query))</pre></td></tr><tr><td class="docs"><p>Perform multiple legacy searches to see if its faster. Perverse!</p>
-</td><td class="codes"><pre class="brush: clojure">(defn hybrid-multi
-  [search-term &amp; {:as search-ctx}]
-  (when-not @#'search.index/initialized?
-    (throw (ex-info &quot;Search index is not initialized. Use [[init!]] to ensure it exists.&quot;
-                    {:search-engine :postgres})))
-  (-&gt;&gt; (search.index/search-query search-term)
-       t2/query
-       (group-by :model)
-       (mapcat (fn [[model results]]
-                 (let [ids (map :model_id results)]
-                   ;; Something is very wrong here, this also returns items with other ids.
-                   (as-&gt; search-ctx &lt;&gt;
-                     (assoc &lt;&gt; :models #{model} :ids ids)
-                     (dissoc &lt;&gt; :search-string)
-                     (in-place-query &lt;&gt;)
-                     (t2/query &lt;&gt;)
-                     (filter (comp (set ids) :id) &lt;&gt;)))))))</pre></td></tr><tr><td class="docs"><p>Return a reducible-query corresponding to searching the entities via a tsvector.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn search
-  [search-ctx]
-  (hybrid-multi (:search-string search-ctx)
-                (dissoc search-ctx :search-string)))</pre></td></tr><tr><td class="docs"><p>Ensure that the search index exists, and has been populated with all the entities.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn init!
-  [&amp; [force-reset?]]
-  (search.index/ensure-ready! force-reset?)
-  (search.ingestion/populate-index!))</pre></td></tr><tr><td class="docs"><p>Populate a new index</p>
-</td><td class="codes"><pre class="brush: clojure">(defn reindex!
-  []
-  (search.index/ensure-ready! false)
-  (search.index/maybe-create-pending!)
-  (search.ingestion/populate-index!)
-  (search.index/activate-pending!))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(comment
-  (init! true))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+<p>We need each instance to initialize on start-up currently, this will need to be refined.</p>
+</td><td class="codes"><pre class="brush: clojure">(jobs/defjob ^{DisallowConcurrentExecution false
+               :doc                        }
+  SearchIndexing [_ctx]
+  (when (public-settings/experimental-fulltext-search-enabled)
+    (log/info &quot;Recreating search index from latest schema&quot;)
+    (search/init-index! {:force-reset? true})
+    (log/info &quot;Populating search index&quot;)
+    (search/reindex!)
+    (log/info &quot;Done indexing.&quot;)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod task/init! ::SearchIndex [_]
+  (let [job     (jobs/build
+                 (jobs/of-type SearchIndexing)
+                 (jobs/with-identity (jobs/key &quot;metabase.task.search-index.job&quot;)))
+        trigger (triggers/build
+                 (triggers/with-identity (triggers/key &quot;metabase.task.search-index.trigger&quot;))
+                 (triggers/start-now))]
+    (task/schedule-task! job trigger)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

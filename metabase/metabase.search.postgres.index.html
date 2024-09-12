@@ -2870,6 +2870,7 @@ net.brehaut.ClojureTools = (function (SH) {
   (:require
    [clojure.string :as str]
    [honey.sql.helpers :as sql.helpers]
+   [metabase.util :as u]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private active-table :search_index)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private pending-table :search_index_next)</pre></td></tr><tr><td class="docs">
@@ -2888,7 +2889,7 @@ net.brehaut.ClojureTools = (function (SH) {
     (-&gt; (sql.helpers/alter-table old)
         (sql.helpers/rename-table new)
         t2/query)))</pre></td></tr><tr><td class="docs"><p>Create a non-active search index table.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn create-pending!
+</td><td class="codes"><pre class="brush: clojure">(defn maybe-create-pending!
   []
   (when (not @reindexing?)
     (when-not (exists? pending-table)
@@ -2907,7 +2908,11 @@ net.brehaut.ClojureTools = (function (SH) {
              [:database_id :int]
              [:table_id :int]
              ;; filter related
-             [:archived :boolean]])
+             [:archived :boolean]
+             ;; useful for tracking the speed and age of the index
+             [:created_at :timestamp
+              [:default [:raw &quot;CURRENT_TIMESTAMP&quot;]]
+              :not-null]])
           t2/query)
       (t2/query
        (format &quot;CREATE INDEX IF NOT EXISTS %s_tsvector_idx ON %s USING gin (search_vector)&quot;
@@ -2924,36 +2929,85 @@ net.brehaut.ClojureTools = (function (SH) {
       (rename-table! pending-table active-table))
     (reset! reindexing? false)
     (drop-table! retired-table)
-    true))</pre></td></tr><tr><td class="docs"><p>Create or update the given search index trny</p>
+    true))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- entity-&gt;entry [entity]
+  (-&gt; entity
+      (select-keys
+       [:model
+        :model_rank
+        :collection_id
+        :database_id
+        :table_id
+        :archived])
+      (assoc
+       :model_id      (:id entity)
+       :search_vector [:to_tsvector
+                       [:inline tsv-language]
+                       [:cast
+                        (:searchable_text entity)
+                        :text]])))</pre></td></tr><tr><td class="docs"><p>Create the given search index entries</p>
 </td><td class="codes"><pre class="brush: clojure">(defn update!
   [entity]
-  (let [entry (-&gt; entity
-                  (select-keys
-                   [:model
-                    :model_rank
-                    :collection_id
-                    :database_id
-                    :table_id
-                    :archived])
-                  (assoc
-                   :model_id      (:id entity)
-                   :search_vector [:to_tsvector
-                                   [:inline tsv-language]
-                                   [:cast
-                                    (:searchable_text entity)
-                                    :text]]))]
+  (let [entry (entity-&gt;entry entity)]
     (when @initialized?
       (t2/insert! active-table entry))
     (when @reindexing?
-      (t2/insert! pending-table entry))))</pre></td></tr><tr><td class="docs"><p>Query fragment for all models corresponding to a query paramter <code>:search-term</code>.</p>
+      (t2/insert! pending-table entry))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- process-negation [term]
+  (if (str/starts-with? term &quot;-&quot;)
+    (str &quot;!&quot; (subs term 1))
+    term))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- process-phrase [word-or-phrase]
+  ;; a phrase is quoted even if the closing quotation mark has not been typed yet
+  (if (str/starts-with? word-or-phrase &quot;\)
+    ;; quoted phrases must be matched sequentially
+    (as-&gt; word-or-phrase &lt;&gt;
+      ;; remove the quote mark(s)
+      (str/replace &lt;&gt; #&quot;^\&quot;|\&quot;$&quot; )
+      (str/trim &lt;&gt;)
+      (str/split &lt;&gt; #&quot;\s+&quot;)
+      (str/join &quot; &lt;-&gt; &quot; &lt;&gt;))
+    ;; just a regular word
+    word-or-phrase))</pre></td></tr><tr><td class="docs"><p>Break up the words in the search input, preserving quoted and partially quoted segments.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- split-preserving-quotes
+  [s]
+  (re-seq #&quot;\&quot;[^\&quot;]*(?:\&quot;|$)|[^\s\&quot;]+|\s+&quot; (u/lower-case-en s)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- process-clause [words-and-phrases]
+  (-&gt;&gt; words-and-phrases
+       (remove #{&quot;and&quot;})
+       (map (comp process-phrase
+                  process-negation))
+       (str/join &quot; &amp; &quot;)))</pre></td></tr><tr><td class="docs"><p>Add wildcards at the end of the final word, so that we match ts completions.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- complete-last-word
+  [expression]
+  (str/replace expression #&quot;(\S+)(?=\s*$)&quot; &quot;$1:*&quot;))</pre></td></tr><tr><td class="docs"><p>Given the user input, construct a query in the Postgres tsvector query language.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- to-tsquery-expr
+  [input]
+  (let [trimmed        (str/trim input)
+        complete?      (not (str/ends-with? trimmed &quot;\&quot;&quot;))
+        maybe-complete (if complete? complete-last-word identity)]
+    (-&gt;&gt; (split-preserving-quotes trimmed)
+         (remove str/blank?)
+         (partition-by #{&quot;or&quot;})
+         (remove #(= (first %) &quot;or&quot;))
+         (map process-clause)
+         (str/join &quot; | &quot;)
+         maybe-complete)))</pre></td></tr><tr><td class="docs"><p>Create the given search index entries in bulk</p>
+</td><td class="codes"><pre class="brush: clojure">(defn batch-update!
+  [entities]
+  (let [entries (map entity-&gt;entry entities)]
+    (when @initialized?
+      (t2/insert! active-table entries))
+    (when @reindexing?
+      (t2/insert! pending-table entries))))</pre></td></tr><tr><td class="docs"><p>Query fragment for all models corresponding to a query paramter <code>:search-term</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn search-query
   [search-term]
   {:select [:model_id :model]
    :from   [active-table]
    :where  [:raw
-            &quot;search_vector @@ websearch_to_tsquery('&quot;
+            &quot;search_vector @@ to_tsquery('&quot;
             tsv-language &quot;', &quot;
-            [:lift search-term] &quot;)&quot;]})</pre></td></tr><tr><td class="docs"><p>Use the index table to search for records.</p>
+            [:lift (to-tsquery-expr search-term)] &quot;)&quot;]})</pre></td></tr><tr><td class="docs"><p>Use the index table to search for records.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn search
   [search-term]
   (map (juxt :model_id :model)
@@ -2962,9 +3016,14 @@ net.brehaut.ClojureTools = (function (SH) {
   []
   (reset! reindexing? false)
   (drop-table! pending-table)
-  (create-pending!)
+  (maybe-create-pending!)
   (activate-pending!)
-  (reset! initialized? true))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+  (reset! initialized? true))</pre></td></tr><tr><td class="docs"><p>Ensure the index is ready to be populated. Return false if it was already ready.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn ensure-ready!
+  [force-recreation?]
+  (if (or force-recreation? (not (exists? active-table)))
+    (reset-index!)
+    (reset! initialized? true)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
