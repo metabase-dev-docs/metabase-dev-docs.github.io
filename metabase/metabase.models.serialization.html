@@ -2880,6 +2880,8 @@ Do not export if it's internal or automatic: Users (created automatically), logs
 <ul>
 <li>Add it to the appropriate list in [[metabase-enterprise.serialization.v2.models]]</li>
 <li>If it is in the <code>excluded-models</code> list, then your job is done</li>
+<li>If it's not, you probably want <code>entity_id</code> field autopopulated (that's a most common way to make model
+transportable between instances), add <code>(derive :model/Model :hook/entity-id)</code> to your model</li>
 <li>Define serialization multi-methods on a model (see <code>Card</code> and <code>Collection</code> for more complex examples or <code>Action</code>
 and <code>Segment</code> for less involved stuff)
 <ul><li><code>serdes/make-spec</code> - this is the main entry point. Should list every field in the model (this is checked in
@@ -3724,36 +3726,62 @@ This is useful for writing [[dependencies]] implementations.</p>
   [[db-name schema table-name]]
   (filterv some? [{:model &quot;Database&quot; :id db-name}
                   (when schema {:model &quot;Schema&quot; :id schema})
-                  {:model &quot;Table&quot; :id table-name}]))</pre></td></tr><tr><td class="docs"><p>The [[serdes/storage-path]] for Table is a bit tricky, and shared with Fields and FieldValues, so it's
+                  {:model &quot;Table&quot; :id table-name}]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private STORAGE-DIRS {&quot;Database&quot; &quot;databases&quot;
+                             &quot;Schema&quot;   &quot;schemas&quot;
+                             &quot;Table&quot;    &quot;tables&quot;
+                             &quot;Field&quot;    &quot;fields&quot;})</pre></td></tr><tr><td class="docs"><p>The [[serdes/storage-path]] for Table is a bit tricky, and shared with Fields and FieldValues, so it's
 factored out here.
 Takes the :serdes/meta value for a <code>Table</code>!
 The return value includes the directory for the Table, but not the file for the Table itself.</p>
 
 <p>With a schema: <code>["databases" "db_name" "schemas" "public" "tables" "customers"]</code>
 No schema:     <code>["databases" "db_name" "tables" "customers"]</code></p>
-</td><td class="codes"><pre class="brush: clojure">(defn storage-table-path-prefix
+</td><td class="codes"><pre class="brush: clojure">(defn storage-path-prefixes
   [path]
-  (let [db-name    (-&gt; path first :id)
-        schema     (when (= (count path) 3)
-                     (-&gt; path second :id))
-        table-name (-&gt; path last :id)]
-    (concat [&quot;databases&quot; db-name]
-            (when schema [&quot;schemas&quot; schema])
-            [&quot;tables&quot; table-name])))</pre></td></tr><tr><td class="docs"><h2>Fields</h2>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Given a numeric <code>field_id</code>, return a portable field reference.
+  (into [] cat
+        (for [entry path]
+          [(or (get STORAGE-DIRS (:model entry))
+               (throw (ex-info &quot;Could not find dir name&quot; {:entry entry})))
+           (:id entry)])))</pre></td></tr><tr><td class="docs"><h2>Fields</h2>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- field-hierarchy [id]
+  (reverse
+   (t2/select :model/Field
+              {:with-recursive [[[:parents {:columns [:id :name :parent_id :table_id]}]
+                                 {:union-all [{:from   [[:metabase_field :mf]]
+                                               :select [:mf.id :mf.name :mf.parent_id :mf.table_id]
+                                               :where  [:= :id id]}
+                                              {:from   [[:metabase_field :pf]]
+                                               :select [:pf.id :pf.name :pf.parent_id :pf.table_id]
+                                               :join   [[:parents :p] [:= :p.parent_id :pf.id]]}]}]]
+               :from           [:parents]
+               :select         [:name :table_id]})))</pre></td></tr><tr><td class="docs"><p>Build a query to find a field among parents (should start with bottom-most field first), i.e.:</p>
+
+<p><code>(recursively-find-field-q 1 ["inner" "outer"])</code></p>
+</td><td class="codes"><pre class="brush: clojure">(defn recursively-find-field-q
+  [table-id [field &amp; rest]]
+  (when field
+    {:from   [:metabase_field]
+     :select [:id]
+     :where  [:and
+              [:= :table_id table-id]
+              [:= :name field]
+              [:= :parent_id (recursively-find-field-q table-id rest)]]}))</pre></td></tr><tr><td class="docs"><p>Given a numeric <code>field_id</code>, return a portable field reference.
 That has the form <code>[db-name schema table-name field-name]</code>, where the <code>schema</code> might be nil.
-[[import-field-fk]] is the inverse.</p>
+[[<em>import-field-fk</em>]] is the inverse.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn ^:dynamic ^::cache *export-field-fk*
   [field-id]
   (when field-id
-    (let [{:keys [name table_id]}     (t2/select-one 'Field :id field-id)
-          [db-name schema field-name] (*export-table-fk* table_id)]
-      [db-name schema field-name name])))</pre></td></tr><tr><td class="docs"><p>Given a <code>field_id</code> as exported by [[export-field-fk]], resolve it back into a numeric <code>field_id</code>.</p>
+    (let [fields                      (field-hierarchy field-id)
+          [db-name schema field-name] (*export-table-fk* (:table_id (first fields)))]
+      (into [db-name schema field-name] (map :name fields)))))</pre></td></tr><tr><td class="docs"><p>Given a <code>field_id</code> as exported by [[<em>export-field-fk</em>]], resolve it back into a numeric <code>field_id</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn ^:dynamic ^::cache *import-field-fk*
-  [[db-name schema table-name field-name :as field-id]]
+  [[db-name schema table-name &amp; fields :as field-id]]
   (when field-id
-    (let [table_id (*import-table-fk* [db-name schema table-name])]
-      (t2/select-one-pk 'Field :table_id table_id :name field-name))))</pre></td></tr><tr><td class="docs"><p>Given a <code>field_id</code> as exported by [[export-field-fk]], turn it into a <code>[{:model ...}]</code> path for the Field.
+    (let [table-id (*import-table-fk* [db-name schema table-name])
+          field-q  (recursively-find-field-q table-id (reverse fields))]
+      (t2/select-one-pk :model/Field field-q))))</pre></td></tr><tr><td class="docs"><p>Given a <code>field_id</code> as exported by [[export-field-fk]], turn it into a <code>[{:model ...}]</code> path for the Field.
 This is useful for writing [[dependencies]] implementations.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn field-&gt;path
   [[db-name schema table-name field-name]]
