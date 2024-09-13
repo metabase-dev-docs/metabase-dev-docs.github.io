@@ -2924,13 +2924,57 @@ net.brehaut.ClojureTools = (function (SH) {
   (deferred-tru &quot;Identify when new versions of Metabase are available.&quot;)
   :type    :boolean
   :audit   :getter
-  :default true)</pre></td></tr><tr><td class="docs">
+  :default true)</pre></td></tr><tr><td class="docs"><p>Unique identifier used for this instance of {0}. This is set once and only once the first time it is fetched via
+its magic getter. Nice!</p>
+</td><td class="codes"><pre class="brush: clojure">(defsetting site-uuid
+  ;; Don't i18n this docstring because it's not user-facing! :)
+  :visibility :authenticated
+  :base       setting/uuid-nonce-base
+  :doc        false)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defsetting upgrade-threshold
+  (deferred-tru &quot;Threshold (value in 0-100) indicating at which treshold it should offer an upgrade to the latest major version.&quot;)
+  :visibility :internal
+  :export?    false
+  :type       :integer
+  :setter     :none
+  :getter     (fn []
+                ;; site-uuid is stable, current-major lets the threshold randomize during each major revision. So they
+                ;; might be early one release, and then later the next.
+                (-&gt; (site-uuid) (str &quot;-&quot; (config/current-major-version)) hash (mod 100))))</pre></td></tr><tr><td class="docs"><p>On a major upgrade, we check the rollout threshold to indicate whether we should remove the latest release from the
+version info. This lets us stage upgrade notifications to self-hosted instances in a controlled manner. Defaults to
+show the upgrade except under certain circumstances.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- prevent-upgrade?
+  [current-major latest threshold]
+  (when (and (integer? current-major) (integer? threshold) (string? (:version latest)))
+    (try (let [upgrade-major (-&gt; latest :version config/major-version)
+               rollout       (some-&gt; latest :rollout)]
+           (when (and upgrade-major rollout)
+             (cond
+               ;; it's the same or a minor release
+               (= upgrade-major current-major) false
+               ;; the rollout threshold is larger than our threshold
+               (&gt;= rollout threshold) false
+               :else true)))
+         (catch Exception _e true))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- version-info*
+  [raw-version-info {:keys [current-major upgrade-threshold-value]}]
+  (try
+    (cond-&gt; raw-version-info
+      (prevent-upgrade? current-major (-&gt; raw-version-info :latest) upgrade-threshold-value)
+      (dissoc :latest))
+    (catch Exception e
+      (log/error e &quot;Error processing version info&quot;)
+      raw-version-info)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defsetting version-info
   (deferred-tru &quot;Information about available versions of Metabase.&quot;)
   :type    :json
   :audit   :never
   :default {}
-  :doc     false)</pre></td></tr><tr><td class="docs">
+  :doc     false
+  :getter  (fn []
+             (let [raw-vi (setting/get-value-of-type :json :version-info)
+                   current-major (config/current-major-version)]
+               (version-info* raw-vi {:current-major current-major :upgrade-threshold-value (upgrade-threshold)}))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defsetting version-info-last-checked
   (deferred-tru &quot;Indicates when Metabase last checked for new versions.&quot;)
   :visibility :public
@@ -2962,13 +3006,7 @@ net.brehaut.ClojureTools = (function (SH) {
   (deferred-tru &quot;ID of dashboard to use as a homepage&quot;)
   :type       :integer
   :visibility :public
-  :audit      :getter)</pre></td></tr><tr><td class="docs"><p>Unique identifier used for this instance of {0}. This is set once and only once the first time it is fetched via
-its magic getter. Nice!</p>
-</td><td class="codes"><pre class="brush: clojure">(defsetting site-uuid
-  ;; Don't i18n this docstring because it's not user-facing! :)
-  :visibility :authenticated
-  :base       setting/uuid-nonce-base
-  :doc        false)</pre></td></tr><tr><td class="docs"><p>In the interest of respecting everyone's privacy and keeping things as anonymous as possible we have a <em>different</em>
+  :audit      :getter)</pre></td></tr><tr><td class="docs"><p>In the interest of respecting everyone's privacy and keeping things as anonymous as possible we have a <em>different</em>
 site-wide UUID that we use for the EE/premium features token feature check API calls. It works in fundamentally the
 same way as [[site-uuid]] but should only be used by the token check logic
 in [[metabase.public-settings.premium-features/fetch-token-status]]. (<code>site-uuid</code> is used for anonymous
