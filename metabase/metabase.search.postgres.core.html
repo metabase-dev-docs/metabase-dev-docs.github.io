@@ -2907,7 +2907,7 @@ the display data, applying permissions, additional filtering, etc.</p>
 
 <p>NOTE: this is less efficient than legacy search even. We plan to replace it with something
 less feature complete, but much faster.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn hybrid
+</td><td class="codes"><pre class="brush: clojure">(defn- hybrid
   [search-term &amp; {:as search-ctx}]
   (when-not @#'search.index/initialized?
     (throw (ex-info &quot;Search index is not initialized. Use [[init!]] to ensure it exists.&quot;
@@ -2921,7 +2921,7 @@ less feature complete, but much faster.</p>
                                             [:= :sq.id :iq.model_id]])
       (sql/format {:quoted true})
       t2/reducible-query))</pre></td></tr><tr><td class="docs"><p>Perform multiple legacy searches to see if its faster. Perverse!</p>
-</td><td class="codes"><pre class="brush: clojure">(defn hybrid-multi
+</td><td class="codes"><pre class="brush: clojure">(defn- hybrid-multi
   [search-term &amp; {:as search-ctx}]
   (when-not @#'search.index/initialized?
     (throw (ex-info &quot;Search index is not initialized. Use [[init!]] to ensure it exists.&quot;
@@ -2945,15 +2945,20 @@ less feature complete, but much faster.</p>
   (-&gt;&gt; (assoc (search.index/search-query search-term) :select [:legacy_input])
        (t2/query)
        (map :legacy_input)
-       (map #(json/parse-string % keyword))))</pre></td></tr><tr><td class="docs"><p>Perform a basic search that only uses the index</p>
-</td><td class="codes"><pre class="brush: clojure">(defn search-minimal
-  [search-ctx]
-  (minimal (:search-string search-ctx)
-           (dissoc search-ctx :search-string)))</pre></td></tr><tr><td class="docs"><p>Return a reducible-query corresponding to searching the entities via a tsvector.</p>
+       (map #(json/parse-string % keyword))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private default-engine hybrid-multi)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- search-fn [search-engine]
+  (case search-engine
+    :hybrid       hybrid
+    :hubrid-multi hybrid-multi
+    :minimal      minimal
+    :fulltext     default-engine
+    default-engine))</pre></td></tr><tr><td class="docs"><p>Return a reducible-query corresponding to searching the entities via a tsvector.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn search
   [search-ctx]
-  (hybrid-multi (:search-string search-ctx)
-                (dissoc search-ctx :search-string)))</pre></td></tr><tr><td class="docs"><p>Ensure that the search index exists, and has been populated with all the entities.</p>
+  (let [f (search-fn (:search-engine search-ctx))]
+    (f (:search-string search-ctx)
+       (dissoc search-ctx :search-string))))</pre></td></tr><tr><td class="docs"><p>Ensure that the search index exists, and has been populated with all the entities.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn init!
   [&amp; [force-reset?]]
   (search.index/ensure-ready! force-reset?)
