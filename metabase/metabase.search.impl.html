@@ -3336,11 +3336,7 @@ endpoint itself, not in the search impl.</p>
          :collection_type
          :archived_directly
          :display_name
-         :effective_parent))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- add-can-write [row]
-  (if (some #(mi/instance-of? % row) [:model/Dashboard :model/Card])
-    (assoc row :can_write (can-write? row))
-    row))</pre></td></tr><tr><td class="docs"><p>Coerce a bit returned by some MySQL/MariaDB versions in some situations to Boolean.</p>
+         :effective_parent))))</pre></td></tr><tr><td class="docs"><p>Coerce a bit returned by some MySQL/MariaDB versions in some situations to Boolean.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- bit-&gt;boolean
   [v]
   (if (number? v)
@@ -3350,6 +3346,7 @@ endpoint itself, not in the search impl.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- allowed-engine? [engine]
   (case engine
     :in-place true
+    :minimal  (public-settings/experimental-fulltext-search-enabled)
     :fulltext (public-settings/experimental-fulltext-search-enabled)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- parse-engine [value]
   (or (when-not (str/blank? value)
@@ -3440,57 +3437,74 @@ endpoint itself, not in the search impl.</p>
     (log/tracef &quot;Searching with query:\n%s\n%s&quot;
                 (u/pprint-to-str search-query)
                 (mdb.query/format-sql (first (mdb.query/compile search-query))))
-    (t2/reducible-query search-query)))</pre></td></tr><tr><td class="docs"><p>Builds a search query that includes all the searchable entities and runs it</p>
+    (t2/reducible-query search-query)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- to-toucan-instance [row]
+  (let [model (-&gt; row :model search.config/model-to-db-model :db-model)]
+    (t2.instance/instance model row)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- map-collection [collection]
+  (cond-&gt; collection
+    (:archived_directly collection)
+    (assoc :location (collection/trash-path))
+    :always
+    (assoc :type (:collection_type collection))
+    :always
+    collection/maybe-localize-trash-name))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- normalize-result [result]
+  (let [instance (to-toucan-instance (t2.realize/realize result))]
+    (-&gt; instance
+        ;; MySQL returns booleans as `1` or `0` so convert those to boolean as needed
+        (update :bookmark bit-&gt;boolean)
+        (update :archived bit-&gt;boolean)
+        (update :archived_directly bit-&gt;boolean)
+        ;; Collections require some transformation before being scored and returned by search.
+        (cond-&gt; (t2/instance-of? :model/Collection instance) map-collection))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- add-can-write [row]
+  (if (some #(mi/instance-of? % row) [:model/Dashboard :model/Card])
+    (assoc row :can_write (can-write? row))
+    row))</pre></td></tr><tr><td class="docs"><p>Additional normalization that is done after we've filtered by permissions, as its more expensive.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- normalize-result-more
+  [result]
+  (-&gt; (update result :pk_ref json/parse-string)
+      add-can-write))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- search-results [search-ctx total-results]
+  (let [add-perms-for-col  (fn [item]
+                             (cond-&gt; item
+                               (mi/instance-of? :model/Collection item)
+                               (assoc :can_write (can-write? item))))]
+    ;; We get to do this slicing and dicing with the result data because
+    ;; the pagination of search is for UI improvement, not for performance.
+    ;; We intend for the cardinality of the search results to be below the default max before this slicing occurs
+    {:available_models (query-model-set search-ctx)
+     :data             (cond-&gt;&gt; total-results
+                         (some? (:offset-int search-ctx)) (drop (:offset-int search-ctx))
+                         (some? (:limit-int search-ctx)) (take (:limit-int search-ctx))
+                         true (map add-perms-for-col))
+     :limit            (:limit-int search-ctx)
+     :models           (:models search-ctx)
+     :offset           (:offset-int search-ctx)
+     :table_db_id      (:table-db-id search-ctx)
+     :engine           (:search-engine search-ctx)
+     :total            (count total-results)}))</pre></td></tr><tr><td class="docs"><p>Builds a search query that includes all the searchable entities, and runs it.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn search
   ([search-ctx :- search.config/SearchContext]
    (search in-place search-ctx))
   ([results-fn search-ctx :- search.config/SearchContext]
-   (let [to-toucan-instance (fn [row]
-                              (let [model (-&gt; row :model search.config/model-to-db-model :db-model)]
-                                (t2.instance/instance model row)))
-         reducible-results  (results-fn search-ctx)
-         xf                 (comp
-                             (take search.config/*db-max-results*)
-                             (map t2.realize/realize)
-                             (map to-toucan-instance)
-                             (map #(if (and (t2/instance-of? :model/Collection %)
-                                            (:archived_directly %))
-                                     (assoc % :location (collection/trash-path))
-                                     %))
-                             (map #(cond-&gt; %
-                                     (t2/instance-of? :model/Collection %) (assoc :type (:collection_type %))))
-                             (map #(cond-&gt; % (t2/instance-of? :model/Collection %) collection/maybe-localize-trash-name))
-                             ;; MySQL returns booleans as `1` or `0` so convert those to boolean as needed
-                             (map #(update % :bookmark bit-&gt;boolean))
-                             (map #(update % :archived bit-&gt;boolean))
-                             (map #(update % :archived_directly bit-&gt;boolean))
-                             (filter (partial check-permissions-for-model search-ctx))
-                             (map #(update % :pk_ref json/parse-string))
-                             (map add-can-write)
-                             (map #(scoring/score-and-result % (select-keys search-ctx [:search-string :search-native-query])))
-                             (filter #(pos? (:score %))))
-         total-results       (cond-&gt;&gt; (scoring/top-results reducible-results search.config/max-filtered-results xf)
-                               true                           hydrate-user-metadata
-                               (:model-ancestors? search-ctx) (add-dataset-collection-hierarchy)
-                               true                           (add-collection-effective-location)
-                               true                           (map serialize))
-         add-perms-for-col  (fn [item]
-                              (cond-&gt; item
-                                (mi/instance-of? :model/Collection item)
-                                (assoc :can_write (can-write? item))))]
-     ;; We get to do this slicing and dicing with the result data because
-     ;; the pagination of search is for UI improvement, not for performance.
-     ;; We intend for the cardinality of the search results to be below the default max before this slicing occurs
-     {:available_models (query-model-set search-ctx)
-      :data             (cond-&gt;&gt; total-results
-                          (some? (:offset-int search-ctx)) (drop (:offset-int search-ctx))
-                          (some? (:limit-int search-ctx)) (take (:limit-int search-ctx))
-                          true (map add-perms-for-col))
-      :limit            (:limit-int search-ctx)
-      :models           (:models search-ctx)
-      :offset           (:offset-int search-ctx)
-      :table_db_id      (:table-db-id search-ctx)
-      :total            (count total-results)})))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+   (let [reducible-results (results-fn search-ctx)
+         scoring-ctx       (select-keys search-ctx [:search-string :search-native-query])
+         xf                (comp
+                            (take search.config/*db-max-results*)
+                            (map normalize-result)
+                            (filter (partial check-permissions-for-model search-ctx))
+                            (map normalize-result-more)
+                             ;; scoring - note that this can also filter further!
+                            (map #(scoring/score-and-result % scoring-ctx))
+                            (filter #(pos? (:score %))))
+         total-results     (cond-&gt;&gt; (scoring/top-results reducible-results search.config/max-filtered-results xf)
+                             true                           hydrate-user-metadata
+                             (:model-ancestors? search-ctx) (add-dataset-collection-hierarchy)
+                             true                           (add-collection-effective-location)
+                             true                           (map serialize))]
+     (search-results search-ctx total-results))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
