@@ -4007,16 +4007,20 @@ are both equally-specific ancestors.</p>
   [hierarchy prefs dispatch-value dispatch-val-x dispatch-val-y]
   (zero? ((domination-comparator hierarchy prefs dispatch-value) dispatch-val-x dispatch-val-y)))</pre></td></tr><tr><td class="docs"><p>Like <code>distinct</code>, but uses value of <code>(f item)</code> to determine whether to keep each <code>item</code> in the resulting collection.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn distinct-by
-  [f coll]
-  (first
-   (reduce
-    (fn [[items already-seen? :as acc] item]
-      (let [v (f item)]
-        (if (already-seen? v)
-          acc
-          [(conj items item) (conj already-seen? v)])))
-    [[] #{}]
-    coll)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#methodical.impl.dispatcher.everything" name="methodical.impl.dispatcher.everything"><h1 class="project-name">methodical.impl.dispatcher.everything</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+  ([f]
+   (fn [rf]
+     (let [seen (volatile! #{})]
+       (fn
+         ([] (rf))
+         ([result] (rf result))
+         ([result input]
+          (let [v (f input)]
+            (if (contains? @seen v)
+              result
+              (do (vswap! seen conj v)
+                  (rf result input)))))))))
+  ([f coll]
+   (into [] (distinct-by f) coll)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#methodical.impl.dispatcher.everything" name="methodical.impl.dispatcher.everything"><h1 class="project-name">methodical.impl.dispatcher.everything</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns methodical.impl.dispatcher.everything
   (:refer-clojure :exclude [methods])
   (:require
@@ -4121,12 +4125,13 @@ multiple values, it supports default methods that specialize on some args and us
   ;;     1 | 01     | [:default :y]
   ;;     0 | 00     | [:default :default]
   (let [cnt (count dispatch-value)]
-    (for [i (reverse (range (dec (int (Math/pow 2 cnt)))))]
-      (vec
-       (for [j (reverse (range 0 cnt))]
-         (if (pos? (bit-and i (bit-shift-left 1 j)))
-           (nth dispatch-value (- cnt j 1))
-           default-value))))))</pre></td></tr><tr><td class="docs"><p>Return a sequence of all partially-specialized default dispatch values for a given <code>dispatch-value</code> and
+    (mapv (fn [i]
+            (mapv (fn [j]
+                    (if (pos? (bit-and i (bit-shift-left 1 j)))
+                      (nth dispatch-value (- cnt j 1))
+                      default-value))
+                  (range (dec cnt) -1 -1)))
+          (range (- (int (Math/pow 2 cnt)) 2) -1 -1))))</pre></td></tr><tr><td class="docs"><p>Return a sequence of all partially-specialized default dispatch values for a given <code>dispatch-value</code> and
 <code>default-value</code>, in order from most-specific to least-specific.</p>
 
 <p>```clj
@@ -4140,26 +4145,21 @@ multiple values, it supports default methods that specialize on some args and us
   [dispatch-value default-value]
   (when (and (sequential? dispatch-value)
              (not (sequential? default-value)))
-    (partially-specialized-default-dispatch-values* dispatch-value default-value)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- matching-partially-specialized-default-primary-method-pairs*
-  [{:keys [default-value dispatch-value unambiguous-pairs-seq-fn]
-    :or   {unambiguous-pairs-seq-fn dispatcher.standard/unambiguous-pairs-seq}
-    :as   opts}]
-  (mapcat
-   (fn [partial-default]
-     (let [pairs (dispatcher.standard/matching-primary-pairs-excluding-default
-                  (assoc opts :dispatch-value partial-default))]
-       (unambiguous-pairs-seq-fn opts pairs)))
-   (partially-specialized-default-dispatch-values dispatch-value default-value)))</pre></td></tr><tr><td class="docs"><p>Return pairs of <code>[dispatch-value method]</code> for all matching partially-specialized default methods, sorted from
+    (partially-specialized-default-dispatch-values* dispatch-value default-value)))</pre></td></tr><tr><td class="docs"><p>Return pairs of <code>[dispatch-value method]</code> for all matching partially-specialized default methods, sorted from
 most-specific to least-specific</p>
 </td><td class="codes"><pre class="brush: clojure">(defn matching-partially-specialized-default-primary-method-pairs
   ;; TODO - this is too many args!
   [opts standard-dispatch-vals]
-  (-&gt;&gt; (matching-partially-specialized-default-primary-method-pairs* opts)
-       (dispatcher.common/distinct-by first)
-       (remove
-        (fn [[dispatch-val]]
-          (contains? standard-dispatch-vals dispatch-val)))))</pre></td></tr><tr><td class="docs"><p>Return a lazy sequence of applicable priamry methods for <code>dispatch-value</code>, sorted from most-specific to
+  (let [{:keys [default-value dispatch-value unambiguous-pairs-seq-fn]
+         :or   {unambiguous-pairs-seq-fn dispatcher.standard/unambiguous-pairs-seq}} opts]
+    (into []
+          (comp (mapcat (fn [partial-default]
+                          (let [pairs (dispatcher.standard/matching-primary-pairs-excluding-default
+                                       (assoc opts :dispatch-value partial-default))]
+                            (unambiguous-pairs-seq-fn opts pairs))))
+                (dispatcher.common/distinct-by first)
+                (remove (fn [[dispatch-val]] (contains? standard-dispatch-vals dispatch-val))))
+          (partially-specialized-default-dispatch-values dispatch-value default-value))))</pre></td></tr><tr><td class="docs"><p>Return a lazy sequence of applicable priamry methods for <code>dispatch-value</code>, sorted from most-specific to
 least-specific. Similar to the implementation in [[methodical.impl.dispatcher.standard]], but supports
 partially-specialized default methods; see explanation in ns docstring.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn matching-primary-methods
