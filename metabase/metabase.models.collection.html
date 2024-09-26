@@ -2931,8 +2931,10 @@ permissions for these objects.
   ;; in some circumstances we don't have a `:type` on the collection (e.g. search or collection items lists, where we
   ;; select a subset of columns). Use the type if it's there, but fall back to the ID to be sure.
   ;; We can't *only* use the id because getting that requires selecting a collection :sweat-smile:
-  (or (= (:type collection-or-id) trash-collection-type)
-      (some-&gt; collection-or-id u/id (= (trash-collection-id)))))</pre></td></tr><tr><td class="docs"><p>Is this the trash collection, or a descendant of it?</p>
+  (let [type (:type collection-or-id ::not-found)]
+    (if (identical? type ::not-found)
+      (some-&gt; collection-or-id u/id (= (trash-collection-id)))
+      (= type trash-collection-type))))</pre></td></tr><tr><td class="docs"><p>Is this the trash collection, or a descendant of it?</p>
 </td><td class="codes"><pre class="brush: clojure">(defn is-trash-or-descendant?
   [collection]
   (str/starts-with? (:location collection) (trash-path)))</pre></td></tr><tr><td class="docs"><p>Used to be the toucan1 model name defined using [[toucan.models/defmodel]], no2 it's a reference to the toucan2 model name.
@@ -3005,8 +3007,9 @@ assembling IDs into a location path, and so forth.</p>
 THAT THE PATH OR RESULTS ARE VALID. This unchecked version exists solely to power the other version below.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- unchecked-location-path-&gt;ids
   [location-path]
-  (for [^String id-str (rest (str/split location-path #&quot;/&quot;))]
-    (Integer/parseInt id-str)))</pre></td></tr><tr><td class="docs">
+  (if (= location-path &quot;/&quot;)
+    []
+    (mapv parse-long (rest (str/split location-path #&quot;/&quot;)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- valid-location-path? [s]
   (boolean
    (and (string? s)
@@ -4206,19 +4209,22 @@ objects of that type.</p>
                             m
                             child-type-&gt;parent-ids)))
                 (zipmap (keys child-type-&gt;parent-ids) (repeat #{}))
-                collections)]
-    (map (fn [{:keys [id] :as collection}]
-           (let [below (apply set/union
-                              (for [[child-type coll-id-set] child-type-&gt;ancestor-ids]
-                                (when (contains? coll-id-set id)
-                                  #{child-type})))
-                 here (into #{} (for [[child-type coll-id-set] child-type-&gt;parent-ids
-                                      :when (contains? coll-id-set id)]
-                                  child-type))]
-             (cond-&gt; collection
-               (seq below) (assoc :below below)
-               (seq here) (assoc :here here))))
-         collections)))</pre></td></tr><tr><td class="docs"><p>Convert a flat sequence of Collections into a tree structure e.g.</p>
+                collections)
+        collect-present-child-types
+        (fn [child-type-map id]
+          (persistent!
+           (reduce-kv (fn [acc child-type coll-id-set]
+                        (cond-&gt; acc
+                          (contains? coll-id-set id) (conj! child-type)))
+                      (transient #{})
+                      child-type-map)))]
+    (mapv (fn [{:keys [id] :as collection}]
+            (let [below (collect-present-child-types child-type-&gt;ancestor-ids id)
+                  here (collect-present-child-types child-type-&gt;parent-ids id)]
+              (cond-&gt; collection
+                (seq below) (assoc :below below)
+                (seq here) (assoc :here here))))
+          collections)))</pre></td></tr><tr><td class="docs"><p>Convert a flat sequence of Collections into a tree structure e.g.</p>
 
 <p>  (collections->tree {:dataset #{C D} :card #{F C} [A B C D E F G])
   ;; ->
@@ -4258,11 +4264,16 @@ objects of that type.</p>
        ;; effectively &quot;pulling&quot; a Collection up to a higher level. e.g. if we have A &gt; B &gt; C and we can't see B then
        ;; the tree should come back as A &gt; C.
        ([m collection]
-        (let [path (as-&gt; (location-path-&gt;ids (:location collection)) ids
-                     (filter all-visible-ids ids)
-                     (concat ids [(:id collection)])
-                     (interpose :children ids))]
-          (update-in m path merge collection)))
+        (let [ids (location-path-&gt;ids (:location collection))
+              path (if (empty? ids)
+                     [(:id collection)]
+                     (as-&gt; ids ids
+                       (filterv all-visible-ids ids)
+                       (conj ids (:id collection))
+                       (interpose :children ids)
+                       (vec ids)))]
+          ;; Using conj instead of merge because the latter is inefficient with its varargs and reduce1.
+          (update-in m path #(if %1 (conj %1 %2) %2) collection)))
        ;; 3. Once we've build the entire tree structure, go in and convert each ID-&gt;Collection map into a flat sequence,
        ;; sorted by the lowercased Collection name. Do this recursively for the `:children` of each Collection e.g.
        ;;
