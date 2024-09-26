@@ -2865,200 +2865,30 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.driver.sql-jdbc.sync.describe-database" name="metabase.driver.sql-jdbc.sync.describe-database"><h1 class="project-name">metabase.driver.sql-jdbc.sync.describe-database</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>SQL JDBC impl for <code>describe-database</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.driver.sql-jdbc.sync.describe-database
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.search.fulltext" name="metabase.search.fulltext"><h1 class="project-name">metabase.search.fulltext</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.search.fulltext
   (:require
-   [clojure.string :as str]
-   [metabase.driver :as driver]
-   [metabase.driver.sql-jdbc.execute :as sql-jdbc.execute]
-   [metabase.driver.sql-jdbc.sync.common :as sql-jdbc.sync.common]
-   [metabase.driver.sql-jdbc.sync.interface :as sql-jdbc.sync.interface]
-   [metabase.driver.sql.query-processor :as sql.qp]
-   [metabase.driver.sync :as driver.s]
-   [metabase.driver.util :as driver.u]
-   [metabase.lib.metadata :as lib.metadata]
-   [metabase.lib.schema.common :as lib.schema.common]
-   [metabase.models.interface :as mi]
-   [metabase.query-processor.store :as qp.store]
-   [metabase.util.honey-sql-2 :as h2x]
-   [metabase.util.log :as log]
-   [metabase.util.malli :as mu])
-  (:import
-   (java.sql Connection DatabaseMetaData ResultSet)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql-jdbc.sync.interface/excluded-schemas :sql-jdbc [_] nil)</pre></td></tr><tr><td class="docs"><p>Get a <em>reducible</em> sequence of all string schema names for the current database from its JDBC database metadata.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn all-schemas
-  [^DatabaseMetaData metadata]
-  {:added &quot;0.39.0&quot;, :pre [(instance? DatabaseMetaData metadata)]}
-  (sql-jdbc.sync.common/reducible-results
-   #(.getSchemas metadata)
-   (fn [^ResultSet rs]
-     #(.getString rs &quot;TABLE_SCHEM&quot;))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql-jdbc.sync.interface/filtered-syncable-schemas :sql-jdbc
-  [driver _ metadata schema-inclusion-patterns schema-exclusion-patterns]
-  (eduction (remove (set (sql-jdbc.sync.interface/excluded-schemas driver)))
-            ;; remove the persisted_model schemas
-            (remove (fn [schema] (re-find #&quot;^metabase_cache.*&quot; schema)))
-            (filter (partial driver.s/include-schema? schema-inclusion-patterns schema-exclusion-patterns))
-            (all-schemas metadata)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn simple-select-probe-query :- [:cat ::lib.schema.common/non-blank-string [:* :any]]
-  &quot;Simple (ie. cheap) SELECT on a given table to test for access and get column metadata. Doesn't return
-  anything useful (only used to check whether we can execute a SELECT query)
-    (simple-select-probe-query :postgres \&quot;public\&quot; \&quot;my_table\&quot;)
-    ;; -&gt; [\&quot;SELECT TRUE FROM public.my_table WHERE 1 &lt;&gt; 1 LIMIT 0\&quot;]&quot;
-  [driver :- :keyword
-   schema :- [:maybe :string]        ; I think technically some DBs like SQL Server support empty schema and table names
-   table  :- :string]
-  ;; Using our SQL compiler here to get portable LIMIT (e.g. `SELECT TOP n ...` for SQL Server/Oracle)
-  (let [tru      (sql.qp/-&gt;honeysql driver true)
-        table    (sql.qp/-&gt;honeysql driver (h2x/identifier :table schema table))
-        honeysql {:select [[tru :_]]
-                  :from   [[table]]
-                  :where  [:inline [:not= 1 1]]}
-        honeysql (sql.qp/apply-top-level-clause driver :limit honeysql {:limit 0})]
-    (sql.qp/format-honeysql driver honeysql)))</pre></td></tr><tr><td class="docs"><p>Execute the simple SELECT query defined above. The main goal here is to check whether we're able to execute a SELECT
-query against the Table in question -- we don't care about the results themselves -- so the query and the logic
-around executing it should be as simple as possible. We need to highly optimize this logic because it's executed for
-every Table on every sync.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- execute-select-probe-query
-  [driver ^Connection conn [sql &amp; params]]
-  {:pre [(string? sql)]}
-  (with-open [stmt (sql-jdbc.sync.common/prepare-statement driver conn sql params)]
-    (log/tracef &quot;[%s] %s&quot; (name driver) sql)
-    ;; attempting to execute the SQL statement will throw an Exception if we don't have permissions; otherwise it will
-    ;; truthy wheter or not it returns a ResultSet, but we can ignore that since we have enough info to proceed at
-    ;; this point.
-    (.execute stmt)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql-jdbc.sync.interface/have-select-privilege? :sql-jdbc
-  [driver ^Connection conn table-schema table-name]
-  ;; Query completes = we have SELECT privileges
-  ;; Query throws some sort of no permissions exception = no SELECT privileges
-  (let [sql-args (simple-select-probe-query driver table-schema table-name)]
-    (log/tracef &quot;Checking for SELECT privileges for %s with query %s&quot;
-                (str (when table-schema
-                       (str (pr-str table-schema) \.))
-                     (pr-str table-name))
-                (pr-str sql-args))
-    (try
-      (execute-select-probe-query driver conn sql-args)
-      (log/trace &quot;SELECT privileges confirmed&quot;)
-      true
-      (catch Throwable e
-        (log/trace e &quot;Assuming no SELECT privileges: caught exception&quot;)
-        (when-not (.getAutoCommit conn)
-          (.rollback conn))
-        false))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- jdbc-get-tables
-  [driver ^DatabaseMetaData metadata catalog schema-pattern tablename-pattern types]
-  (sql-jdbc.sync.common/reducible-results
-   #(.getTables metadata catalog
-                (some-&gt;&gt; schema-pattern (driver/escape-entity-name-for-metadata driver))
-                (some-&gt;&gt; tablename-pattern (driver/escape-entity-name-for-metadata driver))
-                (when (seq types) (into-array String types)))
-   (fn [^ResultSet rset]
-     (fn [] {:name        (.getString rset &quot;TABLE_NAME&quot;)
-             :schema      (.getString rset &quot;TABLE_SCHEM&quot;)
-             :description (when-let [remarks (.getString rset &quot;REMARKS&quot;)]
-                            (when-not (str/blank? remarks)
-                              remarks))
-             :type        (.getString rset &quot;TABLE_TYPE&quot;)}))))</pre></td></tr><tr><td class="docs"><p>Fetch a JDBC Metadata ResultSet of tables in the DB, optionally limited to ones belonging to a given
-schema. Returns a reducible sequence of results.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn db-tables
-  [driver ^DatabaseMetaData metadata ^String schema-or-nil ^String db-name-or-nil]
-  ;; seems like some JDBC drivers like Snowflake are dumb and still narrow the search results by the current session
-  ;; schema if you pass in `nil` for `schema-or-nil`, which means not to narrow results at all... For Snowflake, I fixed
-  ;; this by passing in `&quot;%&quot;` instead -- consider making this the default behavior. See this Slack thread
-  ;; https://metaboat.slack.com/archives/C04DN5VRQM6/p1706220295862639?thread_ts=1706156558.940489&amp;cid=C04DN5VRQM6 for
-  ;; more info.
-  (jdbc-get-tables driver metadata db-name-or-nil schema-or-nil &quot;%&quot;
-                   [&quot;TABLE&quot; &quot;PARTITIONED TABLE&quot; &quot;VIEW&quot; &quot;FOREIGN TABLE&quot; &quot;MATERIALIZED VIEW&quot;
-                    &quot;EXTERNAL TABLE&quot; &quot;DYNAMIC_TABLE&quot;]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- schema+table-with-select-privileges
-  [driver conn]
-  (-&gt;&gt; (sql-jdbc.sync.interface/current-user-table-privileges driver {:connection conn})
-       (filter #(true? (:select %)))
-       (map (fn [{:keys [schema table]}]
-              [schema table]))
-       set))</pre></td></tr><tr><td class="docs"><p>Returns a function that take a map with 3 keys [:schema, :name, :type], return true if we can do a select query on the table.</p>
-
-<p>This function shouldn't be called a <code>map</code> or anything alike, instead use it as a cache function like so:</p>
-
-<p>  (let [have-select-privilege-fn* (have-select-privilege-fn driver database conn)
-        tables                   ...]
-    (filter have-select-privilege-fn* tables))</p>
-</td><td class="codes"><pre class="brush: clojure">(defn have-select-privilege-fn
-  [driver conn]
-  ;; `sql-jdbc.sync.interface/have-select-privilege?` is slow because we're doing a SELECT query on each table
-  ;; It's basically a N+1 operation where N is the number of tables in the database
-  (if (driver/database-supports? driver :table-privileges nil)
-    (let [schema+table-with-select-privileges (schema+table-with-select-privileges driver conn)]
-      (fn [{schema :schema table :name ttype :type}]
-        ;; driver/current-user-table-privileges does not return privileges for external table on redshift, and foreign
-        ;; table on postgres, so we need to use the select method on them
-        (if (#{[:postgres &quot;FOREIGN TABLE&quot;]}
-             [driver ttype])
-          (sql-jdbc.sync.interface/have-select-privilege? driver conn schema table)
-          (contains? schema+table-with-select-privileges [schema table]))))
-    (fn [{schema :schema table :name}]
-      (sql-jdbc.sync.interface/have-select-privilege? driver conn schema table))))</pre></td></tr><tr><td class="docs"><p>Default, fast implementation of <code>active-tables</code> best suited for DBs with lots of system tables (like Oracle). Fetch
-list of schemas, then for each one not in <code>excluded-schemas</code>, fetch its Tables, and combine the results.</p>
-
-<p>This is as much as 15x faster for Databases with lots of system tables than <code>post-filtered-active-tables</code> (4 seconds
-vs 60).</p>
-</td><td class="codes"><pre class="brush: clojure">(defn fast-active-tables
-  [driver ^Connection conn &amp; [db-name-or-nil schema-inclusion-filters schema-exclusion-filters]]
-  {:pre [(instance? Connection conn)]}
-  (let [metadata                  (.getMetaData conn)
-        syncable-schemas          (sql-jdbc.sync.interface/filtered-syncable-schemas driver conn metadata
-                                                                                     schema-inclusion-filters schema-exclusion-filters)
-        have-select-privilege-fn? (have-select-privilege-fn driver conn)]
-    (eduction (mapcat (fn [schema]
-                        (eduction
-                         (comp (filter have-select-privilege-fn?)
-                               (map #(dissoc % :type)))
-                         (db-tables driver metadata schema db-name-or-nil))))
-              syncable-schemas)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sql-jdbc.sync.interface/active-tables :sql-jdbc
-  [driver connection schema-inclusion-filters schema-exclusion-filters]
-  (fast-active-tables driver connection nil schema-inclusion-filters schema-exclusion-filters))</pre></td></tr><tr><td class="docs"><p>Alternative implementation of <code>active-tables</code> best suited for DBs with little or no support for schemas. Fetch <em>all</em>
-Tables, then filter out ones whose schema is in <code>excluded-schemas</code> Clojure-side.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn post-filtered-active-tables
-  [driver ^Connection conn &amp; [db-name-or-nil schema-inclusion-filters schema-exclusion-filters]]
-  {:pre [(instance? Connection conn)]}
-  (let [have-select-privilege-fn? (have-select-privilege-fn driver conn)]
-    (eduction
-     (comp
-      (filter (let [excluded (sql-jdbc.sync.interface/excluded-schemas driver)]
-                (fn [{table-schema :schema :as table}]
-                  (and (not (contains? excluded table-schema))
-                       (driver.s/include-schema? schema-inclusion-filters schema-exclusion-filters table-schema)
-                       (have-select-privilege-fn? table)))))
-      (map #(dissoc % :type)))
-     (db-tables driver (.getMetaData conn) nil db-name-or-nil))))</pre></td></tr><tr><td class="docs"><p>Get database instance from <code>db-or-id-or-spec</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn db-or-id-or-spec-&gt;database
-  [db-or-id-or-spec]
-  (cond (mi/instance-of? :model/Database db-or-id-or-spec)
-        db-or-id-or-spec
-        (int? db-or-id-or-spec)
-        (qp.store/with-metadata-provider db-or-id-or-spec
-          (lib.metadata/database (qp.store/metadata-provider)))
-        :else
-        nil))</pre></td></tr><tr><td class="docs"><p>Default implementation of [[metabase.driver/describe-database]] for SQL JDBC drivers. Uses JDBC DatabaseMetaData.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn describe-database
-  [driver           :- :keyword
-   db-or-id-or-spec :- [:or :int :map]]
-  {:tables
-   (sql-jdbc.execute/do-with-connection-with-options
-    driver
-    db-or-id-or-spec
-    nil
-    (fn [^Connection conn]
-      (let [schema-filter-prop   (driver.u/find-schema-filters-prop driver)
-            database             (db-or-id-or-spec-&gt;database db-or-id-or-spec)
-            [inclusion-patterns
-             exclusion-patterns] (when (some? schema-filter-prop)
-                                   (driver.s/db-details-&gt;schema-filter-patterns (:name schema-filter-prop) database))]
-        (into #{} (sql-jdbc.sync.interface/active-tables driver conn inclusion-patterns exclusion-patterns)))))})</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+   [metabase.public-settings :as public-settings]
+   [metabase.search.api :as search.api]
+   [metabase.search.postgres.core :as search.postgres]))</pre></td></tr><tr><td class="docs"><p>We have a bunch of experimental flavors! 🧄🌶🍊</p>
+</td><td class="codes"><pre class="brush: clojure">(derive :search.engine/hybrid :search.engine/fulltext)
+(derive :search.engine/hybrid-multi :search.engine/fulltext)
+(derive :search.engine/minimal :search.engine/fulltext)
+(derive :search.engine/minimal-with-perms :search.engine/fulltext)</pre></td></tr><tr><td class="docs"><p>Does the app db support fulltext search?</p>
+</td><td class="codes"><pre class="brush: clojure">(defmulti supported-db?  identity)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod supported-db? :default [_] false)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod supported-db? :postgres [_]
+  (public-settings/experimental-fulltext-search-enabled))</pre></td></tr><tr><td class="docs"><p>For now we now that the app db is postgres. We can make these multimethods when that changes.</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search.api/results :search.engine/fulltext
+  [search-ctx]
+  (search.postgres/search search-ctx))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search.api/model-set :search.engine/fulltext
+  [search-ctx]
+  (search.postgres/model-set search-ctx))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search.api/score :search.engine/fulltext
+  [results search-ctx]
+  (search.postgres/no-scoring results search-ctx))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
