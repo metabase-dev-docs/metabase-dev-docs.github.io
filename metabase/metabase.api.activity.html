@@ -2902,28 +2902,26 @@ net.brehaut.ClojureTools = (function (SH) {
                   [:metabase_database.name :database-name]])
    (let [model-symb (symbol (str/capitalize model))
          self-qualify #(mdb.query/qualify model-symb %)]
-     (cond-&gt; {:where [:in (self-qualify :id) ids]}
-       (not= model &quot;table&quot;)
-       (merge {:left-join [:collection [:= :collection.id (self-qualify :collection_id)]]})
-       (= model &quot;table&quot;)
-       (merge {:left-join [:metabase_database [:= :metabase_database.id (self-qualify :db_id)]]})))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- select-items! [model ids]
-  (when (seq ids)
-    (for [model (t2/hydrate (models-query model ids) :moderation_reviews)
-          :let [reviews (:moderation_reviews model)
-                status  (-&gt;&gt; reviews
-                             (filter :most_recent)
-                             first
-                             :status)]]
-      (assoc model :moderated_status status))))</pre></td></tr><tr><td class="docs"><p>Returns a map of {model {id instance}} for activity views suitable for looking up by model and id to get a model.</p>
+     {:where [:in (self-qualify :id) ids]
+      :left-join (if (= model &quot;table&quot;)
+                   [:metabase_database [:= :metabase_database.id (self-qualify :db_id)]]
+                   [:collection [:= :collection.id (self-qualify :collection_id)]])})))</pre></td></tr><tr><td class="docs"><p>Returns a map of {model {id instance}} for activity views suitable for looking up by model and id to get a model.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- models-for-views
   [views]
-  (into {} (map (fn [[model models]]
-                  [model (-&gt;&gt; models
-                              (map :model_id)
-                              (select-items! model)
-                              (m/index-by :id))]))
-        (group-by :model views)))</pre></td></tr><tr><td class="docs"><p>Query implementation for <code>popular_items</code>. Tables and Dashboards have a query limit of <code>views-limit</code>.
+  (let [grouped (group-by :model views)
+        ;; We perform selects for each model type separately, but then bring them back into a flat list to hydrate
+        ;; with moderation_reviews data all at once.
+        items (mapcat (fn [[model views']]
+                        (when (seq views')
+                          (-&gt;&gt; (models-query model (map :model_id views'))
+                               (mapv #(assoc % :model model)))))
+                      grouped)
+        items (-&gt;&gt; (t2/hydrate items :moderation_reviews)
+                   (map (fn [{:keys [moderation_reviews] :as item}]
+                          (let [status (some #(when (:most_recent %) (:status %)) moderation_reviews)]
+                            (assoc item :moderated_status status)))))]
+    ;; Now group the flat list of items into a map.
+    (update-vals (group-by :model items) #(m/index-by :id %))))</pre></td></tr><tr><td class="docs"><p>Query implementation for <code>popular_items</code>. Tables and Dashboards have a query limit of <code>views-limit</code>.
 Cards have a query limit of <code>card-runs-limit</code>.</p>
 
 <p>The expected output of the query is a single row per unique model viewed by the current user including a <code>:max_ts</code> which
@@ -2965,11 +2963,11 @@ query results for dashboard and table views.</p>
                                                               [:= :context (h2x/literal :question)]]
                                                    :order-by [[:max_ts :desc]]
                                                    :limit    card-runs-limit})
-                                       (map #(dissoc % :row_count))
-                                       (map #(assoc % :model &quot;card&quot;)))]
-    (-&gt;&gt; (concat card-runs dashboard-and-table-views)
-         (sort-by :max_ts)
-         reverse)))</pre></td></tr><tr><td class="docs">
+                                       (mapv #(-&gt; %
+                                                  (dissoc :row_count)
+                                                  (assoc :model &quot;card&quot;))))]
+    (-&gt;&gt; (into card-runs dashboard-and-table-views)
+         (sort-by :max_ts #(compare %2 %1)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private views-limit 8)
 (def ^:private card-runs-limit 8)</pre></td></tr><tr><td class="docs"><p>/recent_views</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint ^:deprecated GET 
