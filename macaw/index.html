@@ -3173,7 +3173,17 @@ the query'; this function doesn't do additional inference work to find out a tab
        (walk/postwalk (fn [x]
                         (if (string? x)
                           (unescape-keywords x (:non-reserved-words opts))
-                          x)))))</pre></td></tr><tr><td class="docs"><p>Given an SQL query, apply the given table, column, and schema renames.</p>
+                          x)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- raw-components [xs]
+  (into (empty xs) (keep :component) xs))</pre></td></tr><tr><td class="docs"><p>Given a parsed query (i.e., a [subclass of] <code>Statement</code>) return a set of all the table identifiers found within it.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn query-&gt;tables
+  [sql &amp; {:keys [mode] :as opts}]
+  (case mode
+    :ast-walker-1 (-&gt; (parsed-query sql)
+                      (query-&gt;components opts)
+                      :tables
+                      raw-components)
+    :basic-select :macaw.error/not-implemented))</pre></td></tr><tr><td class="docs"><p>Given an SQL query, apply the given table, column, and schema renames.</p>
 
 <p>Supported options:</p>
 
@@ -3253,12 +3263,12 @@ the query'; this function doesn't do additional inference work to find out a tab
                         (let [ast-node  (.getASTNode ^ASTNodeAccess visitable)
                               idx-range (node-&gt;idx-range ast-node sql)
                               node-text (-&gt;text visitable)]
-                         [idx-range node-text]))
+                          [idx-range node-text]))
         replace-name  (fn [-&gt;text]
-                       (fn [acc visitable _ctx]
-                         (cond-&gt; acc
-                           (updated-node? visitable)
-                           (conj (replacement -&gt;text visitable)))))]
+                        (fn [acc visitable _ctx]
+                          (cond-&gt; acc
+                            (updated-node? visitable)
+                            (conj (replacement -&gt;text visitable)))))]
     (splice-replacements
      sql
      (mw/fold-query
@@ -3327,12 +3337,12 @@ the query'; this function doesn't do additional inference work to find out a tab
 </td><td class="codes"><pre class="brush: clojure">(defn group-with
   [kf rf coll]
   (persistent!
-    (reduce
-      (fn [ret x]
-        (let [k (kf x)]
-          (assoc! ret k (rf (get ret k) x))))
-      (transient {})
-      coll)))</pre></td></tr><tr><td class="docs"><p>Like (first (filter ... )), but doesn't realize chunks of the sequence. Returns the first item in <code>coll</code> for which
+   (reduce
+    (fn [ret x]
+      (let [k (kf x)]
+        (assoc! ret k (rf (get ret k) x))))
+    (transient {})
+    coll)))</pre></td></tr><tr><td class="docs"><p>Like (first (filter ... )), but doesn't realize chunks of the sequence. Returns the first item in <code>coll</code> for which
 <code>pred</code> returns a truthy value, or <code>nil</code> if no such item is found.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn seek
   [pred coll]
@@ -3848,11 +3858,11 @@ indirection.</p>
     :else
     [:schema {:doc/message docstring} the-schema]))</pre></td></tr><tr><td class="docs"><p>Like [[clojure.spec.alpha/def]]; add a Malli schema to our registry.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmacro def
-   ([type the-schema]
-    `(register! ~type ~the-schema))
-   ([type docstring the-schema]
-    `(macaw.util.malli.registry/def ~type
-       (-with-doc ~the-schema ~docstring))))</pre></td></tr><tr><td class="docs"><p>For REPL/test usage: get the definition of a registered schema from the registry.</p>
+  ([type the-schema]
+   `(register! ~type ~the-schema))
+  ([type docstring the-schema]
+   `(macaw.util.malli.registry/def ~type
+      (-with-doc ~the-schema ~docstring))))</pre></td></tr><tr><td class="docs"><p>For REPL/test usage: get the definition of a registered schema from the registry.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn resolve-schema
   [the-schema]
   (mc/deref-all (mc/schema the-schema)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.walk" name="macaw.walk"><h1 class="project-name">macaw.walk</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
@@ -3909,8 +3919,11 @@ indirection.</p>
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>The DANGER ZONE
 This map gives a pattern in the exception message we expect to receive when trying to analyze the given fixture.</p>
 </td><td class="codes"><pre class="brush: clojure">(def broken-queries
-  {:broken/between      #&quot;Encountered unexpected token: \&quot;BETWEEN\&quot;&quot;
-   :broken/filter-where #&quot;Encountered unexpected token: \&quot;\(\&quot;&quot;})</pre></td></tr><tr><td class="docs">
+  {:broken/between       #&quot;Encountered unexpected token: \&quot;BETWEEN\&quot;&quot;
+   :broken/filter-where  #&quot;Encountered unexpected token: \&quot;\(\&quot;&quot;
+   :sqlserver/execute    #&quot;Not supported yet&quot;
+   :sqlserver/executesql #&quot;Not supported yet&quot;
+   :oracle/open-for      #&quot;Encountered unexpected token: \&quot;OPEN\&quot;&quot;})</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- fixture-analysis [fixture]
   (some-&gt; fixture (ct/fixture-&gt;filename &quot;acceptance&quot; &quot;.analysis.edn&quot;) io/resource slurp read-string))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- fixture-renames [fixture]
@@ -3921,7 +3934,34 @@ This map gives a pattern in the exception message we expect to receive when tryi
   (case k
     :source-columns (get cs k)
     :columns-with-scope (ct/contexts-&gt;scopes (get cs :columns))
-    (ct/raw-components (get cs k))))</pre></td></tr><tr><td class="docs"><p>Test that we can parse a given fixture, and compare against expected analysis and rewrites, where they are defined.</p>
+    (ct/raw-components (get cs k))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private test-modes
+  #{:ast-walker-1
+    :basic-select})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def global-overrides
+  {:basic-select :macaw.error/not-implemented})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- validate-analysis [correct override actual]
+  (let [expected (or override correct)]
+    (when override
+      (testing &quot;Override is still needed&quot;
+        (if (and (vector? correct) (not (keyword actual)))
+          (is (not= correct (ct/sorted actual)))
+          (is (not= correct actual)))))
+    (if (and (vector? expected) (not (keyword actual)))
+      (is (= expected (ct/sorted actual)))
+      (when (not= expected actual)
+        (is (= expected actual))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- when-keyword [x]
+  (when (keyword? x)
+    x))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- get-override [expected-cs mode ck]
+  (or (get global-overrides mode)
+      (get-in expected-cs [:overrides mode :error])
+      (get-in expected-cs [:overrides :error])
+      (get-in expected-cs [:overrides mode ck])
+      (get-in expected-cs [:overrides ck])
+      (when-keyword (get-in expected-cs [:overrides mode]))
+      (when-keyword (get expected-cs :overrides))))</pre></td></tr><tr><td class="docs"><p>Test that we can parse a given fixture, and compare against expected analysis and rewrites, where they are defined.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- test-fixture
   [fixture]
   (let [prefix      (str &quot;(fixture: &quot; (subs (str fixture) 1) &quot;)&quot;)
@@ -3929,30 +3969,35 @@ This map gives a pattern in the exception message we expect to receive when tryi
         expected-cs (fixture-analysis fixture)
         renames     (fixture-renames fixture)
         expected-rw (fixture-rewritten fixture)
-        opts        {:non-reserved-words [:final]}]
-    (if-let [expected-msg (broken-queries fixture)]
-      (testing (str prefix &quot; analysis cannot be parsed&quot;)
-        (is (thrown-with-msg? Exception
-                              expected-msg
-                              (ct/components sql opts))))
-      (when-let [cs (testing (str prefix &quot; analysis does not throw&quot;)
-                      (is (ct/components sql opts)))]
-        (doseq [[ck cv] (dissoc expected-cs :overrides)]
-          (testing (str prefix &quot; analysis is correct: &quot; (name ck))
-            (let [actual-cv (get-component cs ck)
-                  override  (get-in expected-cs [:overrides ck])
-                  expected  (or override cv)]
-              (when override
-                (if (vector? cv)
-                  (is (not= cv (ct/sorted actual-cv)) &quot;Override is still needed&quot;)
-                  (is (not= cv actual-cv) &quot;Override is still needed&quot;)))
-              (if (vector? expected)
-                (is (= expected (ct/sorted actual-cv)))
-                (is (= expected actual-cv))))))))
+        base-opts   {:non-reserved-words [:final]}
+        opts-mode   (fn [mode] (assoc base-opts :mode mode))]
+    (assert sql &quot;Fixture exists&quot;)
+    (doseq [m test-modes
+            :let [opts (opts-mode m)]]
+      (if (= m :ast-walker-1)
+        ;; Legacy testing path for `components`, which only supports the original walker, and throws exceptions.
+        (if-let [expected-msg (broken-queries fixture)]
+          (testing (str prefix &quot; analysis cannot be parsed&quot;)
+            (is (thrown-with-msg? Exception expected-msg (ct/components sql opts))))
+          (let [cs (testing (str prefix &quot; analysis does not throw&quot;)
+                     (is (ct/components sql opts)))]
+            (doseq [[ck cv] (dissoc expected-cs :overrides :error)]
+              (testing (str prefix &quot; analysis is correct: &quot; (name ck))
+                (let [actual-cv (get-component cs ck)
+                      override  (get-override expected-cs m ck)]
+                  (validate-analysis cv override actual-cv))))))
+        ;; Testing path for newer modes.
+        (let [correct  (:error expected-cs (:tables expected-cs))
+              override (get-override expected-cs m :tables)
+              ;; For now, we only support (and test) :tables
+              tables   (testing (str prefix &quot; table analysis does not throw for mode &quot; m)
+                         (is (ct/tables sql opts)))]
+          (testing (str prefix &quot; table analysis is correct for mode &quot; m)
+            (validate-analysis correct override tables)))))
     (when renames
       (let [broken?   (:broken? renames)
             rewritten (testing (str prefix &quot; rewriting does not throw&quot;)
-                        (is (m/replace-names sql (dissoc renames :broken?) opts)))]
+                        (is (m/replace-names sql (dissoc renames :broken?) base-opts)))]
         (when expected-rw
           (testing (str prefix &quot; rewritten SQL is correct&quot;)
             (if broken?
@@ -3980,17 +4025,17 @@ This map gives a pattern in the exception message we expect to receive when tryi
                (test-fixture ~f))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(create-fixture-tests!)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(comment
- ;; Unload all the tests, useful for flushing stale fixture tests
- (doseq [[sym ns-var] (ns-interns *ns*)]
-   (when (:test (meta ns-var))
-     (ns-unmap *ns* sym)))
+  ;; Unload all the tests, useful for flushing stale fixture tests
+  (doseq [[sym ns-var] (ns-interns *ns*)]
+    (when (:test (meta ns-var))
+      (ns-unmap *ns* sym)))
 
- (test-fixture :compound/cte)
- (test-fixture :compound/cte-nonambiguous)
- (test-fixture :literal/with-table)
- (test-fixture :literal/without-table)
+  (test-fixture :compound/cte)
+  (test-fixture :compound/cte-nonambiguous)
+  (test-fixture :literal/with-table)
+  (test-fixture :literal/without-table)
 
- (test-fixture :broken/filter-where))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.core-test" name="macaw.core-test"><h1 class="project-name">macaw.core-test</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+  (test-fixture :broken/filter-where))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.core-test" name="macaw.core-test"><h1 class="project-name">macaw.core-test</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns ^:parallel macaw.core-test
   (:require
    [clojure.java.io :as io]
@@ -4011,12 +4056,14 @@ This map gives a pattern in the exception message we expect to receive when tryi
     false))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn components [sql &amp; {:as opts}]
   (m/query-&gt;components (m/parsed-query sql opts) opts))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn tables [sql &amp; {:as opts}]
+  (let [opts (update opts :mode #(or % :ast-walker-1))]
+    (m/query-&gt;tables sql opts)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def raw-components #(let [xs (empty %)] (into xs (keep :component) %)))
 (def columns        (comp raw-components :columns components))
 (def source-columns (comp :source-columns components))
 (def has-wildcard?  (comp non-empty-and-truthy raw-components :has-wildcard? components))
 (def mutations      (comp raw-components :mutation-commands components))
-(def tables         (comp raw-components :tables components))
 (def table-wcs      (comp raw-components :table-wildcards components))</pre></td></tr><tr><td class="docs"><p>Strip the scope id from the context stacks, to get deterministic values for testing.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- strip-context-ids
   [m]
@@ -4306,42 +4353,42 @@ from foo&quot;)</pre></td></tr><tr><td class="docs">
   (testing &quot;Sub-select with outer wildcard&quot;
     ;; TODO we should test the source and result columns too
     (is (=? {:columns
-            #{{:component {:column &quot;total&quot; :table &quot;orders&quot;}, :context [&quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}
-              {:component {:column &quot;id&quot;    :table &quot;orders&quot;}, :context [&quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}
-              {:component {:column &quot;total&quot; :table &quot;orders&quot;}, :context [&quot;WHERE&quot; &quot;JOIN&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
-            :has-wildcard?     #{{:component true, :context [&quot;SELECT&quot;]}},
-            :mutation-commands #{},
-            :tables            #{{:component {:table &quot;orders&quot;}, :context [&quot;FROM&quot; &quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
-            :table-wildcards   #{}}
-           (strip-context-ids (components &quot;SELECT * FROM (SELECT id, total FROM orders) WHERE total &gt; 10&quot;)))))
+             #{{:component {:column &quot;total&quot; :table &quot;orders&quot;}, :context [&quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}
+               {:component {:column &quot;id&quot;    :table &quot;orders&quot;}, :context [&quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}
+               {:component {:column &quot;total&quot; :table &quot;orders&quot;}, :context [&quot;WHERE&quot; &quot;JOIN&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
+             :has-wildcard?     #{{:component true, :context [&quot;SELECT&quot;]}},
+             :mutation-commands #{},
+             :tables            #{{:component {:table &quot;orders&quot;}, :context [&quot;FROM&quot; &quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
+             :table-wildcards   #{}}
+            (strip-context-ids (components &quot;SELECT * FROM (SELECT id, total FROM orders) WHERE total &gt; 10&quot;)))))
   (testing &quot;Sub-select with inner wildcard&quot;
     (is (=? {:columns
-            #{{:component {:column &quot;id&quot;    :table &quot;orders&quot;}, :context [&quot;SELECT&quot;]}
-              {:component {:column &quot;total&quot; :table &quot;orders&quot;}, :context [&quot;SELECT&quot;]}
-              {:component {:column &quot;total&quot; :table &quot;orders&quot;}, :context [&quot;WHERE&quot; &quot;JOIN&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
-            :has-wildcard?     #{{:component true, :context [&quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
-            :mutation-commands #{},
-            :tables            #{{:component {:table &quot;orders&quot;}, :context [&quot;FROM&quot; &quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
-            :table-wildcards   #{}}
-           (strip-context-ids (components &quot;SELECT id, total FROM (SELECT * FROM orders) WHERE total &gt; 10&quot;)))))
+             #{{:component {:column &quot;id&quot;    :table &quot;orders&quot;}, :context [&quot;SELECT&quot;]}
+               {:component {:column &quot;total&quot; :table &quot;orders&quot;}, :context [&quot;SELECT&quot;]}
+               {:component {:column &quot;total&quot; :table &quot;orders&quot;}, :context [&quot;WHERE&quot; &quot;JOIN&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
+             :has-wildcard?     #{{:component true, :context [&quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
+             :mutation-commands #{},
+             :tables            #{{:component {:table &quot;orders&quot;}, :context [&quot;FROM&quot; &quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
+             :table-wildcards   #{}}
+            (strip-context-ids (components &quot;SELECT id, total FROM (SELECT * FROM orders) WHERE total &gt; 10&quot;)))))
   (testing &quot;Sub-select with dual wildcards&quot;
     (is (=? {:columns           #{{:component {:column &quot;total&quot; :table &quot;orders&quot;}, :context [&quot;WHERE&quot; &quot;JOIN&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
-            :has-wildcard?
-            #{{:component true, :context [&quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}
-              {:component true, :context [&quot;SELECT&quot;]}},
-            :mutation-commands #{},
-            :tables            #{{:component {:table &quot;orders&quot;}, :context [&quot;FROM&quot; &quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
-            :table-wildcards   #{}}
-           (strip-context-ids (components &quot;SELECT * FROM (SELECT * FROM orders) WHERE total &gt; 10&quot;)))))
+             :has-wildcard?
+             #{{:component true, :context [&quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}
+               {:component true, :context [&quot;SELECT&quot;]}},
+             :mutation-commands #{},
+             :tables            #{{:component {:table &quot;orders&quot;}, :context [&quot;FROM&quot; &quot;SELECT&quot; &quot;SUB_SELECT&quot; &quot;FROM&quot; &quot;SELECT&quot;]}},
+             :table-wildcards   #{}}
+            (strip-context-ids (components &quot;SELECT * FROM (SELECT * FROM orders) WHERE total &gt; 10&quot;)))))
   (testing &quot;Join; table wildcard&quot;
     (is (=? {:columns           #{{:component {:column &quot;order_id&quot; :table &quot;foo&quot;}, :context [&quot;JOIN&quot; &quot;SELECT&quot;]}
-                                 {:component {:column &quot;id&quot; :table &quot;orders&quot;}, :context [&quot;JOIN&quot; &quot;SELECT&quot;]}},
-            :has-wildcard?     #{},
-            :mutation-commands #{},
-            :tables            #{{:component {:table &quot;foo&quot;}, :context [&quot;FROM&quot; &quot;JOIN&quot; &quot;SELECT&quot;]}
-                                 {:component {:table &quot;orders&quot;}, :context [&quot;FROM&quot; &quot;SELECT&quot;]}},
-            :table-wildcards   #{{:component {:table &quot;orders&quot;}, :context [&quot;SELECT&quot;]}}}
-           (strip-context-ids (components &quot;SELECT o.* FROM orders o JOIN foo ON orders.id = foo.order_id&quot;))))))</pre></td></tr><tr><td class="docs">
+                                  {:component {:column &quot;id&quot; :table &quot;orders&quot;}, :context [&quot;JOIN&quot; &quot;SELECT&quot;]}},
+             :has-wildcard?     #{},
+             :mutation-commands #{},
+             :tables            #{{:component {:table &quot;foo&quot;}, :context [&quot;FROM&quot; &quot;JOIN&quot; &quot;SELECT&quot;]}
+                                  {:component {:table &quot;orders&quot;}, :context [&quot;FROM&quot; &quot;SELECT&quot;]}},
+             :table-wildcards   #{{:component {:table &quot;orders&quot;}, :context [&quot;SELECT&quot;]}}}
+            (strip-context-ids (components &quot;SELECT o.* FROM orders o JOIN foo ON orders.id = foo.order_id&quot;))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest replace-names-test
   (is (= &quot;SELECT aa.xx, b.x, b.y FROM aa, b;&quot;
          (m/replace-names &quot;SELECT a.x, b.x, b.y FROM a, b;&quot;
@@ -4359,9 +4406,9 @@ from foo&quot;)</pre></td></tr><tr><td class="docs">
   ;; qualified targets would allow us to infer such changes. Partial qualification could also work fine where there
   ;; is no ambiguity - even if this is just a nice convenience for testing.
   #_(is (= &quot;SELECT aa.xx, b.x, b.y FROM aa, b;&quot;
-         (m/replace-names &quot;SELECT a.x, b.x, b.y FROM a, b;&quot;
-                          {:columns {{:schema &quot;public&quot; :table &quot;a&quot; :column &quot;x&quot;}
-                                     {:table &quot;aa&quot; :column &quot;xx&quot;}}})))
+           (m/replace-names &quot;SELECT a.x, b.x, b.y FROM a, b;&quot;
+                            {:columns {{:schema &quot;public&quot; :table &quot;a&quot; :column &quot;x&quot;}
+                                       {:table &quot;aa&quot; :column &quot;xx&quot;}}})))
   (is (= &quot;SELECT qwe FROM orders&quot;
          (m/replace-names &quot;SELECT id FROM orders&quot;
                           {:columns {{:schema &quot;public&quot; :table &quot;orders&quot; :column &quot;id&quot;} &quot;qwe&quot;}})))
@@ -4397,10 +4444,10 @@ from foo&quot;)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest replace-schema-test
   ;; Somehow we broke renaming the `x` in the WHERE clause.
   #_(is (= &quot;SELECT totally_private.purchases.xx FROM totally_private.purchases, private.orders WHERE xx = 1&quot;
-         (m/replace-names &quot;SELECT public.orders.x FROM public.orders, private.orders WHERE x = 1&quot;
-                          {:schemas {&quot;public&quot; &quot;totally_private&quot;}
-                           :tables  {{:schema &quot;public&quot; :table &quot;orders&quot;} &quot;purchases&quot;}
-                           :columns {{:schema &quot;public&quot; :table &quot;orders&quot; :column &quot;x&quot;} &quot;xx&quot;}}))))</pre></td></tr><tr><td class="docs">
+           (m/replace-names &quot;SELECT public.orders.x FROM public.orders, private.orders WHERE x = 1&quot;
+                            {:schemas {&quot;public&quot; &quot;totally_private&quot;}
+                             :tables  {{:schema &quot;public&quot; :table &quot;orders&quot;} &quot;purchases&quot;}
+                             :columns {{:schema &quot;public&quot; :table &quot;orders&quot; :column &quot;x&quot;} &quot;xx&quot;}}))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest allow-unused-test
   (is (thrown-with-msg?
        Exception #&quot;Unknown rename&quot;
@@ -4422,12 +4469,12 @@ from foo&quot;)</pre></td></tr><tr><td class="docs">
    (fixture-&gt;filename fixture nil suffix))
   ([fixture path suffix]
    (as-&gt; fixture %
-         [(namespace %) (name %)]
-         (remove nil? %)
-         (str/join &quot;__&quot; %)
-         (str/replace % &quot;-&quot; &quot;_&quot;)
-         (if path (str path &quot;/&quot; %) %)
-         (str % suffix))))</pre></td></tr><tr><td class="docs">
+     [(namespace %) (name %)]
+     (remove nil? %)
+     (str/join &quot;__&quot; %)
+     (str/replace % &quot;-&quot; &quot;_&quot;)
+     (if path (str path &quot;/&quot; %) %)
+     (str % suffix))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn stem-&gt;fixture [stem]
   (let [[x y] (map #(str/replace % &quot;_&quot; &quot;-&quot;) (str/split stem #&quot;__&quot;))]
     (if y
@@ -4542,10 +4589,10 @@ from foo&quot;)</pre></td></tr><tr><td class="docs">
       (query-fixture :snowflake))))
   (user/time+ (simple-benchmark))
   (prof/profile {:event :alloc}
-    (dotimes [_ 1000] (simple-benchmark)))
+                (dotimes [_ 1000] (simple-benchmark)))
   (user/time+ (complex-benchmark))
   (prof/profile {:event :alloc}
-    (dotimes [_ 100] (complex-benchmark)))
+                (dotimes [_ 100] (complex-benchmark)))
   (anonymize-query &quot;SELECT x FROM a&quot;)
   (anonymize-fixture :snowflakelet)
   (require 'virgil)
