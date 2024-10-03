@@ -3121,7 +3121,8 @@ We don't need to render the tab title if only 1 exists (issue #45123).</p>
                              (vswap! retry-errors conj e)
                              ;; Token errors have already been logged and we should not retry.
                              (when-not (should-retry-sending? e (:type channel))
-                               (throw e)))))]
+                               (throw e))
+                             (log/warnf &quot;[Pulse %d] Failed to send to channel %s %d, retring...&quot; pulse-id (:type channel) (:id channel)))))]
       (task-history/with-task-history {:task            &quot;channel-send&quot;
                                        :on-success-info (fn [update-map _result]
                                                           (cond-&gt; update-map
@@ -3133,7 +3134,8 @@ We don't need to render the tab title if only 1 exists (issue #45123).</p>
                                                          :channel-type (:type channel)
                                                          :channel-id   (:id channel)
                                                          :pulse-id     pulse-id}}
-        ((retry/decorate send! (retry/random-exponential-backoff-retry (str (random-uuid)) retry-config)))))
+        ((retry/decorate send! (retry/random-exponential-backoff-retry (str (random-uuid)) retry-config)))
+        (log/debugf &quot;[Pulse %d] Sent to channel %s %d with %d retires&quot; pulse-id (:type channel) (:id channel) (count @retry-errors))))
     (catch Throwable e
       (log/error e &quot;Error sending notification!&quot;))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- execute-pulse
@@ -3176,13 +3178,15 @@ We don't need to render the tab title if only 1 exists (issue #45123).</p>
                            messages (channel/render-notification (:type channel)
                                                                  (get-notification-info pulse parts pulse-channel)
                                                                  (channel-recipients pulse-channel))]
-                       (log/debugf &quot;Rendered %d messages for %s %d to channel %s&quot;
+                       (log/debugf &quot;[Pulse %d] Rendered %d messages for %s %d to channel %s&quot;
+                                   pulse-id
                                    (count messages)
                                    (alert-or-pulse pulse)
                                    (:id pulse)
                                    (:type channel))
                        (doseq [message messages]
-                         (log/debugf &quot;Sending %s %d to channel %s&quot;
+                         (log/debugf &quot;[Pulse %d] Sending %s %d to channel %s&quot;
+                                     pulse-id
                                      (alert-or-pulse pulse)
                                      (:id pulse)
                                      (:channel_type pulse-channel))
