@@ -2883,6 +2883,8 @@ The values of a parameter is provided so the Widget can show a list of options t
    [metabase.legacy-mbql.normalize :as mbql.normalize]
    [metabase.legacy-mbql.schema :as mbql.s]
    [metabase.legacy-mbql.util :as mbql.u]
+   [metabase.lib.core :as lib]
+   [metabase.lib.metadata.jvm :as lib.metadata.jvm]
    [metabase.lib.schema.id :as lib.schema.id]
    [metabase.lib.util.match :as lib.util.match]
    [metabase.models.field-values :as field-values]
@@ -2917,10 +2919,10 @@ checks (since there is no current User) and get <em>all</em> values.</p>
   [param-field-ids]
   (not-empty
    (into {}
-         (map (comp (juxt :field_id identity)
-                    #(select-keys % [:field_id :human_readable_values :values])
-                    #(field-values/get-latest-full-field-values (:id %))))
-         (t2/hydrate (t2/select :model/Field :id [:in (set param-field-ids)]) :values))))</pre></td></tr><tr><td class="docs"><p>Given a collection of <code>param-field-ids</code> return a map of FieldValues for the Fields they reference.
+         (comp (keep field-values/get-latest-full-field-values)
+               (map #(select-keys % [:field_id :human_readable_values :values]))
+               (map (juxt :field_id identity)))
+         param-field-ids)))</pre></td></tr><tr><td class="docs"><p>Given a collection of <code>param-field-ids</code> return a map of FieldValues for the Fields they reference.
 This map is returned by various endpoints as <code>:param_values</code>, if <code>param-field-ids</code> is empty, return <code>nil</code></p>
 </td><td class="codes"><pre class="brush: clojure">(defn- field-ids-&gt;param-field-values
   [param-field-ids]
@@ -3030,27 +3032,102 @@ Dashboard. Implementations are below in respective sections.</p>
 <code>cards</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- cards-&gt;card-param-field-ids
   [cards]
-  (reduce set/union #{} (map card-&gt;template-tag-field-ids cards)))</pre></td></tr><tr><td class="docs">
+  (reduce set/union #{} (map card-&gt;template-tag-field-ids cards)))</pre></td></tr><tr><td class="docs"><p>Get filterable columns for query.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn filterable-columns-for-query
+  [database-id dataset-query]
+  (-&gt; (lib/query (lib.metadata.jvm/application-database-metadata-provider database-id)
+                 dataset-query)
+      (lib/filterable-columns)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- ensure-filterable-columns-for-card
+  [ctx {database-id   :database_id
+        dataset-query :dataset_query
+        id            :id
+        :as           _card}]
+  (if (contains? (get ctx :card-id-&gt;filterable-columns) id)
+    ctx
+    (if-not (and (not-empty dataset-query) (pos-int? database-id))
+      ctx
+      (assoc-in ctx [:card-id-&gt;filterable-columns id]
+                (filterable-columns-for-query database-id dataset-query)))))</pre></td></tr><tr><td class="docs"><p>Update the <code>ctx</code> with <code>field-id</code>. This function is supposed to be used on params where target is a name field, in
+reducing step of [[field-id-into-context-rf]], when it is certain that param target is no integer id field.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- field-id-from-dashcards-filterable-columns
+  [ctx param-dashcard-info]
+  (let [param-target       (get-in param-dashcard-info [:parameter :target])
+        card-id            (get-in param-dashcard-info [:dashcard :card :id])
+        filterable-columns (get-in ctx [:card-id-&gt;filterable-columns card-id])]
+    (if-some [field-id (lib.util.match/match-one param-target
+                         [:field (field-name :guard string?) _]
+                         (-&gt;&gt; filterable-columns
+                              (m/find-first #(= field-name (:name %)))
+                              :id))]
+      (update ctx :field-ids conj field-id)
+      ctx)))</pre></td></tr><tr><td class="docs"><p>Conext for effective computation of field ids for parameters. Bound in
+the [[metabase.api.dashboard/hydrate-dashboard-details]]. Meant to be used in the [[field-id-into-context-rf]], to
+re-use values of previous <code>filterable-columns</code> computations (during the reduction itself and hydration
+of <code>:param_fields</code> and <code>:param_values</code> at the time of writing).</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *field-id-context*
+  nil)</pre></td></tr><tr><td class="docs"><p>Context for effective field id computation. See the [[field-id-into-context-rf]]'s docstring.</p>
+</td><td class="codes"><pre class="brush: clojure">(def empty-field-id-context
+  {:card-id-&gt;filterable-columns {}
+   :field-ids                   #{}})</pre></td></tr><tr><td class="docs"><p>Reducing function that generates <em>field id</em> corresponding to <code>:parameter</code> of <code>param-dashcard-info</code> if possible,
+and returns new <em>context</em> (<code>ctx</code>) with the <em>field id</em> added.</p>
+
+<p>When used in <code>transduce</code>:
+  - 0-arity ensures re-use of existing [[<em>field-id-context</em>]] if available,
+  - 1-arity is used to return set of <em>field ids</em> accumulated by transucing process instead of a <em>context</em>.</p>
+
+<p>Then, 2-arity gets the <em>field id</em> either from (1) target, (2) card's <code>:results_metadata</code>, or (3) filterable columns.
+If computed, filterable columns are added to the context for re-use either in next reduction steps, or in next call
+to this function by means of [[<em>field-id-context</em>]].</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- field-id-into-context-rf
+  ([]
+   (or
+    (some-&gt; *field-id-context* deref)
+    empty-field-id-context))
+  ([ctx]
+   (when (some-&gt; *field-id-context* deref)
+     (swap! *field-id-context* update :card-id-&gt;filterable-columns
+            merge (:card-id-&gt;filterable-columns ctx)))
+   (set (:field-ids ctx)))
+  ([ctx {:keys [param-target-field] :as param-dashcard-info}]
+   (if-not param-target-field
+     ctx
+     (let [card (get-in param-dashcard-info [:dashcard :card])]
+       (if-some [field-id (or
+                           ;; Get the field id from the field-clause if it contains it. This is the common case
+                           ;; for mbql queries.
+                           (lib.util.match/match-one param-target-field [:field (id :guard integer?) _] id)
+                           ;; Attempt to get the field clause from the model metadata corresponding to the field.
+                           ;; This is the common case for native queries in which mappings from original columns
+                           ;; have been performed using model metadata.
+                           (:id (qp.util/field-&gt;field-info param-target-field (:result_metadata card))))]
+         (update ctx :field-ids conj field-id)
+         ;; In case the card doesn't have the same result_metadata columns as filterable columns (a question that
+         ;; aggregates a native query model with a field that was mapped to a db field), we need to load metadata in
+         ;; [[ensure-filterable-columns-for-card]] to find the originating field. (#42829)
+         (-&gt; ctx
+             (ensure-filterable-columns-for-card card)
+             (field-id-from-dashcards-filterable-columns param-dashcard-info)))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn dashcards-&gt;param-field-ids* :- [:set ms/PositiveInt]
+  &quot;Return set of field ids referenced dashcards&quot;
+  [dashcards]
+  (letfn [(dashcard-&gt;param-dashcard-info
+            [dashcard]
+            (map #(hash-map :parameter          %
+                            :dashcard           dashcard
+                            :param-target-field (param-target-&gt;field-clause (:target %)
+                                                                            (:card dashcard)))
+                 (:parameter_mappings dashcard)))]
+    (transduce (mapcat dashcard-&gt;param-dashcard-info)
+               field-id-into-context-rf
+               dashcards)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn dashcards-&gt;param-field-ids :- [:set ms/PositiveInt]
   &quot;Return a set of Field IDs referenced by parameters in Cards in the given `dashcards`, or `nil` if none are referenced. This
   also includes IDs of Fields that are to be found in the 'implicit' parameters for SQL template tag Field filters.
   `dashcards` must be hydrated with :card.&quot;
   [dashcards]
   (set/union
-   (set (for [{:keys [card] :as dashcard} dashcards
-              param    (:parameter_mappings dashcard)
-              :let     [field-clause (param-target-&gt;field-clause (:target param) (:card dashcard))]
-              :when    field-clause
-              :let     [field-id (or
-                                    ;; Get the field id from the field-clause if it contains it. This is the common case
-                                    ;; for mbql queries.
-                                  (lib.util.match/match-one field-clause [:field (id :guard integer?) _] id)
-                                    ;; Attempt to get the field clause from the model metadata corresponding to the field.
-                                    ;; This is the common case for native queries in which mappings from original columns
-                                    ;; have been performed using model metadata.
-                                  (:id (qp.util/field-&gt;field-info field-clause (:result_metadata card))))]
-              :when field-id]
-          field-id))
+   (dashcards-&gt;param-field-ids* dashcards)
    (cards-&gt;card-param-field-ids (map :card dashcards))))</pre></td></tr><tr><td class="docs"><p>Retrieve a map relating paramater ids to field ids.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn get-linked-field-ids
   [dashcards]
