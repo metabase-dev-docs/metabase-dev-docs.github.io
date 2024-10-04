@@ -3836,10 +3836,9 @@ interfaces.</p>
 <p>Toucan instances need to implement [[protocols/IModel]], [[protocols/IWithModel]], and [[protocols/IRecordChanges]].</p>
 </td><td class="codes"><pre class="brush: clojure">(defn instance?
   [x]
-  (every? #(clojure.core/instance? % x)
-          [toucan2.protocols.IModel
-           toucan2.protocols.IWithModel
-           toucan2.protocols.IRecordChanges]))</pre></td></tr><tr><td class="docs"><p>True if <code>x</code> is a Toucan2 instance, and its [[protocols/model]] <code>isa?</code> <code>model</code>.</p>
+  (and (clojure.core/instance? toucan2.protocols.IModel x)
+       (clojure.core/instance? toucan2.protocols.IWithModel x)
+       (clojure.core/instance? toucan2.protocols.IRecordChanges x)))</pre></td></tr><tr><td class="docs"><p>True if <code>x</code> is a Toucan2 instance, and its [[protocols/model]] <code>isa?</code> <code>model</code>.</p>
 
 <p>```clj
 (instance-of? ::bird (instance ::toucan {})) ; -> true
@@ -4055,26 +4054,38 @@ value. No-ops if <code>an-instance</code> is not a Toucan 2 instance.</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Applies <code>f</code> directly to the underlying <code>original</code> map of <code>an-instance</code>. No-ops if <code>an-instance</code> is not
 an [[Instance]].</p>
 </td><td class="codes"><pre class="brush: clojure">(defn update-original
-  [an-instance f &amp; args]
-  (if (instance? an-instance)
-    (protocols/with-original an-instance (apply f (protocols/original an-instance) args))
-    an-instance))</pre></td></tr><tr><td class="docs"><p>Applies <code>f</code> directly to the underlying <code>current</code> map of <code>an-instance</code>; useful if you need to operate on it directly.
+  ([an-instance f]
+   (if (instance? an-instance)
+     (protocols/with-original an-instance (f (protocols/original an-instance)))
+     an-instance))
+  ([an-instance f &amp; args]
+   (if (instance? an-instance)
+     (protocols/with-original an-instance (apply f (protocols/original an-instance) args))
+     an-instance)))</pre></td></tr><tr><td class="docs"><p>Applies <code>f</code> directly to the underlying <code>current</code> map of <code>an-instance</code>; useful if you need to operate on it directly.
 Acts like regular <code>(apply f instance args)</code> if <code>an-instance</code> is not an [[Instance]].</p>
 </td><td class="codes"><pre class="brush: clojure">(defn update-current
-  [an-instance f &amp; args]
-  (protocols/with-current an-instance (apply f (protocols/current an-instance) args)))</pre></td></tr><tr><td class="docs"><p>Like <code>(apply f instance args)</code>, but affects both the <code>original</code> map and <code>current</code> map of <code>an-instance</code> rather than
+  ([an-instance f]
+   (protocols/with-current an-instance (f (protocols/current an-instance))))
+  ([an-instance f &amp; args]
+   (protocols/with-current an-instance (apply f (protocols/current an-instance) args))))</pre></td></tr><tr><td class="docs"><p>Like <code>(apply f instance args)</code>, but affects both the <code>original</code> map and <code>current</code> map of <code>an-instance</code> rather than
 just the current map. Acts like regular <code>(apply f instance args)</code> if <code>instance</code> is not an <code>Instance</code>.</p>
 
 <p><code>f</code> is applied directly to the underlying <code>original</code> and <code>current</code> maps of <code>instance</code> itself. <code>f</code> is only applied
 once if <code>original</code> and <code>current</code> are currently the same object (i.e., the new <code>original</code> and <code>current</code> will also be
 the same object). If <code>current</code> and <code>original</code> are not the same object, <code>f</code> is applied twice.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn update-original-and-current
-  [an-instance f &amp; args]
-  (if (identical? (protocols/original an-instance) (protocols/current an-instance))
-    (reset-original (apply update-current an-instance f args))
-    (as-&gt; an-instance an-instance
-      (apply update-original an-instance f args)
-      (apply update-current  an-instance f args))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#toucan2.jdbc" name="toucan2.jdbc"><h1 class="project-name">toucan2.jdbc</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+  ([an-instance f]
+   (if (identical? (protocols/original an-instance) (protocols/current an-instance))
+     (reset-original (update-current an-instance f))
+     (as-&gt; an-instance an-instance
+       (update-original an-instance f)
+       (update-current  an-instance f))))
+  ([an-instance f &amp; args]
+   (if (identical? (protocols/original an-instance) (protocols/current an-instance))
+     (reset-original (apply update-current an-instance f args))
+     (as-&gt; an-instance an-instance
+       (apply update-original an-instance f args)
+       (apply update-current  an-instance f args)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#toucan2.jdbc" name="toucan2.jdbc"><h1 class="project-name">toucan2.jdbc</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns toucan2.jdbc
   (:require
    [toucan2.jdbc.connection :as jdbc.conn]
@@ -5208,7 +5219,7 @@ resulting collection.</p>
                   (list `-&gt;Text (str/trimr s)))
         texts   (map -&gt;Text* (str/split format-string #&quot;%s&quot;))]
     `(-&gt;Doc ~(vec (interleave-all texts args)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- level-&gt;int [a-level default]
+</td><td class="codes"><pre class="brush: clojure">(defn- level-&gt;int ^long [a-level ^long default]
   (case a-level
     :disabled 5
     :error    4
@@ -5222,7 +5233,7 @@ resulting collection.</p>
 them over and over again. We could introduce a <code>with-level</code> macro or something to make changing the level
 convenient.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn ^:no-doc -current-level-int
-  []
+  ^long []
   (level-&gt;int (or *level* @level) Integer/MAX_VALUE))</pre></td></tr><tr><td class="docs"><p>Whether to enable logging for <code>a-level</code>. This is a macro for performance reasons, so we can do the [[level->int]]
 conversion at compile time rather than on every call.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmacro ^:no-doc -enable-level?
