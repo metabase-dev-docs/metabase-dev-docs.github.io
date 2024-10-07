@@ -3102,8 +3102,13 @@ We don't need to render the tab title if only 1 exists (issue #45123).</p>
       [])))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- should-retry-sending?
   [exception channel-type]
-  (and (= :channel/slack channel-type)
-       (contains? (:errors (ex-data exception)) :slack-token)))</pre></td></tr><tr><td class="docs">
+  (not (and (= :channel/slack channel-type)
+            (contains? (:errors (ex-data exception)) :slack-token))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- format-channel
+  [{:keys [type id]}]
+  (if id
+    (str (name type) &quot; &quot; id)
+    (name type)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- send-retrying!
   [pulse-id channel message]
   (try
@@ -3120,9 +3125,9 @@ We don't need to render the tab title if only 1 exists (issue #45123).</p>
                            (catch Exception e
                              (vswap! retry-errors conj e)
                              ;; Token errors have already been logged and we should not retry.
-                             (when-not (should-retry-sending? e (:type channel))
-                               (throw e))
-                             (log/warnf &quot;[Pulse %d] Failed to send to channel %s %d, retring...&quot; pulse-id (:type channel) (:id channel)))))]
+                             (when (should-retry-sending? e (:type channel))
+                               (log/warnf e &quot;[Pulse %d] Failed to send to channel %s , retrying...&quot; pulse-id (format-channel channel))
+                               (throw e)))))]
       (task-history/with-task-history {:task            &quot;channel-send&quot;
                                        :on-success-info (fn [update-map _result]
                                                           (cond-&gt; update-map
@@ -3135,9 +3140,9 @@ We don't need to render the tab title if only 1 exists (issue #45123).</p>
                                                          :channel-id   (:id channel)
                                                          :pulse-id     pulse-id}}
         ((retry/decorate send! (retry/random-exponential-backoff-retry (str (random-uuid)) retry-config)))
-        (log/debugf &quot;[Pulse %d] Sent to channel %s %d with %d retires&quot; pulse-id (:type channel) (:id channel) (count @retry-errors))))
+        (log/debugf &quot;[Pulse %d] Sent to channel %s with %d retries&quot; pulse-id (format-channel channel) (count @retry-errors))))
     (catch Throwable e
-      (log/error e &quot;Error sending notification!&quot;))))</pre></td></tr><tr><td class="docs">
+      (log/errorf e &quot;[Pulse %d] Error sending notification!&quot; pulse-id))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- execute-pulse
   [{:keys [cards] pulse-id :id :as pulse} dashboard]
   (if dashboard
@@ -3178,21 +3183,17 @@ We don't need to render the tab title if only 1 exists (issue #45123).</p>
                            messages (channel/render-notification (:type channel)
                                                                  (get-notification-info pulse parts pulse-channel)
                                                                  (channel-recipients pulse-channel))]
-                       (log/debugf &quot;[Pulse %d] Rendered %d messages for %s %d to channel %s&quot;
+                       (log/debugf &quot;[Pulse %d] Rendered %d messages for channel %s&quot;
                                    pulse-id
                                    (count messages)
-                                   (alert-or-pulse pulse)
-                                   (:id pulse)
-                                   (:type channel))
+                                   (format-channel channel))
                        (doseq [message messages]
-                         (log/debugf &quot;[Pulse %d] Sending %s %d to channel %s&quot;
+                         (log/debugf &quot;[Pulse %d] Sending to channel %s&quot;
                                      pulse-id
-                                     (alert-or-pulse pulse)
-                                     (:id pulse)
                                      (:channel_type pulse-channel))
                          (send-retrying! pulse-id channel message)))
                      (catch Exception e
-                       (log/errorf e &quot;Error sending %s %d to channel %s&quot; (alert-or-pulse pulse) (:id pulse) (:channel_type pulse-channel)))))
+                       (log/errorf e &quot;[Pulse %d] Error sending to %s channel&quot; (:id pulse) (:channel_type pulse-channel)))))
           (when (:alert_first_only pulse)
             (t2/delete! Pulse :id pulse-id))))
       (log/infof &quot;Skipping sending %s %d&quot; (alert-or-pulse pulse) (:id pulse)))))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
