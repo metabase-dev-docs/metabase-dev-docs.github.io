@@ -3114,22 +3114,23 @@ looking at the last stage.</p>
   <p><strong>Code health:</strong> Healthy</p>
 </blockquote>
 </td><td class="codes"><pre class="brush: clojure">(defn ^:export as-returned
-  [a-query stage-number]
-  (if (and
-       (empty? (lib.core/aggregations a-query stage-number))
-       (empty? (lib.core/breakouts a-query stage-number)))
+  [a-query stage-number card-id]
+  (let [{a-query :query, :keys [stage-number]} (lib.core/wrap-native-query-with-mbql a-query stage-number card-id)]
+    (if (and
+         (empty? (lib.core/aggregations a-query stage-number))
+         (empty? (lib.core/breakouts a-query stage-number)))
     ;; No extra stage needed with no aggregations.
-    #js {:query      a-query
-         :stageIndex stage-number}
-    ;; An extra stage is needed, so see if one already exists.
-    (if-let [next-stage (-&gt;&gt; (lib.util/canonical-stage-index a-query stage-number)
-                             (lib.util/next-stage-number a-query))]
-      ;; Already an extra stage, so use it.
       #js {:query      a-query
-           :stageIndex next-stage}
+           :stageIndex stage-number}
+    ;; An extra stage is needed, so see if one already exists.
+      (if-let [next-stage (-&gt;&gt; (lib.util/canonical-stage-index a-query stage-number)
+                               (lib.util/next-stage-number a-query))]
+      ;; Already an extra stage, so use it.
+        #js {:query      a-query
+             :stageIndex next-stage}
       ;; No new stage, so append one.
-      #js {:query      (lib.core/append-stage a-query)
-           :stageIndex -1})))</pre></td></tr><tr><td class="docs"><p>Returns a JS Array of <em>column metadata</em> values for all columns which can be used to add an <code>ORDER BY</code> to <code>a-query</code> at
+        #js {:query      (lib.core/append-stage a-query)
+             :stageIndex -1}))))</pre></td></tr><tr><td class="docs"><p>Returns a JS Array of <em>column metadata</em> values for all columns which can be used to add an <code>ORDER BY</code> to <code>a-query</code> at
 <code>stage-number</code>.</p>
 
 <p>To add an <code>ORDER BY</code>, pass one of the columns to [[order-by]].</p>
@@ -4754,7 +4755,7 @@ the library.</p>
 <p>In the long term, it should be factored out of <code>metabase.lib.*</code> and into a separate library of CLJC code shared with
 the frontend.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn ^:export available-drill-thrus
-  [a-query stage-number column value row dimensions]
+  [a-query stage-number card-id column value row dimensions]
   (lib.convert/with-aggregation-list (lib.core/aggregations a-query stage-number)
     (let [column-ref (when-let [a-ref (and column (.-field_ref ^js column))]
                        (legacy-ref-&gt;pMBQL a-ref))]
@@ -4764,7 +4765,8 @@ the frontend.</p>
                    :value      (cond
                                  (undefined? value) nil   ; Missing a value, ie. a column click
                                  (nil? value)       :null ; Provided value is null, ie. database NULL
-                                 :else              value)}
+                                 :else              value)
+                   :card-id    card-id}
                   (when row                    {:row        (mapv row-cell       row)})
                   (when (not-empty dimensions) {:dimensions (mapv dimension-cell dimensions)}))
            (lib.core/available-drill-thrus a-query stage-number)
@@ -4779,8 +4781,8 @@ specify the <code>args</code> it expects, if any.</p>
   <p><strong>Code health:</strong> Single use. This is only here to support the context menu UI and should not be reused.</p>
 </blockquote>
 </td><td class="codes"><pre class="brush: clojure">(defn ^:export drill-thru
-  [a-query stage-number a-drill-thru &amp; args]
-  (apply lib.core/drill-thru a-query stage-number a-drill-thru args))</pre></td></tr><tr><td class="docs"><p>Returns a JS object with the details needed to render the complex UI for <code>column-filter</code> and some <code>quick-filter</code>
+  [a-query stage-number card-id a-drill-thru &amp; args]
+  (apply lib.core/drill-thru a-query stage-number card-id a-drill-thru args))</pre></td></tr><tr><td class="docs"><p>Returns a JS object with the details needed to render the complex UI for <code>column-filter</code> and some <code>quick-filter</code>
 drills. The argument is the opaque <code>a-drill-thru</code> value returned by [[available-drill-thrus]].</p>
 
 <p>Since <code>a-query</code> might need an extra stage added (if filtering on aggregation columns) this includes a possible-updated
@@ -4804,7 +4806,13 @@ value:      the clicked value (JS `null` for a SQL `NULL` value)
   #js {&quot;column&quot;     column
        &quot;query&quot;      a-query
        &quot;stageIndex&quot; stage-number
-       &quot;value&quot;      (lib.drill-thru.common/drill-value-&gt;js value)})</pre></td></tr><tr><td class="docs"><p>Returns a JS object with the details needed to render the complex UI for <code>compare-aggregation</code> drills.
+       &quot;value&quot;      (lib.drill-thru.common/drill-value-&gt;js value)})</pre></td></tr><tr><td class="docs"><p>Returns a JS object with the details needed to render the complex UI for <code>combine-column</code> drills.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn ^:export combine-column-drill-details
+  [{a-query :query
+    :keys [column stage-number]}]
+  #js {&quot;query&quot;      a-query
+       &quot;stageIndex&quot; stage-number
+       &quot;column&quot;     column})</pre></td></tr><tr><td class="docs"><p>Returns a JS object with the details needed to render the complex UI for <code>compare-aggregation</code> drills.
 The argument is the opaque <code>a-drill-thru</code> value returned by [[available-drill-thrus]].</p>
 
 <p>The return value has the form:</p>
@@ -5029,11 +5037,13 @@ room for them in the library.</p>
 <p>TODO: All of these are consuming legacy columns and converting them; that should be happening on the calling side,
 or refactored away.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn ^:export update-lat-lon-filter
-  [a-query stage-number latitude-column longitude-column bounds]
+  [a-query stage-number latitude-column longitude-column card-id  bounds]
+  ;; (.log js/console &quot;update-lat-lon-filter&quot;)
   (let [bounds           (js-&gt;clj bounds :keywordize-keys true)
         latitude-column  (legacy-column-&gt;metadata a-query stage-number latitude-column)
         longitude-column (legacy-column-&gt;metadata a-query stage-number longitude-column)]
-    (lib.core/update-lat-lon-filter a-query stage-number latitude-column longitude-column bounds)))</pre></td></tr><tr><td class="docs"><p>Add or update a filter against <code>numeric-column</code>, based on the provided start and end values. <strong>Removes</strong> any existing
+    (lib.core/with-wrapped-native-query a-query stage-number card-id
+      lib.core/update-lat-lon-filter latitude-column longitude-column bounds)))</pre></td></tr><tr><td class="docs"><p>Add or update a filter against <code>numeric-column</code>, based on the provided start and end values. <strong>Removes</strong> any existing
 filters for <code>numeric-column</code>.</p>
 
 <blockquote>
@@ -5042,9 +5052,10 @@ filters for <code>numeric-column</code>.</p>
   ideally refactored away.</p>
 </blockquote>
 </td><td class="codes"><pre class="brush: clojure">(defn ^:export update-numeric-filter
-  [a-query stage-number numeric-column start end]
+  [a-query stage-number numeric-column card-id start end]
   (let [numeric-column (legacy-column-&gt;metadata a-query stage-number numeric-column)]
-    (lib.core/update-numeric-filter a-query stage-number numeric-column start end)))</pre></td></tr><tr><td class="docs"><p>Add or update a filter against <code>temporal-column</code>, based on the provided start and end values.
+    (lib.core/with-wrapped-native-query a-query stage-number card-id
+      lib.core/update-numeric-filter numeric-column start end)))</pre></td></tr><tr><td class="docs"><p>Add or update a filter against <code>temporal-column</code>, based on the provided start and end values.
 <strong>Removes</strong> any existing filters for <code>numeric-column</code>.</p>
 
 <p>Modifies the temporal unit for any breakouts to on <code>temporal-column</code> to still be useful: If there are fewer than 4
@@ -5056,9 +5067,10 @@ points (see [[metabase.lib.filter.update/temporal-filter-min-num-points]]), move
   ideally refactored away.</p>
 </blockquote>
 </td><td class="codes"><pre class="brush: clojure">(defn ^:export update-temporal-filter
-  [a-query stage-number temporal-column start end]
+  [a-query stage-number temporal-column card-id start end]
   (let [temporal-column (legacy-column-&gt;metadata a-query stage-number temporal-column)]
-    (lib.core/update-temporal-filter a-query stage-number temporal-column start end)))</pre></td></tr><tr><td class="docs"><p>Given two columns, returns true if <code>src-column</code> is a valid source to use for filtering <code>dst-column</code>.</p>
+    (lib.core/with-wrapped-native-query a-query stage-number card-id
+      lib.core/update-temporal-filter temporal-column start end)))</pre></td></tr><tr><td class="docs"><p>Given two columns, returns true if <code>src-column</code> is a valid source to use for filtering <code>dst-column</code>.</p>
 
 <blockquote>
   <p><strong>Code health:</strong> Healthy.</p>
