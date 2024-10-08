@@ -2872,6 +2872,8 @@ net.brehaut.ClojureTools = (function (SH) {
    [clojure.string :as str]
    [metabase.legacy-mbql.normalize :as mbql.normalize]
    [metabase.legacy-mbql.schema :as mbql.s]
+   [metabase.lib.schema.common :as lib.schema.common]
+   [metabase.lib.schema.id :as lib.schema.id]
    [metabase.models.card :refer [Card]]
    [metabase.models.interface :as mi]
    [metabase.query-processor :as qp]
@@ -2879,6 +2881,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.util.cron :as u.cron]
    [metabase.util.log :as log]
    [metabase.util.malli :as mu]
+   [metabase.util.malli.registry :as mr]
    [methodical.core :as methodical]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs"><p>model lifecycle ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Used to be the toucan1 model name defined using [[toucan.models/defmodel]], not it's a reference to the toucan2 model name.
@@ -2908,10 +2911,11 @@ threshold.</p>
   [[id v]] (and id v))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn- fix-expression-refs :- mbql.s/Field
   &quot;Convert expression ref into a field ref.
-Expression refs (`[:expression \&quot;full-name\&quot;]`) are how the _query_ refers to a custom column. But nested queries
-don't, (and shouldn't) care that those are expressions. They are just another field. The field type is always
-`:type/Text` enforced by the endpoint to create model indexes.&quot;
-  [field-ref :- mbql.s/Field base-type]
+  Expression refs (`[:expression \&quot;full-name\&quot;]`) are how the _query_ refers to a custom column. But nested queries
+  don't, (and shouldn't) care that those are expressions. They are just another field. The field type is always
+  `:type/Text` enforced by the endpoint to create model indexes.&quot;
+  [field-ref :- mbql.s/Field
+   base-type :- ::lib.schema.common/base-type]
   (case (first field-ref)
     :field field-ref
     :expression (let [[_ expression-name] field-ref]
@@ -2921,10 +2925,17 @@ don't, (and shouldn't) care that those are expressions. They are just another fi
     (throw (ex-info (format &quot;Invalid field ref for indexing: %s&quot; field-ref)
                     {:field-ref field-ref
                      :valid-clauses [:field :expression]}))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- fetch-values
-  [model-index]
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::model-index
+  [:map
+   [:model_id  ::lib.schema.id/card]
+   [:value_ref some?]
+   [:pk_ref    some?]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:private fetch-values
+  [model-index :- ::model-index]
   (let [model     (t2/select-one Card :id (:model_id model-index))
-        fix       (fn [field-ref base-type] (-&gt; field-ref mbql.normalize/normalize-field-ref (fix-expression-refs base-type)))
+        fix       (mu/fn [field-ref :- some?
+                          base-type :- ::lib.schema.common/base-type]
+                    (-&gt; field-ref mbql.normalize/normalize-field-ref (fix-expression-refs base-type)))
         ;; :type/Text and :type/Integer are ensured at creation time on the api.
         value-ref (-&gt; model-index :value_ref (fix :type/Text))
         pk-ref    (-&gt; model-index :pk_ref (fix :type/Integer))]
@@ -2951,8 +2962,11 @@ update if desired.</p>
         source  (set (into {} source-values))]
     {:additions (set/difference source current)
      :deletions (set/difference current source)}))</pre></td></tr><tr><td class="docs"><p>Add indexed values to the model<em>index</em>value table.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn add-values!
-  [model-index]
+</td><td class="codes"><pre class="brush: clojure">(mu/defn add-values!
+  [model-index :- [:merge
+                   ::model-index
+                   [:map
+                    [:id pos-int?]]]]
   (let [[error-message values-to-index] (fetch-values model-index)
         current-index-values            (into #{}
                                               (map (juxt :model_pk :name))
@@ -2987,7 +3001,7 @@ update if desired.</p>
                                      &quot;indexed&quot;)}))
         (catch Exception e
           (log/errorf e &quot;Error saving model-index values for model-index: %d, model: %d&quot;
-                      (:id model-index) (:model-id model-index))
+                      (:id model-index) (:model_id model-index))
           (t2/update! ModelIndex (:id model-index)
                       {:state      &quot;error&quot;
                        :error      (ex-message e)
