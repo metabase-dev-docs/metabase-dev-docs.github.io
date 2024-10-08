@@ -2874,6 +2874,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [honey.sql.helpers :as sql.helpers]
    [honey.sql.protocols]
    [java-time.api :as t]
+   [medley.core :as m]
    [metabase.driver :as driver]
    [metabase.driver.common :as driver.common]
    [metabase.driver.sql.query-processor.deprecated :as sql.qp.deprecated]
@@ -3524,45 +3525,46 @@ appropriately.</p>
   [:power
    (-&gt;honeysql driver mbql-expr)
    (-&gt;honeysql driver power)])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- aggregation-order-bys
-  [order-bys]
-  (filter (fn [[_direction expr]]
-            (and (vector? expr)
-                 (&gt; (count expr) 1)
-                 (= (first expr) :aggregation)
-                 (int? (second expr))))
-          order-bys))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- aggregation?
+  [expr]
+  (and (vector? expr)
+       (&gt; (count expr) 1)
+       (= (first expr) :aggregation)
+       (int? (second expr))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- unwrap-aggregation-option
   [agg]
   (cond-&gt; agg
-    (and (vector? agg) (= (first agg) :aggregation-options)) second))</pre></td></tr><tr><td class="docs"><p>Returns a vector containing the <code>aggregations</code> specified by <code>aggregation-order-bys</code> compiled to
+    (and (vector? agg) (= (first agg) :aggregation-options)) second))</pre></td></tr><tr><td class="docs"><p>Returns a vector containing the <code>aggregations</code> specified by <code>order-bys</code> compiled to
 honeysql expressions for <code>driver</code> suitable for ordering in the over clause of a window function.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- over-aggregations
-  [driver aggregations aggregation-order-bys]
+</td><td class="codes"><pre class="brush: clojure">(defn- over-order-bys
+  [driver aggregations order-bys]
   (let [aggregations (vec aggregations)]
     (into []
-          (keep (fn [[direction [_aggregation index]]]
-                  (let [agg (unwrap-aggregation-option (aggregations index))]
-                    (when-not (#{:cum-count :cum-sum :offset} (first agg))
-                      [(-&gt;honeysql driver agg) direction]))))
-          aggregation-order-bys)))</pre></td></tr><tr><td class="docs"><p>Order by the first breakout, then partition by all the other ones. See #42003 and
+          (keep (fn [[direction expr]]
+                  (if (aggregation? expr)
+                    (let [[_aggregation index] expr
+                          agg (unwrap-aggregation-option (aggregations index))]
+                      (when-not (#{:cum-count :cum-sum :offset} (first agg))
+                        [(-&gt;honeysql driver agg) direction]))
+                    [(-&gt;honeysql driver expr) direction])))
+          order-bys)))</pre></td></tr><tr><td class="docs"><p>Order by the first breakout, then partition by all the other ones. See #42003 and
 https://metaboat.slack.com/archives/C05MPF0TM3L/p1714084449574689 for more info.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- window-aggregation-over-expr-for-query-with-breakouts
   [driver inner-query]
-  (let [num-breakouts   (count (:breakout inner-query))
-        group-bys       (:group-by (apply-top-level-clause driver :breakout {} inner-query))
-        partition-exprs (when (&gt; num-breakouts 1)
-                          (rest group-bys))
-        order-expr      (first group-bys)
-        over-order-bys  (-&gt;&gt; (:order-by inner-query)
-                             aggregation-order-bys
-                             (over-aggregations driver (:aggregation inner-query)))]
+  (let [breakouts (:breakout inner-query)
+        group-bys (:group-by (apply-top-level-clause driver :breakout {} inner-query))
+        finest-temp-breakout (qp.util.transformations.nest-breakouts/finest-temporal-breakout-index breakouts 2)
+        partition-exprs (when (&gt; (count breakouts) 1)
+                          (if finest-temp-breakout
+                            (m/remove-nth finest-temp-breakout group-bys)
+                            (butlast group-bys)))
+        order-bys (over-order-bys driver (:aggregation inner-query) (:order-by inner-query))]
     (merge
      (when (seq partition-exprs)
        {:partition-by (mapv (fn [expr]
                               [expr])
                             partition-exprs)})
-     {:order-by (conj over-order-bys [order-expr :asc])})))</pre></td></tr><tr><td class="docs">
+     {:order-by order-bys})))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- window-aggregation-over-expr-for-query-without-breakouts [driver inner-query]
   (when-let [order-bys (not-empty (:order-by (apply-top-level-clause driver :order-by {} inner-query)))]
     {:order-by (vec order-bys)}))</pre></td></tr><tr><td class="docs"><p>Generate an OVER (...) window function expression for stuff like <code>:offset</code> (<code>lag</code> and <code>lead</code>).</p>
@@ -4383,9 +4385,11 @@ queries that have no cumulative aggregations at all. Once we convert the SQL QP 
         true)
       (when-let [source-query (:source-query inner-query)]
         (has-window-function-aggregations? source-query))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- maybe-nest-breakouts-in-queries-with-window-fn-aggregations [inner-query]
+</td><td class="codes"><pre class="brush: clojure">(defn- maybe-nest-breakouts-in-queries-with-window-fn-aggregations
+  [inner-query]
   (cond-&gt; inner-query
-    (has-window-function-aggregations? inner-query) nest-breakouts-in-queries-with-window-fn-aggregations))</pre></td></tr><tr><td class="docs">
+    (has-window-function-aggregations? inner-query)
+    nest-breakouts-in-queries-with-window-fn-aggregations))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod preprocess :sql
   [_driver inner-query]
   (-&gt; inner-query

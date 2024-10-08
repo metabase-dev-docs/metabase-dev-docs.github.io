@@ -4565,50 +4565,14 @@ this thunk is equivalent to</p>
     (let [rsmeta (.getMetaData rset)
           thunk  (read-column-thunk conn model rset rsmeta i)
           v      (thunk)]
-      (next.jdbc.rs/read-column-by-index v rsmeta i))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- make-i-&gt;thunk [conn model rset]
+      (next.jdbc.rs/read-column-by-index v rsmeta i))))</pre></td></tr><tr><td class="docs"><p>Given a connection <code>conn</code>, a <code>model</code> and a result set <code>rset</code>, return a function which given a column number <code>i</code> returns
+a thunk that retrieves the column value of the current row from the result set.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn ^:no-doc make-i-&gt;thunk
+  [conn model rset]
   (comp (memoize (fn [i]
                    (make-column-thunk conn model rset i)))
-        int))</pre></td></tr><tr><td class="docs"><p>Returns a function that, given the current row number, returns a function that, given a column number, returns a cached
-thunk to fetch values of that column. Confusing, huh? Here's a chart to make it a bit easier to visualize:</p>
-
-<p>```clj
-(make-cached-row-num->i->thunk conn model rset)
-=>
-(f current-row-number)
-=>
-(f column-index)
-=>
-(column-value-thunk)
-```</p>
-
-<p>What's the point of this? The main point is to cache values that come out of the database, so we only fetch them once.
-This is used to implement our transient rows in [[toucan2.jdbc.result-set]] -- accessing the value of a transient row
-twice should not result in two calls to <code>.getObject</code>.</p>
-
-<p>The row number is used for cache-busting purposes, so we can reset the cache after each row is returned (so we don't
-accidentally cache values from the first row and return them for all the rows). The row number passed in here doesn't
-need to correspond to the actual row number from a JDBC standpoint; it's used only for cache-busting purposes.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ^:no-doc make-cached-row-num-&gt;i-&gt;thunk
-  [conn model ^ResultSet rset]
-  (let [i-&gt;thunk       (make-i-&gt;thunk conn model rset)
-        cached-row-num (atom -1)
-        cached-values  (atom {})]
-    (fn row-num-&gt;i-&gt;thunk* [current-row-num]
-      (when-not (= current-row-num @cached-row-num)
-        (reset! cached-row-num current-row-num)
-        (reset! cached-values {}))
-      (fn i-&gt;thunk* [i]
-        (fn cached-column-thunk []
-          (let [cached-value (get @cached-values i ::not-found)]
-            (if-not (= cached-value ::not-found)
-              (log/tracef &quot;Using cached value for column %s: %s&quot; i cached-value)
-              cached-value)
-            (let [thunk (i-&gt;thunk i)
-                  v     (thunk)]
-              (swap! cached-values assoc i v)
-              v)))))))</pre></td></tr><tr><td class="docs"><p>Given a <code>java.sql.Connection</code> <code>conn</code>, a <code>model</code>, and a <code>java.sql.ResultSet</code> <code>rset</code>, return a function that can be used
-with [[next.jdbc.result-set/builder-adapter]]. The function has the signature</p>
+        int))</pre></td></tr><tr><td class="docs"><p>Given a <code>i-&gt;thunk</code> function, return a function that can be used with [[next.jdbc.result-set/builder-adapter]]. The
+function has the signature</p>
 
 <p>```clj
 (f builder rset i) => result
@@ -4619,21 +4583,15 @@ index <code>i</code>, it will return the value of that column for the current ro
 
 <p>The function used to fetch the column is built by combining [[read-column-thunk]]
 and [[next.jdbc.result-set/read-column-by-index]]; the function is built once and used repeatedly for each new row.</p>
-
-<p>Values are cached for the current row -- fetching the same column twice for a given row will only result in fetching
-it from the database once.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn ^:no-doc read-column-by-index-fn
-  ([conn model ^ResultSet rset]
-   (read-column-by-index-fn (make-cached-row-num-&gt;i-&gt;thunk conn model rset)))
-  ([row-num-&gt;i-&gt;thunk]
-   (fn read-column-by-index-fn* [_builder ^ResultSet rset ^Integer i]
-     (assert (not (.isClosed ^ResultSet rset))
-             &quot;ResultSet is already closed. Do you need call toucan2.realize/realize on the row before the Connection is closed?&quot;)
-     (let [i-&gt;thunk (row-num-&gt;i-&gt;thunk (.getRow rset))
-           thunk    (i-&gt;thunk i)
-           result   (thunk)]
-       (log/tracef &quot;col %s =&gt; %s&quot; i result)
-       result))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#toucan2.jdbc.result-set" name="toucan2.jdbc.result-set"><h1 class="project-name">toucan2.jdbc.result-set</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Implementation of a custom <code>next.jdbc</code> result set builder function, [[builder-fn]], and the default
+  [i-&gt;thunk]
+  (fn read-column-by-index-fn* [_builder ^ResultSet rset ^Integer i]
+    (assert (not (.isClosed ^ResultSet rset))
+            &quot;ResultSet is already closed. Do you need call toucan2.realize/realize on the row before the Connection is closed?&quot;)
+    (let [thunk    (i-&gt;thunk i)
+          result   (thunk)]
+      (log/tracef &quot;col %s =&gt; %s&quot; i result)
+      result)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#toucan2.jdbc.result-set" name="toucan2.jdbc.result-set"><h1 class="project-name">toucan2.jdbc.result-set</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Implementation of a custom <code>next.jdbc</code> result set builder function, [[builder-fn]], and the default
 implementation; [[reduce-result-set]] which is used to reduce results from JDBC databases.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns toucan2.jdbc.result-set
   (:require
@@ -4748,10 +4706,10 @@ directly.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn ^:no-doc reduce-result-set
   [rf init conn model ^ResultSet rset opts]
   (log/debugf &quot;Reduce JDBC result set for model %s with rf %s and init %s&quot; model rf init)
-  (let [row-num-&gt;i-&gt;thunk (jdbc.read/make-cached-row-num-&gt;i-&gt;thunk conn model rset)
+  (let [i-&gt;thunk          (jdbc.read/make-i-&gt;thunk conn model rset)
         builder-fn*       (next.jdbc.rs/builder-adapter
                            (builder-fn conn model rset opts)
-                           (jdbc.read/read-column-by-index-fn row-num-&gt;i-&gt;thunk))
+                           (jdbc.read/read-column-by-index-fn i-&gt;thunk))
         builder           (builder-fn* rset opts)
         combined-opts     (jdbc.options/merge-options (merge (:opts builder) opts))
         label-fn          (get combined-opts :label-fn)
@@ -4767,9 +4725,7 @@ directly.</p>
         (do
           (log/tracef &quot;Result set has no more rows.&quot;)
           acc)
-        :let [row-num  (.getRow rset)
-              _        (log/tracef &quot;Fetch row %s&quot; row-num)
-              i-&gt;thunk (row-num-&gt;i-&gt;thunk row-num)
+        :let [_        (log/tracef &quot;Fetch row %s&quot; (.getRow rset))
               row      (jdbc.row/row model rset builder i-&gt;thunk col-name-&gt;index)
               acc'     (rf acc row)]
         (reduced? acc')
@@ -4828,8 +4784,8 @@ Toucan 2 be <code>next.jdbc</code>-compatible.</p>
                                 ;; used to fetch the column. This usually comes
                                 ;; from [[toucan2.jdbc.read/make-cached-i-&gt;thunk]].
                                 i-&gt;thunk
-                                ;; underlying transient map representing this row.
-                                ^clojure.lang.ITransientMap transient-row
+                                ;; a Volatile that contains the underlying transient map representing this row.
+                                ^clojure.lang.Volatile volatile-transient-row
                                 ;; a delay that should return a persistent map for the current row. Once this is called
                                 ;; we should return the realized row directly and work with that going forward.
                                 realized-row]
@@ -4842,27 +4798,18 @@ Toucan 2 be <code>next.jdbc</code>-compatible.</p>
     (log/tracef &quot;.assoc %s %s&quot; k v)
     (if (realized? realized-row)
       (assoc @realized-row k v)
-      (let [^clojure.lang.ITransientMap transient-row' (assoc! transient-row k v)]
+      (do
+        (vswap! volatile-transient-row (fn [^clojure.lang.ITransientMap transient-row]
+                                         (let [^clojure.lang.ITransientMap transient-row' (assoc! transient-row k v)]
+                                           (assert (= (.valAt transient-row' k) v)
+                                                   (format &quot;assoc! did not do what we expected. k = %s v = %s row = %s .valAt = %s&quot;
+                                                           (pr-str k)
+                                                           (pr-str v)
+                                                           (pr-str transient-row')
+                                                           (pr-str (.valAt transient-row' k))))
+                                           transient-row')))
         (swap! realized-keys conj k)
-        (assert (= (.valAt transient-row' k) v)
-                (format &quot;assoc! did not do what we expected. k = %s v = %s row = %s .valAt = %s&quot;
-                        (pr-str k)
-                        (pr-str v)
-                        (pr-str transient-row')
-                        (pr-str (.valAt transient-row' k))))
-        ;; `assoc!` might return a different object. In practice, I think it usually doesn't; optimize for that case
-        ;; and return `this` rather than creating a new instance of `TransientRow`.
-        (if (identical? transient-row transient-row')
-          this
-          ;; If `assoc!` did return a different object, then we need to create a new `TransientRow` with the new value
-          (TransientRow. model
-                         rset
-                         builder
-                         column-name-&gt;index
-                         realized-keys
-                         i-&gt;thunk
-                         transient-row'
-                         realized-row)))))
+        this)))
   ;; TODO -- can we `assocEx` the transient row?
   (assocEx [_this k v]
     (log/tracef &quot;.assocEx %s %s&quot; k v)
@@ -4871,34 +4818,32 @@ Toucan 2 be <code>next.jdbc</code>-compatible.</p>
     (log/tracef &quot;.without %s&quot; k)
     (if (realized? realized-row)
       (dissoc @realized-row k)
-      (let [transient-row'      (dissoc! transient-row k)
-            k-index             (column-name-&gt;index k)
-            column-name-&gt;index' (if-not k-index
-                                  column-name-&gt;index
-                                  (fn [column-name]
-                                    (let [index (column-name-&gt;index column-name)]
-                                      (when-not (= index k-index)
-                                        index))))]
-        (when k-index
-          (swap! i-&gt;thunk (fn [i-&gt;thunk]
-                            (fn [index]
-                              (if (= index k-index)
-                                (constantly ::not-found)
-                                (i-&gt;thunk index))))))
-        (swap! realized-keys disj k)
-        ;; as in the `assoc` method above, we can optimize a bit and return `this` instead of creating a new object if
-        ;; `assoc!` returned the original `transient-row` rather than a different object
-        (if (and (identical? transient-row      transient-row')
-                 (identical? column-name-&gt;index column-name-&gt;index'))
-          this
-          (TransientRow. model
-                         rset
-                         builder
-                         column-name-&gt;index'
-                         realized-keys
-                         i-&gt;thunk
-                         transient-row'
-                         realized-row)))))
+      (do
+        (vswap! volatile-transient-row dissoc! k)
+        (let [k-index             (column-name-&gt;index k)
+              column-name-&gt;index' (if-not k-index
+                                    column-name-&gt;index
+                                    (fn [column-name]
+                                      (let [index (column-name-&gt;index column-name)]
+                                        (when-not (= index k-index)
+                                          index))))]
+          (when k-index
+            (swap! i-&gt;thunk (fn [i-&gt;thunk]
+                              (fn [index]
+                                (if (= index k-index)
+                                  (constantly ::not-found)
+                                  (i-&gt;thunk index))))))
+          (swap! realized-keys disj k)
+          (if (identical? column-name-&gt;index column-name-&gt;index')
+            this
+            (TransientRow. model
+                           rset
+                           builder
+                           column-name-&gt;index'
+                           realized-keys
+                           i-&gt;thunk
+                           volatile-transient-row
+                           realized-row))))))
   ;; Java 7 compatible: no forEach / spliterator
   ;;
   ;; TODO -- not sure if we need/want this
@@ -4911,14 +4856,14 @@ Toucan 2 be <code>next.jdbc</code>-compatible.</p>
     (log/tracef &quot;.containsKey %s&quot; k)
     (if (realized? realized-row)
       (contains? @realized-row k)
-      (or (contains? transient-row k)
+      (or (contains? @volatile-transient-row k)
           (boolean (column-name-&gt;index k)))))
   (entryAt [this k]
     (log/tracef &quot;.entryAt %s&quot; k)
     (let [v (.valAt this k ::not-found)]
       (when-not (= v ::not-found)
         (clojure.lang.MapEntry. k v))))
-;;; TODO -- this should probably also include any extra keys added with `assoc` or whatever
+  ;; TODO -- this should probably also include any extra keys added with `assoc` or whatever
   clojure.lang.Counted
   (count [_this]
     (log/tracef &quot;.count&quot;)
@@ -4960,7 +4905,7 @@ Toucan 2 be <code>next.jdbc</code>-compatible.</p>
           not-found))
       ;; non-number column name
       :else
-      (let [existing-value (.valAt transient-row k ::not-found)]
+      (let [existing-value (.valAt ^clojure.lang.ITransientMap @volatile-transient-row k ::not-found)]
         (if-not (= existing-value ::not-found)
           existing-value
           (let [fetched-value (fetch-column-with-name column-name-&gt;index @i-&gt;thunk k ::not-found)]
@@ -5006,7 +4951,7 @@ Toucan 2 be <code>next.jdbc</code>-compatible.</p>
     (b/cond
       (realized? realized-row)
       (update @realized-row k f)
-      :let [existing-value (.valAt transient-row k ::not-found)]
+      :let [existing-value (.valAt ^clojure.lang.ITransientMap @volatile-transient-row k ::not-found)]
       ;; value already exists: update the value in the transient row and call it a day
       (not= existing-value ::not-found)
       (assoc this k (f existing-value))
@@ -5034,7 +4979,7 @@ things, the [[print-symbol]] and a map.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- print-representation-parts
   [^toucan2.jdbc.row.TransientRow row]
   (try
-    (let [transient-row (.transient_row row)
+    (let [transient-row @(.volatile_transient_row row)
           realized-keys (.realized_keys row)]
       [(symbol (format &quot;^%s &quot; `TransientRow))
        ;; (instance? pretty.core.PrettyPrintable transient-row) (pretty/pretty transient-row)
@@ -5078,20 +5023,20 @@ Slack thread for more information: https://clojurians.slack.com/archives/C1Q164V
    (partial fetch-column! builder i-&gt;thunk)
    transient-row
    (range 1 (inc (next.jdbc.rs/column-count builder)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- make-realized-row-delay [builder i-&gt;thunk transient-row]
+</td><td class="codes"><pre class="brush: clojure">(defn- make-realized-row-delay [builder i-&gt;thunk ^clojure.lang.Volatile volatile-transient-row]
   (delay
     (log/tracef &quot;Fully realizing row. *fetch-all-columns* = %s&quot; *fetch-all-columns*)
-    (let [row (cond-&gt;&gt; transient-row
+    (let [row (cond-&gt;&gt; @volatile-transient-row
                 *fetch-all-columns* (fetch-all-columns! builder i-&gt;thunk))]
       (next.jdbc.rs/row! builder row))))</pre></td></tr><tr><td class="docs"><p>Create a new <code>TransientRow</code>. Part of the low-level implementation of the JDBC query execution backend. You probably
 shouldn't be using this directly!</p>
 </td><td class="codes"><pre class="brush: clojure">(defn ^:no-doc row
   [model ^ResultSet rset builder i-&gt;thunk col-name-&gt;index]
   (assert (not (.isClosed rset)) &quot;ResultSet is already closed&quot;)
-  (let [transient-row      (next.jdbc.rs/-&gt;row builder)
-        i-&gt;thunk           (atom i-&gt;thunk)
-        realized-row-delay (make-realized-row-delay builder i-&gt;thunk transient-row)
-        realized-keys      (atom #{})]
+  (let [volatile-transient-row (volatile! (next.jdbc.rs/-&gt;row builder))
+        i-&gt;thunk               (atom i-&gt;thunk)
+        realized-row-delay     (make-realized-row-delay builder i-&gt;thunk volatile-transient-row)
+        realized-keys          (atom #{})]
     ;; this is a gross amount of positional args. But using `reify` makes debugging things too hard IMO.
     (-&gt;TransientRow model
                     rset
@@ -5099,7 +5044,7 @@ shouldn't be using this directly!</p>
                     col-name-&gt;index
                     realized-keys
                     i-&gt;thunk
-                    transient-row
+                    volatile-transient-row
                     realized-row-delay)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#toucan2.log" name="toucan2.log"><h1 class="project-name">toucan2.log</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Toucan 2 logging utilities. This is basically just a fancy wrapper around <code>clojure.tools.logging</code> that supports some
 additional debugging facilities, such as dynamically enabling logging for different topics or levels from the REPL.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns toucan2.log
