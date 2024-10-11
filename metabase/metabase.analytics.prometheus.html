@@ -2872,7 +2872,6 @@ if [[prometheus-server-port]] is set to a port number. This can only be set in t
 <p>Api is quite simple: [[setup!]] and [[shutdown!]]. After that you can retrieve metrics from
 http://localhost:<prometheus-server-port>/metrics.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.analytics.prometheus
-  (:refer-clojure :exclude [inc])
   (:require
    [clojure.java.jmx :as jmx]
    [iapetos.collector :as collector]
@@ -2924,7 +2923,7 @@ serving metrics from that port.</p>
   [port registry-name]
   (try
     (let [registry   (setup-metrics! registry-name)
-          web-server (start-web-server! port registry)]
+          web-server (when port (start-web-server! port registry))]
       (-&gt;PrometheusSystem registry web-server))
     (catch Exception e
       (throw (ex-info (trs &quot;Failed to initialize Prometheus on port {0}&quot; port)
@@ -3034,7 +3033,14 @@ than "iapetos_internal"</p>
   (when (server/instance)
     [(collector/named {:namespace &quot;metabase_webserver&quot;
                        :name      &quot;jetty_stats&quot;}
-                      (JettyStatisticsCollector. (.getHandler (server/instance))))]))</pre></td></tr><tr><td class="docs"><p>Instrument the application. Conditionally done when some setting is set. If [[prometheus-server-port]] is not set it
+                      (JettyStatisticsCollector. (.getHandler (server/instance))))]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- product-collectors
+  []
+  ;; Iapetos will use &quot;default&quot; if we do not provide a namespace, so explicitly set `metabase-email`:
+  [(prometheus/counter :metabase-email/messages
+                       {:description (trs &quot;Number of emails sent.&quot;)})
+   (prometheus/counter :metabase-email/message-errors
+                       {:description (trs &quot;Number of errors when sending emails.&quot;)})])</pre></td></tr><tr><td class="docs"><p>Instrument the application. Conditionally done when some setting is set. If [[prometheus-server-port]] is not set it
 will throw.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- setup-metrics!
   [registry-name]
@@ -3044,11 +3050,7 @@ will throw.</p>
            (concat (jvm-collectors)
                    (jetty-collectors)
                    [@c3p0-collector]
-                   ; Iapetos will use &quot;default&quot; if we do not provide a namespace, so explicitly set `metabase-email`:
-                   [(prometheus/counter :metabase-email/messages
-                                        {:description (trs &quot;Number of emails sent.&quot;)})
-                    (prometheus/counter :metabase-email/message-errors
-                                        {:description (trs &quot;Number of errors when sending emails.&quot;)})]))))</pre></td></tr><tr><td class="docs"><p>Start the prometheus web-server. If [[prometheus-server-port]] is not set it will throw.</p>
+                   (product-collectors)))))</pre></td></tr><tr><td class="docs"><p>Start the prometheus web-server. If [[prometheus-server-port]] is not set it will throw.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- start-web-server!
   [port registry]
   (log/infof &quot;Starting prometheus metrics web-server on port %s&quot; (str port))
@@ -3065,8 +3067,7 @@ will throw.</p>
   []
   (let [port (prometheus-server-port)]
     (when-not port
-      (throw (ex-info (trs &quot;Attempting to set up prometheus metrics with no web-server port provided&quot;)
-                      {})))
+      (log/info &quot;Running prometheus metrics without a webserver.&quot;))
     (when-not system
       (locking #'system
         (when-not system
@@ -3084,7 +3085,7 @@ will throw.</p>
              (catch Exception e
                (log/warn e &quot;Error stopping prometheus web-server&quot;)))))))</pre></td></tr><tr><td class="docs"><p>Call iapetos.core/inc on the metric in the global registry,
  if it has already been initialized and the metric is registered.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn inc
+</td><td class="codes"><pre class="brush: clojure">(defn inc!
   [metric]
   (some-&gt; system .-registry metric prometheus/inc))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(comment
