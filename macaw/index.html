@@ -3910,6 +3910,7 @@ indirection.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns macaw.acceptance-test
   (:require
    [clojure.java.io :as io]
+   [clojure.set :as set]
    [clojure.string :as str]
    [clojure.test :refer :all]
    [macaw.core :as m]
@@ -3929,7 +3930,7 @@ This map gives a pattern in the exception message we expect to receive when tryi
 </td><td class="codes"><pre class="brush: clojure">(defn- fixture-renames [fixture]
   (some-&gt; fixture (ct/fixture-&gt;filename &quot;acceptance&quot; &quot;.renames.edn&quot;) io/resource slurp read-string))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- fixture-rewritten [fixture]
-  (some-&gt; fixture (ct/fixture-&gt;filename &quot;acceptance&quot; &quot;.rewritten.sql&quot;) io/resource slurp))</pre></td></tr><tr><td class="docs">
+  (some-&gt; fixture (ct/fixture-&gt;filename &quot;acceptance&quot; &quot;.rewritten.sql&quot;) io/resource slurp str/trim))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- get-component [cs k]
   (case k
     :source-columns (get cs k)
@@ -3940,6 +3941,15 @@ This map gives a pattern in the exception message we expect to receive when tryi
     :basic-select})</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def global-overrides
   {:basic-select :macaw.error/not-implemented})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private merged-fixtures-file &quot;test/resources/acceptance/queries.sql&quot;)</pre></td></tr><tr><td class="docs"><p>The fixtures in merged fixtures file, mapped by their identifiers.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- merged-fixtures
+  []
+  (-&gt;&gt; (str/split (slurp merged-fixtures-file) #&quot;-- FIXTURE: &quot;)
+       (keep (fn [named-query]
+               (when-not (str/blank? named-query)
+                 (let [[nm qry] (.split ^String named-query &quot;\n&quot; 2)]
+                   [(keyword nm) (str/trim qry)]))))
+       (into {})))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- validate-analysis [correct override actual]
   (let [expected (or override correct)]
     (when override
@@ -3965,7 +3975,8 @@ This map gives a pattern in the exception message we expect to receive when tryi
 </td><td class="codes"><pre class="brush: clojure">(defn- test-fixture
   [fixture]
   (let [prefix      (str &quot;(fixture: &quot; (subs (str fixture) 1) &quot;)&quot;)
-        sql         (ct/query-fixture fixture)
+        merged      (merged-fixtures)
+        sql         (or (ct/query-fixture fixture) (get merged fixture))
         expected-cs (fixture-analysis fixture)
         renames     (fixture-renames fixture)
         expected-rw (fixture-rewritten fixture)
@@ -3997,13 +4008,13 @@ This map gives a pattern in the exception message we expect to receive when tryi
     (when renames
       (let [broken?   (:broken? renames)
             rewritten (testing (str prefix &quot; rewriting does not throw&quot;)
-                        (is (m/replace-names sql (dissoc renames :broken?) base-opts)))]
+                        (is (str/trim (m/replace-names sql (dissoc renames :broken?) base-opts))))]
         (when expected-rw
           (testing (str prefix &quot; rewritten SQL is correct&quot;)
             (if broken?
               (is (not= expected-rw rewritten))
-              (is (= expected-rw rewritten)))))))))</pre></td></tr><tr><td class="docs"><p>Find all the fixture symbols within our test resources.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn find-fixtures
+              (is (= expected-rw rewritten)))))))))</pre></td></tr><tr><td class="docs"><p>Find all the fixture symbols for stand-alone sql files within our test resources.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn isolated-fixtures
   []
   (-&gt;&gt; (io/resource &quot;acceptance&quot;)
        io/file
@@ -4013,11 +4024,18 @@ This map gives a pattern in the exception message we expect to receive when tryi
                   (when (.endsWith n &quot;.sql&quot;)
                     (str/replace n #&quot;\.sql$&quot; &quot;&quot;)))))
        (remove #(.contains ^String % &quot;.&quot;))
+       (remove #{&quot;queries&quot;})
        (map ct/stem-&gt;fixture)
-       (sort-by str)))</pre></td></tr><tr><td class="docs"><p>Find all the fixture files and for each of them run all the tests we can construct from the related files.</p>
+       (sort-by str)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- all-fixtures []
+  (let [isolated (isolated-fixtures)
+        merged   (keys (merged-fixtures))]
+    (assert (empty? (set/intersection (set isolated) (set merged)))
+            &quot;No fixtures should be in both the isolated and merged files&quot;)
+    (sort-by str (distinct (concat isolated merged)))))</pre></td></tr><tr><td class="docs"><p>Find all the fixture files and for each of them run all the tests we can construct from the related files.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmacro create-fixture-tests!
   []
-  (let [fixtures (find-fixtures)]
+  (let [fixtures (all-fixtures)]
     (cons 'do
           (for [f fixtures
                 :let [test-name (symbol (str/replace (ct/fixture-&gt;filename f &quot;-test&quot;) #&quot;(?&lt;!_)_(?!_)&quot; &quot;-&quot;))]]
@@ -4029,6 +4047,20 @@ This map gives a pattern in the exception message we expect to receive when tryi
   (doseq [[sym ns-var] (ns-interns *ns*)]
     (when (:test (meta ns-var))
       (ns-unmap *ns* sym)))
+
+  (merged-fixtures)
+  ;; Append all the isolated fixtures to the merged file.
+  ;; For now, we keep the stress-testing fixtures separate, because OH LAWDY they HUGE.
+  (spit merged-fixtures-file
+        (str/join &quot;\n\n&quot;
+                  (for [fixture (isolated-fixtures)]
+                    (str &quot;-- FIXTURE: &quot;
+                         (when-let [nms (namespace fixture)]
+                           (str nms &quot;/&quot;))
+                         (name fixture) &quot;\n&quot;
+                         (str/trim
+                          (ct/query-fixture fixture))))))
+
 
   (test-fixture :compound/cte)
   (test-fixture :compound/cte-nonambiguous)
