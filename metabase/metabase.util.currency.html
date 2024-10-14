@@ -2865,394 +2865,896 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.lib.stage" name="metabase.lib.stage"><h1 class="project-name">metabase.lib.stage</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Method implementations for a stage of a query.</p>
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.lib.stage
-  (:require
-   [clojure.string :as str]
-   [medley.core :as m]
-   [metabase.legacy-mbql.normalize :as mbql.normalize]
-   [metabase.lib.aggregation :as lib.aggregation]
-   [metabase.lib.breakout :as lib.breakout]
-   [metabase.lib.convert :as lib.convert]
-   [metabase.lib.expression :as lib.expression]
-   [metabase.lib.field :as lib.field]
-   [metabase.lib.hierarchy :as lib.hierarchy]
-   [metabase.lib.join :as lib.join]
-   [metabase.lib.join.util :as lib.join.util]
-   [metabase.lib.metadata :as lib.metadata]
-   [metabase.lib.metadata.calculation :as lib.metadata.calculation]
-   [metabase.lib.schema :as lib.schema]
-   [metabase.lib.schema.id :as lib.schema.id]
-   [metabase.lib.schema.metadata :as lib.schema.metadata]
-   [metabase.lib.util :as lib.util]
-   [metabase.lib.util.match :as lib.util.match]
-   [metabase.util :as u]
-   [metabase.util.i18n :as i18n]
-   [metabase.util.malli :as mu]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(lib.hierarchy/derive :mbql.stage/mbql   ::stage)
-(lib.hierarchy/derive :mbql.stage/native ::stage)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/metadata-method ::stage
-  [_query _stage-number _stage]
-  ;; not i18n'ed because this shouldn't be developer-facing.
-  (throw (ex-info &quot;You can't calculate a metadata map for a stage! Use lib.metadata.calculation/returned-columns-method instead.&quot;
-                  {})))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ensure-previous-stages-have-metadata :- ::lib.schema/query
-  &quot;Recursively calculate the metadata for the previous stages and add it to them, we'll need it for metadata
-  calculations for [[lib.metadata.calculation/returned-columns]] and [[lib.metadata.calculation/visible-columns]], and
-  we don't want to have to calculate it more than once...&quot;
-  [query        :- ::lib.schema/query
-   stage-number :- :int]
-  (reduce
-   (fn [query stage-number]
-     (lib.util/update-query-stage query
-                                  stage-number
-                                  assoc ::cached-metadata
-                                  (lib.metadata.calculation/returned-columns query
-                                                                             stage-number
-                                                                             (lib.util/query-stage query stage-number))))
-   query
-   (range 0 (lib.util/canonical-stage-index query stage-number))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- existing-stage-metadata :- [:maybe lib.metadata.calculation/ColumnsWithUniqueAliases]
-  &quot;Return existing stage metadata attached to a stage if is already present: return it as-is, but only if this is a
-  native stage or a source-Card or a metric stage. If it's any other sort of stage then ignore the metadata, it's
-  probably wrong; we can recalculate the correct metadata anyway.&quot;
-  [query        :- ::lib.schema/query
-   stage-number :- :int]
-  (let [{stage-type :lib/type, :keys [source-card] :as stage} (lib.util/query-stage query stage-number)]
-    (or (::cached-metadata stage)
-        (when-let [metadata (:lib/stage-metadata stage)]
-          (when (or (= stage-type :mbql.stage/native)
-                    source-card)
-            (let [source-type (case stage-type
-                                :mbql.stage/native :source/native
-                                :mbql.stage/mbql   :source/card)]
-              (not-empty
-               (for [col (:columns metadata)]
-                 (merge
-                  {:lib/source-column-alias  (:name col)
-                   :lib/desired-column-alias (:name col)}
-                  col
-                  {:lib/source source-type})))))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- breakouts-columns :- [:maybe lib.metadata.calculation/ColumnsWithUniqueAliases]
-  [query          :- ::lib.schema/query
-   stage-number   :- :int
-   unique-name-fn :- ::lib.metadata.calculation/unique-name-fn]
-  (not-empty
-   (for [breakout (lib.breakout/breakouts-metadata query stage-number)]
-     (assoc breakout
-            :lib/source               :source/breakouts
-            :lib/source-column-alias  ((some-fn :lib/source-column-alias :name) breakout)
-            :lib/desired-column-alias (unique-name-fn (lib.join.util/desired-alias query breakout))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- aggregations-columns :- [:maybe lib.metadata.calculation/ColumnsWithUniqueAliases]
-  [query          :- ::lib.schema/query
-   stage-number   :- :int
-   unique-name-fn :- ::lib.metadata.calculation/unique-name-fn]
-  (not-empty
-   (for [ag (lib.aggregation/aggregations-metadata query stage-number)]
-     (assoc ag
-            :lib/source               :source/aggregations
-            :lib/source-column-alias  (:name ag)
-            :lib/desired-column-alias (unique-name-fn (:name ag))))))</pre></td></tr><tr><td class="docs"><p>TODO -- maybe the bulk of this logic should be moved into [[metabase.lib.field]], like we did for breakouts and
-aggregations above.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- fields-columns :- [:maybe lib.metadata.calculation/ColumnsWithUniqueAliases]
-  [query          :- ::lib.schema/query
-   stage-number   :- :int
-   unique-name-fn :- ::lib.metadata.calculation/unique-name-fn]
-  (when-let [{fields :fields} (lib.util/query-stage query stage-number)]
-    (not-empty
-     (for [[tag :as ref-clause] fields
-           :let                 [source (case tag
-                                          ;; you can't have an `:aggregation` reference in `:fields`; anything in
-                                          ;; `:aggregations` is returned automatically anyway
-                                          ;; by [[aggregations-columns]] above.
-                                          :field      :source/fields
-                                          :expression :source/expressions)
-                                 metadata (lib.metadata.calculation/metadata query stage-number ref-clause)]]
-       (assoc metadata
-              :lib/source               source
-              :lib/source-column-alias  (lib.metadata.calculation/column-name query stage-number metadata)
-              :lib/desired-column-alias (unique-name-fn (lib.join.util/desired-alias query metadata)))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- summary-columns :- [:maybe lib.metadata.calculation/ColumnsWithUniqueAliases]
-  [query          :- ::lib.schema/query
-   stage-number   :- :int
-   unique-name-fn :- ::lib.metadata.calculation/unique-name-fn]
-  (not-empty
-   (into []
-         (mapcat (fn [f]
-                   (f query stage-number unique-name-fn)))
-         [breakouts-columns
-          aggregations-columns])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- previous-stage-metadata :- [:maybe lib.metadata.calculation/ColumnsWithUniqueAliases]
-  &quot;Metadata for the previous stage, if there is one.&quot;
-  [query          :- ::lib.schema/query
-   stage-number   :- :int
-   unique-name-fn :- ::lib.metadata.calculation/unique-name-fn]
-  (when-let [previous-stage-number (lib.util/previous-stage-number query stage-number)]
-    (not-empty
-     (for [col  (lib.metadata.calculation/returned-columns query
-                                                           previous-stage-number
-                                                           (lib.util/query-stage query previous-stage-number))
-           :let [source-alias (or ((some-fn :lib/desired-column-alias :lib/source-column-alias) col)
-                                  (lib.metadata.calculation/column-name query stage-number col))]]
-       (-&gt; (merge
-            col
-            {:lib/source               :source/previous-stage
-             :lib/source-column-alias  source-alias
-             :lib/desired-column-alias (unique-name-fn source-alias)}
-            (when (:metabase.lib.card/force-broken-id-refs col)
-              (select-keys col [:metabase.lib.card/force-broken-id-refs])))
-           ;; do not retain `:temporal-unit`; it's not like we're doing a extract(month from &lt;x&gt;) twice, in both
-           ;; stages of a query. It's a little hacky that we're manipulating `::lib.field` keys directly here since
-           ;; they're presumably supposed to be private-ish, but I don't have a more elegant way of solving this sort
-           ;; of problem at this point in time.
-           ;;
-           ;; also don't retain `:lib/expression-name`, the fact that this column came from an expression in the
-           ;; previous stage should be totally irrelevant and we don't want it confusing our code that decides whether
-           ;; to generate `:expression` or `:field` refs.
-           (dissoc ::lib.field/temporal-unit :lib/expression-name))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- saved-question-metadata :- [:maybe lib.metadata.calculation/ColumnsWithUniqueAliases]
-  &quot;Metadata associated with a Saved Question, e.g. if we have a `:source-card`&quot;
-  [query          :- ::lib.schema/query
-   stage-number   :- :int
-   card-id        :- [:maybe ::lib.schema.id/card]
-   options        :- lib.metadata.calculation/VisibleColumnsOptions]
-  (when card-id
-    (when-let [card (lib.metadata/card query card-id)]
-      (not-empty (lib.metadata.calculation/visible-columns query stage-number card options)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- metric-metadata :- [:maybe lib.metadata.calculation/ColumnsWithUniqueAliases]
-  [query         :- ::lib.schema/query
-   _stage-number :- :int
-   card          :- ::lib.schema.metadata/card
-   options       :- lib.metadata.calculation/VisibleColumnsOptions]
-  (let [metric-query (-&gt; card :dataset-query mbql.normalize/normalize lib.convert/-&gt;pMBQL
-                         (lib.util/update-query-stage -1 dissoc :aggregation :breakout))]
-    (not-empty (lib.metadata.calculation/visible-columns
-                (assoc metric-query :lib/metadata (:lib/metadata query))
-                -1
-                (lib.util/query-stage metric-query -1)
-                options))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- expressions-metadata :- [:maybe lib.metadata.calculation/ColumnsWithUniqueAliases]
-  [query                         :- ::lib.schema/query
-   stage-number                  :- :int
-   unique-name-fn                :- ::lib.metadata.calculation/unique-name-fn
-   {:keys [include-late-exprs?]} :- [:map [:include-late-exprs? {:optional true} :boolean]]]
-  (not-empty
-   (for [[clause metadata] (map vector
-                                (:expressions (lib.util/query-stage query stage-number))
-                                (lib.expression/expressions-metadata query stage-number))
-          ;; Only include &quot;late&quot; expressions when required.
-          ;; &quot;Late&quot; expressions those like :offset which can't be used within the same query stage, like aggregations.
-         :when (or include-late-exprs?
-                   (not (lib.util.match/match-one clause :offset)))]
-     (let [base-type (:base-type metadata)]
-       (-&gt; (assoc metadata
-                  :lib/source               :source/expressions
-                  :lib/source-column-alias  (:name metadata)
-                  :lib/desired-column-alias (unique-name-fn (:name metadata)))
-           (u/assoc-default :effective-type (or base-type :type/*)))))))</pre></td></tr><tr><td class="docs"><p>Calculate the columns to return if <code>:aggregations</code>/<code>:breakout</code>/<code>:fields</code> are unspecified.</p>
-
-<p>Formula for the so-called 'default' columns is</p>
-
-<p>1a. Columns returned by the previous stage of the query (if there is one), OR</p>
-
-<p>1b. Default 'visible' Fields for our <code>:source-table</code>, OR</p>
-
-<p>1c. Metadata associated with a Saved Question, if we have <code>:source-card</code> (<code>:source-table</code> is a <code>card__&lt;id&gt;</code> string
-    in legacy MBQL), OR</p>
-
-<p>1e. Metadata associated with a Metric, if we have <code>:sources</code>, OR</p>
-
-<p>1d. <code>:lib/stage-metadata</code> if this is a <code>:mbql.stage/native</code> stage</p>
-
-<p>PLUS</p>
-
-<ol>
-<li>Expressions (aka calculated columns) added in this stage</li>
-</ol>
-
-<p>PLUS</p>
-
-<ol>
-<li>Columns added by joins at this stage</li>
-</ol>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- previous-stage-or-source-visible-columns :- lib.metadata.calculation/ColumnsWithUniqueAliases
-  &quot;Return columns from the previous query stage or source Table/Card.&quot;
-  [query                                 :- ::lib.schema/query
-   stage-number                          :- :int
-   {:keys [unique-name-fn], :as options} :- lib.metadata.calculation/VisibleColumnsOptions]
-  {:pre [(fn? unique-name-fn)]}
-  (let [{:keys [source-table source-card], :as this-stage} (lib.util/query-stage query stage-number)
-        card (some-&gt;&gt; source-card (lib.metadata/card query))
-        metric-based? (= (:type card) :metric)]
-    (into []
-          (if metric-based?
-            identity
-            (map #(dissoc % ::lib.join/join-alias ::lib.field/temporal-unit ::lib.field/binning :fk-field-id)))
-          (or
-           ;; 1a. columns returned by previous stage
-           (previous-stage-metadata query stage-number unique-name-fn)
-           ;; 1b or 1c
-           (or
-            ;; 1b: default visible Fields for the source Table
-            (when source-table
-              (assert (integer? source-table))
-              (let [table-metadata (lib.metadata/table query source-table)]
-                (lib.metadata.calculation/visible-columns query stage-number table-metadata options)))
-            ;; 1e. Metadata associated with a Metric
-            (when metric-based?
-              (metric-metadata query stage-number card options))
-            ;; 1c. Metadata associated with a saved Question
-            (when source-card
-              (saved-question-metadata query stage-number source-card (assoc options :include-implicitly-joinable? false)))
-            ;; 1d: `:lib/stage-metadata` for the (presumably native) query
-            (for [col (:columns (:lib/stage-metadata this-stage))]
-              (assoc col
-                     :lib/source :source/native
-                     :lib/source-column-alias  (:name col)
-                     ;; these should already be unique, but run them thru `unique-name-fn` anyway to make sure anything
-                     ;; that gets added later gets deduplicated from these.
-                     :lib/desired-column-alias (unique-name-fn (:name col)))))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- existing-visible-columns :- lib.metadata.calculation/ColumnsWithUniqueAliases
-  [query        :- ::lib.schema/query
-   stage-number :- :int
-   {:keys [unique-name-fn include-joined? include-expressions?], :as options} :- lib.metadata.calculation/VisibleColumnsOptions]
-  (concat
-   ;; 1: columns from the previous stage, source table or query
-   (previous-stage-or-source-visible-columns query stage-number options)
-   ;; 2: expressions (aka calculated columns) added in this stage
-   (when include-expressions?
-     (expressions-metadata query stage-number unique-name-fn {}))
-   ;; 3: columns added by joins at this stage
-   (when include-joined?
-     (lib.join/all-joins-visible-columns query stage-number unique-name-fn))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/visible-columns-method ::stage
-  [query stage-number _stage {:keys [unique-name-fn include-implicitly-joinable?], :as options}]
-  (let [query            (ensure-previous-stages-have-metadata query stage-number)
-        existing-columns (existing-visible-columns query stage-number options)]
-    (-&gt;&gt; (concat
-          existing-columns
-           ;; add implicitly joinable columns if desired
-          (when include-implicitly-joinable?
-            (lib.metadata.calculation/implicitly-joinable-columns query stage-number existing-columns unique-name-fn)))
-         vec)))</pre></td></tr><tr><td class="docs"><p>Return results metadata about the expected columns in an MBQL query stage. If the query has
-aggregations/breakouts, then return those and the fields columns. Otherwise if there are fields columns return
-those and the joined columns. Otherwise return the defaults based on the source Table or previous stage + joins.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/returned-columns-method ::stage
-  [query stage-number _stage {:keys [unique-name-fn], :as options}]
-  (or
-   (existing-stage-metadata query stage-number)
-   (let [query        (ensure-previous-stages-have-metadata query stage-number)
-         summary-cols (summary-columns query stage-number unique-name-fn)
-         field-cols   (fields-columns query stage-number unique-name-fn)]
-     ;; ... then calculate metadata for this stage
-     (cond
-       summary-cols
-       (into summary-cols field-cols)
-
-       field-cols
-       (do (doall field-cols)           ; force generation of unique names before join columns
-           (into []
-                 (m/distinct-by #(dissoc % :source-alias :lib/source :lib/source-uuid :lib/desired-column-alias))
-                 (concat field-cols
-                         (lib.join/all-joins-expected-columns query stage-number options))))
-
-       :else
-       ;; there is no `:fields` or summary columns (aggregtions or breakouts) which means we return all the visible
-       ;; columns from the source or previous stage plus all the expressions. We return only the `:fields` from any
-       ;; joins
-       (concat
-        ;; we don't want to include all visible joined columns, so calculate that separately
-        (previous-stage-or-source-visible-columns query stage-number {:include-implicitly-joinable? false
-                                                                      :unique-name-fn               unique-name-fn})
-        (expressions-metadata query stage-number unique-name-fn {:include-late-exprs? true})
-        (lib.join/all-joins-expected-columns query stage-number options))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/display-name-method :mbql.stage/native
-  [_query _stage-number _stage _style]
-  (i18n/tru &quot;Native query&quot;))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private display-name-source-parts
-  [:source-table
-   :source-card
-   :joins])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private display-name-other-parts
-  [:aggregation
-   :breakout
-   :filters
-   :order-by
-   :limit])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/display-name-method :mbql.stage/mbql
-  [query stage-number _stage style]
-  (let [query (ensure-previous-stages-have-metadata query stage-number)]
-    (or
-     (not-empty
-      (let [part-&gt;description  (into {}
-                                     (comp cat
-                                           (map (fn [k]
-                                                  [k (lib.metadata.calculation/describe-top-level-key query stage-number k)])))
-                                     [display-name-source-parts display-name-other-parts])
-            source-description (str/join &quot; + &quot; (remove str/blank? (map part-&gt;description display-name-source-parts)))
-            other-descriptions (map part-&gt;description display-name-other-parts)]
-        (str/join &quot;, &quot; (remove str/blank? (cons source-description other-descriptions)))))
-     (when-let [previous-stage-number (lib.util/previous-stage-number query stage-number)]
-       (lib.metadata.calculation/display-name query
-                                              previous-stage-number
-                                              (lib.util/query-stage query previous-stage-number)
-                                              style)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn has-clauses? :- :boolean
-  &quot;Does given query stage have any clauses?&quot;
-  [query        :- ::lib.schema/query
-   stage-number :- :int]
-  (boolean (seq (dissoc (lib.util/query-stage query stage-number) :lib/type :source-table :source-card))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn append-stage :- ::lib.schema/query
-  &quot;Adds a new blank stage to the end of the pipeline.&quot;
-  [query]
-  (update query :stages conj {:lib/type :mbql.stage/mbql}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn drop-stage :- ::lib.schema/query
-  &quot;Drops the final stage in the pipeline, will no-op if it is the only stage&quot;
-  [query]
-  (if (= 1 (count (:stages query)))
-    query
-    (update query :stages pop)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn drop-empty-stages :- ::lib.schema/query
-  &quot;Drops all empty stages in the pipeline.&quot;
-  [query :- ::lib.schema/query]
-  (update query :stages (fn [stages]
-                          (into []
-                                (keep-indexed (fn [stage-number stage]
-                                                (when (or (zero? stage-number)
-                                                          (has-clauses? query stage-number))
-                                                  stage)))
-                                stages))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ensure-extra-stage :- [:tuple ::lib.schema/query :int]
-  &quot;Given a query and current stage, returns a tuple of `[query next-stage-number]`.
-  If that stage already exists, the query is unchanged. If it does not, a new (MBQL) stage is appended and its index
-  is returned.&quot;
-  [query        :- ::lib.schema/query
-   stage-number :- :int]
-  (let [stage-number (lib.util/canonical-stage-index query stage-number)]
-    (if-let [next-number (lib.util/next-stage-number query stage-number)]
-      ;; There is already a next stage, so just return it.
-      [query next-number]
-      ;; Otherwise append a stage and return the new query and updated stage number.
-      (let [query (append-stage query)]
-        [query (lib.util/next-stage-number query stage-number)]))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- ensure-legacy-filter-stage
-  [query]
-  (let [inner-query (:query query)]
-    (cond-&gt; query
-      (and (:aggregation inner-query)
-           (:breakout inner-query))
-      (assoc :query {:source-query inner-query}))))</pre></td></tr><tr><td class="docs"><p>Adds an empty stage to <code>query</code> if its last stage contains both breakouts and aggregations.</p>
-
-<p>This is so that parameters can address both the stage before and after the aggregation.
-Adding filters to the result at stage -1 will filter after the summary, filters added at
-stage -2 filter before the summary.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ensure-filter-stage
-  [query]
-  (if (#{:query :native} (lib.util/normalized-query-type query))
-    (ensure-legacy-filter-stage query)
-    (cond-&gt; query
-      (and (lib.breakout/breakouts query) (lib.aggregation/aggregations query))
-      append-stage)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.util.currency" name="metabase.util.currency"><h1 class="project-name">metabase.util.currency</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>The list of currencies, and associated metadata, used by Metabase for number formatting.</p>
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.util.currency)</pre></td></tr><tr><td class="docs"><p>Currencies for which the Metabase frontend supports formatting with its symbol, rather than just
+its code or name. This list is referenced during XLSX export to achieve parity in currency formatting.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn supports-symbol?
+  [currency-code]
+  (contains?
+   #{:USD  ;; US dollar
+     :CAD  ;; Canadian dollar
+     :EUR  ;; Euro
+     :AUD  ;; Australian dollar
+     :BRL  ;; Brazilian real
+     :BTC  ;; Bitcoin
+     :CNY  ;; Chinese yuan
+     :GBP  ;; British pound
+     :HKD  ;; Hong Kong dollar
+     :ILS  ;; Israeli new shekel
+     :INR  ;; Indian rupee
+     :JPY  ;; Japanese yen
+     :KRW  ;; South Korean won
+     :MXN  ;; Mexican peso
+     :NZD  ;; New Zealand dollar
+     :TWD  ;; New Taiwan dollar
+     :VND} ;; Vietnamese dong
+   (keyword currency-code)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private currency-list
+  [[:USD {:symbol &quot;$&quot;,
+          :name &quot;US Dollar&quot;,
+          :symbol_native &quot;$&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;USD&quot;,
+          :name_plural &quot;US dollars&quot;}],
+   [:CAD {:symbol &quot;CA$&quot;,
+          :name &quot;Canadian Dollar&quot;,
+          :symbol_native &quot;$&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;CAD&quot;,
+          :name_plural &quot;Canadian dollars&quot;}],
+   [:EUR {:symbol &quot;€&quot;,
+          :name &quot;Euro&quot;,
+          :symbol_native &quot;€&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;EUR&quot;,
+          :name_plural &quot;euros&quot;}],
+   [:AED {:symbol &quot;AED&quot;,
+          :name &quot;United Arab Emirates Dirham&quot;,
+          :symbol_native &quot;د.إ.‏&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;AED&quot;,
+          :name_plural &quot;UAE dirhams&quot;}],
+   [:AFN {:symbol &quot;Af&quot;,
+          :name &quot;Afghan Afghani&quot;,
+          :symbol_native &quot;؋&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;AFN&quot;,
+          :name_plural &quot;Afghan Afghanis&quot;}],
+   [:ALL {:symbol &quot;ALL&quot;,
+          :name &quot;Albanian Lek&quot;,
+          :symbol_native &quot;Lek&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;ALL&quot;,
+          :name_plural &quot;Albanian lekë&quot;}],
+   [:AMD {:symbol &quot;AMD&quot;,
+          :name &quot;Armenian Dram&quot;,
+          :symbol_native &quot;դր.&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;AMD&quot;,
+          :name_plural &quot;Armenian drams&quot;}],
+   [:ARS {:symbol &quot;AR$&quot;,
+          :name &quot;Argentine Peso&quot;,
+          :symbol_native &quot;$&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;ARS&quot;,
+          :name_plural &quot;Argentine pesos&quot;}],
+   [:AUD {:symbol &quot;AU$&quot;,
+          :name &quot;Australian Dollar&quot;,
+          :symbol_native &quot;$&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;AUD&quot;,
+          :name_plural &quot;Australian dollars&quot;}],
+   [:AZN {:symbol &quot;₼&quot;,
+          :name &quot;Azerbaijani Manat&quot;,
+          :symbol_native &quot;₼&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;AZN&quot;,
+          :name_plural &quot;Azerbaijani manats&quot;}],
+   [:BAM {:symbol &quot;KM&quot;,
+          :name &quot;Bosnia-Herzegovina Convertible Mark&quot;,
+          :symbol_native &quot;KM&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;BAM&quot;,
+          :name_plural &quot;Bosnia-Herzegovina convertible marks&quot;}],
+   [:BDT {:symbol &quot;Tk&quot;,
+          :name &quot;Bangladeshi Taka&quot;,
+          :symbol_native &quot;৳&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;BDT&quot;,
+          :name_plural &quot;Bangladeshi takas&quot;}],
+   [:BGN {:symbol &quot;BGN&quot;,
+          :name &quot;Bulgarian Lev&quot;,
+          :symbol_native &quot;лв.&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;BGN&quot;,
+          :name_plural &quot;Bulgarian leva&quot;}],
+   [:BHD {:symbol &quot;BD&quot;,
+          :name &quot;Bahraini Dinar&quot;,
+          :symbol_native &quot;د.ب.‏&quot;,
+          :decimal_digits 3,
+          :rounding 0,
+          :code &quot;BHD&quot;,
+          :name_plural &quot;Bahraini dinars&quot;}],
+   [:BIF {:symbol &quot;FBu&quot;,
+          :name &quot;Burundian Franc&quot;,
+          :symbol_native &quot;FBu&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;BIF&quot;,
+          :name_plural &quot;Burundian francs&quot;}],
+   [:BND {:symbol &quot;BN$&quot;,
+          :name &quot;Brunei Dollar&quot;,
+          :symbol_native &quot;$&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;BND&quot;,
+          :name_plural &quot;Brunei dollars&quot;}],
+   [:BOB {:symbol &quot;Bs&quot;,
+          :name &quot;Bolivian Boliviano&quot;,
+          :symbol_native &quot;Bs&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;BOB&quot;,
+          :name_plural &quot;Bolivian bolivianos&quot;}],
+   [:BRL {:symbol &quot;R$&quot;,
+          :name &quot;Brazilian Real&quot;,
+          :symbol_native &quot;R$&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;BRL&quot;,
+          :name_plural &quot;Brazilian reals&quot;}],
+   [:BTC {:symbol &quot;₿&quot;,
+          :name &quot;Bitcoin&quot;,
+          :symbol_native &quot;BTC&quot;,
+          :decimal_digits 8,
+          :rounding 0,
+          :code &quot;BTC&quot;,
+          :name_plural &quot;Bitcoins&quot;}],
+   [:BWP {:symbol &quot;BWP&quot;,
+          :name &quot;Botswanan Pula&quot;,
+          :symbol_native &quot;P&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;BWP&quot;,
+          :name_plural &quot;Botswanan pulas&quot;}],
+   [:BYR {:symbol &quot;BYR&quot;,
+          :name &quot;Belarusian Ruble&quot;,
+          :symbol_native &quot;BYR&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;BYR&quot;,
+          :name_plural &quot;Belarusian rubles&quot;}],
+   [:BZD {:symbol &quot;BZ$&quot;,
+          :name &quot;Belize Dollar&quot;,
+          :symbol_native &quot;$&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;BZD&quot;,
+          :name_plural &quot;Belize dollars&quot;}],
+   [:CDF {:symbol &quot;CDF&quot;,
+          :name &quot;Congolese Franc&quot;,
+          :symbol_native &quot;FrCD&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;CDF&quot;,
+          :name_plural &quot;Congolese francs&quot;}],
+   [:CHF {:symbol &quot;CHF&quot;,
+          :name &quot;Swiss Franc&quot;,
+          :symbol_native &quot;CHF&quot;,
+          :decimal_digits 2,
+          :rounding 0.05,
+          :code &quot;CHF&quot;,
+          :name_plural &quot;Swiss francs&quot;}],
+   [:CLP {:symbol &quot;CL$&quot;,
+          :name &quot;Chilean Peso&quot;,
+          :symbol_native &quot;$&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;CLP&quot;,
+          :name_plural &quot;Chilean pesos&quot;}],
+   [:CNY {:symbol &quot;CN¥&quot;,
+          :name &quot;Chinese Yuan&quot;,
+          :symbol_native &quot;CN¥&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;CNY&quot;,
+          :name_plural &quot;Chinese yuan&quot;}],
+   [:COP {:symbol &quot;CO$&quot;,
+          :name &quot;Colombian Peso&quot;,
+          :symbol_native &quot;$&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;COP&quot;,
+          :name_plural &quot;Colombian pesos&quot;}],
+   [:CRC {:symbol &quot;₡&quot;,
+          :name &quot;Costa Rican Colón&quot;,
+          :symbol_native &quot;₡&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;CRC&quot;,
+          :name_plural &quot;Costa Rican colóns&quot;}],
+   [:CVE {:symbol &quot;CV$&quot;,
+          :name &quot;Cape Verdean Escudo&quot;,
+          :symbol_native &quot;CV$&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;CVE&quot;,
+          :name_plural &quot;Cape Verdean escudos&quot;}],
+   [:CZK {:symbol &quot;Kč&quot;,
+          :name &quot;Czech Republic Koruna&quot;,
+          :symbol_native &quot;Kč&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;CZK&quot;,
+          :name_plural &quot;Czech Republic korunas&quot;}],
+   [:DJF {:symbol &quot;Fdj&quot;,
+          :name &quot;Djiboutian Franc&quot;,
+          :symbol_native &quot;Fdj&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;DJF&quot;,
+          :name_plural &quot;Djiboutian francs&quot;}],
+   [:DKK {:symbol &quot;Dkr&quot;,
+          :name &quot;Danish Krone&quot;,
+          :symbol_native &quot;kr&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;DKK&quot;,
+          :name_plural &quot;Danish kroner&quot;}],
+   [:DOP {:symbol &quot;RD$&quot;,
+          :name &quot;Dominican Peso&quot;,
+          :symbol_native &quot;RD$&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;DOP&quot;,
+          :name_plural &quot;Dominican pesos&quot;}],
+   [:DZD {:symbol &quot;DA&quot;,
+          :name &quot;Algerian Dinar&quot;,
+          :symbol_native &quot;د.ج.‏&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;DZD&quot;,
+          :name_plural &quot;Algerian dinars&quot;}],
+   [:EGP {:symbol &quot;EGP&quot;,
+          :name &quot;Egyptian Pound&quot;,
+          :symbol_native &quot;ج.م.‏&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;EGP&quot;,
+          :name_plural &quot;Egyptian pounds&quot;}],
+   [:ERN {:symbol &quot;Nfk&quot;,
+          :name &quot;Eritrean Nakfa&quot;,
+          :symbol_native &quot;Nfk&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;ERN&quot;,
+          :name_plural &quot;Eritrean nakfas&quot;}],
+   [:ETB {:symbol &quot;Br&quot;,
+          :name &quot;Ethiopian Birr&quot;,
+          :symbol_native &quot;Br&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;ETB&quot;,
+          :name_plural &quot;Ethiopian birrs&quot;}],
+   [:ETH {:symbol &quot;ETH&quot;,
+          :name &quot;Ethereum&quot;,
+          :symbol_native &quot;ETH&quot;,
+          :decimal_digits 8,
+          :rounding 0,
+          :code &quot;ETH&quot;,
+          :name_plural &quot;Ethereum&quot;}],
+   [:GBP {:symbol &quot;£&quot;,
+          :name &quot;British Pound Sterling&quot;,
+          :symbol_native &quot;£&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;GBP&quot;,
+          :name_plural &quot;British pounds sterling&quot;}],
+   [:GEL {:symbol &quot;GEL&quot;,
+          :name &quot;Georgian Lari&quot;,
+          :symbol_native &quot;GEL&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;GEL&quot;,
+          :name_plural &quot;Georgian laris&quot;}],
+   [:GHS {:symbol &quot;GH₵&quot;,
+          :name &quot;Ghanaian Cedi&quot;,
+          :symbol_native &quot;GH₵&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;GHS&quot;,
+          :name_plural &quot;Ghanaian cedis&quot;}],
+   [:GNF {:symbol &quot;FG&quot;,
+          :name &quot;Guinean Franc&quot;,
+          :symbol_native &quot;FG&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;GNF&quot;,
+          :name_plural &quot;Guinean francs&quot;}],
+   [:GTQ {:symbol &quot;GTQ&quot;,
+          :name &quot;Guatemalan Quetzal&quot;,
+          :symbol_native &quot;Q&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;GTQ&quot;,
+          :name_plural &quot;Guatemalan quetzals&quot;}],
+   [:HKD {:symbol &quot;HK$&quot;,
+          :name &quot;Hong Kong Dollar&quot;,
+          :symbol_native &quot;$&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;HKD&quot;,
+          :name_plural &quot;Hong Kong dollars&quot;}],
+   [:HNL {:symbol &quot;HNL&quot;,
+          :name &quot;Honduran Lempira&quot;,
+          :symbol_native &quot;L&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;HNL&quot;,
+          :name_plural &quot;Honduran lempiras&quot;}],
+   [:HRK {:symbol &quot;kn&quot;,
+          :name &quot;Croatian Kuna&quot;,
+          :symbol_native &quot;kn&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;HRK&quot;,
+          :name_plural &quot;Croatian kunas&quot;}],
+   [:HUF {:symbol &quot;Ft&quot;,
+          :name &quot;Hungarian Forint&quot;,
+          :symbol_native &quot;Ft&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;HUF&quot;,
+          :name_plural &quot;Hungarian forints&quot;}],
+   [:IDR {:symbol &quot;Rp&quot;,
+          :name &quot;Indonesian Rupiah&quot;,
+          :symbol_native &quot;Rp&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;IDR&quot;,
+          :name_plural &quot;Indonesian rupiahs&quot;}],
+   [:ILS {:symbol &quot;₪&quot;,
+          :name &quot;Israeli New Shekel&quot;,
+          :symbol_native &quot;₪&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;ILS&quot;,
+          :name_plural &quot;Israeli new shekels&quot;}],
+   [:INR {:symbol &quot;Rs&quot;,
+          :name &quot;Indian Rupee&quot;,
+          :symbol_native &quot;টকা&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;INR&quot;,
+          :name_plural &quot;Indian rupees&quot;}],
+   [:IQD {:symbol &quot;IQD&quot;,
+          :name &quot;Iraqi Dinar&quot;,
+          :symbol_native &quot;د.ع.‏&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;IQD&quot;,
+          :name_plural &quot;Iraqi dinars&quot;}],
+   [:IRR {:symbol &quot;IRR&quot;,
+          :name &quot;Iranian Rial&quot;,
+          :symbol_native &quot;﷼&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;IRR&quot;,
+          :name_plural &quot;Iranian rials&quot;}],
+   [:ISK {:symbol &quot;Ikr&quot;,
+          :name &quot;Icelandic Króna&quot;,
+          :symbol_native &quot;kr&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;ISK&quot;,
+          :name_plural &quot;Icelandic krónur&quot;}],
+   [:JMD {:symbol &quot;J$&quot;,
+          :name &quot;Jamaican Dollar&quot;,
+          :symbol_native &quot;$&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;JMD&quot;,
+          :name_plural &quot;Jamaican dollars&quot;}],
+   [:JOD {:symbol &quot;JD&quot;,
+          :name &quot;Jordanian Dinar&quot;,
+          :symbol_native &quot;د.أ.‏&quot;,
+          :decimal_digits 3,
+          :rounding 0,
+          :code &quot;JOD&quot;,
+          :name_plural &quot;Jordanian dinars&quot;}],
+   [:JPY {:symbol &quot;¥&quot;,
+          :name &quot;Japanese Yen&quot;,
+          :symbol_native &quot;￥&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;JPY&quot;,
+          :name_plural &quot;Japanese yen&quot;}],
+   [:KES {:symbol &quot;Ksh&quot;,
+          :name &quot;Kenyan Shilling&quot;,
+          :symbol_native &quot;Ksh&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;KES&quot;,
+          :name_plural &quot;Kenyan shillings&quot;}],
+   [:KGS {:symbol &quot;KGS&quot;,
+          :name &quot;Kyrgyz Som&quot;,
+          :symbol_native &quot;сом&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;KGS&quot;,
+          :name_plural &quot;Kyrgyz soms&quot;}],
+   [:KHR {:symbol &quot;KHR&quot;,
+          :name &quot;Cambodian Riel&quot;,
+          :symbol_native &quot;៛&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;KHR&quot;,
+          :name_plural &quot;Cambodian riels&quot;}],
+   [:KMF {:symbol &quot;CF&quot;,
+          :name &quot;Comorian Franc&quot;,
+          :symbol_native &quot;FC&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;KMF&quot;,
+          :name_plural &quot;Comorian francs&quot;}],
+   [:KRW {:symbol &quot;₩&quot;,
+          :name &quot;South Korean Won&quot;,
+          :symbol_native &quot;₩&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;KRW&quot;,
+          :name_plural &quot;South Korean won&quot;}],
+   [:KWD {:symbol &quot;KD&quot;,
+          :name &quot;Kuwaiti Dinar&quot;,
+          :symbol_native &quot;د.ك.‏&quot;,
+          :decimal_digits 3,
+          :rounding 0,
+          :code &quot;KWD&quot;,
+          :name_plural &quot;Kuwaiti dinars&quot;}],
+   [:KZT {:symbol &quot;KZT&quot;,
+          :name &quot;Kazakhstani Tenge&quot;,
+          :symbol_native &quot;тңг.&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;KZT&quot;,
+          :name_plural &quot;Kazakhstani tenges&quot;}],
+   [:LBP {:symbol &quot;LB£&quot;,
+          :name &quot;Lebanese Pound&quot;,
+          :symbol_native &quot;ل.ل.‏&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;LBP&quot;,
+          :name_plural &quot;Lebanese pounds&quot;}],
+   [:LKR {:symbol &quot;SLRs&quot;,
+          :name &quot;Sri Lankan Rupee&quot;,
+          :symbol_native &quot;SL Re&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;LKR&quot;,
+          :name_plural &quot;Sri Lankan rupees&quot;}],
+   [:LTL {:symbol &quot;Lt&quot;,
+          :name &quot;Lithuanian Litas&quot;,
+          :symbol_native &quot;Lt&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;LTL&quot;,
+          :name_plural &quot;Lithuanian litai&quot;}],
+   [:LVL {:symbol &quot;Ls&quot;,
+          :name &quot;Latvian Lats&quot;,
+          :symbol_native &quot;Ls&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;LVL&quot;,
+          :name_plural &quot;Latvian lati&quot;}],
+   [:LYD {:symbol &quot;LD&quot;,
+          :name &quot;Libyan Dinar&quot;,
+          :symbol_native &quot;د.ل.‏&quot;,
+          :decimal_digits 3,
+          :rounding 0,
+          :code &quot;LYD&quot;,
+          :name_plural &quot;Libyan dinars&quot;}],
+   [:MAD {:symbol &quot;MAD&quot;,
+          :name &quot;Moroccan Dirham&quot;,
+          :symbol_native &quot;د.م.‏&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;MAD&quot;,
+          :name_plural &quot;Moroccan dirhams&quot;}],
+   [:MDL {:symbol &quot;MDL&quot;,
+          :name &quot;Moldovan Leu&quot;,
+          :symbol_native &quot;MDL&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;MDL&quot;,
+          :name_plural &quot;Moldovan lei&quot;}],
+   [:MGA {:symbol &quot;MGA&quot;,
+          :name &quot;Malagasy Ariary&quot;,
+          :symbol_native &quot;MGA&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;MGA&quot;,
+          :name_plural &quot;Malagasy Ariaries&quot;}],
+   [:MKD {:symbol &quot;MKD&quot;,
+          :name &quot;Macedonian Denar&quot;,
+          :symbol_native &quot;MKD&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;MKD&quot;,
+          :name_plural &quot;Macedonian denari&quot;}],
+   [:MMK {:symbol &quot;MMK&quot;,
+          :name &quot;Myanma Kyat&quot;,
+          :symbol_native &quot;K&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;MMK&quot;,
+          :name_plural &quot;Myanma kyats&quot;}],
+   [:MOP {:symbol &quot;MOP$&quot;,
+          :name &quot;Macanese Pataca&quot;,
+          :symbol_native &quot;MOP$&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;MOP&quot;,
+          :name_plural &quot;Macanese patacas&quot;}],
+   [:MRU {:symbol &quot;MRU&quot;,
+          :name &quot;Mauritania Ouguiya&quot;,
+          :symbol_native &quot;MRU&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;MRU&quot;,
+          :name_plural &quot;Mauritania Ouguiyas&quot;}],
+   [:MUR {:symbol &quot;MURs&quot;,
+          :name &quot;Mauritian Rupee&quot;,
+          :symbol_native &quot;MURs&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;MUR&quot;,
+          :name_plural &quot;Mauritian rupees&quot;}],
+   [:MXN {:symbol &quot;MX$&quot;,
+          :name &quot;Mexican Peso&quot;,
+          :symbol_native &quot;$&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;MXN&quot;,
+          :name_plural &quot;Mexican pesos&quot;}],
+   [:MYR {:symbol &quot;RM&quot;,
+          :name &quot;Malaysian Ringgit&quot;,
+          :symbol_native &quot;RM&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;MYR&quot;,
+          :name_plural &quot;Malaysian ringgits&quot;}],
+   [:MZN {:symbol &quot;MTn&quot;,
+          :name &quot;Mozambican Metical&quot;,
+          :symbol_native &quot;MTn&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;MZN&quot;,
+          :name_plural &quot;Mozambican meticals&quot;}],
+   [:NAD {:symbol &quot;N$&quot;,
+          :name &quot;Namibian Dollar&quot;,
+          :symbol_native &quot;N$&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;NAD&quot;,
+          :name_plural &quot;Namibian dollars&quot;}],
+   [:NGN {:symbol &quot;₦&quot;,
+          :name &quot;Nigerian Naira&quot;,
+          :symbol_native &quot;₦&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;NGN&quot;,
+          :name_plural &quot;Nigerian nairas&quot;}],
+   [:NIO {:symbol &quot;C$&quot;,
+          :name &quot;Nicaraguan Córdoba&quot;,
+          :symbol_native &quot;C$&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;NIO&quot;,
+          :name_plural &quot;Nicaraguan córdobas&quot;}],
+   [:NOK {:symbol &quot;Nkr&quot;,
+          :name &quot;Norwegian Krone&quot;,
+          :symbol_native &quot;kr&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;NOK&quot;,
+          :name_plural &quot;Norwegian kroner&quot;}],
+   [:NPR {:symbol &quot;NPRs&quot;,
+          :name &quot;Nepalese Rupee&quot;,
+          :symbol_native &quot;नेरू&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;NPR&quot;,
+          :name_plural &quot;Nepalese rupees&quot;}],
+   [:NZD {:symbol &quot;NZ$&quot;,
+          :name &quot;New Zealand Dollar&quot;,
+          :symbol_native &quot;$&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;NZD&quot;,
+          :name_plural &quot;New Zealand dollars&quot;}],
+   [:OMR {:symbol &quot;OMR&quot;,
+          :name &quot;Omani Rial&quot;,
+          :symbol_native &quot;ر.ع.‏&quot;,
+          :decimal_digits 3,
+          :rounding 0,
+          :code &quot;OMR&quot;,
+          :name_plural &quot;Omani rials&quot;}],
+   [:PAB {:symbol &quot;B/.&quot;,
+          :name &quot;Panamanian Balboa&quot;,
+          :symbol_native &quot;B/.&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;PAB&quot;,
+          :name_plural &quot;Panamanian balboas&quot;}],
+   [:PEN {:symbol &quot;S/.&quot;,
+          :name &quot;Peruvian Nuevo Sol&quot;,
+          :symbol_native &quot;S/.&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;PEN&quot;,
+          :name_plural &quot;Peruvian nuevos soles&quot;}],
+   [:PGK {:symbol &quot;K&quot;,
+          :name &quot;Papua New Guinean Kina&quot;,
+          :symbol_native &quot;K&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;PGK&quot;,
+          :name_plural &quot;Papua New Guinean kina&quot;}],
+   [:PHP {:symbol &quot;₱&quot;,
+          :name &quot;Philippine Peso&quot;,
+          :symbol_native &quot;₱&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;PHP&quot;,
+          :name_plural &quot;Philippine pesos&quot;}],
+   [:PKR {:symbol &quot;PKRs&quot;,
+          :name &quot;Pakistani Rupee&quot;,
+          :symbol_native &quot;₨&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;PKR&quot;,
+          :name_plural &quot;Pakistani rupees&quot;}],
+   [:PLN {:symbol &quot;zł&quot;,
+          :name &quot;Polish Zloty&quot;,
+          :symbol_native &quot;zł&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;PLN&quot;,
+          :name_plural &quot;Polish zlotys&quot;}],
+   [:PYG {:symbol &quot;₲&quot;,
+          :name &quot;Paraguayan Guarani&quot;,
+          :symbol_native &quot;₲&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;PYG&quot;,
+          :name_plural &quot;Paraguayan guaranis&quot;}],
+   [:QAR {:symbol &quot;QR&quot;,
+          :name &quot;Qatari Rial&quot;,
+          :symbol_native &quot;ر.ق.‏&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;QAR&quot;,
+          :name_plural &quot;Qatari rials&quot;}],
+   [:RON {:symbol &quot;RON&quot;,
+          :name &quot;Romanian Leu&quot;,
+          :symbol_native &quot;RON&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;RON&quot;,
+          :name_plural &quot;Romanian lei&quot;}],
+   [:RSD {:symbol &quot;din.&quot;,
+          :name &quot;Serbian Dinar&quot;,
+          :symbol_native &quot;дин.&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;RSD&quot;,
+          :name_plural &quot;Serbian dinars&quot;}],
+   [:RUB {:symbol &quot;₽&quot;,
+          :name &quot;Russian Ruble&quot;,
+          :symbol_native &quot;₽&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;RUB&quot;,
+          :name_plural &quot;Russian rubles&quot;}],
+   [:RWF {:symbol &quot;RWF&quot;,
+          :name &quot;Rwandan Franc&quot;,
+          :symbol_native &quot;FR&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;RWF&quot;,
+          :name_plural &quot;Rwandan francs&quot;}],
+   [:SAR {:symbol &quot;SR&quot;,
+          :name &quot;Saudi Riyal&quot;,
+          :symbol_native &quot;ر.س.‏&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;SAR&quot;,
+          :name_plural &quot;Saudi riyals&quot;}],
+   [:SDG {:symbol &quot;SDG&quot;,
+          :name &quot;Sudanese Pound&quot;,
+          :symbol_native &quot;SDG&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;SDG&quot;,
+          :name_plural &quot;Sudanese pounds&quot;}],
+   [:SEK {:symbol &quot;Skr&quot;,
+          :name &quot;Swedish Krona&quot;,
+          :symbol_native &quot;kr&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;SEK&quot;,
+          :name_plural &quot;Swedish kronor&quot;}],
+   [:SGD {:symbol &quot;S$&quot;,
+          :name &quot;Singapore Dollar&quot;,
+          :symbol_native &quot;$&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;SGD&quot;,
+          :name_plural &quot;Singapore dollars&quot;}],
+   [:SOS {:symbol &quot;Ssh&quot;,
+          :name &quot;Somali Shilling&quot;,
+          :symbol_native &quot;Sh.So&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;SOS&quot;,
+          :name_plural &quot;Somali shillings&quot;}],
+   [:SYP {:symbol &quot;SY£&quot;,
+          :name &quot;Syrian Pound&quot;,
+          :symbol_native &quot;ل.س.‏&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;SYP&quot;,
+          :name_plural &quot;Syrian pounds&quot;}],
+   [:THB {:symbol &quot;฿&quot;,
+          :name &quot;Thai Baht&quot;,
+          :symbol_native &quot;฿&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;THB&quot;,
+          :name_plural &quot;Thai baht&quot;}],
+   [:TND {:symbol &quot;DT&quot;,
+          :name &quot;Tunisian Dinar&quot;,
+          :symbol_native &quot;د.ت.‏&quot;,
+          :decimal_digits 3,
+          :rounding 0,
+          :code &quot;TND&quot;,
+          :name_plural &quot;Tunisian dinars&quot;}],
+   [:TOP {:symbol &quot;T$&quot;,
+          :name &quot;Tongan Paʻanga&quot;,
+          :symbol_native &quot;T$&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;TOP&quot;,
+          :name_plural &quot;Tongan paʻanga&quot;}],
+   [:TRY {:symbol &quot;₺&quot;,
+          :name &quot;Turkish Lira&quot;,
+          :symbol_native &quot;₺&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;TRY&quot;,
+          :name_plural &quot;Turkish Lira&quot;}],
+   [:TTD {:symbol &quot;TT$&quot;,
+          :name &quot;Trinidad and Tobago Dollar&quot;,
+          :symbol_native &quot;$&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;TTD&quot;,
+          :name_plural &quot;Trinidad and Tobago dollars&quot;}],
+   [:TWD {:symbol &quot;NT$&quot;,
+          :name &quot;New Taiwan Dollar&quot;,
+          :symbol_native &quot;NT$&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;TWD&quot;,
+          :name_plural &quot;New Taiwan dollars&quot;}],
+   [:TZS {:symbol &quot;TSh&quot;,
+          :name &quot;Tanzanian Shilling&quot;,
+          :symbol_native &quot;TSh&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;TZS&quot;,
+          :name_plural &quot;Tanzanian shillings&quot;}],
+   [:UAH {:symbol &quot;₴&quot;,
+          :name &quot;Ukrainian Hryvnia&quot;,
+          :symbol_native &quot;₴&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;UAH&quot;,
+          :name_plural &quot;Ukrainian hryvnias&quot;}],
+   [:UGX {:symbol &quot;USh&quot;,
+          :name &quot;Ugandan Shilling&quot;,
+          :symbol_native &quot;USh&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;UGX&quot;,
+          :name_plural &quot;Ugandan shillings&quot;}],
+   [:UYU {:symbol &quot;$U&quot;,
+          :name &quot;Uruguayan Peso&quot;,
+          :symbol_native &quot;$&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;UYU&quot;,
+          :name_plural &quot;Uruguayan pesos&quot;}],
+   [:UZS {:symbol &quot;UZS&quot;,
+          :name &quot;Uzbekistan Som&quot;,
+          :symbol_native &quot;UZS&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;UZS&quot;,
+          :name_plural &quot;Uzbekistan som&quot;}],
+   [:VEF {:symbol &quot;Bs.S.&quot;,
+          :name &quot;Venezuelan Bolívar&quot;,
+          :symbol_native &quot;Bs.S.&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;VES&quot;,
+          :name_plural &quot;Venezuelan bolívars&quot;}],
+   [:VND {:symbol &quot;₫&quot;,
+          :name &quot;Vietnamese Dong&quot;,
+          :symbol_native &quot;₫&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;VND&quot;,
+          :name_plural &quot;Vietnamese dong&quot;}],
+   [:XAF {:symbol &quot;FCFA&quot;,
+          :name &quot;CFA Franc BEAC&quot;,
+          :symbol_native &quot;FCFA&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;XAF&quot;,
+          :name_plural &quot;CFA francs BEAC&quot;}],
+   [:XOF {:symbol &quot;CFA&quot;,
+          :name &quot;CFA Franc BCEAO&quot;,
+          :symbol_native &quot;CFA&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;XOF&quot;,
+          :name_plural &quot;CFA francs BCEAO&quot;}],
+   [:YER {:symbol &quot;YR&quot;,
+          :name &quot;Yemeni Rial&quot;,
+          :symbol_native &quot;ر.ي.‏&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;YER&quot;,
+          :name_plural &quot;Yemeni rials&quot;}],
+   [:ZAR {:symbol &quot;R&quot;,
+          :name &quot;South African Rand&quot;,
+          :symbol_native &quot;R&quot;,
+          :decimal_digits 2,
+          :rounding 0,
+          :code &quot;ZAR&quot;,
+          :name_plural &quot;South African rand&quot;}],
+   [:ZMK {:symbol &quot;ZK&quot;,
+          :name &quot;Zambian Kwacha&quot;,
+          :symbol_native &quot;ZK&quot;,
+          :decimal_digits 0,
+          :rounding 0,
+          :code &quot;ZMW&quot;,
+          :name_plural &quot;Zambian kwachas&quot;}]])</pre></td></tr><tr><td class="docs"><p>The currencies as a Clojure map. Wrapped in [[delay]] so it's only computed on demand.</p>
+</td><td class="codes"><pre class="brush: clojure">(def currency-map
+  (delay (into {} currency-list)))</pre></td></tr><tr><td class="docs"><p>Given a currency symbol, as a string or keyword, look it up in the currency
+map and return the symbol for it as a string.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn ^:export currency-symbol
+  [currency]
+  (some-&gt;&gt; currency keyword (get @currency-map) :symbol))</pre></td></tr><tr><td class="docs"><p>Returns the list of currencies supported by Metabase, with associated metadata.
+In Clojure, it is converted to a map for quick lookup of currency symbols during XLSX
+exports. In ClojureScript, it is kept as a 2D array to maintain the order of currencies.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:export currency
+  #?(:clj  @currency-map
+     :cljs (clj-&gt;js currency-list)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

@@ -2865,394 +2865,241 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.lib.stage" name="metabase.lib.stage"><h1 class="project-name">metabase.lib.stage</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Method implementations for a stage of a query.</p>
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.lib.stage
-  (:require
-   [clojure.string :as str]
-   [medley.core :as m]
-   [metabase.legacy-mbql.normalize :as mbql.normalize]
-   [metabase.lib.aggregation :as lib.aggregation]
-   [metabase.lib.breakout :as lib.breakout]
-   [metabase.lib.convert :as lib.convert]
-   [metabase.lib.expression :as lib.expression]
-   [metabase.lib.field :as lib.field]
-   [metabase.lib.hierarchy :as lib.hierarchy]
-   [metabase.lib.join :as lib.join]
-   [metabase.lib.join.util :as lib.join.util]
-   [metabase.lib.metadata :as lib.metadata]
-   [metabase.lib.metadata.calculation :as lib.metadata.calculation]
-   [metabase.lib.schema :as lib.schema]
-   [metabase.lib.schema.id :as lib.schema.id]
-   [metabase.lib.schema.metadata :as lib.schema.metadata]
-   [metabase.lib.util :as lib.util]
-   [metabase.lib.util.match :as lib.util.match]
-   [metabase.util :as u]
-   [metabase.util.i18n :as i18n]
-   [metabase.util.malli :as mu]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(lib.hierarchy/derive :mbql.stage/mbql   ::stage)
-(lib.hierarchy/derive :mbql.stage/native ::stage)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/metadata-method ::stage
-  [_query _stage-number _stage]
-  ;; not i18n'ed because this shouldn't be developer-facing.
-  (throw (ex-info &quot;You can't calculate a metadata map for a stage! Use lib.metadata.calculation/returned-columns-method instead.&quot;
-                  {})))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ensure-previous-stages-have-metadata :- ::lib.schema/query
-  &quot;Recursively calculate the metadata for the previous stages and add it to them, we'll need it for metadata
-  calculations for [[lib.metadata.calculation/returned-columns]] and [[lib.metadata.calculation/visible-columns]], and
-  we don't want to have to calculate it more than once...&quot;
-  [query        :- ::lib.schema/query
-   stage-number :- :int]
-  (reduce
-   (fn [query stage-number]
-     (lib.util/update-query-stage query
-                                  stage-number
-                                  assoc ::cached-metadata
-                                  (lib.metadata.calculation/returned-columns query
-                                                                             stage-number
-                                                                             (lib.util/query-stage query stage-number))))
-   query
-   (range 0 (lib.util/canonical-stage-index query stage-number))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- existing-stage-metadata :- [:maybe lib.metadata.calculation/ColumnsWithUniqueAliases]
-  &quot;Return existing stage metadata attached to a stage if is already present: return it as-is, but only if this is a
-  native stage or a source-Card or a metric stage. If it's any other sort of stage then ignore the metadata, it's
-  probably wrong; we can recalculate the correct metadata anyway.&quot;
-  [query        :- ::lib.schema/query
-   stage-number :- :int]
-  (let [{stage-type :lib/type, :keys [source-card] :as stage} (lib.util/query-stage query stage-number)]
-    (or (::cached-metadata stage)
-        (when-let [metadata (:lib/stage-metadata stage)]
-          (when (or (= stage-type :mbql.stage/native)
-                    source-card)
-            (let [source-type (case stage-type
-                                :mbql.stage/native :source/native
-                                :mbql.stage/mbql   :source/card)]
-              (not-empty
-               (for [col (:columns metadata)]
-                 (merge
-                  {:lib/source-column-alias  (:name col)
-                   :lib/desired-column-alias (:name col)}
-                  col
-                  {:lib/source source-type})))))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- breakouts-columns :- [:maybe lib.metadata.calculation/ColumnsWithUniqueAliases]
-  [query          :- ::lib.schema/query
-   stage-number   :- :int
-   unique-name-fn :- ::lib.metadata.calculation/unique-name-fn]
-  (not-empty
-   (for [breakout (lib.breakout/breakouts-metadata query stage-number)]
-     (assoc breakout
-            :lib/source               :source/breakouts
-            :lib/source-column-alias  ((some-fn :lib/source-column-alias :name) breakout)
-            :lib/desired-column-alias (unique-name-fn (lib.join.util/desired-alias query breakout))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- aggregations-columns :- [:maybe lib.metadata.calculation/ColumnsWithUniqueAliases]
-  [query          :- ::lib.schema/query
-   stage-number   :- :int
-   unique-name-fn :- ::lib.metadata.calculation/unique-name-fn]
-  (not-empty
-   (for [ag (lib.aggregation/aggregations-metadata query stage-number)]
-     (assoc ag
-            :lib/source               :source/aggregations
-            :lib/source-column-alias  (:name ag)
-            :lib/desired-column-alias (unique-name-fn (:name ag))))))</pre></td></tr><tr><td class="docs"><p>TODO -- maybe the bulk of this logic should be moved into [[metabase.lib.field]], like we did for breakouts and
-aggregations above.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- fields-columns :- [:maybe lib.metadata.calculation/ColumnsWithUniqueAliases]
-  [query          :- ::lib.schema/query
-   stage-number   :- :int
-   unique-name-fn :- ::lib.metadata.calculation/unique-name-fn]
-  (when-let [{fields :fields} (lib.util/query-stage query stage-number)]
-    (not-empty
-     (for [[tag :as ref-clause] fields
-           :let                 [source (case tag
-                                          ;; you can't have an `:aggregation` reference in `:fields`; anything in
-                                          ;; `:aggregations` is returned automatically anyway
-                                          ;; by [[aggregations-columns]] above.
-                                          :field      :source/fields
-                                          :expression :source/expressions)
-                                 metadata (lib.metadata.calculation/metadata query stage-number ref-clause)]]
-       (assoc metadata
-              :lib/source               source
-              :lib/source-column-alias  (lib.metadata.calculation/column-name query stage-number metadata)
-              :lib/desired-column-alias (unique-name-fn (lib.join.util/desired-alias query metadata)))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- summary-columns :- [:maybe lib.metadata.calculation/ColumnsWithUniqueAliases]
-  [query          :- ::lib.schema/query
-   stage-number   :- :int
-   unique-name-fn :- ::lib.metadata.calculation/unique-name-fn]
-  (not-empty
-   (into []
-         (mapcat (fn [f]
-                   (f query stage-number unique-name-fn)))
-         [breakouts-columns
-          aggregations-columns])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- previous-stage-metadata :- [:maybe lib.metadata.calculation/ColumnsWithUniqueAliases]
-  &quot;Metadata for the previous stage, if there is one.&quot;
-  [query          :- ::lib.schema/query
-   stage-number   :- :int
-   unique-name-fn :- ::lib.metadata.calculation/unique-name-fn]
-  (when-let [previous-stage-number (lib.util/previous-stage-number query stage-number)]
-    (not-empty
-     (for [col  (lib.metadata.calculation/returned-columns query
-                                                           previous-stage-number
-                                                           (lib.util/query-stage query previous-stage-number))
-           :let [source-alias (or ((some-fn :lib/desired-column-alias :lib/source-column-alias) col)
-                                  (lib.metadata.calculation/column-name query stage-number col))]]
-       (-&gt; (merge
-            col
-            {:lib/source               :source/previous-stage
-             :lib/source-column-alias  source-alias
-             :lib/desired-column-alias (unique-name-fn source-alias)}
-            (when (:metabase.lib.card/force-broken-id-refs col)
-              (select-keys col [:metabase.lib.card/force-broken-id-refs])))
-           ;; do not retain `:temporal-unit`; it's not like we're doing a extract(month from &lt;x&gt;) twice, in both
-           ;; stages of a query. It's a little hacky that we're manipulating `::lib.field` keys directly here since
-           ;; they're presumably supposed to be private-ish, but I don't have a more elegant way of solving this sort
-           ;; of problem at this point in time.
-           ;;
-           ;; also don't retain `:lib/expression-name`, the fact that this column came from an expression in the
-           ;; previous stage should be totally irrelevant and we don't want it confusing our code that decides whether
-           ;; to generate `:expression` or `:field` refs.
-           (dissoc ::lib.field/temporal-unit :lib/expression-name))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- saved-question-metadata :- [:maybe lib.metadata.calculation/ColumnsWithUniqueAliases]
-  &quot;Metadata associated with a Saved Question, e.g. if we have a `:source-card`&quot;
-  [query          :- ::lib.schema/query
-   stage-number   :- :int
-   card-id        :- [:maybe ::lib.schema.id/card]
-   options        :- lib.metadata.calculation/VisibleColumnsOptions]
-  (when card-id
-    (when-let [card (lib.metadata/card query card-id)]
-      (not-empty (lib.metadata.calculation/visible-columns query stage-number card options)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- metric-metadata :- [:maybe lib.metadata.calculation/ColumnsWithUniqueAliases]
-  [query         :- ::lib.schema/query
-   _stage-number :- :int
-   card          :- ::lib.schema.metadata/card
-   options       :- lib.metadata.calculation/VisibleColumnsOptions]
-  (let [metric-query (-&gt; card :dataset-query mbql.normalize/normalize lib.convert/-&gt;pMBQL
-                         (lib.util/update-query-stage -1 dissoc :aggregation :breakout))]
-    (not-empty (lib.metadata.calculation/visible-columns
-                (assoc metric-query :lib/metadata (:lib/metadata query))
-                -1
-                (lib.util/query-stage metric-query -1)
-                options))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- expressions-metadata :- [:maybe lib.metadata.calculation/ColumnsWithUniqueAliases]
-  [query                         :- ::lib.schema/query
-   stage-number                  :- :int
-   unique-name-fn                :- ::lib.metadata.calculation/unique-name-fn
-   {:keys [include-late-exprs?]} :- [:map [:include-late-exprs? {:optional true} :boolean]]]
-  (not-empty
-   (for [[clause metadata] (map vector
-                                (:expressions (lib.util/query-stage query stage-number))
-                                (lib.expression/expressions-metadata query stage-number))
-          ;; Only include &quot;late&quot; expressions when required.
-          ;; &quot;Late&quot; expressions those like :offset which can't be used within the same query stage, like aggregations.
-         :when (or include-late-exprs?
-                   (not (lib.util.match/match-one clause :offset)))]
-     (let [base-type (:base-type metadata)]
-       (-&gt; (assoc metadata
-                  :lib/source               :source/expressions
-                  :lib/source-column-alias  (:name metadata)
-                  :lib/desired-column-alias (unique-name-fn (:name metadata)))
-           (u/assoc-default :effective-type (or base-type :type/*)))))))</pre></td></tr><tr><td class="docs"><p>Calculate the columns to return if <code>:aggregations</code>/<code>:breakout</code>/<code>:fields</code> are unspecified.</p>
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#shared.cljc" name="shared.cljc"><h1 class="project-name">shared.cljc</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Util functions for dealing with parameters. Primarily used for substituting parameters into variables in Markdown
+dashboard cards.</p>
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.models.params.shared
+  #?@
+   (:clj
+    [(:require
+      [clojure.string :as str]
+      [metabase.legacy-mbql.normalize :as mbql.normalize]
+      [metabase.util.date-2 :as u.date]
+      [metabase.util.date-2.parse.builder :as b]
+      [metabase.util.i18n :refer [trs trsn]]
+      [metabase.util.i18n.impl :as i18n.impl])
+     (:import
+      (java.time.format DateTimeFormatter))]
+    :cljs
+    [(:require
+      [&quot;moment&quot; :as moment]
+      [clojure.string :as str]
+      [metabase.legacy-mbql.normalize :as mbql.normalize]
+      [metabase.util.i18n :refer [trs trsn]])]))</pre></td></tr><tr><td class="docs"><p>Formats a value appropriately for inclusion in a text card, based on its type. Does not do any escaping.
+For datetime parameters, the logic here should mirror the logic (as best as possible) in
+frontend/src/metabase/parameters/utils/date-formatting.ts</p>
 
-<p>Formula for the so-called 'default' columns is</p>
+<p>Without this comment, the namespace-checker linter incorrectly detects moment as unused</p>
+</td><td class="codes"><pre class="brush: clojure">#?(:cljs (comment moment/keep-me))
+(defmulti formatted-value
+  (fn [tyype _value _locale] (keyword tyype)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod formatted-value :date/single
+  [_ value locale]
+  #?(:cljs (let [m (.locale (moment value) locale)]
+             (.format m &quot;MMMM D, YYYY&quot;))
+     :clj  (u.date/format &quot;MMMM d, yyyy&quot; (u.date/parse value) locale)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod formatted-value :date/month-year
+  [_ value locale]
+  #?(:cljs (let [m (.locale (moment value &quot;YYYY-MM&quot;) locale)]
+             (if (.isValid m) (.format m &quot;MMMM, YYYY&quot;) &quot;&quot;))
+     :clj  (u.date/format &quot;MMMM, yyyy&quot; (u.date/parse value) locale)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">#?(:clj
+   (def ^:private quarter-formatter-in
+     (b/formatter
+      &quot;Q&quot; (b/value :iso/quarter-of-year 1) &quot;-&quot; (b/value :year 4))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">#?(:clj
+   (def ^:private quarter-formatter-out
+     (b/formatter
+      &quot;Q&quot; (b/value :iso/quarter-of-year 1) &quot;, &quot; (b/value :year 4))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod formatted-value :date/quarter-year
+  [_ value locale]
+  #?(:cljs (let [m (.locale (moment value &quot;[Q]Q-YYYY&quot;) locale)]
+             (if (.isValid m) (.format m &quot;[Q]Q, YYYY&quot;) &quot;&quot;))
+     :clj (.format (.withLocale ^DateTimeFormatter quarter-formatter-out (i18n.impl/locale locale))
+                   (.parse ^DateTimeFormatter quarter-formatter-in value))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod formatted-value :date/range
+  [_ value locale]
+  (let [[start end] (str/split value #&quot;~&quot;)]
+    (if (and start end)
+      (str (formatted-value :date/single start locale)
+           &quot; - &quot;
+           (formatted-value :date/single end locale))
+      &quot;&quot;)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- translated-interval
+  [interval n]
+  (case interval
+    &quot;minutes&quot;  (trsn &quot;Minute&quot; &quot;Minutes&quot; n)
+    &quot;hours&quot;    (trsn &quot;Hour&quot; &quot;Hours&quot; n)
+    &quot;days&quot;     (trsn &quot;Day&quot; &quot;Days&quot; n)
+    &quot;weeks&quot;    (trsn &quot;Week&quot; &quot;Weeks&quot; n)
+    &quot;months&quot;   (trsn &quot;Month&quot; &quot;Months&quot; n)
+    &quot;quarters&quot; (trsn &quot;Quarter&quot; &quot;Quarters&quot; n)
+    &quot;years&quot;    (trsn &quot;Year&quot; &quot;Years&quot; n)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- format-relative-date
+  [prefix n interval]
+  (let [n        #?(:clj (Integer/valueOf ^String n) :cljs (js/parseInt n))
+        interval (translated-interval interval n)]
+    (case [prefix (= n 1)]
+      [&quot;past&quot; true]  (trs &quot;Previous {0}&quot; interval)
+      [&quot;past&quot; false] (trs &quot;Previous {0} {1}&quot; n interval)
+      [&quot;next&quot; true]  (trs &quot;Next {0}&quot; interval)
+      [&quot;next&quot; false] (trs &quot;Next {0} {1}&quot; n interval))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod formatted-value :date/relative
+  [_ value _]
+  (condp (fn [re value] (-&gt;&gt; (re-find re value) next)) value
+    #&quot;^today$&quot;                             (trs &quot;Today&quot;)
+    #&quot;^thisday$&quot;                           (trs &quot;Today&quot;)
+    #&quot;^thisweek$&quot;                          (trs &quot;This Week&quot;)
+    #&quot;^thismonth$&quot;                         (trs &quot;This Month&quot;)
+    #&quot;^thisquarter$&quot;                       (trs &quot;This Quarter&quot;)
+    #&quot;^thisyear$&quot;                          (trs &quot;This Year&quot;)
+    #&quot;^past1days$&quot;                         (trs &quot;Yesterday&quot;)
+    #&quot;^next1days$&quot;                         (trs &quot;Tomorrow&quot;)
+    #&quot;^(past|next)([0-9]+)([a-z]+)~?$&quot; :&gt;&gt; (fn [matches] (apply format-relative-date matches))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod formatted-value :date/all-options
+  [_ value locale]
+  ;; Test value against a series of regexes (similar to those in metabase/parameters/utils/mbql.js) to determine
+  ;; the appropriate formatting, since it is not encoded in the parameter type.
+  ;; TODO: this is incomplete, and only handles simple dates https://github.com/metabase/metabase/issues/39385
+  (condp (fn [re value] (-&gt;&gt; (re-find re value) second)) value
+    #&quot;^(this[a-z]+)$&quot;          :&gt;&gt; #(formatted-value :date/relative % locale)
+    #&quot;^~?([0-9-T:]+)~?$&quot;       :&gt;&gt; #(formatted-value :date/single % locale)
+    #&quot;^([0-9-T:]+~[0-9-T:]+)$&quot; :&gt;&gt; #(formatted-value :date/range % locale)
+    (formatted-value :date/relative value locale)))</pre></td></tr><tr><td class="docs"><p>Given a seq of parameter values, returns them as a single comma-separated string. Does not do additional formatting
+on the values.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn formatted-list
+  [values]
+  (condp = (count values)
+    1 (str (first values))
+    2 (trs &quot;{0} and {1}&quot; (first values) (second values))
+    (trs &quot;{0}, {1}, and {2}&quot;
+         (str/join &quot;, &quot; (drop-last 2 values))
+         (nth values (- (count values) 2))
+         (last values))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod formatted-value :default
+  [_ value _]
+  (cond
+    (sequential? value)
+    (formatted-list value)
 
-<p>1a. Columns returned by the previous stage of the query (if there is one), OR</p>
+    :else
+    (str value)))</pre></td></tr><tr><td class="docs"><p>Used markdown characters.</p>
+</td><td class="codes"><pre class="brush: clojure">(def escaped-chars-regex
+  #&quot;[\\/*_`'\[\](){}&lt;&gt;#+-.!$@%^&amp;=|\?~]&quot;)</pre></td></tr><tr><td class="docs"><p>Escape markdown characters.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn escape-chars
+  [text regex]
+  (str/replace text regex #(str \\ %)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- value
+  [tag-name tag-&gt;param locale escape-markdown]
+  (let [param    (get tag-&gt;param tag-name)
+        value    (:value param)
+        tyype    (:type param)]
+    (when value
+      (try (cond-&gt; (formatted-value tyype value locale)
+             escape-markdown (escape-chars escaped-chars-regex))
+           (catch #?(:clj Throwable :cljs js/Error) _
+             ;; If we got an exception (most likely during date parsing/formatting), fallback to the default
+             ;; implementation of formatted-value
+             (formatted-value :default value locale))))))</pre></td></tr><tr><td class="docs"><p>A regex to find template tags in a text card on a dashboard. This should mirror the regex used to find template
+tags in native queries, with the exception of snippets and card ID references (see the metabase-lib function
+<code>recognizeTemplateTags</code> for that regex).</p>
 
-<p>1b. Default 'visible' Fields for our <code>:source-table</code>, OR</p>
-
-<p>1c. Metadata associated with a Saved Question, if we have <code>:source-card</code> (<code>:source-table</code> is a <code>card__&lt;id&gt;</code> string
-    in legacy MBQL), OR</p>
-
-<p>1e. Metadata associated with a Metric, if we have <code>:sources</code>, OR</p>
-
-<p>1d. <code>:lib/stage-metadata</code> if this is a <code>:mbql.stage/native</code> stage</p>
-
-<p>PLUS</p>
-
-<ol>
-<li>Expressions (aka calculated columns) added in this stage</li>
-</ol>
-
-<p>PLUS</p>
-
-<ol>
-<li>Columns added by joins at this stage</li>
-</ol>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- previous-stage-or-source-visible-columns :- lib.metadata.calculation/ColumnsWithUniqueAliases
-  &quot;Return columns from the previous query stage or source Table/Card.&quot;
-  [query                                 :- ::lib.schema/query
-   stage-number                          :- :int
-   {:keys [unique-name-fn], :as options} :- lib.metadata.calculation/VisibleColumnsOptions]
-  {:pre [(fn? unique-name-fn)]}
-  (let [{:keys [source-table source-card], :as this-stage} (lib.util/query-stage query stage-number)
-        card (some-&gt;&gt; source-card (lib.metadata/card query))
-        metric-based? (= (:type card) :metric)]
-    (into []
-          (if metric-based?
-            identity
-            (map #(dissoc % ::lib.join/join-alias ::lib.field/temporal-unit ::lib.field/binning :fk-field-id)))
-          (or
-           ;; 1a. columns returned by previous stage
-           (previous-stage-metadata query stage-number unique-name-fn)
-           ;; 1b or 1c
-           (or
-            ;; 1b: default visible Fields for the source Table
-            (when source-table
-              (assert (integer? source-table))
-              (let [table-metadata (lib.metadata/table query source-table)]
-                (lib.metadata.calculation/visible-columns query stage-number table-metadata options)))
-            ;; 1e. Metadata associated with a Metric
-            (when metric-based?
-              (metric-metadata query stage-number card options))
-            ;; 1c. Metadata associated with a saved Question
-            (when source-card
-              (saved-question-metadata query stage-number source-card (assoc options :include-implicitly-joinable? false)))
-            ;; 1d: `:lib/stage-metadata` for the (presumably native) query
-            (for [col (:columns (:lib/stage-metadata this-stage))]
-              (assoc col
-                     :lib/source :source/native
-                     :lib/source-column-alias  (:name col)
-                     ;; these should already be unique, but run them thru `unique-name-fn` anyway to make sure anything
-                     ;; that gets added later gets deduplicated from these.
-                     :lib/desired-column-alias (unique-name-fn (:name col)))))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- existing-visible-columns :- lib.metadata.calculation/ColumnsWithUniqueAliases
-  [query        :- ::lib.schema/query
-   stage-number :- :int
-   {:keys [unique-name-fn include-joined? include-expressions?], :as options} :- lib.metadata.calculation/VisibleColumnsOptions]
-  (concat
-   ;; 1: columns from the previous stage, source table or query
-   (previous-stage-or-source-visible-columns query stage-number options)
-   ;; 2: expressions (aka calculated columns) added in this stage
-   (when include-expressions?
-     (expressions-metadata query stage-number unique-name-fn {}))
-   ;; 3: columns added by joins at this stage
-   (when include-joined?
-     (lib.join/all-joins-visible-columns query stage-number unique-name-fn))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/visible-columns-method ::stage
-  [query stage-number _stage {:keys [unique-name-fn include-implicitly-joinable?], :as options}]
-  (let [query            (ensure-previous-stages-have-metadata query stage-number)
-        existing-columns (existing-visible-columns query stage-number options)]
-    (-&gt;&gt; (concat
-          existing-columns
-           ;; add implicitly joinable columns if desired
-          (when include-implicitly-joinable?
-            (lib.metadata.calculation/implicitly-joinable-columns query stage-number existing-columns unique-name-fn)))
-         vec)))</pre></td></tr><tr><td class="docs"><p>Return results metadata about the expected columns in an MBQL query stage. If the query has
-aggregations/breakouts, then return those and the fields columns. Otherwise if there are fields columns return
-those and the joined columns. Otherwise return the defaults based on the source Table or previous stage + joins.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/returned-columns-method ::stage
-  [query stage-number _stage {:keys [unique-name-fn], :as options}]
-  (or
-   (existing-stage-metadata query stage-number)
-   (let [query        (ensure-previous-stages-have-metadata query stage-number)
-         summary-cols (summary-columns query stage-number unique-name-fn)
-         field-cols   (fields-columns query stage-number unique-name-fn)]
-     ;; ... then calculate metadata for this stage
-     (cond
-       summary-cols
-       (into summary-cols field-cols)
-
-       field-cols
-       (do (doall field-cols)           ; force generation of unique names before join columns
-           (into []
-                 (m/distinct-by #(dissoc % :source-alias :lib/source :lib/source-uuid :lib/desired-column-alias))
-                 (concat field-cols
-                         (lib.join/all-joins-expected-columns query stage-number options))))
-
-       :else
-       ;; there is no `:fields` or summary columns (aggregtions or breakouts) which means we return all the visible
-       ;; columns from the source or previous stage plus all the expressions. We return only the `:fields` from any
-       ;; joins
-       (concat
-        ;; we don't want to include all visible joined columns, so calculate that separately
-        (previous-stage-or-source-visible-columns query stage-number {:include-implicitly-joinable? false
-                                                                      :unique-name-fn               unique-name-fn})
-        (expressions-metadata query stage-number unique-name-fn {:include-late-exprs? true})
-        (lib.join/all-joins-expected-columns query stage-number options))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/display-name-method :mbql.stage/native
-  [_query _stage-number _stage _style]
-  (i18n/tru &quot;Native query&quot;))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private display-name-source-parts
-  [:source-table
-   :source-card
-   :joins])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private display-name-other-parts
-  [:aggregation
-   :breakout
-   :filters
-   :order-by
-   :limit])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/display-name-method :mbql.stage/mbql
-  [query stage-number _stage style]
-  (let [query (ensure-previous-stages-have-metadata query stage-number)]
-    (or
-     (not-empty
-      (let [part-&gt;description  (into {}
-                                     (comp cat
-                                           (map (fn [k]
-                                                  [k (lib.metadata.calculation/describe-top-level-key query stage-number k)])))
-                                     [display-name-source-parts display-name-other-parts])
-            source-description (str/join &quot; + &quot; (remove str/blank? (map part-&gt;description display-name-source-parts)))
-            other-descriptions (map part-&gt;description display-name-other-parts)]
-        (str/join &quot;, &quot; (remove str/blank? (cons source-description other-descriptions)))))
-     (when-let [previous-stage-number (lib.util/previous-stage-number query stage-number)]
-       (lib.metadata.calculation/display-name query
-                                              previous-stage-number
-                                              (lib.util/query-stage query previous-stage-number)
-                                              style)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn has-clauses? :- :boolean
-  &quot;Does given query stage have any clauses?&quot;
-  [query        :- ::lib.schema/query
-   stage-number :- :int]
-  (boolean (seq (dissoc (lib.util/query-stage query stage-number) :lib/type :source-table :source-card))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn append-stage :- ::lib.schema/query
-  &quot;Adds a new blank stage to the end of the pipeline.&quot;
-  [query]
-  (update query :stages conj {:lib/type :mbql.stage/mbql}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn drop-stage :- ::lib.schema/query
-  &quot;Drops the final stage in the pipeline, will no-op if it is the only stage&quot;
-  [query]
-  (if (= 1 (count (:stages query)))
-    query
-    (update query :stages pop)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn drop-empty-stages :- ::lib.schema/query
-  &quot;Drops all empty stages in the pipeline.&quot;
-  [query :- ::lib.schema/query]
-  (update query :stages (fn [stages]
-                          (into []
-                                (keep-indexed (fn [stage-number stage]
-                                                (when (or (zero? stage-number)
-                                                          (has-clauses? query stage-number))
-                                                  stage)))
-                                stages))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ensure-extra-stage :- [:tuple ::lib.schema/query :int]
-  &quot;Given a query and current stage, returns a tuple of `[query next-stage-number]`.
-  If that stage already exists, the query is unchanged. If it does not, a new (MBQL) stage is appended and its index
-  is returned.&quot;
-  [query        :- ::lib.schema/query
-   stage-number :- :int]
-  (let [stage-number (lib.util/canonical-stage-index query stage-number)]
-    (if-let [next-number (lib.util/next-stage-number query stage-number)]
-      ;; There is already a next stage, so just return it.
-      [query next-number]
-      ;; Otherwise append a stage and return the new query and updated stage number.
-      (let [query (append-stage query)]
-        [query (lib.util/next-stage-number query stage-number)]))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- ensure-legacy-filter-stage
-  [query]
-  (let [inner-query (:query query)]
-    (cond-&gt; query
-      (and (:aggregation inner-query)
-           (:breakout inner-query))
-      (assoc :query {:source-query inner-query}))))</pre></td></tr><tr><td class="docs"><p>Adds an empty stage to <code>query</code> if its last stage contains both breakouts and aggregations.</p>
-
-<p>This is so that parameters can address both the stage before and after the aggregation.
-Adding filters to the result at stage -1 will filter after the summary, filters added at
-stage -2 filter before the summary.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ensure-filter-stage
-  [query]
-  (if (#{:query :native} (lib.util/normalized-query-type query))
-    (ensure-legacy-filter-stage query)
-    (cond-&gt; query
-      (and (lib.breakout/breakouts query) (lib.aggregation/aggregations query))
-      append-stage)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+<p>If you modify this, also modify <code>template-tag-splitting-regex</code> below.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private template-tag-regex
+  #&quot;\{\{\s*([A-Za-z0-9_\.]+?)\s*\}\}&quot;)</pre></td></tr><tr><td class="docs"><p>A regex for spliting text around template tags. This should be identical to <code>template-tag-regex</code> above, but without
+the capture group around the tag name.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private template-tag-splitting-regex
+  #&quot;\{\{\s*[A-Za-z0-9_\.]+?\s*\}\}&quot;)</pre></td></tr><tr><td class="docs"><p>Represents a variable parsed out of a text card. <code>tag</code> contains the tag name alone, as a string. <code>source</code> contains
+the full original syntax for the parameter)</p>
+</td><td class="codes"><pre class="brush: clojure">(defrecord ^:private TextParam [tag source]
+  Object
+  (toString
+    [x]
+    (or (:value x) source)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- TextParam?
+  [x]
+  (instance? TextParam x))</pre></td></tr><tr><td class="docs"><p>Given the text of a Markdown card, splits it into a sequence of alternating strings and TextParam records.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- split-on-tags
+  [text]
+  (let [split-text      (str/split text template-tag-splitting-regex)
+        matches         (map first (re-seq template-tag-regex text))
+        max-len         (max (count split-text) (count matches))
+        ;; Pad both `split-text` and `matches` with empty strings until they are equal length, so that nothing is
+        ;; dropped by the call to `interleave`
+        padded-text     (concat split-text (repeatedly (- max-len (count split-text)) (constantly &quot;&quot;)))
+        padded-matches  (concat matches (repeatedly (- max-len (count matches)) (constantly &quot;&quot;)))
+        full-split-text (interleave padded-text padded-matches)]
+    (map (fn [text]
+           (if-let [[_, match] (re-matches template-tag-regex text)]
+             (-&gt;TextParam match text)
+             text))
+         full-split-text)))</pre></td></tr><tr><td class="docs"><p>Given a vector of strings and/or TextParam, concatenate consecutive strings and TextParams without values.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- join-consecutive-strings
+  [strs-or-vars]
+  (-&gt;&gt; strs-or-vars
+       (partition-by (fn [str-or-var]
+                       (or (string? str-or-var)
+                           (not (:value str-or-var)))))
+       (mapcat (fn [strs-or-var]
+                 (if (string? (first strs-or-var))
+                   [(str/join strs-or-var)]
+                   strs-or-var)))))</pre></td></tr><tr><td class="docs"><p>Given <code>split-text</code>, containing a list of alternating strings and TextParam, add a :value key to any TextParams
+with a corresponding value in <code>tag-&gt;normalized-param</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- add-values-to-variables
+  [tag-&gt;normalized-param locale escape-markdown split-text]
+  (map
+   (fn [maybe-variable]
+     (if (TextParam? maybe-variable)
+       (assoc maybe-variable :value (value (:tag maybe-variable) tag-&gt;normalized-param locale escape-markdown))
+       maybe-variable))
+   split-text))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private optional-block-regex
+  #&quot;\[\[.+\]\]&quot;)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private non-optional-block-regex
+  #&quot;\[\[(.+?)\]\]&quot;)</pre></td></tr><tr><td class="docs"><p>Removes any [[optional]] blocks from individual strings in <code>split-text</code>, which are blocks that have no parameters
+with values. Then, concatenates the full string and removes the brackets from any remaining optional blocks.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- strip-optional-blocks
+  [split-text]
+  (let [s (-&gt;&gt; split-text
+               (map #(if (TextParam? %) % (str/replace % optional-block-regex &quot;&quot;)))
+               str/join)]
+    (str/replace s non-optional-block-regex second)))</pre></td></tr><tr><td class="docs"><p>Given the content of a text dashboard card, return a set of the unique names of template tags in the text.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn ^:export tag_names
+  [text]
+  (let [tag-names (-&gt;&gt; (re-seq template-tag-regex (or text &quot;&quot;))
+                       (map second)
+                       set)]
+    #?(:clj  tag-names
+       :cljs (clj-&gt;js tag-names))))</pre></td></tr><tr><td class="docs"><p>Normalize a single parameter by calling [[mbql.normalize/normalize-fragment]] on it, and converting all string keys
+to keywords.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- normalize-parameter
+  [parameter]
+  (-&gt; (mbql.normalize/normalize-fragment [:parameters] [parameter])
+      first
+      (update-keys keyword)))</pre></td></tr><tr><td class="docs"><p>Given the context of a text dashboard card, replace all template tags in the text with their corresponding values,
+formatted and escaped appropriately if escape-markdown is true. Specifically escape-markdown should be false when the
+output isn't being rendered directly as markdown, such as in header cards.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn ^:export substitute-tags
+  ([text tag-&gt;param]
+   (substitute-tags text tag-&gt;param &quot;en&quot; true))
+  ([text tag-&gt;param locale escape-markdown]
+   (when text
+     (let [tag-&gt;param #?(:clj tag-&gt;param
+                         :cljs (js-&gt;clj tag-&gt;param))
+           tag-&gt;normalized-param (update-vals tag-&gt;param normalize-parameter)]
+       ;; Most of the functions in this pipeline are relating to handling optional blocks in the text which use
+       ;; the [[ ]] syntax.
+       ;; For example, given an input &quot;[[a {{b}}]] [[{{c}}]]&quot;, where `b` has no value and `c` = 3:
+       ;; 1. `split-on-tags` =&gt;
+       ;;      (&quot;[[a &quot; {:tag &quot;b&quot; :source &quot;{{b}}&quot;} &quot;]] [[&quot; {:tag &quot;c&quot; :source &quot;{{c}}&quot;} &quot;]]&quot;)
+       ;; 2. `add-values-to-variables` =&gt;
+       ;;      (&quot;[[a &quot; {:tag &quot;b&quot; :source &quot;{{b}}&quot; :value nil} &quot;]] [[&quot; {:tag &quot;c&quot; :source &quot;{{c}}&quot; :value 3} &quot;]]&quot;)
+       ;; 3. `join-consecutive-strings` =&gt; (&quot;[[a {{b}}]] [[&quot; {:tag &quot;b&quot; :source &quot;{{c}}&quot; :value 3} &quot;]]&quot;)
+       ;; 4. `strip-optional-blocks` =&gt; &quot;3&quot;
+       (-&gt;&gt; text
+            split-on-tags
+            (add-values-to-variables tag-&gt;normalized-param locale escape-markdown)
+            join-consecutive-strings
+            strip-optional-blocks)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

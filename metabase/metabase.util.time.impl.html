@@ -2865,394 +2865,348 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.lib.stage" name="metabase.lib.stage"><h1 class="project-name">metabase.lib.stage</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Method implementations for a stage of a query.</p>
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.lib.stage
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.util.time.impl" name="metabase.util.time.impl"><h1 class="project-name">metabase.util.time.impl</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.util.time.impl
   (:require
-   [clojure.string :as str]
-   [medley.core :as m]
-   [metabase.legacy-mbql.normalize :as mbql.normalize]
-   [metabase.lib.aggregation :as lib.aggregation]
-   [metabase.lib.breakout :as lib.breakout]
-   [metabase.lib.convert :as lib.convert]
-   [metabase.lib.expression :as lib.expression]
-   [metabase.lib.field :as lib.field]
-   [metabase.lib.hierarchy :as lib.hierarchy]
-   [metabase.lib.join :as lib.join]
-   [metabase.lib.join.util :as lib.join.util]
-   [metabase.lib.metadata :as lib.metadata]
-   [metabase.lib.metadata.calculation :as lib.metadata.calculation]
-   [metabase.lib.schema :as lib.schema]
-   [metabase.lib.schema.id :as lib.schema.id]
-   [metabase.lib.schema.metadata :as lib.schema.metadata]
-   [metabase.lib.util :as lib.util]
-   [metabase.lib.util.match :as lib.util.match]
-   [metabase.util :as u]
-   [metabase.util.i18n :as i18n]
-   [metabase.util.malli :as mu]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(lib.hierarchy/derive :mbql.stage/mbql   ::stage)
-(lib.hierarchy/derive :mbql.stage/native ::stage)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/metadata-method ::stage
-  [_query _stage-number _stage]
-  ;; not i18n'ed because this shouldn't be developer-facing.
-  (throw (ex-info &quot;You can't calculate a metadata map for a stage! Use lib.metadata.calculation/returned-columns-method instead.&quot;
-                  {})))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ensure-previous-stages-have-metadata :- ::lib.schema/query
-  &quot;Recursively calculate the metadata for the previous stages and add it to them, we'll need it for metadata
-  calculations for [[lib.metadata.calculation/returned-columns]] and [[lib.metadata.calculation/visible-columns]], and
-  we don't want to have to calculate it more than once...&quot;
-  [query        :- ::lib.schema/query
-   stage-number :- :int]
-  (reduce
-   (fn [query stage-number]
-     (lib.util/update-query-stage query
-                                  stage-number
-                                  assoc ::cached-metadata
-                                  (lib.metadata.calculation/returned-columns query
-                                                                             stage-number
-                                                                             (lib.util/query-stage query stage-number))))
-   query
-   (range 0 (lib.util/canonical-stage-index query stage-number))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- existing-stage-metadata :- [:maybe lib.metadata.calculation/ColumnsWithUniqueAliases]
-  &quot;Return existing stage metadata attached to a stage if is already present: return it as-is, but only if this is a
-  native stage or a source-Card or a metric stage. If it's any other sort of stage then ignore the metadata, it's
-  probably wrong; we can recalculate the correct metadata anyway.&quot;
-  [query        :- ::lib.schema/query
-   stage-number :- :int]
-  (let [{stage-type :lib/type, :keys [source-card] :as stage} (lib.util/query-stage query stage-number)]
-    (or (::cached-metadata stage)
-        (when-let [metadata (:lib/stage-metadata stage)]
-          (when (or (= stage-type :mbql.stage/native)
-                    source-card)
-            (let [source-type (case stage-type
-                                :mbql.stage/native :source/native
-                                :mbql.stage/mbql   :source/card)]
-              (not-empty
-               (for [col (:columns metadata)]
-                 (merge
-                  {:lib/source-column-alias  (:name col)
-                   :lib/desired-column-alias (:name col)}
-                  col
-                  {:lib/source source-type})))))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- breakouts-columns :- [:maybe lib.metadata.calculation/ColumnsWithUniqueAliases]
-  [query          :- ::lib.schema/query
-   stage-number   :- :int
-   unique-name-fn :- ::lib.metadata.calculation/unique-name-fn]
-  (not-empty
-   (for [breakout (lib.breakout/breakouts-metadata query stage-number)]
-     (assoc breakout
-            :lib/source               :source/breakouts
-            :lib/source-column-alias  ((some-fn :lib/source-column-alias :name) breakout)
-            :lib/desired-column-alias (unique-name-fn (lib.join.util/desired-alias query breakout))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- aggregations-columns :- [:maybe lib.metadata.calculation/ColumnsWithUniqueAliases]
-  [query          :- ::lib.schema/query
-   stage-number   :- :int
-   unique-name-fn :- ::lib.metadata.calculation/unique-name-fn]
-  (not-empty
-   (for [ag (lib.aggregation/aggregations-metadata query stage-number)]
-     (assoc ag
-            :lib/source               :source/aggregations
-            :lib/source-column-alias  (:name ag)
-            :lib/desired-column-alias (unique-name-fn (:name ag))))))</pre></td></tr><tr><td class="docs"><p>TODO -- maybe the bulk of this logic should be moved into [[metabase.lib.field]], like we did for breakouts and
-aggregations above.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- fields-columns :- [:maybe lib.metadata.calculation/ColumnsWithUniqueAliases]
-  [query          :- ::lib.schema/query
-   stage-number   :- :int
-   unique-name-fn :- ::lib.metadata.calculation/unique-name-fn]
-  (when-let [{fields :fields} (lib.util/query-stage query stage-number)]
-    (not-empty
-     (for [[tag :as ref-clause] fields
-           :let                 [source (case tag
-                                          ;; you can't have an `:aggregation` reference in `:fields`; anything in
-                                          ;; `:aggregations` is returned automatically anyway
-                                          ;; by [[aggregations-columns]] above.
-                                          :field      :source/fields
-                                          :expression :source/expressions)
-                                 metadata (lib.metadata.calculation/metadata query stage-number ref-clause)]]
-       (assoc metadata
-              :lib/source               source
-              :lib/source-column-alias  (lib.metadata.calculation/column-name query stage-number metadata)
-              :lib/desired-column-alias (unique-name-fn (lib.join.util/desired-alias query metadata)))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- summary-columns :- [:maybe lib.metadata.calculation/ColumnsWithUniqueAliases]
-  [query          :- ::lib.schema/query
-   stage-number   :- :int
-   unique-name-fn :- ::lib.metadata.calculation/unique-name-fn]
-  (not-empty
-   (into []
-         (mapcat (fn [f]
-                   (f query stage-number unique-name-fn)))
-         [breakouts-columns
-          aggregations-columns])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- previous-stage-metadata :- [:maybe lib.metadata.calculation/ColumnsWithUniqueAliases]
-  &quot;Metadata for the previous stage, if there is one.&quot;
-  [query          :- ::lib.schema/query
-   stage-number   :- :int
-   unique-name-fn :- ::lib.metadata.calculation/unique-name-fn]
-  (when-let [previous-stage-number (lib.util/previous-stage-number query stage-number)]
-    (not-empty
-     (for [col  (lib.metadata.calculation/returned-columns query
-                                                           previous-stage-number
-                                                           (lib.util/query-stage query previous-stage-number))
-           :let [source-alias (or ((some-fn :lib/desired-column-alias :lib/source-column-alias) col)
-                                  (lib.metadata.calculation/column-name query stage-number col))]]
-       (-&gt; (merge
-            col
-            {:lib/source               :source/previous-stage
-             :lib/source-column-alias  source-alias
-             :lib/desired-column-alias (unique-name-fn source-alias)}
-            (when (:metabase.lib.card/force-broken-id-refs col)
-              (select-keys col [:metabase.lib.card/force-broken-id-refs])))
-           ;; do not retain `:temporal-unit`; it's not like we're doing a extract(month from &lt;x&gt;) twice, in both
-           ;; stages of a query. It's a little hacky that we're manipulating `::lib.field` keys directly here since
-           ;; they're presumably supposed to be private-ish, but I don't have a more elegant way of solving this sort
-           ;; of problem at this point in time.
-           ;;
-           ;; also don't retain `:lib/expression-name`, the fact that this column came from an expression in the
-           ;; previous stage should be totally irrelevant and we don't want it confusing our code that decides whether
-           ;; to generate `:expression` or `:field` refs.
-           (dissoc ::lib.field/temporal-unit :lib/expression-name))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- saved-question-metadata :- [:maybe lib.metadata.calculation/ColumnsWithUniqueAliases]
-  &quot;Metadata associated with a Saved Question, e.g. if we have a `:source-card`&quot;
-  [query          :- ::lib.schema/query
-   stage-number   :- :int
-   card-id        :- [:maybe ::lib.schema.id/card]
-   options        :- lib.metadata.calculation/VisibleColumnsOptions]
-  (when card-id
-    (when-let [card (lib.metadata/card query card-id)]
-      (not-empty (lib.metadata.calculation/visible-columns query stage-number card options)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- metric-metadata :- [:maybe lib.metadata.calculation/ColumnsWithUniqueAliases]
-  [query         :- ::lib.schema/query
-   _stage-number :- :int
-   card          :- ::lib.schema.metadata/card
-   options       :- lib.metadata.calculation/VisibleColumnsOptions]
-  (let [metric-query (-&gt; card :dataset-query mbql.normalize/normalize lib.convert/-&gt;pMBQL
-                         (lib.util/update-query-stage -1 dissoc :aggregation :breakout))]
-    (not-empty (lib.metadata.calculation/visible-columns
-                (assoc metric-query :lib/metadata (:lib/metadata query))
-                -1
-                (lib.util/query-stage metric-query -1)
-                options))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- expressions-metadata :- [:maybe lib.metadata.calculation/ColumnsWithUniqueAliases]
-  [query                         :- ::lib.schema/query
-   stage-number                  :- :int
-   unique-name-fn                :- ::lib.metadata.calculation/unique-name-fn
-   {:keys [include-late-exprs?]} :- [:map [:include-late-exprs? {:optional true} :boolean]]]
-  (not-empty
-   (for [[clause metadata] (map vector
-                                (:expressions (lib.util/query-stage query stage-number))
-                                (lib.expression/expressions-metadata query stage-number))
-          ;; Only include &quot;late&quot; expressions when required.
-          ;; &quot;Late&quot; expressions those like :offset which can't be used within the same query stage, like aggregations.
-         :when (or include-late-exprs?
-                   (not (lib.util.match/match-one clause :offset)))]
-     (let [base-type (:base-type metadata)]
-       (-&gt; (assoc metadata
-                  :lib/source               :source/expressions
-                  :lib/source-column-alias  (:name metadata)
-                  :lib/desired-column-alias (unique-name-fn (:name metadata)))
-           (u/assoc-default :effective-type (or base-type :type/*)))))))</pre></td></tr><tr><td class="docs"><p>Calculate the columns to return if <code>:aggregations</code>/<code>:breakout</code>/<code>:fields</code> are unspecified.</p>
+   [java-time.api :as t]
+   [metabase.util.date-2 :as u.date]
+   [metabase.util.time.impl-common :as common])
+  (:import
+   (java.time.format DateTimeFormatter)
+   (java.util Locale)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- now [] (t/offset-date-time))</pre></td></tr><tr><td class="docs"><p>Given any value, check if it's a datetime object.</p>
 
-<p>Formula for the so-called 'default' columns is</p>
+<p>----------------------------------------------- predicates -------------------------------------------------------</p>
+</td><td class="codes"><pre class="brush: clojure">(defn datetime?
+  [value]
+  (or (t/offset-date-time? value)
+      (t/zoned-date-time? value)
+      (t/instant? value)))</pre></td></tr><tr><td class="docs"><p>checks if the provided value is a local time value.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn time?
+  [value]
+  (t/local-time? value))</pre></td></tr><tr><td class="docs"><p>Given a datetime, check that it's valid.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn valid?
+  [value]
+  (or (datetime?      value)
+      (t/offset-time? value)
+      (t/local-time?  value)))</pre></td></tr><tr><td class="docs"><p>Does nothing. Just a placeholder in CLJS; the JVM implementation does some real work.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn normalize
+  [value]
+  (t/offset-date-time value))</pre></td></tr><tr><td class="docs"><p>Given two platform-specific datetimes, checks if they fall within the same day.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn same-day?
+  [d1 d2]
+  (= (t/truncate-to d1 :days) (t/truncate-to d2 :days)))</pre></td></tr><tr><td class="docs"><p>True if these two datetimes fall in the same year.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn same-year?
+  [d1 d2]
+  (= (t/year d1) (t/year d2)))</pre></td></tr><tr><td class="docs"><p>True if these two datetimes fall in the same (year and) month.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn same-month?
+  [d1 d2]
+  (and (same-year? d1 d2)
+       (= (t/month d1) (t/month d2))))</pre></td></tr><tr><td class="docs"><p>The first day of the week varies by locale, but Metabase has a setting that overrides it.
+In JVM, we can just read the setting directly.</p>
 
-<p>1a. Columns returned by the previous stage of the query (if there is one), OR</p>
+<p>---------------------------------------------- information -------------------------------------------------------</p>
+</td><td class="codes"><pre class="brush: clojure">(defn first-day-of-week
+  []
+  ((requiring-resolve 'metabase.public-settings/start-of-week)))</pre></td></tr><tr><td class="docs"><p>The default map of options.</p>
+</td><td class="codes"><pre class="brush: clojure">(def default-options
+  {:locale (Locale/getDefault)})</pre></td></tr><tr><td class="docs"><p>------------------------------------------------ to-range --------------------------------------------------------</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- minus-ms [value]
+  (t/minus value (t/millis 1)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- apply-offset
+  [value offset-n offset-unit]
+  (t/plus
+   value
+   (case offset-unit
+     :minute (t/minutes offset-n)
+     :hour (t/hours offset-n)
+     :day (t/days offset-n)
+     :week (t/weeks offset-n)
+     :month (t/months offset-n)
+     :year (t/years offset-n)
+     (t/minutes 0))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod common/to-range :default [value _]
+  ;; Fallback: Just return a zero-width at the input time.
+  ;; This mimics Moment.js behavior if you `m.startOf(&quot;unknown unit&quot;)` - it doesn't change anything.
+  [value value])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod common/to-range :minute [value {:keys [n] :or {n 1}}]
+  (let [start (-&gt; value
+                  (t/truncate-to :minutes))]
+    [start (minus-ms (t/plus start (t/minutes n)))]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod common/to-range :hour [value {:keys [n] :or {n 1}}]
+  (let [start (-&gt; value
+                  (t/truncate-to :hours))]
+    [start (minus-ms (t/plus start (t/hours n)))]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod common/to-range :day [value {:keys [n] :or {n 1}}]
+  (let [start (-&gt; value
+                  (t/truncate-to :days))]
+    [start (minus-ms (t/plus start (t/days n)))]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod common/to-range :week [value {:keys [n] :or {n 1}}]
+  (let [first-day (first-day-of-week)
+        start (-&gt; value
+                  (t/truncate-to :days)
+                  (t/adjust :previous-or-same-day-of-week first-day))]
+    [start (minus-ms (t/plus start (t/weeks n)))]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod common/to-range :month [value {:keys [n] :or {n 1}}]
+  (let [value (-&gt; value
+                  (t/truncate-to :days)
+                  (t/adjust :first-day-of-month))]
+    [value (minus-ms (t/plus value (t/months n)))]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(declare truncate add)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod common/to-range :quarter [value {:keys [n] :or {n 1}}]
+  (let [value (truncate value :quarter)]
+    [value (minus-ms (add value :quarter n))]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod common/to-range :year [value {:keys [n] :or {n 1}}]
+  (let [value (-&gt; value
+                  (t/truncate-to :days)
+                  (t/adjust :first-day-of-year))]
+    [value (minus-ms (nth (iterate #(t/adjust % :first-day-of-next-year n) value) n))]))</pre></td></tr><tr><td class="docs"><p>-------------------------------------------- string->timestamp ---------------------------------------------------</p>
+</td><td class="codes"><pre class="brush: clojure">(defmethod common/string-&gt;timestamp :default [value _]
+  ;; Best effort to parse this unknown string format, as a local zoneless datetime, then treating it as UTC.
+  (let [base (try (t/local-date-time value)
+                  (catch Exception _
+                    (try (t/local-date value)
+                         (catch Exception _
+                           nil))))]
+    (when base
+      (t/offset-date-time base (t/zone-id)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod common/string-&gt;timestamp :day-of-week [value options]
+  ;; Try to parse as a regular timestamp; if that fails then try to treat it as a weekday name and adjust from
+  ;; the current time.
+  (let [as-default (try ((get-method common/string-&gt;timestamp :default) value options)
+                        (catch Exception _ nil))]
+    (if (valid? as-default)
+      as-default
+      (let [day (try (t/day-of-week &quot;EEE&quot; value)
+                     (catch Exception _
+                       (try (t/day-of-week &quot;EEEE&quot; value)
+                            (catch Exception _
+                              (throw (ex-info (str &quot;Failed to coerce '&quot; value &quot;' to day-of-week&quot;)
+                                              {:value value}))))))]
+        (-&gt; (now)
+            (t/truncate-to :days)
+            (t/adjust :previous-or-same-day-of-week :monday)  ; Move to ISO start of week.
+            (t/adjust :next-or-same-day-of-week day))))))    ; Then to the specified day.</pre></td></tr><tr><td class="docs"><p>Some of the date coercions are relative, and not directly involved with any particular month.
+To avoid errors we need to use a reference date that is (a) in a month with 31 days,(b) in a leap year.
+This uses 2016-01-01 for the purpose.</p>
 
-<p>1b. Default 'visible' Fields for our <code>:source-table</code>, OR</p>
+<p>-------------------------------------------- number->timestamp ---------------------------------------------------</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private magic-base-date
+  (t/offset-date-time 2016 01 01))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod common/number-&gt;timestamp :default [value _]
+  ;; If no unit is given, or the unit is not recognized, try to parse the number as year number, returning the timestamp
+  ;; for midnight UTC on January 1.
+  (t/offset-date-time value))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod common/number-&gt;timestamp :minute-of-hour [value _]
+  (-&gt; (now) (t/truncate-to :hours) (t/plus (t/minutes value))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod common/number-&gt;timestamp :hour-of-day [value _]
+  (-&gt; (now) (t/truncate-to :days) (t/plus (t/hours value))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod common/number-&gt;timestamp :day-of-week [value _]
+  ;; Metabase uses 1 to mean the start of the week, based on the Metabase setting for the first day of the week.
+  ;; Moment uses 0 as the first day of the week in its configured locale.
+  ;; For Java, get the first day of the week from the setting, and offset by `(dec value)` for the current day.
+  (-&gt; (now)
+      (t/adjust :previous-or-same-day-of-week (first-day-of-week))
+      (t/truncate-to :days)
+      (t/plus (t/days (dec value)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod common/number-&gt;timestamp :day-of-month [value _]
+  ;; We force the initial date to be in a month with 31 days.
+  (t/plus magic-base-date (t/days (dec value))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod common/number-&gt;timestamp :day-of-year [value _]
+  ;; We force the initial date to be in a leap year (2016).
+  (t/plus magic-base-date (t/days (dec value))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod common/number-&gt;timestamp :week-of-year [value _]
+  (-&gt; (now)
+      (t/truncate-to :days)
+      (t/adjust :first-day-of-year)
+      (t/adjust :previous-or-same-day-of-week (first-day-of-week))
+      (t/plus (t/weeks (dec value)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod common/number-&gt;timestamp :month-of-year [value _]
+  (t/offset-date-time (t/year (now)) value 1))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod common/number-&gt;timestamp :quarter-of-year [value _]
+  (let [month (inc (* 3 (dec value)))]
+    (t/offset-date-time (t/year (now)) month 1)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod common/number-&gt;timestamp :year [value _]
+  (t/offset-date-time value 1 1))</pre></td></tr><tr><td class="docs"><p>Parses a timestamp with Z or a timezone offset at the end.</p>
 
-<p>1c. Metadata associated with a Saved Question, if we have <code>:source-card</code> (<code>:source-table</code> is a <code>card__&lt;id&gt;</code> string
-    in legacy MBQL), OR</p>
-
-<p>1e. Metadata associated with a Metric, if we have <code>:sources</code>, OR</p>
-
-<p>1d. <code>:lib/stage-metadata</code> if this is a <code>:mbql.stage/native</code> stage</p>
-
-<p>PLUS</p>
-
-<ol>
-<li>Expressions (aka calculated columns) added in this stage</li>
-</ol>
-
-<p>PLUS</p>
-
-<ol>
-<li>Columns added by joins at this stage</li>
-</ol>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- previous-stage-or-source-visible-columns :- lib.metadata.calculation/ColumnsWithUniqueAliases
-  &quot;Return columns from the previous query stage or source Table/Card.&quot;
-  [query                                 :- ::lib.schema/query
-   stage-number                          :- :int
-   {:keys [unique-name-fn], :as options} :- lib.metadata.calculation/VisibleColumnsOptions]
-  {:pre [(fn? unique-name-fn)]}
-  (let [{:keys [source-table source-card], :as this-stage} (lib.util/query-stage query stage-number)
-        card (some-&gt;&gt; source-card (lib.metadata/card query))
-        metric-based? (= (:type card) :metric)]
-    (into []
-          (if metric-based?
-            identity
-            (map #(dissoc % ::lib.join/join-alias ::lib.field/temporal-unit ::lib.field/binning :fk-field-id)))
-          (or
-           ;; 1a. columns returned by previous stage
-           (previous-stage-metadata query stage-number unique-name-fn)
-           ;; 1b or 1c
-           (or
-            ;; 1b: default visible Fields for the source Table
-            (when source-table
-              (assert (integer? source-table))
-              (let [table-metadata (lib.metadata/table query source-table)]
-                (lib.metadata.calculation/visible-columns query stage-number table-metadata options)))
-            ;; 1e. Metadata associated with a Metric
-            (when metric-based?
-              (metric-metadata query stage-number card options))
-            ;; 1c. Metadata associated with a saved Question
-            (when source-card
-              (saved-question-metadata query stage-number source-card (assoc options :include-implicitly-joinable? false)))
-            ;; 1d: `:lib/stage-metadata` for the (presumably native) query
-            (for [col (:columns (:lib/stage-metadata this-stage))]
-              (assoc col
-                     :lib/source :source/native
-                     :lib/source-column-alias  (:name col)
-                     ;; these should already be unique, but run them thru `unique-name-fn` anyway to make sure anything
-                     ;; that gets added later gets deduplicated from these.
-                     :lib/desired-column-alias (unique-name-fn (:name col)))))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- existing-visible-columns :- lib.metadata.calculation/ColumnsWithUniqueAliases
-  [query        :- ::lib.schema/query
-   stage-number :- :int
-   {:keys [unique-name-fn include-joined? include-expressions?], :as options} :- lib.metadata.calculation/VisibleColumnsOptions]
-  (concat
-   ;; 1: columns from the previous stage, source table or query
-   (previous-stage-or-source-visible-columns query stage-number options)
-   ;; 2: expressions (aka calculated columns) added in this stage
-   (when include-expressions?
-     (expressions-metadata query stage-number unique-name-fn {}))
-   ;; 3: columns added by joins at this stage
-   (when include-joined?
-     (lib.join/all-joins-visible-columns query stage-number unique-name-fn))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/visible-columns-method ::stage
-  [query stage-number _stage {:keys [unique-name-fn include-implicitly-joinable?], :as options}]
-  (let [query            (ensure-previous-stages-have-metadata query stage-number)
-        existing-columns (existing-visible-columns query stage-number options)]
-    (-&gt;&gt; (concat
-          existing-columns
-           ;; add implicitly joinable columns if desired
-          (when include-implicitly-joinable?
-            (lib.metadata.calculation/implicitly-joinable-columns query stage-number existing-columns unique-name-fn)))
-         vec)))</pre></td></tr><tr><td class="docs"><p>Return results metadata about the expected columns in an MBQL query stage. If the query has
-aggregations/breakouts, then return those and the fields columns. Otherwise if there are fields columns return
-those and the joined columns. Otherwise return the defaults based on the source Table or previous stage + joins.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/returned-columns-method ::stage
-  [query stage-number _stage {:keys [unique-name-fn], :as options}]
-  (or
-   (existing-stage-metadata query stage-number)
-   (let [query        (ensure-previous-stages-have-metadata query stage-number)
-         summary-cols (summary-columns query stage-number unique-name-fn)
-         field-cols   (fields-columns query stage-number unique-name-fn)]
-     ;; ... then calculate metadata for this stage
-     (cond
-       summary-cols
-       (into summary-cols field-cols)
-
-       field-cols
-       (do (doall field-cols)           ; force generation of unique names before join columns
-           (into []
-                 (m/distinct-by #(dissoc % :source-alias :lib/source :lib/source-uuid :lib/desired-column-alias))
-                 (concat field-cols
-                         (lib.join/all-joins-expected-columns query stage-number options))))
-
-       :else
-       ;; there is no `:fields` or summary columns (aggregtions or breakouts) which means we return all the visible
-       ;; columns from the source or previous stage plus all the expressions. We return only the `:fields` from any
-       ;; joins
-       (concat
-        ;; we don't want to include all visible joined columns, so calculate that separately
-        (previous-stage-or-source-visible-columns query stage-number {:include-implicitly-joinable? false
-                                                                      :unique-name-fn               unique-name-fn})
-        (expressions-metadata query stage-number unique-name-fn {:include-late-exprs? true})
-        (lib.join/all-joins-expected-columns query stage-number options))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/display-name-method :mbql.stage/native
-  [_query _stage-number _stage _style]
-  (i18n/tru &quot;Native query&quot;))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private display-name-source-parts
-  [:source-table
-   :source-card
-   :joins])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private display-name-other-parts
-  [:aggregation
-   :breakout
-   :filters
-   :order-by
-   :limit])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/display-name-method :mbql.stage/mbql
-  [query stage-number _stage style]
-  (let [query (ensure-previous-stages-have-metadata query stage-number)]
-    (or
-     (not-empty
-      (let [part-&gt;description  (into {}
-                                     (comp cat
-                                           (map (fn [k]
-                                                  [k (lib.metadata.calculation/describe-top-level-key query stage-number k)])))
-                                     [display-name-source-parts display-name-other-parts])
-            source-description (str/join &quot; + &quot; (remove str/blank? (map part-&gt;description display-name-source-parts)))
-            other-descriptions (map part-&gt;description display-name-other-parts)]
-        (str/join &quot;, &quot; (remove str/blank? (cons source-description other-descriptions)))))
-     (when-let [previous-stage-number (lib.util/previous-stage-number query stage-number)]
-       (lib.metadata.calculation/display-name query
-                                              previous-stage-number
-                                              (lib.util/query-stage query previous-stage-number)
-                                              style)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn has-clauses? :- :boolean
-  &quot;Does given query stage have any clauses?&quot;
-  [query        :- ::lib.schema/query
-   stage-number :- :int]
-  (boolean (seq (dissoc (lib.util/query-stage query stage-number) :lib/type :source-table :source-card))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn append-stage :- ::lib.schema/query
-  &quot;Adds a new blank stage to the end of the pipeline.&quot;
-  [query]
-  (update query :stages conj {:lib/type :mbql.stage/mbql}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn drop-stage :- ::lib.schema/query
-  &quot;Drops the final stage in the pipeline, will no-op if it is the only stage&quot;
-  [query]
-  (if (= 1 (count (:stages query)))
-    query
-    (update query :stages pop)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn drop-empty-stages :- ::lib.schema/query
-  &quot;Drops all empty stages in the pipeline.&quot;
-  [query :- ::lib.schema/query]
-  (update query :stages (fn [stages]
-                          (into []
-                                (keep-indexed (fn [stage-number stage]
-                                                (when (or (zero? stage-number)
-                                                          (has-clauses? query stage-number))
-                                                  stage)))
-                                stages))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ensure-extra-stage :- [:tuple ::lib.schema/query :int]
-  &quot;Given a query and current stage, returns a tuple of `[query next-stage-number]`.
-  If that stage already exists, the query is unchanged. If it does not, a new (MBQL) stage is appended and its index
-  is returned.&quot;
-  [query        :- ::lib.schema/query
-   stage-number :- :int]
-  (let [stage-number (lib.util/canonical-stage-index query stage-number)]
-    (if-let [next-number (lib.util/next-stage-number query stage-number)]
-      ;; There is already a next stage, so just return it.
-      [query next-number]
-      ;; Otherwise append a stage and return the new query and updated stage number.
-      (let [query (append-stage query)]
-        [query (lib.util/next-stage-number query stage-number)]))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- ensure-legacy-filter-stage
-  [query]
-  (let [inner-query (:query query)]
-    (cond-&gt; query
-      (and (:aggregation inner-query)
-           (:breakout inner-query))
-      (assoc :query {:source-query inner-query}))))</pre></td></tr><tr><td class="docs"><p>Adds an empty stage to <code>query</code> if its last stage contains both breakouts and aggregations.</p>
-
-<p>This is so that parameters can address both the stage before and after the aggregation.
-Adding filters to the result at stage -1 will filter after the summary, filters added at
-stage -2 filter before the summary.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ensure-filter-stage
-  [query]
-  (if (#{:query :native} (lib.util/normalized-query-type query))
-    (ensure-legacy-filter-stage query)
-    (cond-&gt; query
-      (and (lib.breakout/breakouts query) (lib.aggregation/aggregations query))
-      append-stage)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+<p>---------------------------------------------- parsing helpers ---------------------------------------------------</p>
+</td><td class="codes"><pre class="brush: clojure">(defn parse-with-zone
+  [value]
+  (t/offset-date-time value))</pre></td></tr><tr><td class="docs"><p>Given a freshly parsed <code>OffsetDateTime</code>, convert it to a <code>LocalDateTime</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn localize
+  [value]
+  (t/local-date-time value))</pre></td></tr><tr><td class="docs"><p>Parses a time string that has been stripped of any time zone.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn parse-time-string
+  [value]
+  (t/local-time value))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------ arithmetic ------------------------------------------------------</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Return the number of <code>unit</code>s between two temporal values <code>before</code> and <code>after</code>, e.g. maybe there are 32 <code>:day</code>s
+between Jan 1st and Feb 2nd.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn unit-diff
+  [unit before after]
+  (let [before   (cond-&gt; before
+                   (string? before) u.date/parse)
+        after    (cond-&gt; after
+                   (string? after) u.date/parse)
+        ;; you can't use LocalDates in durations I guess, so just convert them LocalDateTimes with time = 0
+        before   (cond-&gt; before
+                   (instance? java.time.LocalDate before) (t/local-date-time 0))
+        after    (cond-&gt; after
+                   (instance? java.time.LocalDate after) (t/local-date-time 0))
+        duration (t/duration before after)]
+    (case unit
+      :millisecond (.toMillis duration)
+      :second      (.toSeconds duration)
+      :minute      (.toMinutes duration)
+      :hour        (.toHours duration)
+      :day         (.toDays duration)
+      :week
+      (long (/ (unit-diff :day before after) 7))
+      :month
+      (let [diff-months (- (u.date/extract after :month-of-year)
+                           (u.date/extract before :month-of-year))
+            diff-years  (- (u.date/extract after :year)
+                           (u.date/extract before :year))]
+        (+ diff-months (* diff-years 12)))
+      :quarter
+      (long (/ (unit-diff :month before after) 3))
+      :year
+      (- (u.date/extract after :year)
+         (u.date/extract before :year)))))</pre></td></tr><tr><td class="docs"><p>Returns the time elapsed between <code>before</code> and <code>after</code> in days (an integer).</p>
+</td><td class="codes"><pre class="brush: clojure">(defn day-diff
+  [before after]
+  (unit-diff :day before after))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- coerce-local-date-time [input]
+  (cond-&gt; input
+    (re-find #&quot;(?:Z|[+-]\d\d(?::?\d\d)?)$&quot; input) (t/offset-date-time)
+    :always (localize)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private unit-formats
+  {:day-of-week     &quot;EEEE&quot;
+   :month-of-year   &quot;MMM&quot;
+   :minute-of-hour  &quot;m&quot;
+   :hour-of-day     &quot;h a&quot;
+   :day-of-month    &quot;d&quot;
+   :day-of-year     &quot;D&quot;
+   :week-of-year    &quot;w&quot;
+   :quarter-of-year &quot;'Q'Q&quot;})</pre></td></tr><tr><td class="docs"><p>Formats a date-time value given the temporal extraction unit.
+If unit is not supported, returns nil.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn ^:private format-extraction-unit
+  [t unit ^Locale locale]
+  (when-let [^DateTimeFormatter formatter (some-&gt; unit
+                                                  unit-formats
+                                                  t/formatter
+                                                  (cond-&gt; #_formatter locale (.withLocale locale)))]
+    (.format formatter t)))</pre></td></tr><tr><td class="docs"><p>Formats a temporal-value (iso date/time string, int for extraction units) given the temporal-bucketing unit.
+ If unit is nil, formats the full date/time</p>
+</td><td class="codes"><pre class="brush: clojure">(defn format-unit
+  ([input unit] (format-unit input unit nil))
+  ([input unit locale]
+   (if (string? input)
+     (let [time? (common/matches-time? input)
+           date? (common/matches-date? input)
+           date-time? (common/matches-date-time? input)
+           t (cond
+               time? (t/local-time input)
+               date? (t/local-date input)
+               date-time? (coerce-local-date-time input))]
+       (if t
+         (or
+          (format-extraction-unit t unit locale)
+          (cond
+            time? (t/format &quot;h:mm a&quot; t)
+            date? (t/format &quot;MMM d, yyyy&quot; t)
+            :else (t/format &quot;MMM d, yyyy, h:mm a&quot; t)))
+         input))
+     (if (= unit :hour-of-day)
+       (str (cond (zero? input) &quot;12&quot; (&lt;= input 12) input :else (- input 12)) &quot; &quot; (if (&lt;= input 11) &quot;AM&quot; &quot;PM&quot;))
+       (or
+        (format-extraction-unit (common/number-&gt;timestamp input {:unit unit}) unit locale)
+        (str input))))))</pre></td></tr><tr><td class="docs"><p>Formats a time difference between two temporal values.
+ Drops redundant information.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn format-diff
+  [temporal-value-1 temporal-value-2]
+  (let [default-format #(str (format-unit temporal-value-1 nil)
+                             &quot; – &quot;
+                             (format-unit temporal-value-2 nil))]
+    (cond
+      (some (complement string?) [temporal-value-1 temporal-value-2])
+      (default-format)
+      (= temporal-value-1 temporal-value-2)
+      (format-unit temporal-value-1 nil)
+      (and (common/matches-time? temporal-value-1)
+           (common/matches-time? temporal-value-2))
+      (default-format)
+      (and (common/matches-date-time? temporal-value-1)
+           (common/matches-date-time? temporal-value-2))
+      (let [lhs (coerce-local-date-time temporal-value-1)
+            rhs (coerce-local-date-time temporal-value-2)
+            year-matches? (= (t/year lhs) (t/year rhs))
+            month-matches? (= (t/month lhs) (t/month rhs))
+            day-matches? (= (t/day-of-month lhs) (t/day-of-month rhs))
+            hour-matches? (= (t/format &quot;H&quot; lhs) (t/format &quot;H&quot; rhs))
+            [lhs-fmt rhs-fmt] (cond
+                                (and year-matches? month-matches? day-matches? hour-matches?)
+                                [&quot;MMM d, yyyy, h:mm a &quot; &quot; h:mm a&quot;]
+                                (and year-matches? month-matches? day-matches?)
+                                [&quot;MMM d, yyyy, h:mm a &quot; &quot; h:mm a&quot;]
+                                year-matches?
+                                [&quot;MMM d, h:mm a &quot; &quot; MMM d, yyyy, h:mm a&quot;])]
+        (if lhs-fmt
+          (str (t/format lhs-fmt lhs) &quot;–&quot; (t/format rhs-fmt rhs))
+          (default-format)))
+      (and (common/matches-date? temporal-value-1)
+           (common/matches-date? temporal-value-2))
+      (let [lhs (t/local-date temporal-value-1)
+            rhs (t/local-date temporal-value-2)
+            year-matches? (= (t/year lhs) (t/year rhs))
+            month-matches? (= (t/month lhs) (t/month rhs))
+            [lhs-fmt rhs-fmt] (cond
+                                (and year-matches? month-matches?)
+                                [&quot;MMM d&quot; &quot;d, yyyy&quot;]
+                                year-matches?
+                                [&quot;MMM d &quot; &quot; MMM d, yyyy&quot;])]
+        (if lhs-fmt
+          (str (t/format lhs-fmt lhs) &quot;–&quot; (t/format rhs-fmt rhs))
+          (default-format)))
+      :else
+      (default-format))))</pre></td></tr><tr><td class="docs"><p>Given a <code>n</code> <code>unit</code> time interval and the current date, return a string representing the date-time range.
+ Provide an <code>offset-n</code> and <code>offset-unit</code> time interval to change the date used relative to the current date.
+ <code>options</code> is a map and supports <code>:include-current</code> to include the current given unit of time in the range.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn format-relative-date-range
+  ([n unit offset-n offset-unit opts]
+   (format-relative-date-range (now) n unit offset-n offset-unit opts))
+  ([t n unit offset-n offset-unit {:keys [include-current]}]
+   (let [offset-now (cond-&gt; t
+                      (neg? n) (apply-offset n unit)
+                      (and (pos? n) (not include-current)) (apply-offset 1 unit)
+                      (and offset-n offset-unit) (apply-offset offset-n offset-unit))
+         pos-n (cond-&gt; (abs n)
+                 include-current inc)
+         date-ranges (map (if (#{:hour :minute} unit)
+                            #(t/format &quot;yyyy-MM-dd'T'HH:mm&quot; (t/local-date-time %))
+                            #(str (t/local-date %)))
+                          (common/to-range offset-now
+                                           {:unit unit
+                                            :n pos-n
+                                            :offset-n offset-n
+                                            :offset-unit offset-unit}))]
+     (apply format-diff date-ranges))))</pre></td></tr><tr><td class="docs"><p>Clojure implementation of [[metabase.util.time/truncate]]; basically the same as [[u.date/truncate]] but also
+handles ISO-8601 strings.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn truncate
+  [t unit]
+  (if (string? t)
+    (str (truncate (u.date/parse t) unit))
+    (u.date/truncate t unit)))</pre></td></tr><tr><td class="docs"><p>Clojure implementation of [[metabase.util.time/add]]; basically the same as [[u.date/add]] but also handles
+ISO-8601 strings.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn add
+  [t unit amount]
+  (if (string? t)
+    (str (add (u.date/parse t) unit amount))
+    (u.date/add t unit amount)))</pre></td></tr><tr><td class="docs"><p>Clojure implementation of [[metabase.util.time/format-for-base-type]]; format a temporal value as an ISO-8601
+string. <code>base-type</code> is ignored for the Clojure implementation; this simply calls [[clojure.core/str]].</p>
+</td><td class="codes"><pre class="brush: clojure">(defn format-for-base-type
+  [t _base-type]
+  (str t))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
