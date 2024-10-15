@@ -3144,17 +3144,7 @@ In which :is<em>group</em>manager is only included if <code>advanced-permissions
     (for [user users]
       (assoc user :is_installer (= (:id user) 1)))))</pre></td></tr><tr><td class="docs"><p>--------------------------------------------------- Helper Fns ---------------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(declare form-password-reset-url set-password-reset-token!)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- send-welcome-email! [new-user invitor sent-from-setup?]
-  (let [reset-token               (set-password-reset-token! (u/the-id new-user))
-        should-link-to-login-page (and (public-settings/sso-enabled?)
-                                       (not (public-settings/enable-password-login)))
-        join-url                  (if should-link-to-login-page
-                                    (str (public-settings/site-url) &quot;/auth/login&quot;)
-                                    ;; NOTE: the new user join url is just a password reset with an indicator that this is a first time user
-                                    (str (form-password-reset-url reset-token) &quot;#new&quot;))]
-    (classloader/require 'metabase.email.messages)
-    ((resolve 'metabase.email.messages/send-new-user-email!) new-user invitor join-url sent-from-setup?)))</pre></td></tr><tr><td class="docs"><p>Login attributes, currently not collected for LDAP or Google Auth. Will ultimately be stored as JSON.</p>
+</td><td class="codes"><pre class="brush: clojure">(declare form-password-reset-url set-password-reset-token!)</pre></td></tr><tr><td class="docs"><p>Login attributes, currently not collected for LDAP or Google Auth. Will ultimately be stored as JSON.</p>
 </td><td class="codes"><pre class="brush: clojure">(def LoginAttributes
   (mu/with-api-error-message
    [:map-of ms/KeywordOrString :any]
@@ -3175,21 +3165,25 @@ In which :is<em>group</em>manager is only included if <code>advanced-permissions
    [:first_name [:maybe ms/NonBlankString]]])</pre></td></tr><tr><td class="docs"><p>Creates a new user, defaulting the password when not provided</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn insert-new-user!
   [new-user :- NewUser]
-  (first (t2/insert-returning-instances! User (update new-user :password #(or % (str (random-uuid)))))))</pre></td></tr><tr><td class="docs"><p>Creates a new user with a default password, when deserializing eg. a <code>:creator_id</code> field whose email address doesn't
+  (t2/insert-returning-instance! :model/User (update new-user :password #(or % (str (random-uuid))))))</pre></td></tr><tr><td class="docs"><p>Creates a new user with a default password, when deserializing eg. a <code>:creator_id</code> field whose email address doesn't
 match any existing user.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn serdes-synthesize-user!
   [new-user]
-  (insert-new-user! new-user))</pre></td></tr><tr><td class="docs"><p>Convenience function for inviting a new <code>User</code> and sending out the welcome email.</p>
+  (insert-new-user! new-user))</pre></td></tr><tr><td class="docs"><p>Convenience function for inviting a new <code>User</code> and sending them a welcome email.
+This function will create the user, which will trigger the built-in system event
+notification to send an invite via email.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn create-and-invite-user!
   [new-user :- NewUser invitor :- Invitor setup? :- :boolean]
   ;; create the new user
   (u/prog1 (insert-new-user! new-user)
+    ;; TODO make sure the email being sent synchronously.
     (events/publish-event! :event/user-invited
                            {:object
                             (assoc &lt;&gt;
+                                   :is_from_setup setup?
                                    :invite_method &quot;email&quot;
-                                   :sso_source (:sso_source new-user))})
-    (send-welcome-email! &lt;&gt; invitor setup?)))</pre></td></tr><tr><td class="docs"><p>Convenience for creating a new user via Google Auth. This account is considered active immediately; thus all active
+                                   :sso_source    (:sso_source new-user))
+                            :details {:invitor (select-keys invitor [:email :first_name])}})))</pre></td></tr><tr><td class="docs"><p>Convenience for creating a new user via Google Auth. This account is considered active immediately; thus all active
 admins will receive an email right away.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn create-new-google-auth-user!
   [new-user :- NewUser]

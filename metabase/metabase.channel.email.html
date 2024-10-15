@@ -2883,15 +2883,20 @@ net.brehaut.ClojureTools = (function (SH) {
    [stencil.core :as stencil]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private EmailMessage
   [:map
-   [:subject      :string]
-   [:recipients   [:sequential ms/Email]]
-   [:message-type [:enum :attachments :html :text]]
-   [:message      :any]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- construct-email [subject recipients message]
-  {:subject      subject
-   :recipients   recipients
-   :message-type :attachments
-   :message      message})</pre></td></tr><tr><td class="docs">
+   [:subject                         :string]
+   [:recipients                      [:sequential ms/Email]]
+   [:message-type                    [:enum :attachments :html :text]]
+   [:message                         :any]
+   [:recipient-type {:optional true} [:maybe (ms/enum-keywords-and-strings :cc :bcc)]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- construct-email
+  ([subject recipients message]
+   (construct-email subject recipients message nil))
+  ([subject recipients message recipient-type]
+   {:subject        subject
+    :recipients     recipients
+    :message-type   :attachments
+    :message        message
+    :recipient-type recipient-type}))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- recipients-&gt;emails
   [recipients]
   (update-vals
@@ -2910,12 +2915,14 @@ net.brehaut.ClojureTools = (function (SH) {
     (get-in card [:visualization_settings :progress.goal])
     nil))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defmethod channel/send! :channel/email
-  [_channel {:keys [subject recipients message-type message]} :- EmailMessage]
+  [_channel {:keys [subject recipients message-type message recipient-type]} :- EmailMessage]
   (email/send-message-or-throw! {:subject      subject
                                  :recipients   recipients
                                  :message-type message-type
                                  :message      message
-                                 :bcc?         (email/bcc-enabled?)}))</pre></td></tr><tr><td class="docs">
+                                 :bcc?         (if recipient-type
+                                                 (= :bcc recipient-type)
+                                                 (email/bcc-enabled?))}))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defmethod channel/render-notification [:channel/email :notification/alert] :- [:sequential EmailMessage]
   [_channel-type {:keys [card pulse payload pulse-channel]} _template recipients]
   (let [condition-kwd             (messages/pulse-&gt;alert-condition-kwd pulse)
@@ -2966,24 +2973,30 @@ net.brehaut.ClojureTools = (function (SH) {
 ------------------------------------------------------------------------------------------------;;</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- notification-recipients-&gt;emails
-  [recipients]
+  [recipients payload]
   (into [] cat (for [recipient recipients
-                     :let [emails (case (:type recipient)
+                     :let [details (:details recipient)
+                           emails (case (:type recipient)
                                     :notification-recipient/user
                                     [(-&gt; recipient :user :email)]
                                     :notification-recipient/group
                                     (-&gt;&gt; recipient :permissions_group :members (map :email))
                                     :notification-recipient/external-email
-                                    [(-&gt; recipient :details :email)])]
+                                    [(:email details)]
+                                    :notification-recipient/template
+                                    [(not-empty (channel.params/substitute-params (:pattern details) payload :ignore-missing? (:is_optional details)))]
+                                    nil)]
+                     :let  [emails (filter some? emails)]
                      :when (seq emails)]
                  emails)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- render-body
   [{:keys [details] :as _template} payload]
   (case (keyword (:type details))
-    :email/resource
+    :email/mustache-resource
     (stencil/render-file (:path details) payload)
-    :email/mustache
-    (stencil/render-string (:body details) payload)))</pre></td></tr><tr><td class="docs">
+    :email/mustache-text
+    (stencil/render-string (:body details) payload)
+    nil))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defmethod channel/render-notification
   [:channel/email :notification/system-event]
   [_channel-type
@@ -2993,9 +3006,10 @@ net.brehaut.ClojureTools = (function (SH) {
   (assert (some? template) &quot;Template is required for system event notifications&quot;)
   (let [payload (:payload notification-info)]
     [(construct-email (channel.params/substitute-params (-&gt; template :details :subject) payload)
-                      (notification-recipients-&gt;emails recipients)
+                      (notification-recipients-&gt;emails recipients payload)
                       [{:type    &quot;text/html; charset=utf-8&quot;
-                        :content (render-body template payload)}])]))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+                        :content (render-body template payload)}]
+                      (-&gt; template :details :recipient-type keyword))]))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
