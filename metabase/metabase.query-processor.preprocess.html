@@ -2901,6 +2901,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.query-processor.middleware.persistence :as qp.persistence]
    [metabase.query-processor.middleware.pre-alias-aggregations :as qp.pre-alias-aggregations]
    [metabase.query-processor.middleware.reconcile-breakout-and-order-by-bucketing :as reconcile-bucketing]
+   [metabase.query-processor.middleware.remove-inactive-field-refs :as qp.remove-inactive-field-refs]
    [metabase.query-processor.middleware.resolve-fields :as qp.resolve-fields]
    [metabase.query-processor.middleware.resolve-joined-fields :as resolve-joined-fields]
    [metabase.query-processor.middleware.resolve-joins :as resolve-joins]
@@ -2934,6 +2935,26 @@ flavor of MBQL it is written for.</p>
                       (not (:lib/type query)) (lib.query/query (qp.store/metadata-provider)))]
           (vary-meta (middleware-fn query)
                      assoc :converted-form query)))
+      (with-meta (meta middleware-fn))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private unconverted-property?
+  (some-fn #{:info} qualified-keyword?))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- copy-unconverted-properties
+  [to from]
+  (reduce-kv (fn [m k v]
+               (cond-&gt; m
+                 (unconverted-property? k) (assoc k v)))
+             to
+             from))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- ensure-pmbql-for-unclean-query
+  [middleware-fn]
+  (-&gt; (fn [query]
+        (mu/disable-enforcement
+          (binding [lib.convert/*clean-query* false]
+            (let [query' (-&gt; (cond-&gt;&gt; query
+                               (not (:lib/type query))
+                               (lib.query/query (qp.store/metadata-provider)))
+                             (copy-unconverted-properties query))]
+              (-&gt; query' middleware-fn -&gt;legacy)))))
       (with-meta (meta middleware-fn))))</pre></td></tr><tr><td class="docs"><p>Pre-processing middleware. Has the form</p>
 
 <p>  (f query) -> query</p>
@@ -2966,6 +2987,7 @@ flavor of MBQL it is written for.</p>
    (ensure-legacy #'resolve-joined-fields/resolve-joined-fields)
    (ensure-legacy #'fix-bad-refs/fix-bad-references)
    (ensure-legacy #'escape-join-aliases/escape-join-aliases)
+   (ensure-pmbql-for-unclean-query #'qp.remove-inactive-field-refs/remove-inactive-field-refs)
    ;; yes, this is called a second time, because we need to handle any joins that got added
    (ensure-legacy #'qp.middleware.enterprise/apply-sandboxing)
    (ensure-legacy #'qp.cumulative-aggregations/rewrite-cumulative-aggregations)

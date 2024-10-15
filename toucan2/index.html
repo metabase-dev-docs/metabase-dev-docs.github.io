@@ -4561,11 +4561,10 @@ this thunk is equivalent to</p>
   (get-object-of-class-thunk rset i java.time.OffsetTime))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- make-column-thunk [conn model ^ResultSet rset i]
   (log/tracef &quot;Building thunk to read column %s&quot; i)
-  (fn column-thunk []
-    (let [rsmeta (.getMetaData rset)
-          thunk  (read-column-thunk conn model rset rsmeta i)
-          v      (thunk)]
-      (next.jdbc.rs/read-column-by-index v rsmeta i))))</pre></td></tr><tr><td class="docs"><p>Given a connection <code>conn</code>, a <code>model</code> and a result set <code>rset</code>, return a function which given a column number <code>i</code> returns
+  (let [rsmeta (.getMetaData rset)
+        thunk (read-column-thunk conn model rset rsmeta i)]
+    (fn column-thunk []
+      (next.jdbc.rs/read-column-by-index (thunk) rsmeta i))))</pre></td></tr><tr><td class="docs"><p>Given a connection <code>conn</code>, a <code>model</code> and a result set <code>rset</code>, return a function which given a column number <code>i</code> returns
 a thunk that retrieves the column value of the current row from the result set.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn ^:no-doc make-i-&gt;thunk
   [conn model rset]
@@ -5019,10 +5018,12 @@ Slack thread for more information: https://clojurians.slack.com/archives/C1Q164V
       transient-row)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- fetch-all-columns! [builder i-&gt;thunk transient-row]
   (log/tracef &quot;Fetching all columns&quot;)
-  (reduce
-   (partial fetch-column! builder i-&gt;thunk)
-   transient-row
-   (range 1 (inc (next.jdbc.rs/column-count builder)))))</pre></td></tr><tr><td class="docs">
+  (let [n (next.jdbc.rs/column-count builder)]
+    (loop [i 1
+           transient-row transient-row]
+      (if (&lt;= i n)
+        (recur (inc i) (fetch-column! builder i-&gt;thunk transient-row i))
+        transient-row))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- make-realized-row-delay [builder i-&gt;thunk ^clojure.lang.Volatile volatile-transient-row]
   (delay
     (log/tracef &quot;Fully realizing row. *fetch-all-columns* = %s&quot; *fetch-all-columns*)
