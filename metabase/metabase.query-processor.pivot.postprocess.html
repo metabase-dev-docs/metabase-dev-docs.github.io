@@ -2874,6 +2874,7 @@ visually in the same way as in the app.</p>
   (:require
    [clojure.math.combinatorics :as math.combo]
    [clojure.set :as set]
+   [metabase.query-processor.streaming.common :as common]
    [metabase.util.malli :as mu]
    [metabase.util.malli.registry :as mr]))</pre></td></tr><tr><td class="docs"><p>I'll do my best to concisely explain what's happening here. Some terms:
  - raw pivot rows -> the rows returned by the above 'pivot query processor machinery'.
@@ -2898,128 +2899,7 @@ Rows whose pivot-grouping values are greater than 0 represent subtotals, and sho
    [:pivot-grouping-key {:optional true}
     [:int {:min 0}]]
    [:pivot-measures {:optional true}
-    [:sequential [:int {:min 0}]]]])</pre></td></tr><tr><td class="docs"><p>Get all possible values for pivot-col/row 'k'.
-<code>rows</code> are the raw pivot rows, <code>idx</code> is the column index to get values from.
-<code>include-nil?</code> controls whether an extra <code>nil</code> value is added to the returned values.
-This extra nil is needed for some combinations later on, but not others, hence the switch.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- all-values-for
-  [rows idx include-nil?]
-  (let [all-vals (distinct (mapv #(get % idx) rows))]
-    (concat (vec (remove nil? all-vals)) (when include-nil? [nil]))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- pivot-row-titles
-  [{:keys [column-titles pivot-rows pivot-cols]} :- ::pivot-spec]
-  (if (seq pivot-rows)
-    (mapv #(get column-titles %) pivot-rows)
-    [(get column-titles (first pivot-cols) )]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- pivot-measure-titles
-  [{:keys [column-titles pivot-measures]} :- ::pivot-spec]
-  (mapv #(get column-titles %) pivot-measures))</pre></td></tr><tr><td class="docs"><p>Construct the export-style pivot headers from the raw pivot rows, according to the indices specified in <code>pivot-spec</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- header-builder
-  [rows {:keys [pivot-cols pivot-measures] :as pivot-spec} :- ::pivot-spec]
-  (let [row-titles                 (pivot-row-titles pivot-spec)
-        measure-titles             (pivot-measure-titles pivot-spec)
-        n-measures                 (count pivot-measures)
-        multiple-measures?         (&lt; 1 n-measures)
-        include-row-totals-header? (seq pivot-cols)
-        ;; For each pivot column, get the possible values for that column
-        ;; Then, get the cartesian product of each for all of the value groups
-        ;; Each group will have (count pivot-cols) entries and the values
-        ;; will be from the columns in the same order as presented in pivot-cols.
-        ;; So, if pivot-cols is [0 1], the first col-value-group will have [first-value-from-first-col first-value-from-second-col]
-        col-value-groups           (apply math.combo/cartesian-product (concat
-                                                                        (map (fn [col-k]
-                                                                               (all-values-for rows col-k false))
-                                                                             pivot-cols)
-                                                                        (when (seq measure-titles)
-                                                                          [measure-titles])))
-        header-indices             (if (or multiple-measures? (not (seq pivot-cols)))
-                                     ;; when there are more than 1 pivot-measures, we need to
-                                     ;; add one more header row that holds the titles of the measure columns
-                                     ;; and we know it's always just one more row, so we can inc the count.
-                                     (range (inc (count pivot-cols)))
-                                     (range (count pivot-cols)))]
-    ;; Each Header (1 header row per pivot-col) will first start with the Pivot Row Titles. There will be (count pivot-rows) entries.
-    ;; Then, Get all of the nth entries in the col-value-gropus for the nth header, and then append &quot;Row Totals&quot; label.
-    (mapv
-     (fn [col-idx]
-       (vec (concat
-             row-titles
-             (map #(nth % col-idx) col-value-groups)
-             (if (and
-                  multiple-measures?
-                  (seq pivot-cols)
-                  (= col-idx (last header-indices)))
-               measure-titles
-               (when include-row-totals-header?
-                 (repeat (max 1 n-measures) &quot;Row totals&quot;))))))
-     header-indices)))</pre></td></tr><tr><td class="docs"><p>Map of raw pivot rows keyed by [pivot-cols]. Use it per row-group.
-This constructs a map where you can use a pivot-cols-value tuple to find the row-builder
-That is, suppose we have 2 pivot-cols, and valid values might be 'AA' and 'BA'. To get the
-raw pivot row where each of those values matches, you can run this function to get <code>m</code> and then
-use <code>(get m ['AA' 'BA'])</code> to get the row.</p>
-
-<p>This is used inside <code>row-grouper</code> on a subset of the total list of raw pivot rows.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- col-grouper
-  [rows {:keys [pivot-cols]} :- ::pivot-spec]
-  (when (seq pivot-cols)
-    (let [cols-groups (group-by (apply juxt (map (fn [k] #(get % k)) pivot-cols)) rows)]
-      cols-groups)))</pre></td></tr><tr><td class="docs"><p>Map of raw pivot rows keyed by [pivot-rows]. The logic for how the map is initially constructed is the same
-as in <code>col-grouper</code>. Then, each map entry value (which is a subset of rows) is updated by running the <code>sub-rows-fn</code> on the subset.
-This sub-rows-fn does the following:
- - group the sub rows with <code>col-grouper</code>
- - create the list of all possible pivot column value combinations and manually concat the 'nils group' too
- - using the <code>cols-groups</code> map, get the <code>padded-sub-rows</code>
- - Now, since we only need the values in the <code>pivot-measures</code> indices, transform the sub-rows by getting just those indices
-Thus, the output of the <code>row-grouper</code> is a nested map allowing you to get a raw pivot row corresponding to any combination
-of pivot-row values and pivot-col values by doing something like this:</p>
-
-<p><code>(get-in m [[row-idx1 row-idx2] [col-idx1 col-idx2]])</code></p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- row-grouper
-  [rows {:keys [pivot-rows pivot-cols pivot-measures] :as pivot-spec} :- ::pivot-spec]
-  (let [rows-groups (if (seq pivot-rows)
-                      (group-by (apply juxt (map (fn [k] #(get % k)) pivot-rows)) rows)
-                      {[nil] rows})
-        sub-rows-fn (fn [sub-rows]
-                      (let [cols-groups     (col-grouper sub-rows pivot-spec)
-                            padded-sub-rows (vec
-                                             (mapcat
-                                              ;; if the particular values combination is not found, we want to pad that with nil
-                                              ;; so that subsequent cells are rendered in the correct place
-                                              ;; in other words, each padded-sub-row must be the same length
-                                              #(get cols-groups (vec %) [nil])
-                                              ;; this is a list of all possible pivot col value combinations. eg. ['AA' 'BA']
-                                              ;; concat the nils so that the [nil nil] combination shows up once, which is
-                                              ;; necessary to include the row totals and grand totals
-                                              (concat
-                                               (apply math.combo/cartesian-product (map #(all-values-for rows % false) pivot-cols))
-                                               [(vec (repeat (count pivot-cols) nil))])))]
-                        (vec (mapcat (fn [row]
-                                       (mapv #(get row %) pivot-measures))
-                                     ;; cols-groups will be nil if there are no pivot columns
-                                     ;; In such a case, we don't need to modify the rows with padding
-                                     ;; we only need to grab the pivot-measures directly
-                                     (if cols-groups
-                                       padded-sub-rows
-                                       (take 1 sub-rows))))))]
-    (-&gt; rows-groups
-        (update-vals sub-rows-fn))))</pre></td></tr><tr><td class="docs"><p>Given a work in progress pivot export row (NOT a raw pivot row), add Totals labels if appropriate.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- totals-row-fn
-  [export-style-row {:keys [pivot-rows]} :- ::pivot-spec]
-  (let [n-row-cols       (count pivot-rows)
-        row-indices      (range n-row-cols)
-        row-vals         (take n-row-cols export-style-row)
-        totals-for-value (fn [idx v]
-                           (if (and ((set row-indices) idx)
-                                    (some? v))
-                             (format &quot;Totals for %s&quot; v)
-                             v))]
-    (cond
-      (every? nil? row-vals)
-      (assoc export-style-row 0 &quot;Grand Totals&quot;)
-      (some nil? row-vals)
-      (vec (map-indexed totals-for-value export-style-row))
-      :else
-      export-style-row)))</pre></td></tr><tr><td class="docs"><p>Get the index into the raw pivot rows for the 'pivot-grouping' column.</p>
+    [:sequential [:int {:min 0}]]]])</pre></td></tr><tr><td class="docs"><p>Get the index into the raw pivot rows for the 'pivot-grouping' column.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn pivot-grouping-key
   [column-titles]
   ;; a vector is kinda sorta a map of indices-&gt;values, so
@@ -3038,39 +2918,174 @@ of pivot-row values and pivot-col values by doing something like this:</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn add-pivot-measures :- ::pivot-spec
   &quot;Given a pivot-spec map without the `:pivot-measures` key, determine what key(s) the measures will be and assoc that value into `:pivot-measures`.&quot;
   [pivot-spec :- ::pivot-spec]
-  (assoc pivot-spec :pivot-measures (pivot-measures pivot-spec)))</pre></td></tr><tr><td class="docs"><p>Construct the export-style pivot rows from the raw pivot rows, according to the indices specified in <code>pivot-spec</code>.</p>
+  (-&gt; pivot-spec
+      (assoc :pivot-measures (pivot-measures pivot-spec))
+      (assoc :pivot-grouping (pivot-grouping-key (:column-titles pivot-spec)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn add-totals-settings :- ::pivot-spec
+  &quot;Given a pivot-spec map and `viz-settings`, add the `:row-totals?` and `:col-totals?` keys.&quot;
+  [pivot-spec :- ::pivot-spec viz-settings]
+  (let [row-totals (if (contains? viz-settings :pivot.show_row_totals)
+                     (:pivot.show_row_totals viz-settings)
+                     true)
+        col-totals (if (contains? viz-settings :pivot.show_column_totals)
+                     (:pivot.show_column_totals viz-settings)
+                     true)]
+    (-&gt; pivot-spec
+        (assoc :row-totals? row-totals)
+        (assoc :col-totals? col-totals))))</pre></td></tr><tr><td class="docs"><p>Initiate the pivot data structure.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn init-pivot
+  [pivot-spec :- ::pivot-spec]
+  (let [{:keys [pivot-rows pivot-cols pivot-measures]} pivot-spec]
+    {:config         pivot-spec
+     :data           {}
+     :row-values     (zipmap pivot-rows (repeat (sorted-set)))
+     :column-values  (zipmap pivot-cols (repeat (sorted-set)))
+     :measure-values (zipmap pivot-measures (repeat (sorted-set)))}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- update-set
+  [m k v]
+  (update m k conj v))</pre></td></tr><tr><td class="docs"><p>Update the given <code>measure-aggregations</code> with <code>new-values</code> using the appropriate function in the <code>agg-fns</code> map.</p>
 
-<p>This function:
- - creates the row-groups map using <code>row-grouper</code>. This already has the nearly complete rows.
- - create the list of pivot row value combinations. We don't need the nils group this time; it would result in
-   a doubling of the Grand totals row
-   We DO want to generate tuples that can have 'nil' (eg. ['CA' nil]) so that Row totals rows will be grabbed from the map too.
- - construct each row by concatenating the row values, since they're the labels for each pivot-row. Handily, the <code>ks</code> are exactly
-   these values, so we can just concat each k to its <code>row-groups</code> entry
- - Run the <code>totals-row-fn</code> to add the Row totals and Grand totals labels in the right spots.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- row-builder
-  [rows {:keys [pivot-rows] :as pivot-spec} :- ::pivot-spec]
-  (let [row-groups (row-grouper rows pivot-spec)
-        ks         (if (seq pivot-rows)
-                     (mapv vec (concat
-                                (apply math.combo/cartesian-product (map #(all-values-for rows % true) pivot-rows))))
-                     [[nil]])]
-    (-&gt;&gt; (map (fn [k] (vec (concat k (get row-groups k)))) ks)
-         (filter #(&lt; (count pivot-rows) (count %)))
-         (map #(totals-row-fn % pivot-spec)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- clean-row
-  [row]
-  (mapv #(if (=  %)
-           nil
-           %)
-        row))</pre></td></tr><tr><td class="docs"><p>Create the rows for a pivot export from raw pivot rows <code>rows</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn pivot-builder
-  [rows pivot-spec :- ::pivot-spec]
-  (let [rows       (mapv clean-row rows)
-        pivot-spec (add-pivot-measures pivot-spec)]
-    (vec (concat
-          (header-builder rows pivot-spec)
-          (row-builder rows pivot-spec)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+<p>Measure aggregations is a map whose keys are each pivot-measure; often just 1 key, but could be several depending on how the user has set up their measures.
+<code>new-values</code> are the values being added and have the same keys as <code>measure-aggregations</code>.
+<code>agg-fns</code> is also a map of the measure keys indicating the type of aggregation.
+For now (2024-09-10), agg-fn is <code>+</code>, which actually works fine for every aggregation type in our implementation. This is because the pivot qp
+returns rows that have already done the aggregation set by the user in the query (eg. count or sum, or whatever), so the post-processing done here
+will always work. For each 'cell', there will only ever be 1 value per measure (the already-aggregated value from the qp).</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- update-aggregate
+  [measure-aggregations new-values agg-fns]
+  (into {}
+        (map
+         (fn [[measure-key agg]]
+           (let [agg-fn (get agg-fns measure-key +) ; default aggregation is just summation
+                 new-v  (get new-values measure-key)]
+             [measure-key (if new-v
+                            (agg-fn agg new-v)
+                            agg)])))
+        measure-aggregations))</pre></td></tr><tr><td class="docs"><p>Aggregate the given <code>row</code> into the <code>pivot</code> datastructure.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn add-row
+  [pivot row]
+  (let [{:keys [pivot-rows
+                pivot-cols
+                pivot-measures
+                measures]} (:config pivot)
+        row-path           (mapv row pivot-rows)
+        col-path           (mapv row pivot-cols)
+        measure-vals       (select-keys row pivot-measures)
+        total-fn           (fn [m path]
+                             (if (seq path)
+                               (update-in m path
+                                          #(update-aggregate (or % (zipmap pivot-measures (repeat 0))) measure-vals measures))
+                               m))]
+    (-&gt; pivot
+        (update :row-count (fn [v] (if v (inc v) 0)))
+        (update :data update-in (concat row-path col-path)
+                #(update-aggregate (or % (zipmap pivot-measures (repeat 0))) measure-vals measures))
+        (update :totals (fn [totals]
+                          (-&gt; totals
+                              (total-fn [:grand-total])
+                              (total-fn row-path)
+                              (total-fn col-path)
+                              (total-fn [:section-totals (first row-path)])
+                              (total-fn (concat [:column-totals (first row-path)] col-path)))))
+        (update :row-values #(reduce-kv update-set % (select-keys row pivot-rows)))
+        (update :column-values #(reduce-kv update-set % (select-keys row pivot-cols))))))</pre></td></tr><tr><td class="docs"><p>Format a value using the provided formatter or identity function.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- fmt
+  [formatter value]
+  ((or formatter identity) (common/format-value value)))</pre></td></tr><tr><td class="docs"><p>Build multi-level column headers.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- build-column-headers
+  [{:keys [pivot-cols pivot-measures column-titles row-totals?]} col-combos col-formatters]
+  (concat
+   (if (= 1 (count pivot-measures))
+     (mapv (fn [col-combo] (mapv fmt col-formatters col-combo)) col-combos)
+     (for [col-combo col-combos
+           measure-key pivot-measures]
+       (conj
+        (mapv fmt col-formatters col-combo)
+        (get column-titles measure-key))))
+   (repeat (count pivot-measures)
+           (concat
+            (when (and row-totals? (seq pivot-cols)) [&quot;Row totals&quot;])
+            (repeat (dec (count pivot-cols)) nil)
+            (when (and (seq pivot-cols) (&gt; (count pivot-measures) 1)) [nil])))))</pre></td></tr><tr><td class="docs"><p>Combine row keys with column headers.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- build-headers
+  [column-headers {:keys [pivot-cols pivot-rows column-titles]}]
+  (map (fn [h]
+         (if (and (seq pivot-cols) (not (seq pivot-rows)))
+           (concat (map #(get column-titles %) pivot-cols) h)
+           (concat (map #(get column-titles %) pivot-rows) h)))
+       (let [hs (filter seq column-headers)]
+         (when (seq hs)
+           (apply map vector hs)))))</pre></td></tr><tr><td class="docs"><p>Build a single row of the pivot table.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- build-row
+  [row-combo col-combos pivot-measures data totals row-totals? ordered-formatters row-formatters]
+  (let [row-path row-combo]
+    (concat
+     (when-not (seq row-formatters) (repeat (count pivot-measures) nil))
+     (mapv fmt row-formatters row-combo)
+     (concat
+      (for [col-combo col-combos
+            measure-key pivot-measures]
+        (fmt (get ordered-formatters measure-key)
+             (get-in data (concat row-path col-combo [measure-key]))))
+      (when row-totals?
+        (for [measure-key pivot-measures]
+          (fmt (get ordered-formatters measure-key)
+               (get-in totals (concat row-path [measure-key])))))))))</pre></td></tr><tr><td class="docs"><p>Build column totals for a section.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- build-column-totals
+  [section col-combos pivot-measures totals row-totals? ordered-formatters pivot-rows]
+  (concat
+   (cons (format &quot;Totals for %s&quot; (fmt (get ordered-formatters (first pivot-rows)) section))
+         (repeat (dec (count pivot-rows)) nil))
+   (for [col-combo col-combos
+         measure-key pivot-measures]
+     (fmt (get ordered-formatters measure-key)
+          (get-in totals (concat
+                          [:column-totals section]
+                          col-combo
+                          [measure-key]))))
+   (when row-totals?
+     (for [measure-key pivot-measures]
+       (fmt (get ordered-formatters measure-key)
+            (get-in totals [:section-totals section measure-key]))))))</pre></td></tr><tr><td class="docs"><p>Build grand totals row.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- build-grand-totals
+  [{:keys [pivot-cols pivot-rows pivot-measures]} col-combos totals row-totals? ordered-formatters]
+  (concat
+   (if (and (seq pivot-cols) (not (seq pivot-rows)))
+     (cons &quot;Grand totals&quot; (repeat (dec (count pivot-cols)) nil))
+     (cons &quot;Grand totals&quot; (repeat (dec (count pivot-rows)) nil)))
+   (when row-totals?
+     (for [col-combo col-combos
+           measure-key pivot-measures]
+       (fmt (get ordered-formatters measure-key)
+            (get-in totals (concat col-combo [measure-key])))))
+   (for [measure-key pivot-measures]
+     (fmt (get ordered-formatters measure-key)
+          (get-in totals [:grand-total measure-key])))))</pre></td></tr><tr><td class="docs"><p>Arrange and format the aggregated <code>pivot</code> data.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn build-pivot-output
+  [pivot ordered-formatters]
+  (let [{:keys [config data totals row-values column-values]} pivot
+        {:keys [pivot-rows pivot-cols pivot-measures column-titles row-totals? col-totals?]} config
+        row-formatters (mapv #(get ordered-formatters %) pivot-rows)
+        col-formatters (mapv #(get ordered-formatters %) pivot-cols)
+        row-combos (apply math.combo/cartesian-product (map row-values pivot-rows))
+        col-combos (apply math.combo/cartesian-product (map column-values pivot-cols))
+        row-totals? (and row-totals? (boolean (seq pivot-cols)))
+        column-headers (build-column-headers config col-combos col-formatters)
+        headers (or (seq (build-headers column-headers config))
+                    [(concat
+                      (map #(get column-titles %) pivot-rows)
+                      (map #(get column-titles %) pivot-measures))])]
+    (concat
+     headers
+     (apply concat
+            (for [section-row-combos (sort-by ffirst (vals (group-by first row-combos)))]
+              (concat
+               (for [row-combo (sort-by first section-row-combos)]
+                 (build-row row-combo col-combos pivot-measures data totals row-totals? ordered-formatters row-formatters))
+               (when (and col-totals? (&gt; (count pivot-rows) 1))
+                 [(build-column-totals (ffirst section-row-combos) col-combos pivot-measures totals row-totals? ordered-formatters pivot-rows)]))))
+     (when col-totals?
+       [(build-grand-totals config col-combos totals row-totals? ordered-formatters)]))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
