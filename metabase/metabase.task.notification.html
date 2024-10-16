@@ -2865,645 +2865,109 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.api.common" name="metabase.api.common"><h1 class="project-name">metabase.api.common</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><h1>API Endpoints at Metabase</h1>
-
-<p>We use a custom macro called <code>defendpoint</code> for defining all endpoints. It's best illustrated with an example:</p>
-
-<pre><code>
-(ns metabase.api.dashboard ...)
-
-(api/defendpoint GET "/"
- "Get `Dashboards`. With filter option `f`..."
- [f]
- {f [:maybe [:enum "all" "mine" "archived"]]}
- (let ...))
-
- ; ...
-
-(api/define-routes)
-</code></pre>
-
-<p>As you can see, the arguments are:</p>
-
-<ul>
-<li><strong>The HTTP verb.</strong>  (<code>GET</code>, <code>PUT</code>, <code>POST</code>, etc)</li>
-<li><strong>The route.</strong> This will automatically have <code>api</code> and the namespace prefixed to it, so in this case <code>"/"</code> is defining
-the route for <code>/api/dashboard/</code>.</li>
-<li><strong>A docstring.</strong> Apart from being helpful to us, this is used for API documentation for third-party devs, so please
-be thorough!</li>
-<li><strong>A schema.</strong> This uses <a href="https://github.com/metosin/malli#vector-syntax">Malli's vector syntax</a>. This is documented
-on Malli's page, of course, but we also have some of our own schemas defined. Start by looking in
-<a href="#metabase.util.malli.schema"><code>metabase.util.malli.schema</code></a></li>
-<li><strong>The parameters.</strong> This uses Compojure's
-<a href="https://github.com/weavejester/compojure/wiki/Destructuring-Syntax">destructuring syntax</a> (a superset of Clojure's
-normal destructuring syntax).</li>
-<li><strong>The actual code for the endpoint.</strong> The returned value could be one of several types. The Right Thing (such as
-converting to JSON or setting an appropriate status code) usually happens by default. Consult
-<a href="https://github.com/weavejester/compojure/blob/master/src/compojure/response.clj">Compojure's documentation</a>,
-but it may be more instructive to look at examples in our codebase.</li>
-</ul>
-
- <hr />
-
-<h2>How does defendpoint coersion work?</h2>
-
-<p>The <code>defendpoint</code> macro uses the <code>auto-coerce</code> function to generate a let code which binds args to their decoded
-values. Values are decoded by their corresponding malli schema. n.b.: Only symbols in the arg->schema map will be
-coerced; additional aliases (eg. after the :as key) will not automatically be coerced.</p>
-
-<p>The exact coersion function [[mc/decode]], and uses the [[metabase.api.common.internal/defendpoint-transformer]],
-and gets called with the schema, value, and transformer. see: https://github.com/metosin/malli#value-transformation</p>
-
-<h3>Here's an example repl session showing how it works:</h3>
-
-<pre><code>
-(require '[malli.core :as mc] '[malli.error :as me] '[malli.util :as mut] '[metabase.util.malli :as mu]
-         '[metabase.util.malli.describe :as umd] '[malli.provider :as mp] '[malli.generator :as mg]
-         '[malli.transform :as mtx] '[metabase.api.common.internal :refer [defendpoint-transformer]])
-</code></pre>
-
-<p>To see how a schema will be transformed, call <code>mc/decode</code> with <code>defendpoint-transformer</code>.</p>
-
-<p>With the <code>:keyword</code> schema:</p>
-
-<pre><code>
-(mc/decode :keyword "foo/bar" defendpoint-transformer)
- => :foo/bar
-</code></pre>
-
-<p>The schemas can get quite complex, ( see: https://github.com/metosin/malli#advanced-transformations ) so it's best
-to test them out in the REPL to see how they'll be transformed.</p>
-
-<p>Example:</p>
-
-<pre><code>
-(def DecodableKwInt
-  [:int {:decode/string (fn kw-int->int-decoder [kw-int]
-                          (if (int? kw-int) kw-int (parse-long (name kw-int))))}])
-
-(mc/decode DecodableKwInt :123 defendpoint-transformer)
- => 123
-</code></pre>
-
-<hr />
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Dynamic variables and utility functions/macros for writing API functions.</p>
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.api.common
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.task.notification" name="metabase.task.notification"><h1 class="project-name">metabase.task.notification</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.task.notification
   (:require
-   [clojure.set :as set]
-   [clojure.spec.alpha :as s]
-   [clojure.string :as str]
-   [clojure.tools.macro :as macro]
-   [compojure.core :as compojure]
-   [medley.core :as m]
-   [metabase.api.common.internal
-    :refer [add-route-param-schema
-            auto-coerce
-            route-dox
-            route-fn-name
-            validate-params
-            wrap-response-if-needed]]
-   [metabase.api.common.openapi :as openapi]
-   [metabase.config :as config]
-   [metabase.events :as events]
-   [metabase.models.interface :as mi]
-   [metabase.util :as u]
-   [metabase.util.i18n :as i18n :refer [deferred-tru tru]]
+   [clojurewerkz.quartzite.conversion :as qc]
+   [clojurewerkz.quartzite.jobs :as jobs]
+   [clojurewerkz.quartzite.schedule.cron :as cron]
+   [clojurewerkz.quartzite.triggers :as triggers]
+   [metabase.driver :as driver]
+   [metabase.models.task-history :as task-history]
+   [metabase.notification.core :as notification]
+   [metabase.query-processor.timezone :as qp.timezone]
+   [metabase.task :as task]
    [metabase.util.log :as log]
-   [metabase.util.malli :as mu]
-   [metabase.util.malli.schema :as ms]
-   [potemkin :as p]
-   [ring.middleware.multipart-params :as mp]
-   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(declare check-403 check-404)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(p/import-vars [openapi openapi-object])</pre></td></tr><tr><td class="docs"><p>----------------------------------------------- DYNAMIC VARIABLES ------------------------------------------------
-These get bound by middleware for each HTTP request.</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Int ID or <code>nil</code> of user associated with current API call.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic ^Integer *current-user-id*
-  nil)</pre></td></tr><tr><td class="docs"><p>Delay that returns the <code>User</code> (or nil) associated with the current API call.
- ex. <code>@*current-user*</code></p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *current-user*
-  (atom nil)) ; default binding is just something that will return nil when dereferenced</pre></td></tr><tr><td class="docs"><p>Is the current user a superuser?</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic ^Boolean *is-superuser?*
-  false)</pre></td></tr><tr><td class="docs"><p>Is the current user a group manager of at least one group?</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic ^Boolean *is-group-manager?*
-  false)</pre></td></tr><tr><td class="docs"><p>Delay to the set of permissions granted to the current user. See documentation in [[metabase.models.permissions]] for
-more information about the Metabase permissions system.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *current-user-permissions-set*
-  (atom #{}))</pre></td></tr><tr><td class="docs"><p>---------------------------------------- Precondition checking helper fns ----------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- check-one [condition code message]
-  (when-not condition
-    (let [[message info] (if (and (map? message)
-                                  (not (i18n/localized-string? message)))
-                           [(:message message) message]
-                           [message])]
-      (throw (ex-info (str message) (assoc info :status-code code)))))
-  condition)</pre></td></tr><tr><td class="docs"><p>Assertion mechanism for use inside API functions.
-Checks that <code>test</code> is true, or throws an <code>ExceptionInfo</code> with <code>status-code</code> and <code>message</code>.</p>
-
-<p><code>message</code> can be either a plain string error message, or a map including the key <code>:message</code> and any additional
-details, such as an <code>:error_code</code>.</p>
-
-<p>This exception is automatically caught in the body of <code>defendpoint</code> functions, and the appropriate HTTP response is
-generated.</p>
-
-<p><code>check</code> can be called with the form</p>
-
-<pre><code>(check test code message)
-</code></pre>
-
-<p>or with the form</p>
-
-<pre><code>(check test [code message])
-</code></pre>
-
-<p>You can also include multiple tests in a single call:</p>
-
-<p>  (check test1 code1 message1
-         test2 code2 message2)</p>
-</td><td class="codes"><pre class="brush: clojure">(defn check
-  {:style/indent [:form], :arglists '([condition [code message] &amp; more] [condition code message &amp; more])}
-  [condition &amp; args]
-  (let [[code message &amp; more] (if (sequential? (first args))
-                                (concat (first args) (rest args))
-                                args)]
-    (check-one condition code message)
-    (if (seq more)
-      (recur (first more) (rest more))
-      condition)))</pre></td></tr><tr><td class="docs"><p>Check that object with ID (or other key/values) exists in the DB, or throw a 404.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn check-exists?
-  ([entity id]
-   (check-exists? entity :id id))
-  ([entity k v &amp; more]
-   (check-404 (apply t2/exists? entity k v more))))</pre></td></tr><tr><td class="docs"><p>Check that <code>*current-user*</code> is a superuser or throw a 403. This doesn't require a DB call.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn check-superuser
+   [toucan2.core :as t2])
+  (:import
+   (java.util TimeZone)
+   (org.quartz CronTrigger TriggerKey)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private send-notification-job-key (jobs/key &quot;metabase.task.notification.send.job&quot;))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- send-notification-timezone
   []
-  (check-403 *is-superuser?*))</pre></td></tr><tr><td class="docs"><p>checkp- functions: as in "check param". These functions expect that you pass a symbol so they can throw exceptions
-w/ relevant error messages.</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Throw an <code>ExceptionInfo</code> that contains information about an invalid API params in the expected format.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn throw-invalid-param-exception
-  [field-name message]
-  (throw (ex-info (tru &quot;Invalid field: {0}&quot; field-name)
-                  {:status-code 400
-                   :errors      {(keyword field-name) message}})))</pre></td></tr><tr><td class="docs"><p>Assertion mechanism for use inside API functions that validates individual input params.
-Checks that <code>test</code> is true, or throws an <code>ExceptionInfo</code> with <code>field-name</code> and <code>message</code>.</p>
-
-<p>This exception is automatically caught in the body of <code>defendpoint</code> functions, and the appropriate HTTP response is
-generated.</p>
-
-<p><code>checkp</code> can be called with the form</p>
-
-<pre><code>(checkp test field-name message)
-</code></pre>
-</td><td class="codes"><pre class="brush: clojure">(defn checkp
-  [tst field-name message]
-  (when-not tst
-    (throw-invalid-param-exception (str field-name) message)))</pre></td></tr><tr><td class="docs"><p>---------------------------------------------- api-let, api->, etc. ----------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>The following all work exactly like the corresponding Clojure versions
-but take an additional arg at the beginning called RESPONSE-PAIR.
-RESPONSE-PAIR is of the form <code>[status-code message]</code>.
-ex.</p>
-
-<pre><code>(let [binding x] ...) -&gt; (api-let [500 \"Not OK!\"] [binding x] ...)
-</code></pre>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>If <code>test</code> is true, bind it to <code>binding</code> and evaluate <code>body</code>. Intended for internal use only by macros such as
-<code>let-400</code> below.</p>
-
-<p>  (api-let [404 "Not found."] [user @<em>current-user</em>]
-    (:id user))</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro do-api-let
-  [response-pair bindings &amp; body]
-  ;; so `response-pair` doesn't get evaluated more than once
-  (let [response-pair-symb (gensym &quot;response-pair-&quot;)]
-    `(let [~response-pair-symb ~response-pair
-           ~@(vec (apply concat (for [[binding test] (partition-all 2 bindings)]
-                                  [binding `(check ~test ~response-pair-symb)])))]
-       ~@body)))</pre></td></tr><tr><td class="docs"><h3>GENERIC RESPONSE HELPERS</h3>
-
-<p>These are basically the same as the <code>api-</code> versions but with RESPONSE-PAIR already bound</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><h4>GENERIC 400 RESPONSE HELPERS</h4>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private generic-400
-  [400 (deferred-tru &quot;Invalid Request.&quot;)])</pre></td></tr><tr><td class="docs"><p>Throw a <code>400</code> if <code>arg</code> is <code>false</code> or <code>nil</code>, otherwise return as-is.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn check-400
-  [arg]
-  (check arg generic-400))</pre></td></tr><tr><td class="docs"><h4>GENERIC 404 RESPONSE HELPERS</h4>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private generic-404
-  [404 (deferred-tru &quot;Not found.&quot;)])</pre></td></tr><tr><td class="docs"><p>Throw a <code>404</code> if <code>arg</code> is <code>false</code> or <code>nil</code>, otherwise return as-is.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn check-404
-  [arg]
-  (check arg generic-404))</pre></td></tr><tr><td class="docs"><p>Bind a form as with <code>let</code>; throw a 404 if it is <code>nil</code> or <code>false</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro let-404
-  {:style/indent 1}
-  [bindings &amp; body]
-  `(do-api-let ~generic-404 ~bindings ~@body))</pre></td></tr><tr><td class="docs"><h4>GENERIC 403 RESPONSE HELPERS</h4>
-
-<p>If you can't be bothered to write a custom error message</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- generic-403 []
-  [403 (tru &quot;You don''t have permissions to do that.&quot;)])</pre></td></tr><tr><td class="docs"><p>Throw a <code>403</code> (no permissions) if <code>arg</code> is <code>false</code> or <code>nil</code>, otherwise return as-is.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn check-403
-  [arg]
-  (check arg (generic-403)))</pre></td></tr><tr><td class="docs"><p>Throw a generic 403 (no permissions) error response.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn throw-403
-  ([]
-   (throw-403 nil))
-  ([e]
-   (throw (ex-info (tru &quot;You don''t have permissions to do that.&quot;) {:status-code 403} e))))</pre></td></tr><tr><td class="docs"><h4>GENERIC 500 RESPONSE HELPERS</h4>
-
-<p>For when you don't feel like writing something useful</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private generic-500
-  [500 (deferred-tru &quot;Internal server error.&quot;)])</pre></td></tr><tr><td class="docs"><p>Throw a <code>500</code> if <code>arg</code> is <code>false</code> or <code>nil</code>, otherwise return as-is.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn check-500
-  [arg]
-  (check arg generic-500))</pre></td></tr><tr><td class="docs"><p>A 'No Content' response for <code>DELETE</code> endpoints to return.</p>
-</td><td class="codes"><pre class="brush: clojure">(def generic-204-no-content
-  {:status 204, :body nil})</pre></td></tr><tr><td class="docs"><p>--------------------------------------- DEFENDPOINT AND RELATED FUNCTIONS ----------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/def ::defendpoint-args
-  (s/cat
-   :method      symbol?
-   :route       (some-fn string? sequential?)
-   :docstr      (s/? string?)
-   :args        vector?
-   :arg-&gt;schema (s/? (s/map-of symbol? any?)) ;; any? is either a plumatic or malli schema
-   :body        (s/* any?)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- parse-defendpoint-args [args]
-  (let [parsed (s/conform ::defendpoint-args args)]
-    (when (= parsed ::s/invalid)
-      (throw (ex-info (str &quot;Invalid defendpoint args: &quot; (s/explain-str ::defendpoint-args args))
-                      (s/explain-data ::defendpoint-args args))))
-    (let [{:keys [method route docstr args arg-&gt;schema body]} parsed
-          fn-name                                             (route-fn-name method route)
-          route                                               (add-route-param-schema arg-&gt;schema route)
-          ;; eval the vals in arg-&gt;schema to make sure the actual schemas are resolved so we can document
-          ;; their API error messages
-          route-doc                                           (route-dox method route docstr args
-                                                                         (m/map-vals #_{:clj-kondo/ignore [:discouraged-var]} eval arg-&gt;schema)
-                                                                         body)]
-      ;; Don't i18n this, it's dev-facing only
-      (when-not docstr
-        (log/warn (u/format-color 'red &quot;Warning: endpoint %s/%s does not have a docstring. Go add one.&quot;
-                                  (ns-name *ns*) fn-name)))
-      (assoc parsed :fn-name fn-name, :route route, :route-doc route-doc, :docstr docstr))))</pre></td></tr><tr><td class="docs"><p>Log a warning if the request body contains any parameters not included in <code>expected-params</code> (which is presumably
-populated by the defendpoint schema)</p>
-</td><td class="codes"><pre class="brush: clojure">(defn validate-param-values
-  [{method :request-method uri :uri body :body} expected-params]
-  (when (and (not config/is-prod?)
-             (map? body))
-    (let [extraneous-params (set/difference (set (keys body))
-                                            (set expected-params))]
-      (when (seq extraneous-params)
-        (log/warnf &quot;Unexpected parameters at %s: %s\nPlease add them to the schema or remove them from the API client&quot;
-                   [method uri] (vec extraneous-params))))))</pre></td></tr><tr><td class="docs"><p>Convert Compojure-style HTTP method symbols (PUT, POST, etc.) to the keywords used internally by
-Compojure (:put, :post, ...)</p>
-</td><td class="codes"><pre class="brush: clojure">(defn method-symbol-&gt;keyword
-  [method-symbol]
-  (-&gt; method-symbol
-      name
-      u/lower-case-en
-      keyword))</pre></td></tr><tr><td class="docs"><p>Impl macro for [[defendpoint]]; don't use this directly.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro defendpoint*
-  [{:keys [method route fn-name route-doc docstr args body arg-&gt;schema]}]
-  {:pre [(or (string? route) (vector? route))]}
-  (let [method-kw       (method-symbol-&gt;keyword method)
-        allowed-params  (mapv keyword (keys arg-&gt;schema))
-        prep-route      #'compojure/prepare-route
-        multipart?      (get (meta method) :multipart false)
-        handler-wrapper (if multipart? mp/wrap-multipart-params identity)
-        schema          (into [:map] (for [[k v] arg-&gt;schema]
-                                       [(keyword k) v]))
-        quoted-args     (list 'quote args)]
-    `(def ~(vary-meta fn-name
-                      merge
-                      {:doc          route-doc
-                       :orig-doc     docstr
-                       :method       method-kw
-                       :path         route
-                       :schema       schema
-                       :args         quoted-args
-                       :is-endpoint? true}
-                      (meta method))
-       ;; The next form is a copy of `compojure/compile-route`, with the sole addition of the call to
-       ;; `validate-param-values`. This is because to validate the request body we need to intercept the request
-       ;; before the destructuring takes place. I.e., we need to validate the value of `(:body request#)`, and that's
-       ;; not available if we called `compile-route` ourselves.
-       (compojure/make-route
-        ~method-kw
-        ~(prep-route route)
-        (~handler-wrapper
-         (fn [request#]
-           (validate-param-values request# (quote ~allowed-params))
-           (compojure/let-request [~args request#]
-                                  ~@body)))))))</pre></td></tr><tr><td class="docs"><p>Define an API function.
- This automatically does several things:</p>
-
-<ul>
-<li><p>converts <code>route</code> from a simple form like <code>"/:id"</code> to a regex-typed one like <code>["/:id" :id #"[0-9]+"]</code> based
-on its malli schema</p></li>
-<li><p>sequentially applies specified annotation functions on args to validate them.</p></li>
-<li><p>automatically calls <code>wrap-response-if-needed</code> on the result of <code>body</code></p></li>
-<li><p>tags function's metadata in a way that subsequent calls to <code>define-routes</code> (see below) will automatically include
-the function in the generated <code>defroutes</code> form.</p></li>
-<li><p>Generates a super-sophisticated Markdown-formatted docstring</p></li>
-</ul>
-</td><td class="codes"><pre class="brush: clojure">(defmacro defendpoint
-  {:arglists '([method route docstr? args schemas-map? &amp; body])}
-  [&amp; defendpoint-args]
-  (let [{:keys [args body arg-&gt;schema], :as defendpoint-args} (parse-defendpoint-args defendpoint-args)]
-    `(defendpoint* ~(assoc defendpoint-args
-                           :body `((auto-coerce ~args ~arg-&gt;schema
-                                                ~@(validate-params arg-&gt;schema)
-                                                (wrap-response-if-needed
-                                                 (do ~@body))))))))</pre></td></tr><tr><td class="docs"><p>Like <code>defendpoint</code>, but generates an endpoint that accepts the usual <code>[request respond raise]</code> params.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro defendpoint-async
-  {:arglists '([method route docstr? args schemas-map? &amp; body])}
-  [&amp; defendpoint-args]
-  (let [{:keys [args body arg-&gt;schema], :as defendpoint-args} (parse-defendpoint-args defendpoint-args)]
-    `(defendpoint* ~(assoc defendpoint-args
-                           :args []
-                           :body `((fn ~args
-                                     ~@(validate-params arg-&gt;schema)
-                                     ~@body))))))</pre></td></tr><tr><td class="docs"><p>Return a sequence of all API endpoint functions defined by <code>defendpoint</code> in a namespace.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- namespace-&gt;api-route-fns
-  [nmspace]
-  (for [[_symb varr] (ns-publics nmspace)
-        :when       (:is-endpoint? (meta varr))]
-    varr))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- api-routes-docstring [nmspace route-fns middleware]
-  (str
-   (format &quot;Ring routes for %s:\n%s&quot;
-           (-&gt; (ns-name nmspace)
-               (str/replace #&quot;^metabase\.&quot; )
-               (str/replace #&quot;\.&quot; &quot;/&quot;))
-           (u/pprint-to-str route-fns))
-   (when (seq middleware)
-     (str &quot;\nMiddleware applied to all endpoints in this namespace:\n&quot;
-          (u/pprint-to-str middleware)))))</pre></td></tr><tr><td class="docs"><p>Create a <code>(defroutes routes ...)</code> form that automatically includes all functions created with <code>defendpoint</code> in the
-current namespace. Optionally specify middleware that will apply to all of the endpoints in the current namespace.</p>
-
-<p>  (api/define-routes api/+check-superuser) ; all API endpoints in this namespace will require superuser access</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro define-routes
-  {:style/indent 0}
-  [&amp; middleware]
-  (let [api-route-fns (vec (namespace-&gt;api-route-fns *ns*))
-        routes        `(with-meta (compojure/routes ~@api-route-fns) {:routes ~api-route-fns})
-        docstring     (str &quot;Routes for &quot; *ns*)]
-    `(def ~(vary-meta 'routes assoc
-                      :doc    (api-routes-docstring *ns* api-route-fns middleware)
-                      :routes api-route-fns)
-       ~docstring
-       ~(if (seq middleware)
-          `(-&gt; ~routes ~@middleware)
-          routes))))</pre></td></tr><tr><td class="docs"><p>Replacement for <code>compojure.core/context</code>, but with metadata</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro context
-  [path args &amp; routes]
-  `(with-meta (compojure/context ~path ~args ~@routes) {:routes (vector ~@routes)
-                                                        :path   ~path}))</pre></td></tr><tr><td class="docs"><p>Replacement for `compojure.core/defroutes, but with metadata</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro defroutes
-  [name &amp; routes]
-  (let [[name routes] (macro/name-with-attributes name routes)
-        name          (vary-meta name assoc :routes (vec routes))]
-    `(def ~name (compojure/routes ~@routes))))</pre></td></tr><tr><td class="docs"><p>Wrap a Ring handler to make sure the current user is a superuser before handling any requests.</p>
-
-<p>  (api/+check-superuser routes)</p>
-</td><td class="codes"><pre class="brush: clojure">(defn +check-superuser
-  [handler]
-  (with-meta
-   (fn
-     ([request]
-      (check-superuser)
-      (handler request))
-     ([request respond raise]
-      (if-let [e (try
-                   (check-superuser)
-                   nil
-                   (catch Throwable e
-                     e))]
-        (raise e)
-        (handler request respond raise))))
-   (meta handler)))</pre></td></tr><tr><td class="docs"><p>---------------------------------------- PERMISSIONS CHECKING HELPER FNS -----------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Check whether we can read an existing <code>obj</code>, or <code>entity</code> with <code>id</code>. If the object doesn't exist, throw a 404; if we
-don't have proper permissions, throw a 403. This will fetch the object if it was not already fetched, and returns
-<code>obj</code> if the check is successful.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn read-check
-  ([obj]
-   (check-404 obj)
-   (try
-     (check-403 (mi/can-read? obj))
-     (catch clojure.lang.ExceptionInfo e
-       (events/publish-event! :event/read-permission-failure {:user-id    *current-user-id*
-                                                              :object     obj
-                                                              :has-access false})
-       (throw e)))
-   obj)
-  ([entity id]
-   (read-check (t2/select-one entity :id id)))
-  ([entity id &amp; other-conditions]
-   (read-check (apply t2/select-one entity :id id other-conditions))))</pre></td></tr><tr><td class="docs"><p>Check whether we can write an existing <code>obj</code>, or <code>entity</code> with <code>id</code>. If the object doesn't exist, throw a 404; if we
-don't have proper permissions, throw a 403. This will fetch the object if it was not already fetched, and returns
-<code>obj</code> if the check is successful.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn write-check
-  ([obj]
-   (check-404 obj)
-   (try
-     (check-403 (mi/can-write? obj))
-     (catch clojure.lang.ExceptionInfo e
-       (events/publish-event! :event/write-permission-failure {:user-id *current-user-id*
-                                                               :object obj})
-       (throw e)))
-   obj)
-  ([entity id]
-   (write-check (t2/select-one entity :id id)))
-  ([entity id &amp; other-conditions]
-   (write-check (apply t2/select-one entity :id id other-conditions))))</pre></td></tr><tr><td class="docs"><p>NEW! Check whether the current user has permissions to CREATE a new instance of an object with properties in map <code>m</code>.</p>
-
-<p>This function was added <em>years</em> after <code>read-check</code> and <code>write-check</code>, and at the time of this writing most models do
-not implement this method. Most <code>POST</code> API endpoints instead have the <code>can-create?</code> logic for a given model
-hardcoded into them -- this should be considered an antipattern and be refactored out going forward.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn create-check
-  {:added &quot;0.32.0&quot;}
-  [entity m]
-  (try
-    (check-403 (mi/can-create? entity m))
-    (catch clojure.lang.ExceptionInfo e
-      (events/publish-event! :event/create-permission-failure {:model entity
-                                                               :user-id *current-user-id*})
-      (throw e))))</pre></td></tr><tr><td class="docs"><p>NEW! Check whether the current user has permissions to UPDATE an object by applying a map of <code>changes</code>.</p>
-
-<p>This function was added <em>years</em> after <code>read-check</code> and <code>write-check</code>, and at the time of this writing most models do
-not implement this method. Most <code>PUT</code> API endpoints instead have the <code>can-update?</code> logic for a given model hardcoded
-into them -- this should be considered an antipattern and be refactored out going forward.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn update-check
-  {:added &quot;0.36.0&quot;}
-  [instance changes]
-  (try
-    (check-403 (mi/can-update? instance changes))
-    (catch clojure.lang.ExceptionInfo e
-      (events/publish-event! :event/update-permission-failure {:user-id *current-user-id*
-                                                               :object instance})
-      (throw e))))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------ OTHER HELPER FNS ------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Check that the <code>object</code> exists and is not <code>:archived</code>, or throw a <code>404</code>. Returns <code>object</code> as-is if check passes.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn check-not-archived
-  [object]
-  (u/prog1 object
-    (check-404 object)
-    (check (not (:archived object))
-           [404 {:message (tru &quot;The object has been archived.&quot;), :error_code &quot;archived&quot;}])))</pre></td></tr><tr><td class="docs"><p>Check on paginated stuff that, if the limit exists, the offset exists, and vice versa.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn check-valid-page-params
-  [limit offset]
-  (check (not (and limit (not offset))) [400 (tru &quot;When including a limit, an offset must also be included.&quot;)])
-  (check (not (and offset (not limit))) [400 (tru &quot;When including an offset, a limit must also be included.&quot;)]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn column-will-change? :- :boolean
-  &quot;Helper for PATCH-style operations to see if a column is set to change when `object-updates` (i.e., the input to the
-  endpoint) is applied.
-    ;; assuming we have a Collection 10, that is not currently archived...
-    (api/column-will-change? :archived (t2/select-one Collection :id 10) {:archived true}) ; -&gt; true, because value will change
-    (api/column-will-change? :archived (t2/select-one Collection :id 10) {:archived false}) ; -&gt; false, because value did not change
-    (api/column-will-change? :archived (t2/select-one Collection :id 10) {}) ; -&gt; false; value not specified in updates (request body)&quot;
-  [k :- :keyword object-before-updates :- :map object-updates :- :map]
-  (boolean
-   (and (contains? object-updates k)
-        (not= (get object-before-updates k)
-              (get object-updates k)))))</pre></td></tr><tr><td class="docs"><p>------------------------------------------ COLLECTION POSITION HELPER FNS ----------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Compare <code>old-position</code> and <code>new-position</code> to determine what needs to be updated based on the position change. Used
-for fixing card/dashboard/pulse changes that impact other instances in the collection</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn reconcile-position-for-collection!
-  [collection-id :- [:maybe ms/PositiveInt]
-   old-position  :- [:maybe ms/PositiveInt]
-   new-position  :- [:maybe ms/PositiveInt]]
-  (let [update-fn! (fn [plus-or-minus position-update-clause]
-                     (doseq [model '[Card Dashboard Pulse]]
-                       (t2/update! model {:collection_id       collection-id
-                                          :collection_position position-update-clause}
-                                   {:collection_position [plus-or-minus :collection_position 1]})))]
-    (when (not= new-position old-position)
-      (cond
-        (and (nil? new-position)
-             old-position)
-        (update-fn! :-  [:&gt; old-position])
-        (and new-position (nil? old-position))
-        (update-fn! :+ [:&gt;= new-position])
-        (&gt; new-position old-position)
-        (update-fn! :- [:between old-position new-position])
-        (&lt; new-position old-position)
-        (update-fn! :+ [:between new-position old-position])))))</pre></td></tr><tr><td class="docs"><p>Intended to cover Cards/Dashboards/Pulses, it only asserts collection id and position, allowing extra keys</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ModelWithPosition
-  [:map
-   [:collection_id       [:maybe ms/PositiveInt]]
-   [:collection_position [:maybe ms/PositiveInt]]])</pre></td></tr><tr><td class="docs"><p>Intended to cover Cards/Dashboards/Pulses updates. Collection id and position are optional, if they are not
-present, they didn't change. If they are present, they might have changed and we need to compare.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ModelWithOptionalPosition
-  [:map
-   [:collection_id       {:optional true} [:maybe ms/PositiveInt]]
-   [:collection_position {:optional true} [:maybe ms/PositiveInt]]])</pre></td></tr><tr><td class="docs"><p>Generic function for working on cards/dashboards/pulses. Checks the before and after changes to see if there is any
-impact to the collection position of that model instance. If so, executes updates to fix the collection position
-that goes with the change. The 2-arg version of this function is used for a new card/dashboard/pulse (i.e. not
-updating an existing instance, but creating a new one).</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn maybe-reconcile-collection-position!
-  ([new-model-data :- ModelWithPosition]
-   (maybe-reconcile-collection-position! nil new-model-data))
-  ([{old-collection-id :collection_id, old-position :collection_position, :as _before-update} :- [:maybe ModelWithPosition]
-    {new-collection-id :collection_id, new-position :collection_position, :as model-updates} :- ModelWithOptionalPosition]
-   (let [updated-collection? (and (contains? model-updates :collection_id)
-                                  (not= old-collection-id new-collection-id))
-         updated-position?   (and (contains? model-updates :collection_position)
-                                  (not= old-position new-position))]
-     (cond
-       ;; If the collection hasn't changed, but we have a new collection position, we might need to reconcile
-       (and (not updated-collection?) updated-position?)
-       (reconcile-position-for-collection! old-collection-id old-position new-position)
-       ;; If we have a new collection id, but no new position, reconcile the old collection, then update the new
-       ;; collection with the existing position
-       (and updated-collection? (not updated-position?))
-       (do
-         (reconcile-position-for-collection! old-collection-id old-position nil)
-         (reconcile-position-for-collection! new-collection-id nil old-position))
-       ;; We have a new collection id AND and new collection position
-       ;; Update the old collection using the old position
-       ;; Update the new collection using the new position
-       (and updated-collection? updated-position?)
-       (do
-         (reconcile-position-for-collection! old-collection-id old-position nil)
-         (reconcile-position-for-collection! new-collection-id nil new-position))))))</pre></td></tr><tr><td class="docs"><p>------------------------------------------ PARAM PARSING FNS ----------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Coerce a bit returned by some MySQL/MariaDB versions in some situations to Boolean.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn bit-&gt;boolean
-  [v]
-  (if (number? v)
-    (not (zero? v))
-    v))</pre></td></tr><tr><td class="docs"><p>Parse a param that could have a single value or multiple values using <code>parse-fn</code>.
-Always return a vector.</p>
-
-<p>Used for API that can parse single value or multiple values for a param:
-e.g:
-  single value: api/card/series?exclude_ids=1
-  multi values: api/card/series?exclude<em>ids=1&amp;exclude</em>ids=2</p>
-
-<p>Example usage:
-  (parse-multi-values-param "1" parse-long)
-  => [1]</p>
-
-<p>  (parse-multi-values-param ["1" "2"] parse-long)
-  => [1, 2]</p>
-</td><td class="codes"><pre class="brush: clojure">(defn parse-multi-values-param
-  [xs parse-fn]
-  (if (sequential? xs)
-    (map parse-fn xs)
-    [(parse-fn xs)]))</pre></td></tr><tr><td class="docs"><p>---------------------------------------- SET <code>archived_directly</code> ---------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Sets <code>archived_directly</code> to <code>true</code> iff <code>:archived</code> is being set to <code>true</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn updates-with-archived-directly
-  [current-obj obj-updates]
-  (cond-&gt; obj-updates
-    (column-will-change? :archived current-obj obj-updates)
-    (assoc :archived_directly (boolean (:archived obj-updates)))
-    ;; This is a hack around a frontend issue. Apparently, the undo functionality depends on calculating a diff
-    ;; between the current state and the previous state. Sometimes this results in the frontend telling us to
-    ;; *both* mark an item as archived *and* &quot;move&quot; it to the Trash.
-    ;;
-    ;; Let's just say that if you're marking something as archived, we throw away any `collection_id` you passed in
-    ;; along with it.
-    (and (column-will-change? :archived current-obj obj-updates)
-         (:archived obj-updates))
-    (dissoc :collection_id)))</pre></td></tr><tr><td class="docs"><p>If <code>:archived_directly</code> is <code>true</code>, set <code>:collection_id</code> to the trash collection ID.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn present-in-trash-if-archived-directly
-  [item trash-collection-id]
-  (cond-&gt; item
-    (:archived_directly item)
-    (assoc :collection_id trash-collection-id)))</pre></td></tr><tr><td class="docs"><p>A convenience function that takes a heterogeneous collection of items. Each item should have, at minimum, a <code>:model</code>
-and an <code>:id</code>. The <code>f</code> function is called like <code>(f model all-items-with-that-model)</code> and should return a collection
-of maps. <code>:id</code> is the only required key for these maps, and order <em>does not matter</em> - <code>present-items</code> is responsible
-for reordering items the way they were.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn present-items
-  [f items :- [:sequential [:map
-                            [:id ms/PositiveInt]
-                            [:model :keyword]]]]
-  (let [id+model-&gt;order (into {} (map-indexed (fn [i row] [[(:id row) (:model row)] i]) items))]
-    (-&gt;&gt; items
-         (group-by :model)
-         (mapcat (fn [[model items]]
-                   (map #(assoc % ::model model) (f model items))))
-         (sort-by (comp id+model-&gt;order (juxt :id ::model)))
-         (map #(dissoc % ::model)))))</pre></td></tr><tr><td class="docs"><p>A mapping from the name of a model used in the API to information about it. This is reused in search, and entity_id
-translation.</p>
-</td><td class="codes"><pre class="brush: clojure">(def model-&gt;db-model
-  {&quot;action&quot;            {:db-model :model/Action             :alias :action}
-   &quot;card&quot;              {:db-model :model/Card               :alias :card}
-   &quot;collection&quot;        {:db-model :model/Collection         :alias :collection}
-   &quot;dashboard&quot;         {:db-model :model/Dashboard          :alias :dashboard}
-   &quot;database&quot;          {:db-model :model/Database           :alias :database}
-   &quot;dataset&quot;           {:db-model :model/Card               :alias :card}
-   &quot;indexed-entity&quot;    {:db-model :model/ModelIndexValue    :alias :model-index-value}
-   &quot;metric&quot;            {:db-model :model/Card               :alias :card}
-   &quot;segment&quot;           {:db-model :model/Segment            :alias :segment}
-   &quot;snippet&quot;           {:db-model :model/NativeQuerySnippet :alias :snippet}
-   &quot;table&quot;             {:db-model :model/Table              :alias :table}
-   &quot;dashboard-card&quot;    {:db-model :model/DashboardCard      :alias :dashboard-card}
-   &quot;dashboard-tab&quot;     {:db-model :model/DashboardTab       :alias :dashboard-tab}
-   &quot;dimension&quot;         {:db-model :model/Dimension          :alias :dimension}
-   &quot;permissions-group&quot; {:db-model :model/PermissionsGroup   :alias :permissions-group}
-   &quot;pulse&quot;             {:db-model :model/Pulse              :alias :pulse}
-   &quot;pulse-card&quot;        {:db-model :model/PulseCard          :alias :pulse-card}
-   &quot;pulse-channel&quot;     {:db-model :model/PulseChannel       :alias :pulse-channel}
-   &quot;timeline&quot;          {:db-model :model/Timeline           :alias :timeline}
-   &quot;user&quot;              {:db-model :model/User               :alias :user}})</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+  (or (driver/report-timezone)
+      (qp.timezone/system-timezone-id)
+      &quot;UTC&quot;))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- send-notification-trigger-key
+  ^TriggerKey [subscription-id]
+  (triggers/key (format &quot;metabase.task.notification.trigger.subscription.%d&quot;
+                        subscription-id)))</pre></td></tr><tr><td class="docs"><p>Build a Quartz Trigger for <code>database</code> and <code>task-info</code> if a schedule exists.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- build-trigger
+  ^CronTrigger [subscription-id cron-schedule]
+  (triggers/build
+   (triggers/with-description (format &quot;Notification Subscription %d&quot; subscription-id))
+   (triggers/with-identity (send-notification-trigger-key subscription-id))
+   (triggers/using-job-data {&quot;subscription-id&quot; subscription-id})
+   (triggers/for-job send-notification-job-key)
+   (triggers/start-now)
+   (triggers/with-schedule
+    (cron/schedule
+     (cron/cron-schedule cron-schedule)
+     (cron/in-time-zone (TimeZone/getTimeZone ^String (send-notification-timezone)))
+      ;; We want to fire the trigger once even if the previous triggers  missed
+     (cron/with-misfire-handling-instruction-fire-and-proceed)))
+   ;; higher than sync
+   (triggers/with-priority 6)))</pre></td></tr><tr><td class="docs"><p>Update the trigger for a notification subscription if it exists and needs to be updated.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn update-subscription-trigger!
+  [{:keys [id type cron_schedule] :as _notification-subscription}]
+  (let [existing-trigger (first (task/existing-triggers send-notification-job-key (send-notification-trigger-key id)))]
+    (cond
+     ;; delete trigger if type changes
+      (and
+       (not= type :notification-subscription/cron)
+       existing-trigger)
+      (do
+        (log/infof &quot;Deleting trigger for subscription %d because of type changes&quot; id)
+        (task/delete-trigger! (-&gt; existing-trigger :key triggers/key)))
+     ;; do nothing if type is not cron
+      (not= type :notification-subscription/cron)
+      nil
+     ;; create new if there is no existing trigger
+      (not existing-trigger)
+      (do
+        (log/infof &quot;Creating new trigger for subscription %d with schedule %s&quot; id cron_schedule)
+        (task/add-trigger! (build-trigger id cron_schedule)))
+      (not= cron_schedule (:schedule existing-trigger))
+      (do
+        (log/infof &quot;Rescheduling trigger for subscription %d from %s to %s&quot; id (:schedule existing-trigger) cron_schedule)
+        (task/delete-trigger! (-&gt; existing-trigger :key triggers/key))
+        (task/add-trigger! (build-trigger id cron_schedule)))
+      :else
+      (log/infof &quot;No changes to trigger for subscription %d&quot; id))))</pre></td></tr><tr><td class="docs"><p>Delete the trigger for a notification subscription.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn delete-trigger-for-subscription!
+  [notification-subscription-id]
+  (when-first [trigger (task/existing-triggers send-notification-job-key (send-notification-trigger-key notification-subscription-id))]
+    (log/infof &quot;Deleting trigger for subscription %d&quot; notification-subscription-id)
+    (task/delete-trigger! (-&gt; trigger :key triggers/key))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- send-notification*
+  [subscription-id]
+  (let [subscription    (t2/select-one :model/NotificationSubscription subscription-id)
+        notification-id (:notification_id subscription)]
+    (try
+      (log/infof &quot;Sending notification %d for subscription %d&quot; notification-id subscription-id)
+      (task-history/with-task-history {:task         &quot;notification-trigger&quot;
+                                       :task_details {:trigger_type                 :notification-subscription/cron
+                                                      :notification_subscription_id subscription-id
+                                                      :cron_schedule                (:cron_schedule subscription)
+                                                      :notification_ids             [notification-id]}}
+        (notification/*send-notification!* (t2/select-one :model/Notification notification-id)))
+      (log/infof &quot;Sent notification %d for subscription %d&quot; notification-id subscription-id)
+      (catch Exception e
+        (log/errorf e &quot;Failed to send notification %d for subscription %d&quot; notification-id subscription-id)
+        (throw e)))))</pre></td></tr><tr><td class="docs"><p>Triggers that send a notification for a subscription.</p>
+</td><td class="codes"><pre class="brush: clojure">(jobs/defjob 
+  SendNotification
+  [context]
+  (let [{:strs [subscription-id]} (qc/from-job-data context)]
+    (send-notification* subscription-id)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod task/init! ::SendNotifications [_]
+  (let [send-notification-job (jobs/build
+                               (jobs/with-identity send-notification-job-key)
+                               (jobs/with-description &quot;Send Notification&quot;)
+                               (jobs/of-type SendNotification)
+                               (jobs/store-durably))]
+    (task/add-job! send-notification-job)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
