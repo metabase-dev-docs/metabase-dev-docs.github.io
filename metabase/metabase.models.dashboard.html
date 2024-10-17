@@ -3422,28 +3422,34 @@ name. We'll keep this till we replace all the Dashboard symbol in our codebase.<
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/descendants &quot;Dashboard&quot; [_model-name id]
   (let [dashcards (t2/select ['DashboardCard :id :card_id :action_id :parameter_mappings :visualization_settings]
                              :dashboard_id id)
-        dashboard (t2/select-one Dashboard :id id)]
-    (set/union
-      ;; DashboardCards are inlined into Dashboards, but we need to capture what those those DashboardCards rely on
-      ;; here. So their actions, and their cards both direct, mentioned in their parameters viz settings, and related
-      ;; via dashboard card series.
-     (set (for [{:keys [card_id parameter_mappings]} dashcards
-                ;; Capture all card_ids in the parameters, plus this dashcard's card_id if non-nil.
-                card-id (cond-&gt; (set (keep :card_id parameter_mappings))
-                          card_id (conj card_id))]
-            [&quot;Card&quot; card-id]))
+        dashboard (t2/select-one Dashboard :id id)
+        dash-id   id]
+    (merge-with
+     merge
+     ;; DashboardCards are inlined into Dashboards, but we need to capture what those those DashboardCards rely on
+     ;; here. So their actions, and their cards both direct, mentioned in their parameters viz settings, and related
+     ;; via dashboard card series.
+     (into {} (for [{:keys [id card_id parameter_mappings]} dashcards
+                    ;; Capture all card_ids in the parameters, plus this dashcard's card_id if non-nil.
+                    card-id (cond-&gt; (set (keep :card_id parameter_mappings))
+                              card_id (conj card_id))]
+                {[&quot;Card&quot; card-id] {&quot;DashboardCard&quot; id &quot;Dashboard&quot; dash-id}}))
      (when (not-empty dashcards)
-       (set (for [card-id (t2/select-fn-set :card_id :model/DashboardCardSeries :dashboardcard_id [:in (map :id dashcards)])]
-              [&quot;Card&quot; card-id])))
-     (set (for [{:keys [action_id]} dashcards
-                :when action_id]
-            [&quot;Action&quot; action_id]))
-     (reduce set/union #{}
-             (for [dc dashcards]
-               (serdes/visualization-settings-descendants (:visualization_settings dc))))
-      ;; parameter with values_source_type = &quot;card&quot; will depend on a card
-     (set (for [card-id (some-&gt;&gt; dashboard :parameters (keep (comp :card_id :values_source_config)))]
-            [&quot;Card&quot; card-id])))))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------ Audit Log --------------------------------------------------------</p>
+       (into {} (for [{:keys [id card_id dashboardcard_id]} (t2/select [:model/DashboardCardSeries :id :card_id :dashboardcard_id]
+                                                                       :dashboardcard_id [:in (map :id dashcards)])]
+                  {[&quot;Card&quot; card_id] {&quot;DashboardCardSeries&quot; id
+                                     &quot;DashboardCard&quot;       dashboardcard_id
+                                     &quot;Dashboard&quot;           dash-id}})))
+     (into {} (for [{:keys [id action_id]} dashcards
+                    :when action_id]
+                {[&quot;Action&quot; action_id] {&quot;DashboardCard&quot; id
+                                       &quot;Dashboard&quot;     dash-id}}))
+     (into {} (for [dc dashcards]
+                (serdes/visualization-settings-descendants (:visualization_settings dc) {&quot;DashboardCard&quot; id
+                                                                                         &quot;Dashboard&quot;     dash-id})))
+     ;; parameter with values_source_type = &quot;card&quot; will depend on a card
+     (into {} (for [card-id (some-&gt;&gt; dashboard :parameters (keep (comp :card_id :values_source_config)))]
+                {[&quot;Card&quot; card-id] {&quot;Dashboard&quot; dash-id}})))))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------ Audit Log --------------------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod audit-log/model-details Dashboard
   [dashboard event-type]

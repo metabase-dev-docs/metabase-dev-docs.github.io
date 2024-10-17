@@ -3347,7 +3347,7 @@ collection.</p>
       (t2/reducible-select model {:where [:and
                                           [:or
                                            [:in :collection_id collection-set]
-                                           (when (contains? collection-set nil)
+                                           (when (some nil? collection-set)
                                              [:= :collection_id nil])]
                                           (when where
                                             where)]}))))</pre></td></tr><tr><td class="docs">
@@ -3355,17 +3355,17 @@ collection.</p>
   (let [spec    (make-spec model-name opts)
         nested? (some ::nested (vals (:transform spec)))]
     (cond-&gt;&gt; (extract-query-collections (keyword &quot;model&quot; model-name) opts)
-      nested? (extract-reducible-nested model-name (dissoc opts :where)))))</pre></td></tr><tr><td class="docs"><p>Returns set of <code>[model-name database-id]</code> pairs for all entities contained or used by this entity. e.g. the Dashboard
- implementation should return pairs for all DashboardCard entities it contains, etc.</p>
+      nested? (extract-reducible-nested model-name (dissoc opts :where)))))</pre></td></tr><tr><td class="docs"><p>Returns map of <code>{[model-name database-id] {initiating-model id}}</code> for all entities contained or used by this
+ entity. e.g. the Dashboard implementation should return pairs for all DashboardCard entities it contains, etc.</p>
 
 <p> Dispatched on model-name.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti descendants
   {:arglists '([model-name db-id])}
   (fn [model-name _] model-name))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod descendants :default [_ _]
-  nil)</pre></td></tr><tr><td class="docs"><p>Return set of <code>[model-name database-id]</code> pairs for all entities containing this entity, required to successfully
-load this entity in destination db. Notice that ascendants are searched recursively, but their descendants are not
-analyzed.</p>
+  nil)</pre></td></tr><tr><td class="docs"><p>Return map of <code>{[model-name database-id] {initiating-model id}}</code> for all entities containing this entity, required
+to successfully load this entity in destination db. Notice that ascendants are searched recursively, but their
+descendants are not analyzed.</p>
 
 <p>Dispatched on model-name.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti ascendants
@@ -4211,24 +4211,24 @@ Always returns an empty set even if the input is nil.</p>
                  [(mbql-deps viz) link-card-deps click-behavior-deps])
          (filter some?)
          (reduce set/union #{}))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- viz-click-behavior-descendants [{:keys [click_behavior]}]
+</td><td class="codes"><pre class="brush: clojure">(defn- viz-click-behavior-descendants [{:keys [click_behavior]} src]
   (when-let [{:keys [linkType targetId type]} click_behavior]
     (case type
       &quot;link&quot; (when-let [model (link-card-model-&gt;toucan-model linkType)]
-               #{[(name model) targetId]})
+               {[(name model) targetId] src})
       ;; TODO: We might need to handle the click behavior that updates dashboard filters? I can't figure out how get
       ;; that to actually attach to a filter to check what it looks like.
       nil)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- viz-column-settings-descendants [{:keys [column_settings]}]
+</td><td class="codes"><pre class="brush: clojure">(defn- viz-column-settings-descendants [{:keys [column_settings]} src]
   (when column_settings
     (-&gt;&gt; (vals column_settings)
-         (mapcat viz-click-behavior-descendants)
+         (mapcat #(viz-click-behavior-descendants % src))
          set)))</pre></td></tr><tr><td class="docs"><p>Given the :visualization_settings (possibly nil) for an entity, return anything that should be considered a
 descendant. Always returns an empty set even if the input is nil.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn visualization-settings-descendants
-  [viz]
-  (set/union (viz-click-behavior-descendants  viz)
-             (viz-column-settings-descendants viz)))</pre></td></tr><tr><td class="docs"><p>Common transformers</p>
+  [viz src]
+  (set/union (viz-click-behavior-descendants  viz src)
+             (viz-column-settings-descendants viz src)))</pre></td></tr><tr><td class="docs"><p>Common transformers</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Export Foreign Key</p>
 </td><td class="codes"><pre class="brush: clojure">(defn fk  [model &amp; [field-name]]
   (cond

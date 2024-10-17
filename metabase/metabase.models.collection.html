@@ -4060,7 +4060,9 @@ macros.)</p>
       (t2/reducible-select Collection
                            {:where
                             [:and
-                             [:in :id collection-set]
+                             [:or
+                              [:in :id collection-set]
+                              (when (some nil? collection-set) [:= :id nil])]
                              not-trash-clause
                              (or where true)]})
       (t2/reducible-select Collection
@@ -4076,22 +4078,26 @@ macros.)</p>
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/generate-path &quot;Collection&quot; [_ coll]
   (serdes/maybe-labeled &quot;Collection&quot; coll :slug))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/ascendants &quot;Collection&quot; [_ id]
-  (let [{:keys [location]} (t2/select-one :model/Collection :id id)]
-    ;; it would work returning just one, but why not return all if it's cheap
-    (set (map vector (repeat &quot;Collection&quot;) (location-path-&gt;ids location)))))</pre></td></tr><tr><td class="docs">
+  (when id
+    (let [{:keys [location]} (t2/select-one :model/Collection :id id)]
+      ;; it would work returning just one, but why not return all if it's cheap
+      (into {} (for [parent-id (location-path-&gt;ids location)]
+                 {[&quot;Collection&quot; parent-id] {&quot;Collection&quot; id}})))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/descendants &quot;Collection&quot; [_model-name id]
-  (let [location    (t2/select-one-fn :location Collection :id id)
-        child-colls (set (for [child-id (t2/select-pks-set :model/Collection {:where [:and
-                                                                                      [:like :location (str location id &quot;/%&quot;)]
-                                                                                      [:or
-                                                                                       [:not= :type trash-collection-type]
-                                                                                       [:= :type nil]]]})]
-                           [&quot;Collection&quot; child-id]))
-        dashboards  (set (for [dash-id (t2/select-pks-set :model/Dashboard {:where [:= :collection_id id]})]
-                           [&quot;Dashboard&quot; dash-id]))
-        cards       (set (for [card-id (t2/select-pks-set :model/Card {:where [:= :collection_id id]})]
-                           [&quot;Card&quot; card-id]))]
-    (set/union child-colls dashboards cards)))</pre></td></tr><tr><td class="docs">
+  (let [location    (when id (t2/select-one-fn :location Collection :id id))
+        child-colls (when id ; traversing root coll will return all (even personal) colls, do not do it
+                      (into {} (for [child-id (t2/select-pks-set :model/Collection
+                                                                 {:where [:and
+                                                                          [:= :location (str location id &quot;/&quot;)]
+                                                                          [:or
+                                                                           [:not= :type trash-collection-type]
+                                                                           [:= :type nil]]]})]
+                                 {[&quot;Collection&quot; child-id] {&quot;Collection&quot; id}})))
+        dashboards  (into {} (for [dash-id (t2/select-pks-set :model/Dashboard {:where [:= :collection_id id]})]
+                               {[&quot;Dashboard&quot; dash-id] {&quot;Collection&quot; id}}))
+        cards       (into {} (for [card-id (t2/select-pks-set :model/Card {:where [:= :collection_id id]})]
+                               {[&quot;Card&quot; card-id] {&quot;Collection&quot; id}}))]
+    (merge child-colls dashboards cards)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/storage-path &quot;Collection&quot; [coll {:keys [collections]}]
   (let [parental (get collections (:entity_id coll))]
     (concat [&quot;collections&quot;] parental [(last parental)])))</pre></td></tr><tr><td class="docs">
