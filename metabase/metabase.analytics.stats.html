@@ -3391,24 +3391,39 @@ completed activation signals. Returns nil for non-Pro or Starter plans.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- -&gt;one-day-ago []
   (t/minus (t/offset-date-time) (t/days 1)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- -&gt;snowplow-grouped-metric-info []
-  {:query_executions (merge
-                      {&quot;sdk_embed&quot; 0 &quot;interactive_embed&quot; 0 &quot;static_embed&quot; 0 &quot;public_link&quot; 0 &quot;internal&quot; 0}
-                      (-&gt; categorize-query-execution
-                          (group-by
-                           (t2/select [:model/QueryExecution :embedding_client :executor_id]))
-                          (update-vals count)))})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- snowplow-grouped-metrics [{query-executions :query_executions :as _snowplow-grouped-metric-info}]
-  (-&gt;&gt; [{:name :query_executions_by_source
-         :values (mapv (fn [qe-group]
-                         {:group qe-group :value (get query-executions qe-group)})
-                       [&quot;interactive_embed&quot; &quot;internal&quot; &quot;public_link&quot; &quot;sdk_embed&quot; &quot;static_embed&quot;])
-         :tags [&quot;embedding&quot;]}]
-       (walk/postwalk (fn [x] (if (keyword? x) (-&gt; x u/-&gt;snake_case_en name) x)))))</pre></td></tr><tr><td class="docs"><p>Collects Snowplow metrics data that is not in the legacy stats format. Also clears entity id translation count.</p>
+  (let [qe (t2/select [:model/QueryExecution :embedding_client :executor_id :started_at])
+        one-day-ago (-&gt;one-day-ago)
+        ;; reuse the query data:
+        qe-24h (filter (fn [{started-at :started_at}] (t/after? one-day-ago started-at)) qe)]
+    {:query-executions (merge
+                        {&quot;sdk_embed&quot; 0 &quot;interactive_embed&quot; 0 &quot;static_embed&quot; 0 &quot;public_link&quot; 0 &quot;internal&quot; 0}
+                        (-&gt; (group-by categorize-query-execution qe)
+                            (update-vals count)))
+     :query-executions-24h (merge
+                            {&quot;sdk_embed&quot; 0 &quot;interactive_embed&quot; 0 &quot;static_embed&quot; 0 &quot;public_link&quot; 0 &quot;internal&quot; 0}
+                            (-&gt; (group-by categorize-query-execution qe-24h)
+                                (update-vals count)))
+     :eid-translations-24h (get-translation-count)}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- snowplow-grouped-metrics [{:keys [eid-translations-24h
+                                         query-executions
+                                         query-executions-24h]
+                                  :as _snowplow-grouped-metric-info}]
+  [{:name :query_executions_by_source
+    :values (mapv (fn [qe-group]
+                    {:group qe-group :value (get query-executions qe-group)})
+                  [&quot;interactive_embed&quot; &quot;internal&quot; &quot;public_link&quot; &quot;sdk_embed&quot; &quot;static_embed&quot;])
+    :tags [&quot;embedding&quot;]}
+   {:name :query_executions_by_source_24h
+    :values (mapv (fn [qe-group] {:group qe-group :value (get query-executions-24h qe-group)})
+                  [&quot;interactive_embed&quot; &quot;internal&quot; &quot;public_link&quot; &quot;sdk_embed&quot; &quot;static_embed&quot;])
+    :tags [&quot;embedding&quot;]}
+   {:name :entity_id_translations_last_24h
+    :values eid-translations-24h
+    :tags [&quot;embedding&quot;]}])</pre></td></tr><tr><td class="docs"><p>Collects Snowplow metrics data that is not in the legacy stats format. Also clears entity id translation count.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- -&gt;snowplow-metric-info
   []
   (let [one-day-ago (-&gt;one-day-ago)
-        total-translation-count (:total (get-translation-count))
-        _ (clear-translation-count!)]
+        total-translation-count (:total (get-translation-count))]
     {:models                          (t2/count :model/Card :type :model :archived false)
      :new_embedded_dashboards         (t2/count :model/Dashboard
                                                 :enable_embedding true
@@ -3617,12 +3632,12 @@ completed activation signals. Returns nil for non-Pro or Starter plans.</p>
         grouped-metrics     (snowplow-grouped-metrics (-&gt;snowplow-grouped-metric-info))
         features            (snowplow-features)]
     ;; grouped_metrics and settings are required in the json schema, but their data will be included in the next Milestone:
-    {:analytics_uuid      (snowplow/analytics-uuid)
-     :features            features
-     :grouped_metrics     grouped-metrics
-     :instance_attributes instance-attributes
-     :metrics             metrics
-     :settings             []}))</pre></td></tr><tr><td class="docs"><p>Generate stats for this instance as data</p>
+    {&quot;analytics_uuid&quot;      (snowplow/analytics-uuid)
+     &quot;features&quot;            features
+     &quot;grouped_metrics&quot;     grouped-metrics
+     &quot;instance_attributes&quot; instance-attributes
+     &quot;metrics&quot;             metrics
+     &quot;settings&quot;             []}))</pre></td></tr><tr><td class="docs"><p>Generate stats for this instance as data</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- generate-instance-stats!
   []
   (let [stats (legacy-anonymous-usage-stats)]
@@ -3630,8 +3645,15 @@ completed activation signals. Returns nil for non-Pro or Starter plans.</p>
                 ;; `:num_queries_cached_unbinned` is added to [[legacy-anonymous-usage-stats]]'s return value to make
                 ;; computing [[snowplow-anonymous-usage-stats]] more efficient. It shouldn't be sent by
                 ;; [[send-stats-deprecited!]].
-                (update-in [:stats :stats :cache] dissoc :num_queries_cached_unbinned))
-     :snowplow-stats (snowplow-anonymous-usage-stats stats)}))</pre></td></tr><tr><td class="docs"><p>Collect usage stats and phone them home</p>
+                (update-in [:stats :cache] dissoc :num_queries_cached_unbinned))
+     :snowplow-stats (snowplow-anonymous-usage-stats stats)}))</pre></td></tr><tr><td class="docs"><p>Snowplow data will not work if you pass in keywords, but this will let use use keywords all over.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- deep-string-keywords
+  [data]
+  (walk/postwalk
+   (fn [x] (if (keyword? x) (-&gt; x u/-&gt;snake_case_en name) x))
+   data))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- stats-post-cleanup []
+  (clear-translation-count!))</pre></td></tr><tr><td class="docs"><p>Collect usage stats and phone them home</p>
 </td><td class="codes"><pre class="brush: clojure">(defn phone-home-stats!
   []
   (when (public-settings/anon-tracking-enabled)
@@ -3639,15 +3661,17 @@ completed activation signals. Returns nil for non-Pro or Starter plans.</p>
           {:keys [stats snowplow-stats]} (generate-instance-stats!)
           end-time-ms                    (System/currentTimeMillis)
           elapsed-secs                   (quot (- end-time-ms start-time-ms) 1000)
-          snowplow-data                  (assoc snowplow-stats
-                                                :metadata [{&quot;key&quot;   &quot;stats_export_time_seconds&quot;
-                                                            &quot;value&quot; elapsed-secs}])]
-      (assert (= #{:analytics_uuid :features :grouped_metrics :instance_attributes :metadata :metrics :settings}
+          snowplow-data                  (-&gt; snowplow-stats
+                                             (assoc &quot;metadata&quot; [{&quot;key&quot;   &quot;stats_export_time_seconds&quot;
+                                                                 &quot;value&quot; elapsed-secs}])
+                                             deep-string-keywords)]
+      (assert (= #{&quot;analytics_uuid&quot; &quot;features&quot; &quot;grouped_metrics&quot; &quot;instance_attributes&quot; &quot;metadata&quot; &quot;metrics&quot; &quot;settings&quot;}
                  (set (keys snowplow-data)))
               (str &quot;Missing required keys in snowplow-data. got:&quot; (sort (keys snowplow-data))))
       #_{:clj-kondo/ignore [:deprecated-var]}
       (send-stats-deprecated! stats)
-      (snowplow/track-event! ::snowplow/instance_stats snowplow-data))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+      (snowplow/track-event! ::snowplow/instance_stats snowplow-data)
+      (stats-post-cleanup))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
