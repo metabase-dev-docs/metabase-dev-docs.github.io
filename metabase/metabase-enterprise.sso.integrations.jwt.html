@@ -2874,7 +2874,6 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase-enterprise.sso.api.interface :as sso.i]
    [metabase-enterprise.sso.integrations.sso-settings :as sso-settings]
    [metabase-enterprise.sso.integrations.sso-utils :as sso-utils]
-   [metabase.api.common :as api]
    [metabase.api.session :as api.session]
    [metabase.embed.settings :as embed.settings]
    [metabase.integrations.common :as integrations.common]
@@ -2889,7 +2888,9 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defn fetch-or-create-user!
   [first-name last-name email user-attributes]
   (when-not (sso-settings/jwt-enabled)
-    (throw (IllegalArgumentException. (str (tru &quot;Can't create new JWT user when JWT is not configured&quot;)))))
+    (throw
+     (IllegalArgumentException.
+      (str (tru &quot;Can't create new JWT user when JWT is not configured&quot;)))))
   (let [user {:first_name       first-name
               :last_name        last-name
               :email            email
@@ -2898,10 +2899,14 @@ net.brehaut.ClojureTools = (function (SH) {
     (or (sso-utils/fetch-and-update-login-attributes! user)
         (sso-utils/check-user-provisioning :jwt)
         (sso-utils/create-new-sso-user! user))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([])} jwt-attribute-email     (comp keyword sso-settings/jwt-attribute-email))
-(def ^:private ^{:arglists '([])} jwt-attribute-firstname (comp keyword sso-settings/jwt-attribute-firstname))
-(def ^:private ^{:arglists '([])} jwt-attribute-lastname  (comp keyword sso-settings/jwt-attribute-lastname))
-(def ^:private ^{:arglists '([])} jwt-attribute-groups    (comp keyword sso-settings/jwt-attribute-groups))</pre></td></tr><tr><td class="docs"><p>Registered claims in the JWT standard which we should not interpret as login attributes</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([])} jwt-attribute-email
+  (comp keyword sso-settings/jwt-attribute-email))
+(def ^:private ^{:arglists '([])} jwt-attribute-firstname
+  (comp keyword sso-settings/jwt-attribute-firstname))
+(def ^:private ^{:arglists '([])} jwt-attribute-lastname
+  (comp keyword sso-settings/jwt-attribute-lastname))
+(def ^:private ^{:arglists '([])} jwt-attribute-groups
+  (comp keyword sso-settings/jwt-attribute-groups))</pre></td></tr><tr><td class="docs"><p>Registered claims in the JWT standard which we should not interpret as login attributes</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private registered-claims
   [:iss :iat :sub :aud :exp :nbf :jti])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- jwt-data-&gt;login-attributes [jwt-data]
@@ -2915,8 +2920,9 @@ used by Zendesk for their JWT SSO, so it seemed like a good place for us to star
 </td><td class="codes"><pre class="brush: clojure">(def ^:private ^:const three-minutes-in-seconds 180)</pre></td></tr><tr><td class="docs"><p>Translate a user's group names to a set of MB group IDs using the configured mappings</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- group-names-&gt;ids
   [group-names]
-  (set (mapcat (sso-settings/jwt-group-mappings)
-               (map keyword group-names))))</pre></td></tr><tr><td class="docs"><p>Returns the set of all MB group IDs that have configured mappings</p>
+  (set
+   (mapcat (sso-settings/jwt-group-mappings)
+           (map keyword group-names))))</pre></td></tr><tr><td class="docs"><p>Returns the set of all MB group IDs that have configured mappings</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- all-mapped-group-ids
   []
   (-&gt; (sso-settings/jwt-group-mappings)
@@ -2939,9 +2945,10 @@ used by Zendesk for their JWT SSO, so it seemed like a good place for us to star
                          (jwt/unsign jwt (sso-settings/jwt-shared-secret)
                                      {:max-age three-minutes-in-seconds})
                          (catch Throwable e
-                           (throw (ex-info (ex-message e)
-                                           (assoc (ex-data e) :status-code 401)
-                                           e))))
+                           (throw
+                            (ex-info (ex-message e)
+                                     {:status      &quot;error-jwt-bad-unsigning&quot;
+                                      :status-code 401}))))
           login-attrs  (jwt-data-&gt;login-attributes jwt-data)
           email        (get jwt-data (jwt-attribute-email))
           first-name   (get jwt-data (jwt-attribute-firstname))
@@ -2951,20 +2958,36 @@ used by Zendesk for their JWT SSO, so it seemed like a good place for us to star
       (sync-groups! user jwt-data)
       {:session session, :redirect-url redirect-url, :jwt-data jwt-data})))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- check-jwt-enabled []
-  (api/check (sso-settings/jwt-enabled)
-             [400 (tru &quot;JWT SSO has not been enabled and/or configured&quot;)]))</pre></td></tr><tr><td class="docs">
+  (when-not (sso-settings/jwt-configured)
+    (throw
+     (ex-info (tru &quot;JWT SSO has not been configured&quot;)
+              {:status      &quot;error-sso-jwt-not-configured&quot;
+               :status-code 402})))
+  (when-not (sso-settings/jwt-enabled)
+    (throw
+     (ex-info (tru &quot;JWT SSO has not been enabled&quot;)
+              {:status      &quot;error-sso-jwt-disabled&quot;
+               :status-code 402})))
+  true)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn ^:private generate-response-token
   [session jwt-data]
-  (api/check (embed.settings/enable-embedding-sdk)
-             [402 (tru &quot;SDK Embedding is not enabled.&quot;)])
-  (response/response {:id  (:id session)
-                      :exp (:exp jwt-data)
-                      :iat (:iat jwt-data)}))</pre></td></tr><tr><td class="docs">
+  (if-not (embed.settings/enable-embedding-sdk)
+    (throw
+     (ex-info (tru &quot;SDK Embedding is disabled. Enable it in the Embedding settings.&quot;)
+              {:status      &quot;error-embedding-sdk-disabled&quot;
+               :status-code 402}))
+    (response/response
+     {:status :ok
+      :id     (:id session)
+      :exp    (:exp jwt-data)
+      :iat    (:iat jwt-data)})))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn ^:private redirect-to-idp
   [idp redirect]
   (let [return-to-param (if (str/includes? idp &quot;?&quot;) &quot;&amp;return_to=&quot; &quot;?return_to=&quot;)]
-    (response/redirect (str idp (when redirect
-                                  (str return-to-param redirect))))))</pre></td></tr><tr><td class="docs">
+    (response/redirect
+     (str idp
+          (when redirect
+            (str return-to-param redirect))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn ^:private handle-jwt-authentication
   [{:keys [session redirect-url jwt-data]} token request]
   (if token
@@ -2979,7 +3002,9 @@ used by Zendesk for their JWT SSO, so it seemed like a good place for us to star
     (redirect-to-idp (sso-settings/jwt-identity-provider-uri) redirect)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod sso.i/sso-post :jwt
   [_]
-  (throw (ex-info &quot;POST not valid for JWT SSO requests&quot; {:status-code 400})))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+  (throw
+   (ex-info (tru &quot;POST not valid for JWT SSO requests&quot;)
+            {:status &quot;error-post-jwt-not-valid&quot; :status-code 501})))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

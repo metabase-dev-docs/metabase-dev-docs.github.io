@@ -3115,10 +3115,12 @@ referenced in a table-wildcard (as far as can be determined from the query).</p>
    [macaw.collect :as collect]
    [macaw.rewrite :as rewrite])
   (:import
-   (com.metabase.macaw AstWalker$Scope)
+   (com.metabase.macaw AstWalker$Scope BasicTableExtractor BasicTableExtractor$AnalysisError)
    (java.util.function Consumer)
+   (net.sf.jsqlparser JSQLParserException)
    (net.sf.jsqlparser.parser CCJSqlParser CCJSqlParserUtil)
-   (net.sf.jsqlparser.parser.feature Feature)))</pre></td></tr><tr><td class="docs">
+   (net.sf.jsqlparser.parser.feature Feature)
+   (net.sf.jsqlparser.schema Table)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- escape-keywords ^String [sql keywords]
   (reduce
@@ -3175,15 +3177,33 @@ the query'; this function doesn't do additional inference work to find out a tab
                           (unescape-keywords x (:non-reserved-words opts))
                           x)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- raw-components [xs]
-  (into (empty xs) (keep :component) xs))</pre></td></tr><tr><td class="docs"><p>Given a parsed query (i.e., a [subclass of] <code>Statement</code>) return a set of all the table identifiers found within it.</p>
+  (into (empty xs) (keep :component) xs))</pre></td></tr><tr><td class="docs"><p>Given a table object, return a map with the schema and table names.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- table-&gt;identifier
+  [^Table t]
+  (if (.getSchemaName t)
+    {:schema (.getSchemaName t)
+     :table  (.getName t)}
+    {:table (.getName t)}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- -&gt;macaw-error [^BasicTableExtractor$AnalysisError analysis-error]
+  (keyword &quot;macaw.error&quot; (-&gt; (.-errorType analysis-error)
+                             str/lower-case
+                             (str/replace #&quot;_&quot; &quot;-&quot;))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmacro ^:private kw-or-tables [expr]
+  `(try (map table-&gt;identifier ~expr)
+        (catch BasicTableExtractor$AnalysisError e#
+          (-&gt;macaw-error e#))
+        (catch JSQLParserException _e#
+          :macaw.error/unable-to-parse)))</pre></td></tr><tr><td class="docs"><p>Given a parsed query (i.e., a [subclass of] <code>Statement</code>) return a set of all the table identifiers found within it.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn query-&gt;tables
   [sql &amp; {:keys [mode] :as opts}]
   (case mode
-    :ast-walker-1 (-&gt; (parsed-query sql)
+    :ast-walker-1 (-&gt; (parsed-query sql opts)
                       (query-&gt;components opts)
                       :tables
                       raw-components)
-    :basic-select :macaw.error/not-implemented))</pre></td></tr><tr><td class="docs"><p>Given an SQL query, apply the given table, column, and schema renames.</p>
+    :basic-select (-&gt;&gt; (parsed-query sql opts)
+                       (BasicTableExtractor/getTables)
+                       kw-or-tables)))</pre></td></tr><tr><td class="docs"><p>Given an SQL query, apply the given table, column, and schema renames.</p>
 
 <p>Supported options:</p>
 
@@ -3940,7 +3960,11 @@ This map gives a pattern in the exception message we expect to receive when tryi
   #{:ast-walker-1
     :basic-select})</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def global-overrides
-  {:basic-select :macaw.error/not-implemented})</pre></td></tr><tr><td class="docs">
+  {})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ns-overrides
+  {:basic-select {&quot;compound&quot; :macaw.error/unsupported-expression
+                  &quot;mutation&quot; :macaw.error/invalid-query
+                  &quot;dynamic&quot;  :macaw.error/invalid-query}})</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private merged-fixtures-file &quot;test/resources/acceptance/queries.sql&quot;)</pre></td></tr><tr><td class="docs"><p>The fixtures in merged fixtures file, mapped by their identifiers.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- merged-fixtures
   []
@@ -3964,8 +3988,9 @@ This map gives a pattern in the exception message we expect to receive when tryi
 </td><td class="codes"><pre class="brush: clojure">(defn- when-keyword [x]
   (when (keyword? x)
     x))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- get-override [expected-cs mode ck]
+</td><td class="codes"><pre class="brush: clojure">(defn- get-override [expected-cs mode fixture ck]
   (or (get global-overrides mode)
+      (get-in ns-overrides [mode (namespace fixture)])
       (get-in expected-cs [:overrides mode :error])
       (get-in expected-cs [:overrides :error])
       (get-in expected-cs [:overrides mode ck])
@@ -3995,16 +4020,17 @@ This map gives a pattern in the exception message we expect to receive when tryi
             (doseq [[ck cv] (dissoc expected-cs :overrides :error)]
               (testing (str prefix &quot; analysis is correct: &quot; (name ck))
                 (let [actual-cv (get-component cs ck)
-                      override  (get-override expected-cs m ck)]
+                      override  (get-override expected-cs m fixture ck)]
                   (validate-analysis cv override actual-cv))))))
         ;; Testing path for newer modes.
         (let [correct  (:error expected-cs (:tables expected-cs))
-              override (get-override expected-cs m :tables)
+              override (get-override expected-cs m fixture :tables)
               ;; For now, we only support (and test) :tables
               tables   (testing (str prefix &quot; table analysis does not throw for mode &quot; m)
                          (is (ct/tables sql opts)))]
-          (testing (str prefix &quot; table analysis is correct for mode &quot; m)
-            (validate-analysis correct override tables)))))
+          (when-not (and (nil? correct) (nil? override))
+            (testing (str prefix &quot; table analysis is correct for mode &quot; m)
+              (validate-analysis correct override tables))))))
     (when renames
       (let [broken?   (:broken? renames)
             rewritten (testing (str prefix &quot; rewriting does not throw&quot;)
@@ -4061,6 +4087,7 @@ This map gives a pattern in the exception message we expect to receive when tryi
                          (str/trim
                           (ct/query-fixture fixture))))))
 
+  (test-fixture :dynamic/generate-series)
 
   (test-fixture :compound/cte)
   (test-fixture :compound/cte-nonambiguous)
