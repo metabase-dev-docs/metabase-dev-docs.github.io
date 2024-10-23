@@ -2868,19 +2868,12 @@ net.brehaut.ClojureTools = (function (SH) {
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.events.notification" name="metabase.events.notification"><h1 class="project-name">metabase.events.notification</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.events.notification
   (:require
-   [java-time.api :as t]
    [malli.core :as mc]
    [malli.transform :as mtx]
-   [metabase.email.messages :as messages]
    [metabase.events :as events]
-   [metabase.events.schema :as events.schema]
    [metabase.models.notification :as models.notification]
    [metabase.models.task-history :as task-history]
-   [metabase.models.user :as user]
    [metabase.notification.core :as notification]
-   [metabase.public-settings :as public-settings]
-   [metabase.pulse.core :as pulse]
-   [metabase.util.i18n :as i18n :refer [trs]]
    [metabase.util.log :as log]
    [methodical.core :as methodical]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
@@ -2905,7 +2898,7 @@ net.brehaut.ClojureTools = (function (SH) {
                                          x
                                          hydrates)
                                         x)))))}}}))</pre></td></tr><tr><td class="docs"><p>Given a schema and value, hydrate the keys that are marked as to-hydrate.
-Hydrated keys have the :hydrate properties that can be added by [[events.schema/with-hydration]].</p>
+Hydrated keys have the :hydrate properties that can be added by [[metabase.events.schema/with-hydration]].</p>
 
 <p>  (hydrate! [:map
               [:user_id {:hydrate {:key :user
@@ -2915,49 +2908,16 @@ Hydrated keys have the :hydrate properties that can be added by [[events.schema/
          :user    {:email "ngoc@metabase.com"}}</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- hydrate!
   [schema value]
-  (mc/decode schema value hydrate-transformer))</pre></td></tr><tr><td class="docs"><p>Returns notifications for a given topic if it is supported and has notifications.</p>
+  (mc/decode schema value hydrate-transformer))</pre></td></tr><tr><td class="docs"><p>Hydrate event-info if the topic has a schema.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn maybe-hydrate-event-info
+  [topic event-info]
+  (cond-&gt;&gt; event-info
+    (some? (events/topic-&gt;schema topic))
+    (hydrate! (events/topic-&gt;schema topic))))</pre></td></tr><tr><td class="docs"><p>Returns notifications for a given topic if it is supported and has notifications.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- notifications-for-topic
   [topic]
   (when (supported-topics topic)
-    (models.notification/notifications-for-event topic)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- join-url
-  [new-user]
-  (let [reset-token               (user/set-password-reset-token! (:id new-user))
-        should-link-to-login-page (and (public-settings/sso-enabled?)
-                                       (not (public-settings/enable-password-login)))]
-    (if should-link-to-login-page
-      (str (public-settings/site-url) &quot;/auth/login&quot;)
-      ;; NOTE: the new user join url is just a password reset with an indicator that this is a first time user
-      (str (user/form-password-reset-url reset-token) &quot;#new&quot;))))</pre></td></tr><tr><td class="docs"><p>Returns a map of extra context for a given topic and event-info.
-Extra are set of contexts that are specific to a certain emails.
-Currently we need it to support usecases that our template engines doesn't support such as i18n,
-but ideally this should be part of the template.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- extra-context
-  [topic event-info]
-  (case topic
-    :event/user-invited
-    {:user-invited-today         (t/format &quot;MMM'&amp;nbsp;'dd,'&amp;nbsp;'yyyy&quot; (t/zoned-date-time))
-     :user-invited-email-subject (trs &quot;You''re invited to join {0}''s {1}&quot; (public-settings/site-name) (messages/app-name-trs))
-     :user-invited-join-url      (join-url (:object event-info))}
-    :event/alert-create
-    {:alert-create-condition-description (-&gt;&gt; event-info :object
-                                              messages/pulse-&gt;alert-condition-kwd
-                                              (get messages/alert-condition-text))}
-    {}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- enriched-event-info
-  [topic event-info]
-  ;; DO NOT delete or rename these fields, they are used in the notification templates
-  {:context     {:application-name     (public-settings/application-name)
-                 :application-logo-url (messages/logo-url)
-                 :site-name            (public-settings/site-name)
-                 :site-url             (public-settings/site-url)
-                 :admin-email          (public-settings/admin-email)
-                 :style                {:button (messages/button-style (pulse/primary-color))}
-                 :extra                (extra-context topic event-info)}
-   :event-info  (cond-&gt;&gt; event-info
-                  (some? (events.schema/topic-&gt;schema topic))
-                  (hydrate! (events.schema/topic-&gt;schema topic)))
-   :event-topic topic})</pre></td></tr><tr><td class="docs"><p>Used as a hack for when we need to skip sending notifications for certain events.</p>
+    (models.notification/notifications-for-event topic)))</pre></td></tr><tr><td class="docs"><p>Used as a hack for when we need to skip sending notifications for certain events.</p>
 
 <p>It's an escape hatch until we implement conditional notifications.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *skip-sending-notification?*
@@ -2970,10 +2930,10 @@ but ideally this should be part of the template.</p>
                                        :task_details {:trigger_type     :notification-subscription/system-event
                                                       :event_name       topic
                                                       :notification_ids (map :id notifications)}}
-        (let [event-info (enriched-event-info topic event-info)]
-          (log/infof &quot;Found %d notifications for event: %s&quot; (count notifications) topic)
-          (doseq [notification notifications]
-            (notification/*send-notification!* (assoc notification :payload event-info))))))))</pre></td></tr><tr><td class="docs">
+        (log/infof &quot;Found %d notifications for event: %s&quot; (count notifications) topic)
+        (doseq [notification notifications]
+          (notification/*send-notification!* (assoc notification :payload {:event_info  (maybe-hydrate-event-info topic event-info)
+                                                                           :event_topic topic})))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(methodical/defmethod events/publish-event! ::notification
   [topic event-info]
   (maybe-send-notification-for-topic! topic event-info))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
