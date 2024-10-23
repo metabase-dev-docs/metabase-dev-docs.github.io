@@ -3024,12 +3024,13 @@ the provided list of all possible tables.</p>
   [tables db-id]
   (consolidate-tables
    tables
-   (t2/select :model/QueryTable
-              {:select [[:t.id :table-id] [:t.name :table] [:t.schema :schema]]
-               :from   [[(t2/table-name :model/Table) :t]]
-               :where  [:and
-                        [:= :t.db_id db-id]
-                        (into [:or] (map table-query tables))]})))</pre></td></tr><tr><td class="docs"><p>See if we can qualify the schema and table-id for any explicit field refs which couldn't resolve their field</p>
+   (when (seq tables)
+     (t2/select :model/QueryTable
+                {:select [[:t.id :table-id] [:t.name :table] [:t.schema :schema]]
+                 :from   [[(t2/table-name :model/Table) :t]]
+                 :where  [:and
+                          [:= :t.db_id db-id]
+                          (into [:or] (map table-query tables))]}))))</pre></td></tr><tr><td class="docs"><p>See if we can qualify the schema and table-id for any explicit field refs which couldn't resolve their field</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- fill-missing-table-ids-hack
   [table-refs field-refs]
   ;; Note, at this point we have given up on any pretense of respecting case sensitivity
@@ -3108,17 +3109,23 @@ both explicit and implicit, it will <em>only</em> show up in the <code>:explicit
         field-refs    (concat (mark-reference explicit-refs true)
                               (mark-reference implicit-refs false))]
     {:tables (strip-model-refs table-refs)
-     :fields (strip-model-refs field-refs)}))</pre></td></tr><tr><td class="docs"><p>Returns a set of table identifiers that (may) be referenced in the given card's query.
+     :fields (strip-model-refs field-refs)}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- wrap-if-legacy [result]
+  (cond
+    (map? result)     result
+    (keyword? result) {:error result}
+    (coll? result)    {:tables result}
+    :else             result))</pre></td></tr><tr><td class="docs"><p>Returns a set of table identifiers that (may) be referenced in the given card's query.
 Errs on the side of optimism: i.e., it may return tables that are <em>not</em> in the query, and is unlikely to fail
 to return tables that are in the query.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- tables-via-macaw
-  [driver query &amp; {:keys [mode] :or {mode :ast-walker-1}}]
-  (let [db-id        (:database query)
-        macaw-opts   (nqa.impl/macaw-options driver)
-        table-opts   (assoc macaw-opts :mode mode)
-        sql-string   (:query (nqa.sub/replace-tags query))
-        parsed-query (macaw/query-&gt;tables sql-string table-opts)]
-    (table-refs-for-query parsed-query db-id)))</pre></td></tr><tr><td class="docs"><p>Returns a set of table identifiers that (may) be referenced in the given card's query.
+  [driver query &amp; {:keys [mode] :or {mode :basic-select}}]
+  (let [db-id      (:database query)
+        macaw-opts (nqa.impl/macaw-options driver)
+        table-opts (assoc macaw-opts :mode mode)
+        sql-string (:query (nqa.sub/replace-tags query))
+        result     (wrap-if-legacy (macaw/query-&gt;tables sql-string table-opts))]
+    (u/update-if-exists result :tables table-refs-for-query db-id)))</pre></td></tr><tr><td class="docs"><p>Returns a set of table identifiers that (may) be referenced in the given card's query.
 Errs on the side of optimism: i.e., it may return tables that are <em>not</em> in the query, and is unlikely to fail
 to return tables that are in the query.</p>
 
@@ -3135,7 +3142,7 @@ to return tables that are in the query.</p>
   [driver query opts]
   (if (nqa.impl/trusted-for-table-permissions? driver)
     (tables-via-macaw driver query opts)
-    :query-analysis.error/driver-not-supported))</pre></td></tr><tr><td class="docs"><p>Returns a <code>{:explicit #{...} :implicit #{...}}</code> map with field IDs that (may) be referenced in the given card's
+    {:error :query-analysis.error/driver-not-supported}))</pre></td></tr><tr><td class="docs"><p>Returns a <code>{:explicit #{...} :implicit #{...}}</code> map with field IDs that (may) be referenced in the given card's
 query. Currently only support SQL-based dialects.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn references-for-native
   [query]
