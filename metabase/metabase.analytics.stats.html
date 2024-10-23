@@ -3403,23 +3403,35 @@ completed activation signals. Returns nil for non-Pro or Starter plans.</p>
                             {&quot;sdk_embed&quot; 0 &quot;interactive_embed&quot; 0 &quot;static_embed&quot; 0 &quot;public_link&quot; 0 &quot;internal&quot; 0}
                             (-&gt; (group-by categorize-query-execution qe-24h)
                                 (update-vals count)))
-     :eid-translations-24h (get-translation-count)}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- snowplow-grouped-metrics [{:keys [eid-translations-24h
-                                         query-executions
-                                         query-executions-24h]
-                                  :as _snowplow-grouped-metric-info}]
-  [{:name :query_executions_by_source
-    :values (mapv (fn [qe-group]
-                    {:group qe-group :value (get query-executions qe-group)})
-                  [&quot;interactive_embed&quot; &quot;internal&quot; &quot;public_link&quot; &quot;sdk_embed&quot; &quot;static_embed&quot;])
-    :tags [&quot;embedding&quot;]}
-   {:name :query_executions_by_source_24h
-    :values (mapv (fn [qe-group] {:group qe-group :value (get query-executions-24h qe-group)})
-                  [&quot;interactive_embed&quot; &quot;internal&quot; &quot;public_link&quot; &quot;sdk_embed&quot; &quot;static_embed&quot;])
-    :tags [&quot;embedding&quot;]}
-   {:name :entity_id_translations_last_24h
-    :values eid-translations-24h
-    :tags [&quot;embedding&quot;]}])</pre></td></tr><tr><td class="docs"><p>Collects Snowplow metrics data that is not in the legacy stats format. Also clears entity id translation count.</p>
+     :eid-translations-24h (get-translation-count)}))</pre></td></tr><tr><td class="docs"><p>Snowplow data will not work if you pass in keywords, but this will let use use keywords all over.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- deep-string-keywords
+  [data]
+  (walk/postwalk
+   (fn [x] (if (keyword? x) (-&gt; x u/-&gt;snake_case_en name) x))
+   data))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- snowplow-grouped-metrics
+  :- [:sequential
+      [:map
+       [&quot;name&quot; :string]
+       [&quot;values&quot; [:sequential [:map [&quot;group&quot; :string] [&quot;value&quot; :int]]]]
+       [&quot;tags&quot; [:sequential :string]]]]
+  [{:keys [eid-translations-24h
+           query-executions
+           query-executions-24h]
+    :as _snowplow-grouped-metric-info}]
+  (deep-string-keywords
+   [{:name :query_executions_by_source
+     :values (mapv (fn [qe-group]
+                     {:group qe-group :value (get query-executions qe-group)})
+                   [&quot;interactive_embed&quot; &quot;internal&quot; &quot;public_link&quot; &quot;sdk_embed&quot; &quot;static_embed&quot;])
+     :tags [&quot;embedding&quot;]}
+    {:name :query_executions_by_source_24h
+     :values (mapv (fn [qe-group] {:group qe-group :value (get query-executions-24h qe-group)})
+                   [&quot;interactive_embed&quot; &quot;internal&quot; &quot;public_link&quot; &quot;sdk_embed&quot; &quot;static_embed&quot;])
+     :tags [&quot;embedding&quot;]}
+    {:name :entity_id_translations_last_24h
+     :values (mapv (fn [[k v]] {:group k :value v}) eid-translations-24h)
+     :tags [&quot;embedding&quot;]}]))</pre></td></tr><tr><td class="docs"><p>Collects Snowplow metrics data that is not in the legacy stats format. Also clears entity id translation count.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- -&gt;snowplow-metric-info
   []
   (let [one-day-ago (-&gt;one-day-ago)
@@ -3646,12 +3658,7 @@ completed activation signals. Returns nil for non-Pro or Starter plans.</p>
                 ;; computing [[snowplow-anonymous-usage-stats]] more efficient. It shouldn't be sent by
                 ;; [[send-stats-deprecited!]].
                 (update-in [:stats :cache] dissoc :num_queries_cached_unbinned))
-     :snowplow-stats (snowplow-anonymous-usage-stats stats)}))</pre></td></tr><tr><td class="docs"><p>Snowplow data will not work if you pass in keywords, but this will let use use keywords all over.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- deep-string-keywords
-  [data]
-  (walk/postwalk
-   (fn [x] (if (keyword? x) (-&gt; x u/-&gt;snake_case_en name) x))
-   data))</pre></td></tr><tr><td class="docs">
+     :snowplow-stats (snowplow-anonymous-usage-stats stats)}))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- stats-post-cleanup []
   (clear-translation-count!))</pre></td></tr><tr><td class="docs"><p>Collect usage stats and phone them home</p>
 </td><td class="codes"><pre class="brush: clojure">(defn phone-home-stats!
