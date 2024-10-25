@@ -3097,34 +3097,31 @@ to return fields that are in the query.</p>
 both explicit and implicit, it will <em>only</em> show up in the <code>:explicit</code> set.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- references-for-sql
   [driver query]
-  (let [db-id         (:database query)
-        macaw-opts    (nqa.impl/macaw-options driver)
-        sql-string    (:query (nqa.sub/replace-tags query))
-        parsed-query  (macaw/query-&gt;components (macaw/parsed-query sql-string macaw-opts) macaw-opts)
-        tables        (map :component (:tables parsed-query))
-        table-refs    (table-refs-for-query tables db-id)
-        explicit-refs (explicit-field-refs-for-query parsed-query db-id table-refs)
-        implicit-refs (-&gt; (implicit-references-for-query parsed-query db-id)
-                          (set/difference explicit-refs))
-        field-refs    (concat (mark-reference explicit-refs true)
-                              (mark-reference implicit-refs false))]
-    {:tables (strip-model-refs table-refs)
-     :fields (strip-model-refs field-refs)}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- wrap-if-legacy [result]
-  (cond
-    (map? result)     result
-    (keyword? result) {:error result}
-    (coll? result)    {:tables result}
-    :else             result))</pre></td></tr><tr><td class="docs"><p>Returns a set of table identifiers that (may) be referenced in the given card's query.
+  (let [db-id      (:database query)
+        macaw-opts (nqa.impl/macaw-options driver)
+        sql-string (:query (nqa.sub/replace-tags query))
+        result     (macaw/query-&gt;components (macaw/parsed-query sql-string macaw-opts) macaw-opts)]
+    (if (:error result)
+      ;; We may want to do some error translation here in the future, to decrease coupling to Macaw.
+      result
+      (let [tables        (map :component (:tables result))
+            table-refs    (table-refs-for-query tables db-id)
+            explicit-refs (explicit-field-refs-for-query result db-id table-refs)
+            implicit-refs (-&gt; (implicit-references-for-query result db-id)
+                              (set/difference explicit-refs))
+            field-refs    (concat (mark-reference explicit-refs true)
+                                  (mark-reference implicit-refs false))]
+        {:tables (strip-model-refs table-refs)
+         :fields (strip-model-refs field-refs)}))))</pre></td></tr><tr><td class="docs"><p>Returns a set of table identifiers that (may) be referenced in the given card's query.
 Errs on the side of optimism: i.e., it may return tables that are <em>not</em> in the query, and is unlikely to fail
 to return tables that are in the query.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- tables-via-macaw
-  [driver query &amp; {:keys [mode] :or {mode :basic-select}}]
+  [driver query &amp; {:keys [mode] :or {mode :compound-select}}]
   (let [db-id      (:database query)
         macaw-opts (nqa.impl/macaw-options driver)
         table-opts (assoc macaw-opts :mode mode)
         sql-string (:query (nqa.sub/replace-tags query))
-        result     (wrap-if-legacy (macaw/query-&gt;tables sql-string table-opts))]
+        result     (macaw/query-&gt;tables sql-string table-opts)]
     (u/update-if-exists result :tables table-refs-for-query db-id)))</pre></td></tr><tr><td class="docs"><p>Returns a set of table identifiers that (may) be referenced in the given card's query.
 Errs on the side of optimism: i.e., it may return tables that are <em>not</em> in the query, and is unlikely to fail
 to return tables that are in the query.</p>
@@ -3152,8 +3149,9 @@ query. Currently only support SQL-based dialects.</p>
     ;; For now we are not restricting this as we are for [[tables-for-native]], yet.
     ;; As we don't have any hard dependencies on this data, its useful to gather info on which drivers have errors or
     ;; inaccuracies in practice.
-    (when (isa? driver/hierarchy driver :sql)
-      (references-for-sql driver query))))</pre></td></tr><tr><td class="docs"><p>Returns a set of table identifiers that (may) be referenced in the given card's query.
+    (if (isa? driver/hierarchy driver :sql)
+      (references-for-sql driver query)
+      {:error :query-analysis.error/driver-not-supported})))</pre></td></tr><tr><td class="docs"><p>Returns a set of table identifiers that (may) be referenced in the given card's query.
 Takes an options :mode option, which determines the complexity of queries it can handle, and what types of false
 positives it may return.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn tables-for-native

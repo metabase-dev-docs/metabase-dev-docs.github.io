@@ -3148,15 +3148,17 @@ referenced in a table-wildcard (as far as can be determined from the query).</p>
         (.withFeature ^CCJSqlParser parser (-&gt;Feature f) v)))))</pre></td></tr><tr><td class="docs"><p>Main entry point: takes a string query and returns a <code>Statement</code> object that can be handled by the other functions.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn parsed-query
   [^String query &amp; {:as opts}]
-  ;; Dialects like SQLite and Databricks treat consecutive blank lines as implicit semicolons.
-  ;; JSQLParser, as a polyglot parser, always has this behavior, and there is no option to disable it.
-  ;; For Metabase, we are always dealing with single queries, so there's no point ever having this behavior.
-  ;; TODO When JSQLParser 4.10 is released, move to the more robust [[CCJSqlParserUtil.sanitizeSingleSql]] helper.
-  ;; See https://github.com/JSQLParser/JSqlParser/issues/1988
-  (-&gt; query
-      (str/replace #&quot;\n{2,}&quot; &quot;\n&quot;)
-      (escape-keywords (:non-reserved-words opts))
-      (CCJSqlParserUtil/parse (-&gt;parser-fn opts))))</pre></td></tr><tr><td class="docs"><p>A unique identifier for the given scope.</p>
+  (try
+    (-&gt; query
+        ;; Dialects like SQLite and Databricks treat consecutive blank lines as implicit semicolons.
+        ;; JSQLParser, as a polyglot parser, always has this behavior, and there is no option to disable it.
+        ;; This utility pre-processed the query to remove any such blank lines.
+        (CCJSqlParserUtil/sanitizeSingleSql)
+        (escape-keywords (:non-reserved-words opts))
+        (CCJSqlParserUtil/parse (-&gt;parser-fn opts)))
+    (catch JSQLParserException e
+      {:error   :macaw.error/unable-to-parse
+       :context {:cause e}})))</pre></td></tr><tr><td class="docs"><p>A unique identifier for the given scope.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn scope-id
   [^AstWalker$Scope s]
   (.getId s))</pre></td></tr><tr><td class="docs"><p>The type of scope we're talking about e.g., a top-level SELECT.</p>
@@ -3171,21 +3173,20 @@ referenced in a table-wildcard (as far as can be determined from the query).</p>
 <p>(Specifically, it returns their fully-qualified names as strings, where 'fully-qualified' means 'as referred to in
 the query'; this function doesn't do additional inference work to find out a table's schema.)</p>
 </td><td class="codes"><pre class="brush: clojure">(defn query-&gt;components
-  [statement &amp; {:as opts}]
-  ;; By default, we will preserve identifiers verbatim, to be agnostic of case and quote behavior.
+  [parsed &amp; {:as opts}]
+  ;; By default, we will preserve identifiers verbatim, to be agnostic of casing and quoting.
   ;; This may result in duplicate components, which are left to the caller to deduplicate.
   ;; In Metabase's case, this is done during the stage where the database metadata is queried.
   (try
-    (-&gt;&gt; (collect/query-&gt;components statement (merge {:preserve-identifiers? true} opts))
-         (walk/postwalk (fn [x]
-                          (if (string? x)
-                            (unescape-keywords x (:non-reserved-words opts))
-                            x))))
+    (if (map? parsed)
+      parsed
+      (-&gt;&gt; (collect/query-&gt;components parsed (merge {:preserve-identifiers? true} opts))
+           (walk/postwalk (fn [x]
+                            (if (string? x)
+                              (unescape-keywords x (:non-reserved-words opts))
+                              x)))))
     (catch AnalysisError e
-      (-&gt;macaw-error e))
-    (catch JSQLParserException e
-      {:error   :macaw.error/unable-to-parse
-       :context {:cause e}})))</pre></td></tr><tr><td class="docs">
+      (-&gt;macaw-error e))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- raw-components [xs]
   (into (empty xs) (keep :component) xs))</pre></td></tr><tr><td class="docs"><p>Given a table object, return a map with the schema and table names.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- table-&gt;identifier
@@ -3199,16 +3200,15 @@ the query'; this function doesn't do additional inference work to find out a tab
 </td><td class="codes"><pre class="brush: clojure">(defn query-&gt;tables
   [sql &amp; {:keys [mode] :as opts}]
   (try
-    (let [query (parsed-query sql opts)]
-      (case mode
-        :ast-walker-1    (-&gt; (query-&gt;components query opts) :tables raw-components (-&gt;&gt; (hash-map :tables)))
-        :basic-select    (-&gt; (BasicTableExtractor/getTables query) tables-&gt;identifiers)
-        :compound-select (-&gt; (CompoundTableExtractor/getTables query) tables-&gt;identifiers)))
+    (let [parsed (parsed-query sql opts)]
+      (if (map? parsed)
+        parsed
+        (case mode
+          :ast-walker-1 (-&gt; (query-&gt;components parsed opts) :tables raw-components (-&gt;&gt; (hash-map :tables)))
+          :basic-select (-&gt; (BasicTableExtractor/getTables parsed) tables-&gt;identifiers)
+          :compound-select (-&gt; (CompoundTableExtractor/getTables parsed) tables-&gt;identifiers))))
     (catch AnalysisError e
-      (-&gt;macaw-error e))
-    (catch JSQLParserException e
-      {:error   :macaw.error/unable-to-parse
-       :context {:cause e}})))</pre></td></tr><tr><td class="docs"><p>Given an SQL query, apply the given table, column, and schema renames.</p>
+      (-&gt;macaw-error e))))</pre></td></tr><tr><td class="docs"><p>Given an SQL query, apply the given table, column, and schema renames.</p>
 
 <p>Supported options:</p>
 
@@ -3225,7 +3225,8 @@ the query'; this function doesn't do additional inference work to find out a tab
   ;; We need to pre-sanitize the SQL before its analyzed so that the AST token positions match up correctly.
   ;; Currently, we use a more complex and expensive sanitization method, so that it's reversible.
   ;; If we decide that it's OK to normalize whitespace etc. during replacement, then we can use the same helper.
-  (let [sql'     (escape-keywords (str/replace sql #&quot;(?m)^\n&quot; &quot; \n&quot;) (:non-reserved-words opts))
+  (let [sql'     (-&gt; (str/replace sql #&quot;(?m)^\n&quot; &quot; \n&quot;)
+                     (escape-keywords (:non-reserved-words opts)))
         opts'    (select-keys opts [:case-insensitive :quotes-preserve-case? :allow-unused?])
         renames' (walk/postwalk (fn [x]
                                   (if (string? x)
@@ -3257,7 +3258,8 @@ the query'; this function doesn't do additional inference work to find out a tab
           (neg? next-id) next-id
           :else (recur (dec n) (inc next-id)))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- -&gt;idx [^String sql line col]
-  (+ col (index-of-nth sql &quot;\n&quot; (dec line))))</pre></td></tr><tr><td class="docs"><p>Find the start and end index of the underlying tokens for a given AST node from a given SQL string.</p>
+  ;; The second `dec` on `line` is a workaround for what appears to be an off-by-one error in this JSQLParser version.
+  (+ col (index-of-nth sql &quot;\n&quot; (dec (dec line)))))</pre></td></tr><tr><td class="docs"><p>Find the start and end index of the underlying tokens for a given AST node from a given SQL string.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- node-&gt;idx-range
   [^SimpleNode node sql]
   (let [first-token (.jjtGetFirstToken node)
@@ -3298,7 +3300,11 @@ the query'; this function doesn't do additional inference work to find out a tab
      sql
      (mw/fold-query
       updated-ast
-      {:table  (replace-name #(.getFullyQualifiedName ^Table %))
+      {:table  (replace-name #(let [fqn     (.getFullyQualifiedName ^Table %)
+                                    t-alias (.getAlias ^Table %)]
+                                (if t-alias
+                                  (str fqn &quot; &quot; (.getName t-alias))
+                                  fqn)))
        :column (replace-name #(.getFullyQualifiedName ^Column %))}
       []))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- rename-table
@@ -3325,7 +3331,7 @@ the query'; this function doesn't do additional inference work to find out a tab
   (let [known-rename? (set (map second updated-nodes))]
     (doseq [[k items] renames]
       (when-let [unknown (first (remove known-rename? items))]
-        (throw (ex-info (str &quot;Unknown rename: &quot; unknown) {:type k
+        (throw (ex-info (str &quot;Unknown rename: &quot; unknown) {:type   k
                                                           :rename unknown}))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- index-by-instances [xs]
   (into {} (for [x xs
@@ -3942,14 +3948,7 @@ indirection.</p>
    [macaw.core-test :as ct])
   (:import
    (java.io File)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>The DANGER ZONE
-This map gives a pattern in the exception message we expect to receive when trying to analyze the given fixture.</p>
-</td><td class="codes"><pre class="brush: clojure">(def broken-queries
-  {:broken/between       #&quot;Encountered unexpected token: \&quot;BETWEEN\&quot;&quot;
-   :broken/filter-where  #&quot;Encountered unexpected token: \&quot;\(\&quot;&quot;
-   :sqlserver/execute    #&quot;Not supported yet&quot;
-   :sqlserver/executesql #&quot;Not supported yet&quot;
-   :oracle/open-for      #&quot;Encountered unexpected token: \&quot;OPEN\&quot;&quot;})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- fixture-analysis [fixture]
   (some-&gt; fixture (ct/fixture-&gt;filename &quot;acceptance&quot; &quot;.analysis.edn&quot;) io/resource slurp read-string))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- fixture-renames [fixture]
@@ -3979,15 +3978,21 @@ This map gives a pattern in the exception message we expect to receive when tryi
   {:select-only  {&quot;mutation&quot; :macaw.error/invalid-query
                   &quot;dynamic&quot;  :macaw.error/invalid-query}
    :basic-select {&quot;compound&quot; :macaw.error/unsupported-expression}})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private merged-fixtures-file &quot;test/resources/acceptance/queries.sql&quot;)</pre></td></tr><tr><td class="docs"><p>The fixtures in merged fixtures file, mapped by their identifiers.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- merged-fixtures
-  []
-  (-&gt;&gt; (str/split (slurp merged-fixtures-file) #&quot;-- FIXTURE: &quot;)
+</td><td class="codes"><pre class="brush: clojure">(def ^:private merged-fixtures-file &quot;test/resources/acceptance/queries.sql&quot;)</pre></td></tr><tr><td class="docs"><p>TODO generically detect queries.<namespace>.sql files</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private dynamic-fixtures-file &quot;test/resources/acceptance/queries.dynamic.sql&quot;)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- read-merged [file]
+  (-&gt;&gt; (str/split (slurp file) #&quot;-- FIXTURE: &quot;)
        (keep (fn [named-query]
                (when-not (str/blank? named-query)
                  (let [[nm qry] (.split ^String named-query &quot;\n&quot; 2)]
                    [(keyword nm) (str/trim qry)]))))
-       (into {})))</pre></td></tr><tr><td class="docs">
+       (into {})))</pre></td></tr><tr><td class="docs"><p>The fixtures in merged fixtures file, mapped by their identifiers.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- merged-fixtures
+  []
+  (merge (read-merged merged-fixtures-file)
+         (update-keys
+          (read-merged dynamic-fixtures-file)
+          #(keyword &quot;dynamic&quot; (name %)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- validate-analysis [correct override actual]
   (let [expected (or override correct)]
     (when override
@@ -4003,11 +4008,11 @@ This map gives a pattern in the exception message we expect to receive when tryi
   (when (keyword? x)
     x))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- get-override* [expected-cs mode fixture ck]
-  (or (get global-overrides mode)
-      (get-in ns-overrides [mode (namespace fixture)])
-      (get-in expected-cs [:overrides mode :error])
+  (or (get-in expected-cs [:overrides mode :error])
       (get-in expected-cs [:overrides mode ck])
-      (when-keyword (get-in expected-cs [:overrides mode]))))</pre></td></tr><tr><td class="docs">
+      (when-keyword (get-in expected-cs [:overrides mode]))
+      (get-in ns-overrides [mode (namespace fixture)])
+      (get global-overrides mode)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- get-override [expected-cs mode fixture ck]
   (or
    (some #(get-override* expected-cs % fixture ck)
@@ -4030,19 +4035,18 @@ This map gives a pattern in the exception message we expect to receive when tryi
             :let [opts (opts-mode m)]]
       (if (= m :ast-walker-1)
         ;; Legacy testing path for `components`, which only supports the original walker, and throws exceptions.
-        (if-let [expected-msg (broken-queries fixture)]
-          (testing (str prefix &quot; analysis cannot be parsed&quot;)
-            (is (thrown-with-msg? Exception expected-msg (ct/components sql opts))))
-          (let [cs (testing (str prefix &quot; analysis does not throw&quot;)
-                     (is (ct/components sql opts)))]
-            (doseq [[ck cv] (dissoc expected-cs :overrides :error :skip)]
-              (testing (str prefix &quot; analysis is correct: &quot; (name ck))
-                (let [actual-cv (get-component cs ck)
-                      override  (get-override expected-cs m fixture ck)]
-                  (validate-analysis cv override actual-cv))))))
+        (let [cs (testing (str prefix &quot; analysis does not throw&quot;)
+                   (is (ct/components sql opts)))]
+          (doseq [[ck cv] (dissoc expected-cs :overrides :error :skip)]
+            (testing (str prefix &quot; analysis is correct: &quot; (name ck))
+              (let [actual-cv (:error cs (get-component cs ck))
+                    override  (get-override expected-cs m fixture ck)]
+                (validate-analysis cv override actual-cv)))))
         ;; Testing path for newer modes.
         (let [correct  (:error expected-cs (:tables expected-cs))
-              override (get-override expected-cs m fixture :tables)
+              override (if (str/includes? sql &quot;-- BROKEN&quot;)
+                         :macaw.error/unable-to-parse
+                         (get-override expected-cs m fixture :tables))
               ;; For now, we only support (and test) :tables
               tables   (testing (str prefix &quot; table analysis does not throw for mode &quot; m)
                          (is (ct/tables sql opts)))]
@@ -4174,10 +4178,11 @@ from foo&quot;)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest three-or-more-line-breaks-test
   (doseq [f [identity -&gt;windows]
           :let [query (f implicit-semicolon)]]
-    (is (= (-&gt; query (str/replace &quot;id&quot; &quot;pk&quot;) (str/replace &quot;foo&quot; &quot;bar&quot;))
-           (m/replace-names query
-                            {:columns {{:table &quot;foo&quot; :column &quot;id&quot;} &quot;pk&quot;}
-                             :tables  {{:table &quot;foo&quot;} &quot;bar&quot;}})))))</pre></td></tr><tr><td class="docs">
+    (testing (if (= -&gt;windows f) &quot;windows&quot; &quot;unix&quot;)
+      (is (= (-&gt; query (str/replace &quot;id&quot; &quot;pk&quot;) (str/replace &quot;foo&quot; &quot;bar&quot;))
+             (m/replace-names query
+                              {:columns {{:table &quot;foo&quot; :column &quot;id&quot;} &quot;pk&quot;}
+                               :tables  {{:table &quot;foo&quot;} &quot;bar&quot;}}))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(deftest query-&gt;tables-test
   (testing &quot;Simple queries&quot;
     (is (= #{{:table &quot;core_user&quot;}}
