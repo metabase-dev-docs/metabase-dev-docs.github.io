@@ -2866,7 +2866,7 @@ net.brehaut.ClojureTools = (function (SH) {
   };
 })(SyntaxHighlighter);
 </script><title>Macaw -- Marginalia</title></head><body><table><tr><td class="docs"><div class="header"><h1 class="project-name">Macaw</h1><h2 class="project-version">0.0.1-SNAPSHOT</h2><br /><p>A Clojure wrapper for JSqlParser 🦜</p>
-</div></td><td class="codes" style="text-align: center; vertical-align: middle;color: #666;padding-right:20px"><br /><br /><br />(this space intentionally left almost blank)</td></tr><tr><td class="docs"><div class="toc"><a name="toc"><h3>namespaces</h3></a><ul><li><a href="#macaw.collect">macaw.collect</a></li><li><a href="#macaw.config">macaw.config</a></li><li><a href="#macaw.core">macaw.core</a></li><li><a href="#macaw.rewrite">macaw.rewrite</a></li><li><a href="#macaw.util">macaw.util</a></li><li><a href="#macaw.util.malli">macaw.util.malli</a></li><li><a href="#macaw.util.malli.defn">macaw.util.malli.defn</a></li><li><a href="#macaw.util.malli.fn">macaw.util.malli.fn</a></li><li><a href="#macaw.util.malli.registry">macaw.util.malli.registry</a></li><li><a href="#macaw.walk">macaw.walk</a></li><li><a href="#macaw.acceptance-test">macaw.acceptance-test</a></li><li><a href="#macaw.core-test">macaw.core-test</a></li><li><a href="#macaw.test.util">macaw.test.util</a></li><li><a href="#macaw.test.util-test">macaw.test.util-test</a></li><li><a href="#macaw.util-test">macaw.util-test</a></li><li><a href="#macaw.util.malli-test">macaw.util.malli-test</a></li></ul></div></td><td class="codes">&nbsp;</td></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.collect" name="macaw.collect"><h1 class="project-name">macaw.collect</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</div></td><td class="codes" style="text-align: center; vertical-align: middle;color: #666;padding-right:20px"><br /><br /><br />(this space intentionally left almost blank)</td></tr><tr><td class="docs"><div class="toc"><a name="toc"><h3>namespaces</h3></a><ul><li><a href="#macaw.collect">macaw.collect</a></li><li><a href="#macaw.config">macaw.config</a></li><li><a href="#macaw.core">macaw.core</a></li><li><a href="#macaw.rewrite">macaw.rewrite</a></li><li><a href="#macaw.types">macaw.types</a></li><li><a href="#macaw.util">macaw.util</a></li><li><a href="#macaw.util.malli">macaw.util.malli</a></li><li><a href="#macaw.util.malli.defn">macaw.util.malli.defn</a></li><li><a href="#macaw.util.malli.fn">macaw.util.malli.fn</a></li><li><a href="#macaw.util.malli.registry">macaw.util.malli.registry</a></li><li><a href="#macaw.walk">macaw.walk</a></li><li><a href="#macaw.acceptance-test">macaw.acceptance-test</a></li><li><a href="#macaw.core-test">macaw.core-test</a></li><li><a href="#macaw.test.util">macaw.test.util</a></li><li><a href="#macaw.test.util-test">macaw.test.util-test</a></li><li><a href="#macaw.util-test">macaw.util-test</a></li><li><a href="#macaw.util.malli-test">macaw.util.malli-test</a></li></ul></div></td><td class="codes">&nbsp;</td></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.collect" name="macaw.collect"><h1 class="project-name">macaw.collect</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns macaw.collect
   (:require
    [clojure.string :as str]
@@ -3113,14 +3113,17 @@ referenced in a table-wildcard (as far as can be determined from the query).</p>
    [clojure.string :as str]
    [clojure.walk :as walk]
    [macaw.collect :as collect]
-   [macaw.rewrite :as rewrite])
+   [macaw.rewrite :as rewrite]
+   [macaw.types :as m.types]
+   [macaw.util.malli :as mu])
   (:import
-   (com.metabase.macaw AstWalker$Scope BasicTableExtractor AnalysisError CompoundTableExtractor)
+   (com.metabase.macaw AnalysisError AstWalker$Scope BasicTableExtractor CompoundTableExtractor)
    (java.util.function Consumer)
    (net.sf.jsqlparser JSQLParserException)
    (net.sf.jsqlparser.parser CCJSqlParser CCJSqlParserUtil)
    (net.sf.jsqlparser.parser.feature Feature)
-   (net.sf.jsqlparser.schema Table)))</pre></td></tr><tr><td class="docs">
+   (net.sf.jsqlparser.schema Table)
+   (net.sf.jsqlparser.statement Statement)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- escape-keywords ^String [sql keywords]
   (reduce
@@ -3168,12 +3171,13 @@ referenced in a table-wildcard (as far as can be determined from the query).</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- -&gt;macaw-error [^AnalysisError analysis-error]
   {:error (keyword &quot;macaw.error&quot; (-&gt; (.-errorType analysis-error)
                                      str/lower-case
-                                     (str/replace #&quot;_&quot; &quot;-&quot;)))})</pre></td></tr><tr><td class="docs"><p>Given a parsed query (i.e., a [subclass of] <code>Statement</code>) return a map with the elements found within it.</p>
-
-<p>(Specifically, it returns their fully-qualified names as strings, where 'fully-qualified' means 'as referred to in
-the query'; this function doesn't do additional inference work to find out a table's schema.)</p>
-</td><td class="codes"><pre class="brush: clojure">(defn query-&gt;components
-  [parsed &amp; {:as opts}]
+                                     (str/replace #&quot;_&quot; &quot;-&quot;)))})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn query-&gt;components :- [:or m.types/error-result m.types/components-result]
+  &quot;Given a parsed query (i.e., a [subclass of] `Statement`) return a map with the elements found within it.
+  (Specifically, it returns their fully-qualified names as strings, where 'fully-qualified' means 'as referred to in
+  the query'; this function doesn't do additional inference work to find out a table's schema.)&quot;
+  [parsed       :- [:or m.types/error-result [:fn #(instance? Statement %)]]
+   &amp; {:as opts} :- [:maybe m.types/options-map]]
   ;; By default, we will preserve identifiers verbatim, to be agnostic of casing and quoting.
   ;; This may result in duplicate components, which are left to the caller to deduplicate.
   ;; In Metabase's case, this is done during the stage where the database metadata is queried.
@@ -3196,9 +3200,10 @@ the query'; this function doesn't do additional inference work to find out a tab
      :table  (.getName t)}
     {:table (.getName t)}))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- tables-&gt;identifiers [expr]
-  {:tables (set (map table-&gt;identifier expr))})</pre></td></tr><tr><td class="docs"><p>Given a parsed query (i.e., a [subclass of] <code>Statement</code>) return a set of all the table identifiers found within it.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn query-&gt;tables
-  [sql &amp; {:keys [mode] :as opts}]
+  {:tables (set (map table-&gt;identifier expr))})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn query-&gt;tables :- [:or m.types/error-result m.types/tables-result]
+  &quot;Given a parsed query (i.e., a [subclass of] `Statement`) return a set of all the table identifiers found within it.&quot;
+  [sql :- :string &amp; {:keys [mode] :as opts} :- [:maybe m.types/options-map]]
   (try
     (let [parsed (parsed-query sql opts)]
       (if (map? parsed)
@@ -3208,20 +3213,18 @@ the query'; this function doesn't do additional inference work to find out a tab
           :basic-select (-&gt; (BasicTableExtractor/getTables parsed) tables-&gt;identifiers)
           :compound-select (-&gt; (CompoundTableExtractor/getTables parsed) tables-&gt;identifiers))))
     (catch AnalysisError e
-      (-&gt;macaw-error e))))</pre></td></tr><tr><td class="docs"><p>Given an SQL query, apply the given table, column, and schema renames.</p>
-
-<p>Supported options:</p>
-
-<ul>
-<li><p>case-insensitive: whether to relax the comparison</p>
-
-<ul><li>:upper    - identifiers are implicitly case to uppercase, as per the SQL-92 standard.</li>
-<li>:lower    - identifiers are implicitly cast to lowercase, as per Postgres et al.</li>
-<li>:agnostic - case is ignored when comparing identifiers in code to replacement "from" strings.</li></ul></li>
-<li><p>quotes-preserve-case: whether quoted identifiers should override the previous option.</p></li>
-</ul>
-</td><td class="codes"><pre class="brush: clojure">(defn replace-names
-  [sql renames &amp; {:as opts}]
+      (-&gt;macaw-error e))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn replace-names :- :string
+  &quot;Given an SQL query, apply the given table, column, and schema renames.
+  Supported options:
+  - case-insensitive: whether to relax the comparison
+    - :upper    - identifiers are implicitly case to uppercase, as per the SQL-92 standard.
+    - :lower    - identifiers are implicitly cast to lowercase, as per Postgres et al.
+    - :agnostic - case is ignored when comparing identifiers in code to replacement \&quot;from\&quot; strings.
+  - quotes-preserve-case: whether quoted identifiers should override the previous option.&quot;
+  [sql          :- :string
+   renames      :- :map
+   &amp; {:as opts} :- [:maybe m.types/options-map]]
   ;; We need to pre-sanitize the SQL before its analyzed so that the AST token positions match up correctly.
   ;; Currently, we use a more complex and expensive sanitization method, so that it's reversible.
   ;; If we decide that it's OK to normalize whitespace etc. during replacement, then we can use the same helper.
@@ -3358,7 +3361,56 @@ the query'; this function doesn't do additional inference work to find out a tab
                            (update-query @updated-nodes sql opts))]
     (when-not (:allow-unused? opts)
       (alert-unused! @updated-nodes renames))
-    res))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.util" name="macaw.util"><h1 class="project-name">macaw.util</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+    res))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.types" name="macaw.types"><h1 class="project-name">macaw.types</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns macaw.types)</pre></td></tr><tr><td class="docs"><p>The different analyzer strategies that Macaw supports.</p>
+</td><td class="codes"><pre class="brush: clojure">(def modes
+  [:ast-walker-1
+   :basic-select
+   :compound-select])</pre></td></tr><tr><td class="docs"><p>The shape of the options accepted by our API</p>
+</td><td class="codes"><pre class="brush: clojure">(def options-map
+  [:map
+   [:mode                  {:optional true} (into [:enum] modes)]
+   [:non-reserved-words    {:optional true} [:seqable :keyword]]
+   [:allow-unused?         {:optional true} :boolean]
+   [:case-insensitive      {:optional true} [:enum :upper :lower :agnostic]]
+   [:quotes-preserve-case? {:optional true} :boolean]])</pre></td></tr><tr><td class="docs"><p>The different types of errors that Macaw can return.</p>
+</td><td class="codes"><pre class="brush: clojure">(def error-types
+  [:macaw.error/analysis-error
+   :macaw.error/illegal-expression
+   :macaw.error/invalid-query
+   :macaw.error/unable-to-parse
+   :macaw.error/unsupported-expression])</pre></td></tr><tr><td class="docs"><p>A map indicating that we were not able to parse the query.</p>
+</td><td class="codes"><pre class="brush: clojure">(def error-result
+  [:map
+   [:error (into [:enum] error-types)]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private table-ident
+  [:map
+   [:schema {:optional true} :string]
+   [:table                   :string]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private column-ident
+  [:map
+   [:schema {:optional true} :string]
+   [:table  {:optional true} :string]
+   [:column                  :string]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- with-context [t]
+  [:map
+   [:component t]
+   [:context :any]])</pre></td></tr><tr><td class="docs"><p>A map holding all the components that we were able to parse from a query</p>
+</td><td class="codes"><pre class="brush: clojure">(def components-result
+  [:map {:closed true}
+   [:tables         [:set (with-context table-ident)]]
+   [:columns        [:set (with-context column-ident)]]
+   [:source-columns [:set column-ident]]
+   ;; TODO Unclear why we would want to wrap any of these.
+   [:table-wildcards   [:set (with-context table-ident)]]
+   ;; This :maybe would be a problem, if anything actually used this value.
+   [:tables-superset   [:set (with-context [:maybe table-ident])]]
+   ;; Unclear why we need a collection here
+   [:has-wildcard?     [:set (with-context :boolean)]]
+   [:mutation-commands [:set (with-context :string)]]])</pre></td></tr><tr><td class="docs"><p>A map holding the tables that we were able to parse from a query</p>
+</td><td class="codes"><pre class="brush: clojure">(def tables-result
+  [:map
+   [:tables [:set table-ident]]])</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#macaw.util" name="macaw.util"><h1 class="project-name">macaw.util</h1><a class="toc-link" href="#toc">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns macaw.util
   (:require
    [clojure.string :as str])
@@ -3945,7 +3997,8 @@ indirection.</p>
    [clojure.string :as str]
    [clojure.test :refer :all]
    [macaw.core :as m]
-   [macaw.core-test :as ct])
+   [macaw.core-test :as ct]
+   [macaw.types])
   (:import
    (java.io File)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
@@ -3961,9 +4014,7 @@ indirection.</p>
     :columns-with-scope (ct/contexts-&gt;scopes (get cs :columns))
     (ct/raw-components (get cs k))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private test-modes
-  #{:ast-walker-1
-    :basic-select
-    :compound-select})</pre></td></tr><tr><td class="docs">
+  (set macaw.types/modes))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def override-hierarchy
   (-&gt; (make-hierarchy)
       (derive :basic-select :select-only)
@@ -4772,7 +4823,7 @@ Used so that strings with significant whitespace may be visually aligned.</p>
 </td><td class="codes"><pre class="brush: clojure">(deftest ^:parallel defn-bad-in-bad-out-test
   (is (thrown-with-msg? Exception
                         #&quot;Invalid input.*&quot;
-                        (enhance 7.3 true))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a><div id="floating-toc"><ul><li class="floating-toc-li" id="floating-toc_macaw.collect">macaw.collect</li><li class="floating-toc-li" id="floating-toc_macaw.config">macaw.config</li><li class="floating-toc-li" id="floating-toc_macaw.core">macaw.core</li><li class="floating-toc-li" id="floating-toc_macaw.rewrite">macaw.rewrite</li><li class="floating-toc-li" id="floating-toc_macaw.util">macaw.util</li><li class="floating-toc-li" id="floating-toc_macaw.util.malli">macaw.util.malli</li><li class="floating-toc-li" id="floating-toc_macaw.util.malli.defn">macaw.util.malli.defn</li><li class="floating-toc-li" id="floating-toc_macaw.util.malli.fn">macaw.util.malli.fn</li><li class="floating-toc-li" id="floating-toc_macaw.util.malli.registry">macaw.util.malli.registry</li><li class="floating-toc-li" id="floating-toc_macaw.walk">macaw.walk</li><li class="floating-toc-li" id="floating-toc_macaw.acceptance-test">macaw.acceptance-test</li><li class="floating-toc-li" id="floating-toc_macaw.core-test">macaw.core-test</li><li class="floating-toc-li" id="floating-toc_macaw.test.util">macaw.test.util</li><li class="floating-toc-li" id="floating-toc_macaw.test.util-test">macaw.test.util-test</li><li class="floating-toc-li" id="floating-toc_macaw.util-test">macaw.util-test</li><li class="floating-toc-li" id="floating-toc_macaw.util.malli-test">macaw.util.malli-test</li></ul></div></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+                        (enhance 7.3 true))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a><div id="floating-toc"><ul><li class="floating-toc-li" id="floating-toc_macaw.collect">macaw.collect</li><li class="floating-toc-li" id="floating-toc_macaw.config">macaw.config</li><li class="floating-toc-li" id="floating-toc_macaw.core">macaw.core</li><li class="floating-toc-li" id="floating-toc_macaw.rewrite">macaw.rewrite</li><li class="floating-toc-li" id="floating-toc_macaw.types">macaw.types</li><li class="floating-toc-li" id="floating-toc_macaw.util">macaw.util</li><li class="floating-toc-li" id="floating-toc_macaw.util.malli">macaw.util.malli</li><li class="floating-toc-li" id="floating-toc_macaw.util.malli.defn">macaw.util.malli.defn</li><li class="floating-toc-li" id="floating-toc_macaw.util.malli.fn">macaw.util.malli.fn</li><li class="floating-toc-li" id="floating-toc_macaw.util.malli.registry">macaw.util.malli.registry</li><li class="floating-toc-li" id="floating-toc_macaw.walk">macaw.walk</li><li class="floating-toc-li" id="floating-toc_macaw.acceptance-test">macaw.acceptance-test</li><li class="floating-toc-li" id="floating-toc_macaw.core-test">macaw.core-test</li><li class="floating-toc-li" id="floating-toc_macaw.test.util">macaw.test.util</li><li class="floating-toc-li" id="floating-toc_macaw.test.util-test">macaw.test.util-test</li><li class="floating-toc-li" id="floating-toc_macaw.util-test">macaw.util-test</li><li class="floating-toc-li" id="floating-toc_macaw.util.malli-test">macaw.util.malli-test</li></ul></div></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
