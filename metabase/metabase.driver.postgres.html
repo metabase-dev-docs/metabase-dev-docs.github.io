@@ -2922,6 +2922,8 @@ for JDBC-based drivers.</p>
 </td><td class="codes"><pre class="brush: clojure">(driver/register! :postgres, :parent :sql-jdbc)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod driver/display-name :postgres [_] &quot;PostgreSQL&quot;)</pre></td></tr><tr><td class="docs"><p>Features that are supported by Postgres and all of its child drivers like Redshift</p>
 </td><td class="codes"><pre class="brush: clojure">(doseq [[feature supported?] {:connection-impersonation true
+                              :describe-fields          true
+                              :describe-fks             true
                               :convert-timezone         true
                               :datetime-diff            true
                               :now                      true
@@ -3054,15 +3056,14 @@ for JDBC-based drivers.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- get-typenames [{:keys [nspname typname]}]
   (cond-&gt; [typname]
     (not= nspname &quot;public&quot;) (conj (format &quot;\&quot;%s\&quot;.\&quot;%s\ nspname typname))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- enum-types [_driver database]
+</td><td class="codes"><pre class="brush: clojure">(defn- enum-types
+  [database]
   (into #{}
-        (comp (mapcat get-typenames)
-              (map keyword))
+        (mapcat get-typenames)
         (jdbc/query (sql-jdbc.conn/db-&gt;pooled-connection-spec database)
                     [(str &quot;SELECT nspname, typname &quot;
                           &quot;FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace &quot;
                           &quot;WHERE t.oid IN (SELECT DISTINCT enumtypid FROM pg_enum e)&quot;)])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^:dynamic *enum-types* nil)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- get-tables-sql
   [schemas table-names]
   ;; Ref: https://github.com/davecramer/pgjdbc/blob/a714bfd/pgjdbc/src/main/java/org/postgresql/jdbc/PgDatabaseMetaData.java#L1272
@@ -3120,13 +3121,90 @@ for JDBC-based drivers.</p>
   [_driver database]
   ;; TODO: we should figure out how to sync tables using transducer, this way we don't have to hold 100k tables in
   ;; memory in a set like this
-  {:tables (into #{} (describe-syncable-tables database))})</pre></td></tr><tr><td class="docs"><p>Describe the Fields present in a <code>table</code>. This just hands off to the normal SQL driver implementation of the same
-name, but first fetches database enum types so we have access to them. These are simply binded to the dynamic var
-and used later in <code>database-type-&gt;base-type</code>, which you will find below.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmethod driver/describe-table :postgres
-  [driver database table]
-  (binding [*enum-types* (enum-types driver database)]
-    (sql-jdbc.sync/describe-table driver database table)))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
+  {:tables (into #{} (describe-syncable-tables database))})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod sql-jdbc.sync/describe-fields-sql :postgres
+  ;; The implementation is based on `getColumns` in https://github.com/pgjdbc/pgjdbc/blob/fcc13e70e6b6bb64b848df4b4ba6b3566b5e95a3/pgjdbc/src/main/java/org/postgresql/jdbc/PgDatabaseMetaData.java
+  [driver &amp; {:keys [schema-names table-names]}]
+  (sql/format {:select [[:c.column_name :name]
+                        [:c.udt_name :database-type]
+                        [[:- :c.ordinal_position [:inline 1]] :database-position]
+                        [:c.table_schema :table-schema]
+                        [:c.table_name :table-name]
+                        [[:not= :pk.column_name nil] :pk?]
+
+                        [[:col_description
+                          [:cast [:cast [:format [:inline &quot;%I.%I&quot;] [:cast :c.table_schema :text] [:cast :c.table_name :text]] :regclass] :oid]
+                          :c.ordinal_position]
+                         :field-comment]
+                        [[:and
+                          [:or [:= :column_default nil] [:= [:lower :column_default] [:inline &quot;null&quot;]]]
+                          [:= :is_nullable [:inline &quot;NO&quot;]]
+                          ;;_ IS_AUTOINCREMENT from: https://github.com/pgjdbc/pgjdbc/blob/fcc13e70e6b6bb64b848df4b4ba6b3566b5e95a3/pgjdbc/src/main/java/org/postgresql/jdbc/PgDatabaseMetaData.java#L1852-L1856
+                          [:not [:or
+                                 [:and [:!= :column_default nil] [:like :column_default [:inline &quot;%nextval(%&quot;]]]
+                                 [:!= :is_identity [:inline &quot;NO&quot;]]]]]
+                         :database-required]
+                        [[:or
+                          [:and [:!= :column_default nil] [:like :column_default [:inline &quot;%nextval(%&quot;]]]
+                          [:!= :is_identity [:inline &quot;NO&quot;]]]
+                         :database-is-auto-increment]]
+               :from [[:information_schema.columns :c]]
+               :left-join [[{:select [:tc.table_schema
+                                      :tc.table_name
+                                      :kc.column_name]
+                             :from [[:information_schema.table_constraints :tc]]
+                             :join [[:information_schema.key_column_usage :kc]
+                                    [:and
+                                     [:= :tc.constraint_name :kc.constraint_name]
+                                     [:= :tc.table_schema :kc.table_schema]
+                                     [:= :tc.table_name :kc.table_name]]]
+                             :where [:= :tc.constraint_type [:inline &quot;PRIMARY KEY&quot;]]}
+                            :pk]
+                           [:and
+                            [:= :c.table_schema :pk.table_schema]
+                            [:= :c.table_name :pk.table_name]
+                            [:= :c.column_name :pk.column_name]]]
+               :where [:and
+                       [:raw &quot;c.table_schema !~ '^information_schema|catalog_history|pg_'&quot;]
+                       (when schema-names [:in :c.table_schema schema-names])
+                       (when table-names [:in :c.table_name table-names])]
+               :order-by [:table-schema :table-name :database-position]}
+              :dialect (sql.qp/quote-style driver)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod sql-jdbc.sync/describe-fks-sql :postgres
+  [driver &amp; {:keys [schema-names table-names]}]
+  (sql/format {:select (vec
+                        {:fk_ns.nspname       &quot;fk-table-schema&quot;
+                         :fk_table.relname    &quot;fk-table-name&quot;
+                         :fk_column.attname   &quot;fk-column-name&quot;
+                         :pk_ns.nspname       &quot;pk-table-schema&quot;
+                         :pk_table.relname    &quot;pk-table-name&quot;
+                         :pk_column.attname   &quot;pk-column-name&quot;})
+               :from   [[:pg_constraint :c]]
+               :join   [[:pg_class     :fk_table]  [:= :c.conrelid :fk_table.oid]
+                        [:pg_namespace :fk_ns]     [:= :c.connamespace :fk_ns.oid]
+                        [:pg_attribute :fk_column] [:= :c.conrelid :fk_column.attrelid]
+                        [:pg_class     :pk_table]  [:= :c.confrelid :pk_table.oid]
+                        [:pg_namespace :pk_ns]     [:= :pk_table.relnamespace :pk_ns.oid]
+                        [:pg_attribute :pk_column] [:= :c.confrelid :pk_column.attrelid]]
+               :where  [:and
+                        [:raw &quot;fk_ns.nspname !~ '^information_schema|catalog_history|pg_'&quot;]
+                        [:= :c.contype [:raw &quot;'f'::char&quot;]]
+                        [:= :fk_column.attnum [:raw &quot;ANY(c.conkey)&quot;]]
+                        [:= :pk_column.attnum [:raw &quot;ANY(c.confkey)&quot;]]
+                        (when table-names [:in :fk_table.relname table-names])
+                        (when schema-names [:in :fk_ns.nspname schema-names])]
+               :order-by [:fk-table-schema :fk-table-name]}
+              :dialect (sql.qp/quote-style driver)))</pre></td></tr><tr><td class="docs"><p>Describe the Fields present in a <code>table</code>. This just hands off to the normal SQL driver implementation of the same
+name, but first fetches database enum types so we have access to them.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmethod driver/describe-fields :postgres
+  [driver database &amp; args]
+  (let [enums (enum-types database)]
+    (eduction
+     (map (fn [{:keys [database-type] :as col}]
+            (cond-&gt; col
+              (contains? enums database-type)
+              (assoc :base-type :type/PostgresEnum))))
+     (apply (get-method driver/describe-fields :sql-jdbc) driver database args))))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
 |                                           metabase.driver.sql impls                                            |
 +----------------------------------------------------------------------------------------------------------------+</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
@@ -3481,10 +3559,8 @@ The alias names in JSON fields are unique wrt nfc path</p>
    (keyword &quot;timestamp with time zone&quot;)    :type/DateTimeWithLocalTZ
    (keyword &quot;timestamp without time zone&quot;) :type/DateTime})</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod sql-jdbc.sync/database-type-&gt;base-type :postgres
-  [_driver column]
-  (if (contains? *enum-types* column)
-    :type/PostgresEnum
-    (default-base-types column)))</pre></td></tr><tr><td class="docs">
+  [_driver database-type]
+  (default-base-types database-type))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod sql-jdbc.sync/column-&gt;semantic-type :postgres
   [_driver database-type _column-name]
   ;; this is really, really simple right now.  if its postgres :json type then it's :type/SerializedJSON semantic-type
