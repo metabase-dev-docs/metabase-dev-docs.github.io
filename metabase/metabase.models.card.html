@@ -3536,7 +3536,80 @@ query.</p>
   #{:table_id
     :database_id
     :query_type ;; these first three may not even be changeable
-    :dataset_query})</pre></td></tr><tr><td class="docs"><p>Update a Card. Metadata is fetched asynchronously. If it is ready before [[metadata-sync-wait-ms]] elapses it will be
+    :dataset_query})</pre></td></tr><tr><td class="docs"><p>Generate mapping of of <em>ref identifier</em> -> #{<em>ref...</em>}.</p>
+
+<p><em>ref identifier</em> is a vector of first 2 elements of ref, eg. [:expression "xix"] or [:field 10]</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- breakout--&gt;identifier-&gt;refs
+  [breakouts]
+  (-&gt; (group-by #(subvec % 0 2) breakouts)
+      (update-vals set)))</pre></td></tr><tr><td class="docs"><p>Generate <em>action</em> for combination of args.</p>
+
+<p><em>Action</em> is to be performed on <em>parameter mapping</em> of a <em>dashcard</em>. For more info see
+the [[update-associated-parameters!]]'s docstring.</p>
+
+<p><em>Action</em> has a form of [<action> &amp; args].</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- action-for-identifier+refs
+  [after--identifier-&gt;refs identifier before--refs]
+  (let [after--refs (get after--identifier-&gt;refs identifier #{})]
+    (when (and (= 1 (count before--refs) (count after--refs))
+               (not= before--refs after--refs))
+      [:update (first after--refs)])))</pre></td></tr><tr><td class="docs"><p>Generate mapping of <em>identifier</em> -> <em>action</em>.</p>
+
+<p><em>identifier</em> is is a vector of first 2 elements of ref, eg. [:expression "xix"] or [:field 10]. Action is generated
+in [[action-for-identifier+refs]] and performed later in [[update-mapping]].</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- breakouts--&gt;identifier-&gt;action
+  [breakout-before-update breakout-after-update]
+  (let [before--identifier-&gt;refs (breakout--&gt;identifier-&gt;refs breakout-before-update)
+        after--identifier-&gt;refs  (breakout--&gt;identifier-&gt;refs breakout-after-update)]
+    ;; Remove no-ops to avoid redundant db calls in [[update-associated-parameters!]].
+    (-&gt;&gt; before--identifier-&gt;refs
+         (m/map-kv-vals #(action-for-identifier+refs after--identifier-&gt;refs %1 %2))
+         (m/filter-vals some?)
+         not-empty)))</pre></td></tr><tr><td class="docs"><p>Decide whether parameter mapping has strucuture so it can be updated presumably using [[update-mapping]].</p>
+</td><td class="codes"><pre class="brush: clojure">(defn eligible-mapping?
+  [{[dim [ref-kind]] :target :as _mapping}]
+  (and (= dim :dimension)
+       (#{:field :expression} ref-kind)))</pre></td></tr><tr><td class="docs"><p>Return modifed mapping according to action.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- update-mapping
+  [identifier-&gt;action {[_dim ref] :target :as mapping}]
+  (let [identifier (subvec ref 0 2)
+        [action arg] (get identifier-&gt;action identifier)]
+    (case action
+      :update (assoc-in mapping [:target 1] arg)
+      mapping)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- updates-for-dashcards
+  [identifier-&gt;action dashcards]
+  (not-empty (for [{:keys [id parameter_mappings]} dashcards
+                   :let [updated (into [] (map #(if (eligible-mapping? %)
+                                                  (update-mapping identifier-&gt;action %)
+                                                  %))
+                                       parameter_mappings)]
+                   :when (not= parameter_mappings updated)]
+               [id {:parameter_mappings updated}])))</pre></td></tr><tr><td class="docs"><p>Update <em>parameter mappings</em> of <em>dashcards</em> that target modified <em>card</em>, to reflect the modification.</p>
+
+<p>This function handles only modifications to breakout.</p>
+
+<p>Context. Card can have multiple multiple breakout elements referencing same field or expression, having different
+<em>temporal unit</em>. Those refs can be targeted by dashboard <em>temporal unit parameter</em>. If refs change, and card is saved,
+<em>parameter mappings</em> have to be updated to target new, modified refs. This function takes care of that.</p>
+
+<p>First mappings of <em>identifier</em> -> <em>action</em> are generated. <em>identifier</em> is described
+eg. in [[breakouts-->identifier->action]] docstring. Then, dashcards are fetched and updates are generated
+by [[updates-for-dashcards]]. Updates are then executed.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- update-associated-parameters!
+  [card-before card-after]
+  (let [card-&gt;breakout     #(-&gt; % :dataset_query mbql.normalize/normalize :query :breakout)
+        breakout-before    (card-&gt;breakout card-before)
+        breakout-after     (card-&gt;breakout card-after)]
+    (when-some [identifier-&gt;action (breakouts--&gt;identifier-&gt;action breakout-before breakout-after)]
+      (let [dashcards          (t2/select :model/DashboardCard :card_id (some :id [card-after card-before]))
+            updates            (updates-for-dashcards identifier-&gt;action dashcards)]
+        ;; Beware. This can have negative impact on card update performance as queries are fired in sequence. I'm not
+        ;; aware of more reasonable way.
+        (when (seq updates)
+          (t2/with-transaction [_conn]
+            (doseq [[id update] updates]
+              (t2/update! :model/DashboardCard :id id update))))))))</pre></td></tr><tr><td class="docs"><p>Update a Card. Metadata is fetched asynchronously. If it is ready before [[metadata-sync-wait-ms]] elapses it will be
 included, otherwise the metadata will be saved to the database asynchronously.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn update-card!
   [{:keys [card-before-update card-updates actor]}]
@@ -3560,7 +3633,15 @@ included, otherwise the metadata will be saved to the database asynchronously.</
                                     :present #{:collection_id :collection_position :description :cache_ttl :archived_directly}
                                     :non-nil #{:dataset_query :display :name :visualization_settings :archived
                                                :enable_embedding :type :parameters :parameter_mappings :embedding_params
-                                               :result_metadata :collection_preview :verified-result-metadata?})))
+                                               :result_metadata :collection_preview :verified-result-metadata?}))
+    ;; ok, now update dependent dashcard parameters
+    (try
+      (update-associated-parameters! card-before-update card-updates)
+      (catch Throwable e
+        (log/error &quot;Update of dependent card parameters failed!&quot;)
+        (log/debug e
+                   &quot;`card-before-update`:&quot; (pr-str card-before-update)
+                   &quot;`card-updates`:&quot; (pr-str card-updates)))))
   ;; Fetch the updated Card from the DB
   (let [card (t2/select-one Card :id (:id card-before-update))]
     (delete-alerts-if-needed! :old-card card-before-update, :new-card card, :actor actor)
