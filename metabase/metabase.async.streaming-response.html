@@ -2885,7 +2885,6 @@ net.brehaut.ClojureTools = (function (SH) {
    (jakarta.servlet AsyncContext)
    (jakarta.servlet.http HttpServletResponse)
    (java.io BufferedWriter OutputStream OutputStreamWriter)
-   (java.nio ByteBuffer)
    (java.nio.channels ClosedChannelException SocketChannel)
    (java.nio.charset StandardCharsets)
    (java.util.zip GZIPOutputStream)
@@ -3008,23 +3007,15 @@ error over and over.</p>
   (let [transport-type (type transport)]
     (when-not (contains? @*reported-types transport-type)
       (log/errorf &quot;Unexpected transport type encountered in `canceled?`: %s&quot; transport-type))
-    (swap! *reported-types conj transport-type)))</pre></td></tr><tr><td class="docs"><p>Check whether the HTTP request has been canceled by the client.</p>
-
-<p>This function attempts to read a single byte from the underlying TCP socket; if the request is canceled, <code>.read</code>
-will return <code>-1</code>. Otherwise, since the entire request has already been read, <code>.read</code> <em>should</em> probably complete
-immediately, returning <code>0</code>.</p>
+    (swap! *reported-types conj transport-type)))</pre></td></tr><tr><td class="docs"><p>Check whether the HTTP request has been canceled by the client. This function uses <code>HttpEndpoint.isOpen</code> method which
+is not guaranteed to return false in case the client closes the connection, but it's the best heuristic we have.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- canceled?
   [^Request request]
   (try
-    (let [transport (.. request getHttpChannel getEndPoint getTransport)]
-      (if-let [channel (get-channel transport)]
-        (let [buf        (ByteBuffer/allocate 1)
-              status     (.read channel buf)]
-          (log/tracef &quot;Check cancelation status: .read returned %d&quot; status)
-          (neg? status))
-        (do
-          (log-unexpected-transport! transport)
-          false)))
+    (let [endpoint (.. request getHttpChannel getEndPoint)
+          is-open  (.isOpen endpoint)]
+      (log/tracef &quot;Check cancelation status: .isOpen returned %s&quot; is-open)
+      (not is-open))
     (catch InterruptedException _ false)
     (catch ClosedChannelException _ true)
     (catch Throwable e
