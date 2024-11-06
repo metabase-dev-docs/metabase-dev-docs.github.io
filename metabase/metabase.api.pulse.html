@@ -2868,6 +2868,7 @@ net.brehaut.ClojureTools = (function (SH) {
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.api.pulse" name="metabase.api.pulse"><h1 class="project-name">metabase.api.pulse</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p><code>/api/pulse</code> endpoints. These are all authenticated. For unauthenticated <code>/api/pulse/unsubscribe</code> endpoints,
 see [[metabase.api.pulse.unsubscribe]].</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.api.pulse
+  #_{:clj-kondo/ignore [:deprecated-namespace]}
   (:require
    [clojure.set :refer [difference]]
    [compojure.core :refer [GET POST PUT]]
@@ -2876,6 +2877,7 @@ see [[metabase.api.pulse.unsubscribe]].</p>
    [metabase.api.alert :as api.alert]
    [metabase.api.common :as api]
    [metabase.api.common.validation :as validation]
+   [metabase.channel.render.core :as channel.render]
    [metabase.config :as config]
    [metabase.email :as email]
    [metabase.events :as events]
@@ -2889,6 +2891,7 @@ see [[metabase.api.pulse.unsubscribe]].</p>
     :as pulse-channel
     :refer [channel-types PulseChannel]]
    [metabase.models.pulse-channel-recipient :refer [PulseChannelRecipient]]
+   [metabase.notification.core :as notification]
    [metabase.plugins.classloader :as classloader]
    [metabase.public-settings.premium-features :as premium-features]
    [metabase.pulse.core :as pulse]
@@ -3115,13 +3118,13 @@ merge in recipients that are Metabase users, not raw email addresses, which thes
      :body   (html5
               [:html
                [:body {:style &quot;margin: 0;&quot;}
-                (pulse/render-pulse-card-for-display (pulse/defaulted-timezone card)
-                                                     card
-                                                     result
-                                                     {:pulse/include-title? true, :pulse/include-buttons? true})]])}))</pre></td></tr><tr><td class="docs"><p>/preview_dashboard/:id</p>
+                (channel.render/render-pulse-card-for-display (channel.render/defaulted-timezone card)
+                                                              card
+                                                              result
+                                                              {:channel.render/include-title? true, :channel.render/include-buttons? true})]])}))</pre></td></tr><tr><td class="docs"><p>/preview_dashboard/:id</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
   &quot;Get HTML rendering of a Dashboard with `id`.
-  This endpoint relies on a custom middleware defined in `metabase.pulse.preview/style-tag-nonce-middleware` to
+  This endpoint relies on a custom middleware defined in `metabase.channel.render.core/style-tag-nonce-middleware` to
   allow the style tag to render properly, given our Content Security Policy setup. This middleware is attached to these
   routes at the bottom of this namespace using `metabase.api.common/define-routes`.&quot;
   [id]
@@ -3129,7 +3132,7 @@ merge in recipients that are Metabase users, not raw email addresses, which thes
   (api/read-check :model/Dashboard id)
   {:status  200
    :headers {&quot;Content-Type&quot; &quot;text/html&quot;}
-   :body    (pulse/style-tag-from-inline-styles
+   :body    (channel.render/style-tag-from-inline-styles
              (html5
               [:head
                [:meta {:charset &quot;utf-8&quot;}]
@@ -3137,7 +3140,7 @@ merge in recipients that are Metabase users, not raw email addresses, which thes
                        :rel  &quot;stylesheet&quot;
                        :href &quot;https://fonts.googleapis.com/css2?family=Lato:ital,wght@0,100;0,300;0,400;0,700;0,900;1,100;1,300;1,400;1,700;1,900&amp;display=swap&quot;}]]
               [:body [:h2 (format &quot;Backend Artifacts Preview for Dashboard %s&quot; id)]
-               (pulse/render-dashboard-to-html id)]))})</pre></td></tr><tr><td class="docs"><p>/preview<em>card</em>info/:id</p>
+               (channel.render/render-dashboard-to-html id)]))})</pre></td></tr><tr><td class="docs"><p>/preview<em>card</em>info/:id</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
   &quot;Get JSON object containing HTML rendering of a Card with `id` and other information.&quot;
   [id]
@@ -3145,11 +3148,11 @@ merge in recipients that are Metabase users, not raw email addresses, which thes
   (let [card      (api/read-check Card id)
         result    (pulse-card-query-results card)
         data      (:data result)
-        card-type (pulse/detect-pulse-chart-type card nil data)
-        card-html (html (pulse/render-pulse-card-for-display (pulse/defaulted-timezone card)
-                                                             card
-                                                             result
-                                                             {:pulse/include-title? true}))]
+        card-type (channel.render/detect-pulse-chart-type card nil data)
+        card-html (html (channel.render/render-pulse-card-for-display (channel.render/defaulted-timezone card)
+                                                                      card
+                                                                      result
+                                                                      {:channel.render/include-title? true}))]
     {:id              id
      :pulse_card_type card-type
      :pulse_card_html card-html
@@ -3164,11 +3167,11 @@ merge in recipients that are Metabase users, not raw email addresses, which thes
   {id ms/PositiveInt}
   (let [card   (api/read-check Card id)
         result (pulse-card-query-results card)
-        ba     (pulse/render-pulse-card-to-png (pulse/defaulted-timezone card)
-                                               card
-                                               result
-                                               preview-card-width
-                                               {:pulse/include-title? true})]
+        ba     (channel.render/render-pulse-card-to-png (channel.render/defaulted-timezone card)
+                                                        card
+                                                        result
+                                                        preview-card-width
+                                                        {:channel.render/include-title? true})]
     {:status 200, :headers {&quot;Content-Type&quot; &quot;image/png&quot;}, :body (ByteArrayInputStream. ba)}))</pre></td></tr><tr><td class="docs"><p>/test</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint POST 
   &quot;Test send an unsaved pulse.&quot;
@@ -3189,7 +3192,8 @@ merge in recipients that are Metabase users, not raw email addresses, which thes
   ;; make sure any email addresses that are specified are allowed before sending the test Pulse.
   (doseq [channel channels]
     (pulse-channel/validate-email-domains channel))
-  (pulse/send-pulse! (assoc body :creator_id api/*current-user-id*))
+  (binding [notification/*send-notification!* notification/send-notification-sync!]
+    (pulse/send-pulse! (assoc body :creator_id api/*current-user-id*)))
   {:ok true})</pre></td></tr><tr><td class="docs"><p>/:id/subscription</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint DELETE 
   &quot;For users to unsubscribe themselves from a pulse subscription.&quot;
@@ -3201,7 +3205,7 @@ merge in recipients that are Metabase users, not raw email addresses, which thes
     (t2/delete! PulseChannelRecipient :id pcr-id))
   api/generic-204-no-content)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private style-nonce-middleware
-  (partial pulse/style-tag-nonce-middleware &quot;/api/pulse/preview_dashboard&quot;))</pre></td></tr><tr><td class="docs">
+  (partial channel.render/style-tag-nonce-middleware &quot;/api/pulse/preview_dashboard&quot;))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(api/define-routes style-nonce-middleware)</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
