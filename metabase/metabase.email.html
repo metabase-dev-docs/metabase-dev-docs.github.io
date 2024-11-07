@@ -2877,9 +2877,11 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.util.malli.schema :as ms]
    [metabase.util.retry :as retry]
    [postal.core :as postal]
-   [postal.support :refer [make-props]])
+   [postal.support :refer [make-props]]
+   [throttle.core :as throttle])
   (:import
-   (javax.mail Session)))</pre></td></tr><tr><td class="docs">
+   (javax.mail Session)
+   (throttle.core Throttler)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>https://github.com/metabase/metabase/issues/11879#issuecomment-713816386</p>
 </td><td class="codes"><pre class="brush: clojure">(when-not *compile-files*
   (System/setProperty &quot;mail.mime.splitlongparameters&quot; &quot;false&quot;))</pre></td></tr><tr><td class="docs"><p>CONFIG</p>
@@ -2946,11 +2948,52 @@ net.brehaut.ClojureTools = (function (SH) {
   :setter     (fn [new-value]
                 (when (some? new-value)
                   (assert (#{:tls :ssl :none :starttls} (keyword new-value))))
-                (setting/set-value-of-type! :keyword :email-smtp-security new-value)))</pre></td></tr><tr><td class="docs"><h2>PUBLIC INTERFACE</h2>
+                (setting/set-value-of-type! :keyword :email-smtp-security new-value)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defsetting email-max-recipients-per-second
+  (deferred-tru &quot;The maximum number of recipients, summed across emails, that can be sent per second.
+                Note that the final email sent before reaching the limit is able to exceed it, if it has multiple recipients.&quot;)
+  :export?    true
+  :type       :integer
+  :visibility :settings-manager
+  :audit      :getter)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- make-email-throttler
+  [rate-limit]
+  (throttle/make-throttler
+   :email
+   :attempt-ttl-ms     1000
+   :initial-delay-ms   1000
+   :attempts-threshold rate-limit))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defonce ^:private email-throttler (when-let [rate-limit (email-max-recipients-per-second)]
+                                     (make-email-throttler rate-limit)))</pre></td></tr><tr><td class="docs"><p>Check if the email throttler is enabled and if so, throttle the email sending based on the total number of recipients.</p>
+
+<p>We will allow multi-recipient emails to broach the limit, as long as the limit has not been reached yet.</p>
+
+<p>We want two properties:
+  1. All emails eventually get sent.
+  2. Lowering the threshold must never cause more overflow.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn check-email-throttle
+  [email]
+  (when email-throttler
+    (when-let [recipients (not-empty (into #{} (mapcat email) [:to :bcc]))]
+      (let [throttle-threshold (.attempts-threshold ^Throttler email-throttler)
+            check-one!         #(throttle/check email-throttler true)]
+        (check-one!)
+        (try
+          (dotimes [_ (dec (count recipients))]
+            (throttle/check email-throttler true))
+          (catch Exception _e
+            (log/warn &quot;Email throttling is enabled and the number of recipients exceeds the rate limit per second. Skip throttling.&quot;
+                      {:email-subject  (:subject email)
+                       :recipients     (count recipients)
+                       :max-recipients throttle-threshold})))))))</pre></td></tr><tr><td class="docs"><h2>PUBLIC INTERFACE</h2>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Internal function used to send messages. Should take 2 args - a map of SMTP credentials, and a map of email details.
- Provided so you can swap this out with an "inbox" for test purposes.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^{:arglists '([smtp-credentials email-details])} send-email!
-  postal/send-message)</pre></td></tr><tr><td class="docs"><p>Check if email is enabled and that the mandatory settings are configured.</p>
+Provided so you can swap this out with an "inbox" for test purposes.</p>
+
+<p>If email-rate-limit-per-second is set, this function will throttle the email sending based on the total number of recipients.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn send-email!
+  [smtp-credentials email-details]
+  (check-email-throttle email-details)
+  (postal/send-message smtp-credentials email-details))</pre></td></tr><tr><td class="docs"><p>Check if email is enabled and that the mandatory settings are configured.</p>
 </td><td class="codes"><pre class="brush: clojure">(defsetting email-configured?
   :type       :boolean
   :visibility :public
