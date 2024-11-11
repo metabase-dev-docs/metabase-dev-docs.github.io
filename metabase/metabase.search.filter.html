@@ -2865,137 +2865,57 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.search.filter" name="metabase.search.filter"><h1 class="project-name">metabase.search.filter</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Namespace that defines the filters that are applied to the search results.</p>
-
-<p>There are required filters and optional filters.
-Archived is an required filters and is always applied, the reason because by default we want to hide archived/inactive entities.</p>
-
-<p>But there are OPTIONAL FILTERS like :created-by, :created-at, when these filters are provided, the results will return only
-results of models that have these filters.</p>
-
-<p>The multi method for optional filters should have the default implementation to throw for unsupported models, and then each model
-that supports the filter should define its own method for the filter.</p>
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.search.filter
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.search.filter" name="metabase.search.filter"><h1 class="project-name">metabase.search.filter</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns ^:mb/once metabase.search.filter
   (:require
-   [clojure.set :as set]
-   [clojure.string :as str]
    [honey.sql.helpers :as sql.helpers]
-   [metabase.audit :as audit]
    [metabase.driver.common.parameters.dates :as params.dates]
    [metabase.public-settings.premium-features :as premium-features]
-   [metabase.search.config
-    :as search.config
-    :refer [SearchableModel SearchContext]]
-   [metabase.search.util :as search.util]
+   [metabase.search.in-place.filter :as search.in-place.filter]
+   [metabase.search.spec :as search.spec]
+   [metabase.util :as u]
    [metabase.util.date-2 :as u.date]
-   [metabase.util.i18n :refer [tru]]
-   [metabase.util.malli :as mu])
+   [metabase.util.i18n :refer [tru]])
   (:import
    (java.time LocalDate)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private true-clause [:inline [:= 1 1]])
-(def ^:private false-clause [:inline [:= 0 1]])</pre></td></tr><tr><td class="docs"><p>------------------------------------------------------------------------------------------------;;
-                                        Required Filters                                         ;
-------------------------------------------------------------------------------------------------;;</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Clause to filter by the archived status of the entity.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti ^:private archived-clause
-  {:arglists '([model archived?])}
-  (fn [model _] model))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod archived-clause :default
-  [model archived?]
-  [:= (search.config/column-with-model-alias model :archived) archived?])</pre></td></tr><tr><td class="docs"><p>Databases can't be archived</p>
-</td><td class="codes"><pre class="brush: clojure">(defmethod archived-clause &quot;database&quot;
-  [_model archived?]
-  (if archived?
-    false-clause
-    true-clause))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod archived-clause &quot;indexed-entity&quot;
-  [_model archived?]
-  (if-not archived?
-    true-clause
-    false-clause))</pre></td></tr><tr><td class="docs"><p>Table has an <code>:active</code> flag, but no <code>:archived</code> flag; never return inactive Tables</p>
-</td><td class="codes"><pre class="brush: clojure">(defmethod archived-clause &quot;table&quot;
-  [model archived?]
-  (if archived?
-    false-clause ; No tables should appear in archive searches
-    [:and
-     [:= (search.config/column-with-model-alias model :active) true]
-     [:= (search.config/column-with-model-alias model :visibility_type) nil]]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- sandboxed-or-impersonated-user? []
-  ;; TODO FIXME -- search actually currently still requires [[metabase.api.common/*current-user*]] to be bound,
-  ;; because [[metabase.public-settings.premium-features/sandboxed-or-impersonated-user?]] requires it to be bound.
-  ;; Since it's part of the search context it would be nice if we could run search without having to bind that stuff at
-  ;; all.
-  (assert @@(requiring-resolve 'metabase.api.common/*current-user*)
-          &quot;metabase.api.common/*current-user* must be bound in order to use search for an indexed entity&quot;)
-  (premium-features/sandboxed-or-impersonated-user?))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- search-string-clause-for-model
-  [model                :- SearchableModel
-   search-context       :- SearchContext
-   search-native-query  :- [:maybe true?]]
-  (when-let [query (:search-string search-context)]
-    (into
-     [:or]
-     (for [column           (-&gt;&gt; (search.config/searchable-columns model search-native-query)
-                                 (map #(search.config/column-with-model-alias model %)))
-           wildcarded-token (-&gt;&gt; (search.util/normalize query)
-                                 search.util/tokenize
-                                 (map search.util/wildcard-match))]
-       (cond
-         (and (= model &quot;indexed-entity&quot;) (sandboxed-or-impersonated-user?))
-         [:= 0 1]
-         (and (#{&quot;card&quot; &quot;dataset&quot;} model) (= column (search.config/column-with-model-alias model :dataset_query)))
-         [:and
-          [:= (search.config/column-with-model-alias model :query_type) &quot;native&quot;]
-          [:like [:lower column] wildcarded-token]]
-         (and (#{&quot;action&quot;} model)
-              (= column (search.config/column-with-model-alias model :dataset_query)))
-         [:like [:lower :query_action.dataset_query] wildcarded-token]
-         :else
-         [:like [:lower column] wildcarded-token])))))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------------------------------------------------------;;
-                                        Optional filters                                        ;;
-------------------------------------------------------------------------------------------------;;</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Build the query to filter by <code>filter</code>.
-Dispatch with an array of [filter model-name].</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti ^:private build-optional-filter-query
-  {:arglists '([model filter query filter-value])}
-  (fn [filter model _query _filter-value]
-    [filter model]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod build-optional-filter-query :default
-  [filter model _query _filter-value]
-  (throw (ex-info (format &quot;%s filter for %s is not supported&quot; filter model) {:filter filter :model model})))</pre></td></tr><tr><td class="docs"><p>Created by filters</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- default-created-by-filter-clause
-  [model creator-ids]
-  (if (= 1 (count creator-ids))
-    [:= (search.config/column-with-model-alias model :creator_id) (first creator-ids)]
-    [:in (search.config/column-with-model-alias model :creator_id) creator-ids]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(doseq [model [&quot;card&quot; &quot;dataset&quot; &quot;metric&quot; &quot;dashboard&quot; &quot;action&quot;]]
-  (defmethod build-optional-filter-query [:created-by model]
-    [_filter model query creator-ids]
-    (sql.helpers/where query (default-created-by-filter-clause model creator-ids))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(doseq [model [&quot;card&quot; &quot;dataset&quot; &quot;metric&quot; &quot;dashboard&quot; &quot;action&quot;]]
-  (defmethod build-optional-filter-query [:id model]
-    [_filter model query ids]
-    (sql.helpers/where query [:in (search.config/column-with-model-alias model :id) ids])))</pre></td></tr><tr><td class="docs"><p>Verified filters</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod build-optional-filter-query [:verified &quot;card&quot;]
-  [_filter model query verified]
-  (assert (true? verified) &quot;filter for non-verified cards is not supported&quot;)
-  (if (premium-features/has-feature? :content-verification)
-    (-&gt; query
-        (sql.helpers/join :moderation_review
-                          [:= :moderation_review.moderated_item_id
-                           (search.config/column-with-model-alias model :id)])
-        (sql.helpers/where [:= :moderation_review.status &quot;verified&quot;]
-                           [:= :moderation_review.moderated_item_type &quot;card&quot;]
-                           [:= :moderation_review.most_recent true]))
-    (sql.helpers/where query false-clause)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod build-optional-filter-query [:verified &quot;dataset&quot;]
-  [filter _model query verified]
-  (build-optional-filter-query filter &quot;card&quot; query verified))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod build-optional-filter-query [:verified &quot;metric&quot;]
-  [filter _model query verified]
-  (build-optional-filter-query filter &quot;card&quot; query verified))</pre></td></tr><tr><td class="docs"><p>Created at filters</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private filter-&gt;type
+  {:archived?      ::single-value
+   :created-at     ::date-range
+   :created-by     ::list
+   :last-edited-at ::date-range
+   :last-edited-by ::list
+   :table-db-id    ::single-value
+   :verified       ::verified})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private context-key-&gt;attr
+  {:archived?           :archived
+   :created-at          :created-at
+   :created-by          :creator-id
+   :last-edited-at      :last-edited-at
+   :last-edited-by      :last-editor-id
+   :search-native-query :native-query
+   ;; this actually has nothing to do with tables anymore, as we also filter cards.
+   :table-db-id         :database-id
+   :verified            :verified})</pre></td></tr><tr><td class="docs"><p>TODO dry this alias up with the index hydration code</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private field-alias {:created-at :model-created-at})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private attr-&gt;index-key
+  (into {} (for [k (vals context-key-&gt;attr)]
+             [k (keyword (str &quot;search_index.&quot; (u/-&gt;snake_case_en (name (get field-alias k k)))))])))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- remove-if-falsey [m k]
+  (if (m k) m (dissoc m k)))</pre></td></tr><tr><td class="docs"><p>Returns a set of models that are applicable given the search context.</p>
+
+<p>If the context has optional filters, the models will be restricted for the set of supported models only.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn search-context-&gt;applicable-models
+  [search-ctx]
+  (if (= :search.engine/in-place (:search-engine search-ctx))
+    (search.in-place.filter/search-context-&gt;applicable-models search-ctx)
+    ;; Archived is an eccentric one - we treat it as false for models that don't map it
+    (let [required (-&gt;&gt; (remove-if-falsey search-ctx :archived?) keys (keep context-key-&gt;attr))]
+      (into #{}
+            (remove nil?)
+            (for [search-model (:models search-ctx)
+                  :let [spec (search.spec/spec search-model)]]
+              (when (every? (:attrs spec) required)
+                (:name spec)))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- date-range-filter-clause
   [dt-col dt-val]
   (let [date-range (try
@@ -3016,141 +2936,39 @@ Dispatch with an array of [filter model-name].</p>
       [:&gt; dt-col start]
       :else
       [:and [:&gt;= dt-col start] [:&lt; dt-col end]])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(doseq [model [&quot;collection&quot; &quot;database&quot; &quot;table&quot; &quot;dashboard&quot; &quot;card&quot; &quot;dataset&quot; &quot;metric&quot; &quot;action&quot;]]
-  (defmethod build-optional-filter-query [:created-at model]
-    [_filter model query created-at]
-    (sql.helpers/where query (date-range-filter-clause
-                              (search.config/column-with-model-alias model :created_at)
-                              created-at))))</pre></td></tr><tr><td class="docs"><p>Last edited by filter</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Check if  the query have a join with <code>table</code>.
-Note: this does a very shallow check by only checking if the join-clause is the same.
-Using the same table with a different alias will return false.</p>
-
-<p>  (-> (sql.helpers/select :*)
-      (sql.helpers/from [:a])
-      (sql.helpers/join :b [:= :a.id :b.id])
-      (joined-with-table? :join :b))</p>
-
-<p>  ;; => true</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- joined-with-table?
-  [query join-type table]
-  (-&gt;&gt; (get query join-type) (partition 2) (map first) (some #(= % table)) boolean))</pre></td></tr><tr><td class="docs"><p>Return the apporpriate revision model given a search model.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn search-model-&gt;revision-model
-  [model]
-  (case model
-    &quot;dataset&quot; (recur &quot;card&quot;)
-    (str/capitalize model)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(doseq [model [&quot;dashboard&quot; &quot;card&quot; &quot;dataset&quot; &quot;metric&quot;]]
-  (defmethod build-optional-filter-query [:last-edited-by model]
-    [_filter model query editor-ids]
-    (cond-&gt; query
-      ;; both last-edited-by and last-edited-at join with revision, so we should be careful not to join twice
-      (not (joined-with-table? query :join :revision))
-      (-&gt; (sql.helpers/join :revision [:= :revision.model_id (search.config/column-with-model-alias model :id)])
-          (sql.helpers/where [:= :revision.most_recent true]
-                             [:= :revision.model (search.config/search-model-&gt;revision-model model)]))
-      (= 1 (count editor-ids))
-      (sql.helpers/where [:= :revision.user_id (first editor-ids)])
-
-      (&gt; (count editor-ids) 1)
-      (sql.helpers/where [:in :revision.user_id editor-ids]))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(doseq [model [&quot;dashboard&quot; &quot;card&quot; &quot;dataset&quot; &quot;metric&quot;]]
-  (defmethod build-optional-filter-query [:last-edited-at model]
-    [_filter model query last-edited-at]
-    (cond-&gt; query
-      ;; both last-edited-by and last-edited-at join with revision, so we should be careful not to join twice
-      (not (joined-with-table? query :join :revision))
-      (-&gt; (sql.helpers/join :revision [:= :revision.model_id (search.config/column-with-model-alias model :id)])
-          (sql.helpers/where [:= :revision.most_recent true]
-                             [:= :revision.model (search.config/search-model-&gt;revision-model model)]))
-      true
-      ;; on UI we showed the the last edit info from revision.timestamp
-      ;; not the model.updated_at column
-      ;; to be consistent we use revision.timestamp to do the filtering
-      (sql.helpers/where (date-range-filter-clause :revision.timestamp last-edited-at)))))</pre></td></tr><tr><td class="docs"><p>TODO: once we record revision for actions, we should update this to use the same approach with dashboard/card</p>
-</td><td class="codes"><pre class="brush: clojure">(defmethod build-optional-filter-query [:last-edited-at &quot;action&quot;]
-  [_filter model query last-edited-at]
-  (sql.helpers/where query (date-range-filter-clause
-                            (search.config/column-with-model-alias model :updated_at)
-                            last-edited-at)))</pre></td></tr><tr><td class="docs"><p>Return A map of filter to its support models.</p>
-
-<p>E.g: {:created-by #{"card" "dataset" "dashboard" "action"}}</p>
-
-<p>This is function instead of a def so that optional-filter-clause can be defined anywhere in the codebase.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- feature-&gt;supported-models
-  []
-  (merge
-   ;; models support search-native-query if there are additional columns to search when the `search-native-query`
-   ;; argument is true
-   {:search-native-query (-&gt;&gt; (dissoc (methods search.config/searchable-columns) :default)
-                              (filter (fn [[model f]]
-                                        (seq (set/difference (set (f model true)) (set (f model false))))))
-                              (map first)
-                              set)}
-   (-&gt;&gt; (dissoc (methods build-optional-filter-query) :default)
-        keys
-        (reduce (fn [acc [filter model]]
-                  (update acc filter set/union #{model}))
-                {}))))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------------------------------------------------------;;
-                                       Public functions                                         ;;
-------------------------------------------------------------------------------------------------;;</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn search-context-&gt;applicable-models :- [:set SearchableModel]
-  &quot;Returns a set of models that are applicable given the search context.
-  If the context has optional filters, the models will be restricted for the set of supported models only.&quot;
-  [search-context :- SearchContext]
-  (let [{:keys [created-at
-                created-by
-                last-edited-at
-                last-edited-by
-                models
-                search-native-query
-                verified]}        search-context
-        feature-&gt;supported-models (feature-&gt;supported-models)]
-    (cond-&gt; models
-      (some? created-at)          (set/intersection (:created-at feature-&gt;supported-models))
-      (some? created-by)          (set/intersection (:created-by feature-&gt;supported-models))
-      (some? last-edited-at)      (set/intersection (:last-edited-at feature-&gt;supported-models))
-      (some? last-edited-by)      (set/intersection (:last-edited-by feature-&gt;supported-models))
-      (true? search-native-query) (set/intersection (:search-native-query feature-&gt;supported-models))
-      (true? verified)            (set/intersection (:verified feature-&gt;supported-models)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn build-filters :- :map
-  &quot;Build the search filters for a model.&quot;
-  [honeysql-query :- :map
-   model          :- SearchableModel
-   search-context :- SearchContext]
-  (let [{:keys [models
-                archived?
-                created-at
-                created-by
-                last-edited-at
-                last-edited-by
-                search-string
-                search-native-query
-                verified
-                ids]}    search-context]
-    (cond-&gt; honeysql-query
-      (not (str/blank? search-string))
-      (sql.helpers/where (search-string-clause-for-model model search-context search-native-query))
-      (some? archived?)
-      (sql.helpers/where (archived-clause model archived?))
-      ;; build optional filters
-      (some? created-at)
-      (#(build-optional-filter-query :created-at model % created-at))
-      (some? created-by)
-      (#(build-optional-filter-query :created-by model % created-by))
-      (some? last-edited-at)
-      (#(build-optional-filter-query :last-edited-at model % last-edited-at))
-      (some? last-edited-by)
-      (#(build-optional-filter-query :last-edited-by model % last-edited-by))
-      (some? verified)
-      (#(build-optional-filter-query :verified model % verified))
-      (and (some? ids)
-           (contains? models model))
-      (#(build-optional-filter-query :id model % ids))
-      (= &quot;table&quot; model)
-      (sql.helpers/where
-       [:not [:= (search.config/column-with-model-alias &quot;table&quot; :db_id) audit/audit-db-id]]))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+</td><td class="codes"><pre class="brush: clojure">(defmulti ^:private where-clause* (fn [context-key _column _v] context-key))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod where-clause* ::single-value [_ k v] [:= k v])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod where-clause* ::date-range [_ k v] (date-range-filter-clause k v))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod where-clause* ::list [_ k v] [:in k v])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod where-clause* ::verified [_ k v]
+  (assert (true? v) &quot;filter for non-verified cards is not supported&quot;)
+  (when (premium-features/has-feature? :content-verification)
+    [:= k v]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private true-clause
+  [:inline [:= 1 1]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(assert (= (disj (set (keys context-key-&gt;attr)) :search-native-query)
+           (set (keys filter-&gt;type)))
+        &quot;All filters have been implemented.&quot;)</pre></td></tr><tr><td class="docs"><p>Return a HoneySQL clause corresponding to all the optional search filters.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn with-filters
+  [search-context qry]
+  (as-&gt; qry qry
+    (sql.helpers/where qry (when (seq (:models search-context))
+                             [:in :model (:models search-context)]))
+    (sql.helpers/where qry (when-let [ids (:ids search-context)]
+                             [:and
+                              [:in :model_id ids]
+                              ;; NOTE: we limit id-based search to only a subset of the models
+                              ;; TODO this should just become part of the spec e.g. :search-by-id?
+                              [:in :model [&quot;card&quot; &quot;dataset&quot; &quot;metric&quot; &quot;dashboard&quot; &quot;action&quot;]]]))
+    (reduce (fn [qry [ctx-key attr-key]]
+              (let [v (get search-context ctx-key)]
+                (if (some? v)
+                  (sql.helpers/where qry (or (where-clause* (filter-&gt;type ctx-key)
+                                                            (attr-&gt;index-key attr-key) v)
+                                             true-clause))
+                  qry)))
+            qry
+            (dissoc context-key-&gt;attr :search-native-query))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

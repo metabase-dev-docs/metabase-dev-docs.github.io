@@ -2869,8 +2869,6 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.search.config
   (:require
    [cheshire.core :as json]
-   [clojure.string :as str]
-   [flatland.ordered.map :as ordered-map]
    [metabase.api.common :as api]
    [metabase.models.setting :refer [defsetting]]
    [metabase.permissions.util :as perms.u]
@@ -2898,9 +2896,11 @@ bonus for results newer than this (scaled to just how recent they are). c.f. <co
 </td><td class="codes"><pre class="brush: clojure">(def ^:const stale-time-in-days
   180)</pre></td></tr><tr><td class="docs"><p>Results in more dashboards than this are all considered to be equally popular.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:const dashboard-count-ceiling
-  50)</pre></td></tr><tr><td class="docs"><p>Show this many words of context before/after matches in long search results</p>
+  10)</pre></td></tr><tr><td class="docs"><p>Show this many words of context before/after matches in long search results</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:const surrounding-match-context
   2)</pre></td></tr><tr><td class="docs"><p>Set of models that should not be included in search results.</p>
+
+<p>We won't need this once fully migrated to specs, but kept for now in case legacy cod falls out of sync</p>
 </td><td class="codes"><pre class="brush: clojure">(def excluded-models
   #{&quot;dashboard-card&quot;
     &quot;dashboard-tab&quot;
@@ -2912,6 +2912,10 @@ bonus for results newer than this (scaled to just how recent they are). c.f. <co
     &quot;snippet&quot;
     &quot;timeline&quot;
     &quot;user&quot;})</pre></td></tr><tr><td class="docs"><p>Mapping from string model to the Toucan model backing it.</p>
+
+<p>TODO we could almost replace this using the spec, but there are two blockers
+- We do not cover index-entity yet
+- We also need to provide an alias (and this must match the API one for legacy)</p>
 </td><td class="codes"><pre class="brush: clojure">(def model-to-db-model
   (apply dissoc api/model-&gt;db-model excluded-models))</pre></td></tr><tr><td class="docs"><p>Set of all valid models to search for. </p>
 </td><td class="codes"><pre class="brush: clojure">(def all-models
@@ -2919,13 +2923,17 @@ bonus for results newer than this (scaled to just how recent they are). c.f. <co
 list will be ranked higher.</p>
 </td><td class="codes"><pre class="brush: clojure">(def models-search-order
   [&quot;dashboard&quot; &quot;metric&quot; &quot;segment&quot; &quot;indexed-entity&quot; &quot;card&quot; &quot;dataset&quot; &quot;collection&quot; &quot;table&quot; &quot;action&quot; &quot;database&quot;])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(assert (= all-models (set models-search-order)) &quot;The models search order has to include all models&quot;)</pre></td></tr><tr><td class="docs"><p>Return the apporpriate revision model given a search model.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn search-model-&gt;revision-model
-  [model]
-  (case model
-    &quot;dataset&quot; (recur &quot;card&quot;)
-    &quot;metric&quot; (recur &quot;card&quot;)
-    (str/capitalize model)))</pre></td></tr><tr><td class="docs"><p>Given a model string returns the model alias</p>
+</td><td class="codes"><pre class="brush: clojure">(assert (= all-models (set models-search-order)) &quot;The models search order has to include all models&quot;)</pre></td></tr><tr><td class="docs"><p>Strength of the various scorers. Copied from metabase.search.in-place.scoring, but allowing divergence.</p>
+</td><td class="codes"><pre class="brush: clojure">(def weights
+  {:pinned              2                                   ;; simple field
+   :bookmarked          2                                   ;; join with multi-table entity
+   :recency             1.5                                 ;; date formula
+   :dashboard           1                                   ;; simple field
+   :model               0.5                                 ;; simple field
+   :official-collection 2                                   ;; a field we can calculate
+   :verified            2                                   ;; a simple field
+   :text                10                                  ;; strength of text-scores-weight previously
+   })</pre></td></tr><tr><td class="docs"><p>Given a model string returns the model alias</p>
 </td><td class="codes"><pre class="brush: clojure">(defn model-&gt;alias
   [model]
   (-&gt; model model-to-db-model :alias))</pre></td></tr><tr><td class="docs">
@@ -2967,200 +2975,7 @@ list will be ranked higher.</p>
    [:table-db-id                         {:optional true} ms/PositiveInt]
    ;; true to search for verified items only, nil will return all items
    [:verified                            {:optional true} true?]
-   [:ids                                 {:optional true} [:set {:min 1} ms/PositiveInt]]])</pre></td></tr><tr><td class="docs"><p>All columns that will appear in the search results, and the types of those columns. The generated search query is a
-<code>UNION ALL</code> of the queries for each different entity; it looks something like:</p>
-
-<p>  SELECT 'card' AS model, id, cast(NULL AS integer) AS table_id, ...
-  FROM report_card
-  UNION ALL
-  SELECT 'metric' as model, id, table_id, ...
-  FROM metric</p>
-
-<p>Columns that aren't used in any individual query are replaced with <code>SELECT cast(NULL AS &lt;type&gt;)</code> statements. (These
-are cast to the appropriate type because Postgres will assume <code>SELECT NULL</code> is <code>TEXT</code> by default and will refuse to
-<code>UNION</code> two columns of two different types.)</p>
-</td><td class="codes"><pre class="brush: clojure">(def all-search-columns
-  (ordered-map/ordered-map
-   ;; returned for all models. Important to be first for changing model for dataset
-   :model               :text
-   :id                  :integer
-   :name                :text
-   :display_name        :text
-   :description         :text
-   :archived            :boolean
-   ;; returned for Card, Dashboard, and Collection
-   :collection_id       :integer
-   :collection_name     :text
-   :collection_type     :text
-   :collection_location :text
-   :collection_authority_level :text
-   :archived_directly   :boolean
-   ;; returned for Card and Dashboard
-   :collection_position :integer
-   :creator_id          :integer
-   :created_at          :timestamp
-   :bookmark            :boolean
-   ;; returned for everything except Collection
-   :updated_at          :timestamp
-   ;; returned only for Collection
-   :location            :text
-   ;; returned for Card only, used for scoring and displays
-   :dashboardcard_count :integer
-   :last_edited_at      :timestamp
-   :last_editor_id      :integer
-   :moderated_status    :text
-   :display             :text
-   ;; returned for Metric and Segment
-   :table_id            :integer
-   :table_schema        :text
-   :table_name          :text
-   :table_description   :text
-   ;; returned for Metric, Segment, and Action
-   :database_id         :integer
-   ;; returned for Database and Table
-   :initial_sync_status :text
-   :database_name       :text
-   ;; returned for Action
-   :model_id            :integer
-   :model_name          :text
-   ;; returned for indexed-entity
-   :pk_ref              :text
-   :model_index_id      :integer
-   ;; returned for Card and Action
-   :dataset_query       :text))</pre></td></tr><tr><td class="docs"><p>All of the result components that by default are displayed by the frontend.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:const displayed-columns
-  #{:name :display_name :collection_name :description})</pre></td></tr><tr><td class="docs"><p>The columns that can be searched for each model.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti searchable-columns
-  {:arglists '([model search-native-query])}
-  (fn [model _] model))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod searchable-columns :default
-  [_ _]
-  [:name])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod searchable-columns &quot;action&quot;
-  [_ search-native-query]
-  (cond-&gt; [:name
-           :description]
-    search-native-query
-    (conj :dataset_query)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod searchable-columns &quot;card&quot;
-  [_ search-native-query]
-  (cond-&gt; [:name
-           :description]
-    search-native-query
-    (conj :dataset_query)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod searchable-columns &quot;dataset&quot;
-  [_ search-native-query]
-  (searchable-columns &quot;card&quot; search-native-query))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod searchable-columns &quot;metric&quot;
-  [_ search-native-query]
-  (searchable-columns &quot;card&quot; search-native-query))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod searchable-columns &quot;dashboard&quot;
-  [_ _]
-  [:name
-   :description])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod searchable-columns &quot;page&quot;
-  [_ search-native-query]
-  (searchable-columns &quot;dashboard&quot; search-native-query))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod searchable-columns &quot;database&quot;
-  [_ _]
-  [:name
-   :description])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod searchable-columns &quot;table&quot;
-  [_ _]
-  [:name
-   :display_name
-   :description])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod searchable-columns &quot;indexed-entity&quot;
-  [_ _]
-  [:name])</pre></td></tr><tr><td class="docs"><p>Columns returned for all models.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private default-columns
-  [:id :name :description :archived :created_at :updated_at])</pre></td></tr><tr><td class="docs"><p>Case statement to return boolean values of <code>:bookmark</code> for Card, Collection and Dashboard.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private bookmark-col
-  [[:case [:not= :bookmark.id nil] true :else false] :bookmark])</pre></td></tr><tr><td class="docs"><p>Subselect to get the count of associated DashboardCards</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private dashboardcard-count-col
-  [{:select [:%count.*]
-    :from   [:report_dashboardcard]
-    :where  [:= :report_dashboardcard.card_id :card.id]}
-   :dashboardcard_count])</pre></td></tr><tr><td class="docs"><p>Columns containing information about the Table this model references. Returned for Metrics and Segments.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private table-columns
-  [:table_id
-   :created_at
-   [:table.db_id       :database_id]
-   [:table.schema      :table_schema]
-   [:table.name        :table_name]
-   [:table.description :table_description]])</pre></td></tr><tr><td class="docs"><p>The columns that will be returned by the query for <code>model</code>, excluding <code>:model</code>, which is added automatically.
-This is not guaranteed to be the final list of columns, new columns can be added by calling [[api.search/replace-select]]</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti columns-for-model
-  {:arglists '([model])}
-  (fn [model] model))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod columns-for-model &quot;action&quot;
-  [_]
-  (conj default-columns :model_id
-        :creator_id
-        [:model.collection_id        :collection_id]
-        [:model.id                   :model_id]
-        [:model.name                 :model_name]
-        [:query_action.database_id   :database_id]
-        [:query_action.dataset_query :dataset_query]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod columns-for-model &quot;card&quot;
-  [_]
-  (conj default-columns :collection_id :archived_directly :collection_position :dataset_query :display :creator_id
-        [:collection.name :collection_name]
-        [:collection.type :collection_type]
-        [:collection.location :collection_location]
-        [:collection.authority_level :collection_authority_level]
-        bookmark-col dashboardcard-count-col))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod columns-for-model &quot;indexed-entity&quot; [_]
-  [[:model-index-value.name     :name]
-   [:model-index-value.model_pk :id]
-   [:model-index.pk_ref         :pk_ref]
-   [:model-index.id             :model_index_id]
-   [:collection.name            :collection_name]
-   [:collection.type            :collection_type]
-   [:model.collection_id        :collection_id]
-   [:model.id                   :model_id]
-   [:model.name                 :model_name]
-   [:model.database_id          :database_id]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod columns-for-model &quot;dashboard&quot;
-  [_]
-  (conj default-columns :archived_directly :collection_id :collection_position :creator_id bookmark-col
-        [:collection.name :collection_name]
-        [:collection.type :collection_type]
-        [:collection.authority_level :collection_authority_level]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod columns-for-model &quot;database&quot;
-  [_]
-  [:id :name :description :created_at :updated_at :initial_sync_status])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod columns-for-model &quot;collection&quot;
-  [_]
-  (conj (remove #{:updated_at} default-columns)
-        [:collection.id :collection_id]
-        [:name :collection_name]
-        [:type :collection_type]
-        [:authority_level :collection_authority_level]
-        :archived_directly
-        :location
-        bookmark-col))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod columns-for-model &quot;segment&quot;
-  [_]
-  (concat default-columns table-columns [:creator_id]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod columns-for-model &quot;metric&quot;
-  [_]
-  (concat default-columns table-columns [:creator_id]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod columns-for-model &quot;table&quot;
-  [_]
-  [[:table.id :id]
-   [:table.name :name]
-   [:table.created_at :created_at]
-   [:table.display_name :display_name]
-   [:table.description :description]
-   [:table.updated_at :updated_at]
-   [:table.initial_sync_status :initial_sync_status]
-   [:table.id :table_id]
-   [:table.db_id :database_id]
-   [:table.schema :table_schema]
-   [:table.name :table_name]
-   [:table.description :table_description]
-   [:metabase_database.name :database_name]])</pre></td></tr><tr><td class="docs"><p>Turn a complex column into a string</p>
+   [:ids                                 {:optional true} [:set {:min 1} ms/PositiveInt]]])</pre></td></tr><tr><td class="docs"><p>Turn a complex column into a string</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti column-&gt;string
   (fn [_column-value model column-name]
     [(keyword model) column-name]))</pre></td></tr><tr><td class="docs">

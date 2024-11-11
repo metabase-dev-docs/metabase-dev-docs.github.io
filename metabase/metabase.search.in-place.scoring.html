@@ -2865,47 +2865,345 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.task.email-remove-legacy-pulse" name="metabase.task.email-remove-legacy-pulse"><h1 class="project-name">metabase.task.email-remove-legacy-pulse</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.task.email-remove-legacy-pulse
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.search.in-place.scoring" name="metabase.search.in-place.scoring"><h1 class="project-name">metabase.search.in-place.scoring</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><h1>How does search scoring work?</h1>
+
+<p><em>This was written for a success engineer, but may be helpful here, too.</em></p>
+
+<p>Most of what you care about happens in the <code>scoring.clj</code> file <a href="https://github.com/metabase/metabase/blob/master/src/metabase/search/scoring.clj">here</a>.</p>
+
+<p>We have two sets of scorers. The first is based on the literal text matches and defined <a href="https://github.com/metabase/metabase/blob/8d5f5db02c84899a053e20468986050b2034a9a4/src/metabase/search/scoring.clj#L132C1-L137">here</a>:</p>
+
+<pre><code>
+(def ^:private match-based-scorers
+  [{:scorer exact-match-scorer :name "exact-match" :weight 4}
+   {:scorer consecutivity-scorer :name "consecutivity" :weight 2}
+   {:scorer total-occurrences-scorer :name "total-occurrences" :weight 2}
+   {:scorer fullness-scorer :name "fullness" :weight 1}
+   {:scorer prefix-scorer :name "prefix" :weight 1}])
+</code></pre>
+
+<ul>
+<li><p>The <code>exact-match-scorer</code> gives points for exact matches. So if you search <code>foo</code> it'll score well for `foo
+collection<code>but not</code>my favorite foods`. Everything else counts partial matches</p></li>
+<li><p><code>consecutivity-scorer</code> gives points for a sequence of matching words. So if you search <code>four five six seven</code>
+it'll score well for <code>one two three four five six seven eight</code> and 0 for `eight seven six five four three two
+one`.</p></li>
+<li><p><code>total-occurrences-scorer</code> gives points for the number of tokens that show up in the search result. So if you
+search for <code>foo bar</code> it'll score better for <code>Admiral Akbar's Food Truck</code> (2; note that <code>akbar</code> and <code>food</code> count
+as matches even though it's not exact) than for <code>foo collection</code> (1; being an exact match doesn't matter. That's
+why we have the <code>exact-match-scorer</code>).</p></li>
+<li><p><code>fullness-scorer</code> is sort of the opposite of that: it gives points for how much of the result is "covered" by the
+search query. So if you search <code>foo bar</code> then <code>Barry's Food</code> will have a perfect fullness score and `Barry's
+Dashboard Of Favorite Bars, Restaurants, and Food Trucks` will score poorly since only 3/9 of the dashboard's
+title is covered by the search query. Why 3? <code>bar</code> matches both <code>Barry's</code> and <code>Bars</code>.</p></li>
+<li><p><code>prefix-scorer</code> gives points for an exact prefix match. So if you search for <code>foo bar</code> then <code>foo collection</code> will
+have a good prefix score (4/24: <code>foo</code> matches), <code>Food trucks I love</code> will have a worse one (3/18), and
+<code>top 10 foo bars</code> will be zero.</p></li>
+</ul>
+
+<p>These are all weighted: you can see that the exact-match scorer is responsible for 4/10 of the score, the consecutivity one is 2/10, etc.</p>
+
+<p>The second set of scorers is defined lower down,
+<a href="https://github.com/metabase/metabase/blob/8d5f5db02c84899a053e20468986050b2034a9a4/src/metabase/search/scoring.clj#L215-L222">here</a>:</p>
+
+<pre><code>
+(defn weights-and-scores
+  "Default weights and scores for a given result."
+  [result]
+  [{:weight 2 :score (pinned-score result) :name "pinned"}
+   {:weight 2 :score (bookmarked-score result) :name "bookmarked"}
+   {:weight 3/2 :score (recency-score result) :name "recency"}
+   {:weight 1 :score (dashboard-count-score result) :name "dashboard"}
+   {:weight 1/2 :score (model-score result) :name "model"}])
+</code></pre>
+
+<p>And there are two more for Enterprise
+<a href="https://github.com/metabase/metabase/blob/8d5f5db02c84899a053e20468986050b2034a9a4/enterprise/backend/src/metabase_enterprise/search/scoring.clj#L27-L33">here</a>:</p>
+
+<pre><code>
+(premium-features/has-feature? :official-collections)
+    (conj {:weight 2
+            :score  (official-collection-score result)
+            :name   "official collection score"})
+    (premium-features/has-feature? :content-verification)
+    (conj {:weight 2
+           :score  (verified-score result)
+           :name   "verified"})))
+</code></pre>
+
+<p>These are easier to explain: you get points if the search result is pinned (yes or no), bookmarked (yes or no), how
+recently it was updated (sliding value between 1 (edited just now) and 0 (edited <a href="https://github.com/metabase/metabase/blob/8d5f5db02c84899a053e20468986050b2034a9a4/src/metabase/search/config.clj#L29-L32">180+
+days</a>
+ago), how many dashboards it appears in (sliding value between 0 (zero dashboards) and 1 (<a href="https://github.com/metabase/metabase/blob/8d5f5db02c84899a053e20468986050b2034a9a4/src/metabase/search/config.clj#L34-L36">50+
+dashboards</a>)
+and it's type (<code>model-score</code>): the earlier a type appears in <a href="https://github.com/metabase/metabase/blob/8d5f5db02c84899a053e20468986050b2034a9a4/src/metabase/search/config.clj#L55-L58">this
+list</a>
+the higher score it gets:</p>
+
+<p><code> ["dashboard" "metric" "segment" "indexed-entity" "card" "dataset" "collection" "table" "action" "database"]</code></p>
+
+<p>On the EE side, we also give points if something's an official collection and if it's verified.</p>
+
+<p>Finally, what we actually search is defined in the search
+config <a href="https://github.com/metabase/metabase/blob/8d5f5db02c84899a053e20468986050b2034a9a4/src/metabase/search/config.clj#L73-L109">here</a>,
+but the short answer is "the name and, if there is one, the description". We used to search raw SQL queries for
+cards, but that got turned off recently (but I've seen chat about turning it back on).</p>
+
+<p>❦</p>
+
+<p>So, these 12 scorers are weighted and combined together, and the grand total affects search order. If this sounds a
+little complicated…it is! It also means that it can be tricky to give a proper answer about why the search ranking
+is "wrong", maybe you search for <code>monthly revenue</code> and are looking for a card called <code>monthly revenue</code> and are mad
+that a dashboard called <code>company stats</code> shows up first…but then it turns out that the dashboard's description is
+<code>Stats that everyone should be aware of, such as our order count and monthly revenue.</code> and the dashboard happens to
+be pinned, bookmarked, part of an official collection, verified, and edited a couple hours ago…whereas the card is
+none of those things.</p>
+
+<p>Also, be aware that as of October 2023 there's <a href="https://github.com/metabase/metabase/issues/27982">a big epic under
+way</a> to add filtering to search results, which should help
+people find what they're looking for (and spares us from having to make the above algorithm better).</p>
+
+ <hr />
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Computes a relevancy score for search results using the weighted average of various scorers. Scores are determined by
+various ways of comparing the text of the search string and the item's title or description, as well as by
+Metabase-specific features such as how many dashboards a card appears in or whether an item is pinned.</p>
+
+<p>Get the score for a result with <code>score-and-result</code>, and efficiently get the most relevant results with
+<code>top-results</code>.</p>
+
+<p>Some of the scorers can be tweaked with configuration in [[metabase.search.config]].</p>
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.search.in-place.scoring
   (:require
-   [clojurewerkz.quartzite.jobs :as jobs]
-   [clojurewerkz.quartzite.triggers :as triggers]
-   [metabase.channel.template.core :as channel.template]
-   [metabase.email :as email]
-   [metabase.task :as task]
-   [metabase.util.log :as log]
-   [metabase.util.urls :as urls]
-   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- has-legacy-pulse? []
-  (pos? (t2/count :model/Pulse :dashboard_id nil :alert_condition nil :archived false)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private template-path (str &quot;metabase/email/warn_deprecate_pulse.hbs&quot;))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- email-remove-legacy-pulse []
-  (when (and (email/email-configured?)
-             (has-legacy-pulse?))
-    (log/info &quot;Sending email to admins about removal of legacy pulses&quot;)
-    (let [legacy-pulse (-&gt;&gt; (t2/select :model/Pulse :dashboard_id nil :alert_condition nil :archived false)
-                            (map #(assoc % :url (urls/legacy-pulse-url (:id %)))))]
-      (doseq [admin (t2/select :model/User :is_superuser true)]
-        (email/send-email-retrying!
-         {:recipients   [(:email admin)]
-          :message-type :html
-          :subject      &quot;[Metabase] Removal of legacy pulses in upcoming Metabase release&quot;
-          :message      (channel.template/render template-path {:userName    (:common_name admin)
-                                                                :pulses      legacy-pulse
-                                                                :instanceURL (urls/site-url)})})))))</pre></td></tr><tr><td class="docs"><p>Send email to admins and warn about removal of Pulse in 49, This job will only run once.</p>
-</td><td class="codes"><pre class="brush: clojure">(jobs/defjob 
-  EmailRemoveLegacyPulse [_ctx]
-  (email-remove-legacy-pulse))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod task/init! ::SendWarnPulseRemovalEmail [_job-name]
-  (let [job     (jobs/build
-                 (jobs/of-type EmailRemoveLegacyPulse)
-                 (jobs/with-identity (jobs/key &quot;metabase.task.email-remove-legacy-pulse.job&quot;))
-                 (jobs/store-durably))
-        trigger (triggers/build
-                 (triggers/with-identity (triggers/key &quot;metabase.task.email-remove-legacy-pulse.trigger&quot;))
-                 (triggers/start-now))]
-    (task/schedule-task! job trigger)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+   [clojure.string :as str]
+   [java-time.api :as t]
+   [metabase.public-settings.premium-features :refer [defenterprise]]
+   [metabase.search.config :as search.config]
+   [metabase.search.util :as search.util]
+   [metabase.util :as u]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- matches?
+  [search-token match-token]
+  (str/includes? match-token search-token))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- matches-in?
+  [search-token match-tokens]
+  (some #(matches? search-token %) match-tokens))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- tokens-&gt;string
+  [tokens abbreviate?]
+  (let [-&gt;string (partial str/join &quot; &quot;)
+        context  search.config/surrounding-match-context]
+    (if (or (not abbreviate?)
+            (&lt;= (count tokens) (* 2 context)))
+      (-&gt;string tokens)
+      (str
+       (-&gt;string (take context tokens))
+       &quot;…&quot;
+       (-&gt;string (take-last context tokens))))))</pre></td></tr><tr><td class="docs"><p>Breaks the matched-text into match/no-match chunks and returns a seq of them in order. Each chunk is a map with keys
+<code>is_match</code> (true/false) and <code>text</code></p>
+</td><td class="codes"><pre class="brush: clojure">(defn- match-context
+  [query-tokens match-tokens]
+  (-&gt;&gt; match-tokens
+       (map (fn [match-token]
+              {:text match-token
+               :is_match (boolean (some #(matches? % match-token) query-tokens))}))
+       (partition-by :is_match)
+       (map (fn [matches-or-misses-maps]
+              (let [is-match    (:is_match (first matches-or-misses-maps))
+                    text-tokens (map :text matches-or-misses-maps)]
+                {:is_match is-match
+                 :text     (tokens-&gt;string text-tokens (not is-match))})))))</pre></td></tr><tr><td class="docs"><p>Scores a search result. Returns a vector of score maps, each containing <code>:weight</code>, <code>:score</code>, and other info about
+the text match, if there is one. If there is no match, the score is 0.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- text-scores-with
+  [search-native-query weighted-scorers query-tokens search-result]
+  ;; TODO is pmap over search-result worth it?
+  (let [scores (for [column (let [search-columns-fn (requiring-resolve 'metabase.search.legacy/searchable-columns)]
+                              (search-columns-fn (:model search-result) search-native-query))
+                     {:keys [scorer name weight]
+                      :as   _ws} weighted-scorers
+                     :let [matched-text (-&gt; search-result
+                                            (get column)
+                                            (search.config/column-&gt;string (:model search-result) column))
+                           match-tokens (some-&gt; matched-text search.util/normalize search.util/tokenize)
+                           raw-score    (scorer query-tokens match-tokens)]
+                     :when (and matched-text (pos? raw-score))]
+                 {:score               raw-score
+                  :name                (str &quot;text-&quot; name)
+                  :weight              weight
+                  :match               matched-text
+                  :match-context-thunk #(match-context query-tokens match-tokens)
+                  :column              column})]
+    (if (seq scores)
+      (vec scores)
+      [{:score 0 :weight 0}])))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- consecutivity-scorer
+  [query-tokens match-tokens]
+  (/ (search.util/largest-common-subseq-length
+      matches?
+      ;; See comment on largest-common-subseq-length re. its cache. This is a little conservative, but better to under- than over-estimate
+      (take 30 query-tokens)
+      (take 30 match-tokens))
+     (count query-tokens)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- occurrences
+  [query-tokens match-tokens token-matches?]
+  (reduce (fn [tally token]
+            (if (token-matches? token match-tokens)
+              (inc tally)
+              tally))
+          0
+          query-tokens))</pre></td></tr><tr><td class="docs"><p>How many search tokens show up in the result?</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- total-occurrences-scorer
+  [query-tokens match-tokens]
+  (/ (occurrences query-tokens match-tokens matches-in?)
+     (count query-tokens)))</pre></td></tr><tr><td class="docs"><p>How many search tokens are exact matches (perfect string match, not <code>includes?</code>) in the result?</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- exact-match-scorer
+  [query-tokens match-tokens]
+  (/ (occurrences query-tokens match-tokens #(some (partial = %1) %2))
+     (count query-tokens)))</pre></td></tr><tr><td class="docs"><p>How much of the result is covered by the search query?</p>
+</td><td class="codes"><pre class="brush: clojure">(defn fullness-scorer
+  [query-tokens match-tokens]
+  (let [match-token-count (count match-tokens)]
+    (if (zero? match-token-count)
+      0
+      (/ (occurrences query-tokens match-tokens matches-in?)
+         match-token-count))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- prefix-counter
+  [query-string item-string]
+  (reduce
+   (fn [cnt [a b]]
+     (if (= a b) (inc cnt) (reduced cnt)))
+   0
+   (map vector query-string item-string)))</pre></td></tr><tr><td class="docs"><p>Tokens is a seq of strings, like ["abc" "def"]</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- count-token-chars
+  [tokens]
+  (reduce
+   (fn [cnt x] (+ cnt (count x)))
+   0
+   tokens))</pre></td></tr><tr><td class="docs"><p>How much does the search query match the beginning of the result? </p>
+</td><td class="codes"><pre class="brush: clojure">(defn prefix-scorer
+  [query-tokens match-tokens]
+  (let [query (u/lower-case-en (str/join &quot; &quot; query-tokens))
+        match (u/lower-case-en (str/join &quot; &quot; match-tokens))]
+    (/ (prefix-counter query match)
+       (count-token-chars query-tokens))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private match-based-scorers
+  [{:scorer exact-match-scorer :name &quot;exact-match&quot; :weight 4}
+   {:scorer consecutivity-scorer :name &quot;consecutivity&quot; :weight 2}
+   {:scorer total-occurrences-scorer :name &quot;total-occurrences&quot; :weight 2}
+   {:scorer fullness-scorer :name &quot;fullness&quot; :weight 1}
+   {:scorer prefix-scorer :name &quot;prefix&quot; :weight 1}])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private model-&gt;sort-position
+  (zipmap (reverse search.config/models-search-order) (range)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- model-score
+  [{:keys [model]}]
+  (/ (or (model-&gt;sort-position model) 0)
+     (count model-&gt;sort-position)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- text-scores-with-match
+  [result {:keys [search-string search-native-query]}]
+  (if (seq search-string)
+    (text-scores-with search-native-query
+                      match-based-scorers
+                      (search.util/tokenize (search.util/normalize search-string))
+                      result)
+    [{:score 0 :weight 0}]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- pinned-score
+  [{:keys [model collection_position]}]
+  ;; We experimented with favoring lower collection positions, but it wasn't good
+  ;; So instead, just give a bonus for items that are pinned at all
+  (if (and (#{&quot;card&quot; &quot;dashboard&quot;} model)
+           ((fnil pos? 0) collection_position))
+    1
+    0))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- bookmarked-score
+  [{:keys [model bookmark]}]
+  (if (and (#{&quot;card&quot; &quot;collection&quot; &quot;dashboard&quot;} model)
+           bookmark)
+    1
+    0))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- dashboard-count-score
+  [{:keys [model dashboardcard_count]}]
+  (if (= model &quot;card&quot;)
+    (min (/ dashboardcard_count
+            search.config/dashboard-count-ceiling)
+         1)
+    0))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- recency-score
+  [{:keys [updated_at]}]
+  (let [stale-time search.config/stale-time-in-days
+        days-ago (if updated_at
+                   (t/time-between updated_at
+                                   (t/offset-date-time)
+                                   :days)
+                   stale-time)]
+    (/
+     (max (- stale-time days-ago) 0)
+     stale-time)))</pre></td></tr><tr><td class="docs"><p>Default weights and scores for a given result.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn weights-and-scores
+  [result]
+  [{:weight 2 :score (pinned-score result) :name &quot;pinned&quot;}
+   {:weight 2 :score (bookmarked-score result) :name &quot;bookmarked&quot;}
+   {:weight 3/2 :score (recency-score result) :name &quot;recency&quot;}
+   {:weight 1 :score (dashboard-count-score result) :name &quot;dashboard&quot;}
+   {:weight 1/2 :score (model-score result) :name &quot;model&quot;}])</pre></td></tr><tr><td class="docs"><p>Score a result, returning a collection of maps with score and weight. Should not include the text scoring, done
+separately. Should return a sequence of maps with</p>
+
+<p>  {:weight number,
+   :score  number,
+   :name   string}</p>
+</td><td class="codes"><pre class="brush: clojure">(defenterprise score-result
+  metabase-enterprise.search.scoring
+  [result]
+  (weights-and-scores result))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- sum-weights [weights]
+  (reduce
+   (fn [acc {:keys [weight] :or {weight 0}}]
+     (+ acc weight))
+   0
+   weights))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- compute-normalized-score [scores]
+  (let [weight-sum (sum-weights scores)]
+    (if (zero? weight-sum)
+      0
+      (let [score-sum (reduce
+                       (fn [acc {:keys [weight score]
+                                 :or {weight 0 score 0}}]
+                         (+ acc (* score weight)))
+                       0
+                       scores)]
+        (/ score-sum weight-sum)))))</pre></td></tr><tr><td class="docs"><p>Reweight <code>scores</code> such that the sum of their weights equals <code>total</code>, and their proportions do not change.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn force-weight
+  [scores total]
+  (let [total-weight (sum-weights scores)
+        weight-calc-fn (if (contains? #{nil 0} total-weight)
+                         (fn weight-calc-fn [_] 0)
+                         (fn weight-calc-fn [weight] (* total (/ weight total-weight))))]
+    (mapv #(update % :weight weight-calc-fn) scores)))</pre></td></tr><tr><td class="docs"><p>This is used to control the total weight of text-based scorers in [[score-and-result]]</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:const text-scores-weight
+  10)</pre></td></tr><tr><td class="docs"><p>Returns a map with the normalized, combined score from relevant-scores as <code>:score</code> and <code>:result</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn score-and-result
+  [result {:keys [search-string search-native-query]}]
+  (let [text-matches    (-&gt; (text-scores-with-match result {:search-string       search-string
+                                                            :search-native-query search-native-query})
+                            (force-weight text-scores-weight))
+        has-text-match? (some (comp pos? :score) text-matches)
+        all-scores      (into (vec (score-result result)) text-matches)
+        relevant-scores (remove (comp zero? :score) all-scores)
+        total-score     (compute-normalized-score all-scores)]
+    ;; Searches with a blank search string mean &quot;show me everything, ranked&quot;;
+    ;; see https://github.com/metabase/metabase/pull/15604 for archived search.
+    ;; If the search string is non-blank, results with no text match have a score of zero.
+    (when (or has-text-match? (str/blank? search-string))
+      {:score  total-score
+       :result (assoc result :all-scores all-scores :relevant-scores relevant-scores)})))</pre></td></tr><tr><td class="docs"><p>Compare maps of scores and results. Must return -1, 0, or 1. The score is assumed to be a vector, and will be
+compared in order.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn compare-score
+  [{score-1 :score} {score-2 :score}]
+  (compare score-1 score-2))</pre></td></tr><tr><td class="docs"><p>Given a reducible collection (i.e., from <code>jdbc/reducible-query</code>) and a transforming function for it, applies the
+transformation and returns a seq of the results sorted by score. The transforming function is expected to output
+maps with <code>:score</code> and <code>:result</code> keys.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn top-results
+  [reducible-results max-results xf]
+  (-&gt;&gt; reducible-results
+       (transduce xf (u/sorted-take max-results compare-score))
+       rseq
+       (map :result)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

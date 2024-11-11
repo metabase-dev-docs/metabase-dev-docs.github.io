@@ -2871,6 +2871,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [cheshire.core :as json]
    [clojure.string :as str]
    [honey.sql.helpers :as sql.helpers]
+   [metabase.search.spec :as search.spec]
    [metabase.util :as u]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private active-table :search_index)</pre></td></tr><tr><td class="docs">
@@ -2878,7 +2879,7 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(def ^:private retired-table :search_index_retired)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defonce ^:private initialized? (atom false))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defonce ^:private reindexing? (atom false))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private tsv-language &quot;english&quot;)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private tsv-language &quot;simple&quot;)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- exists? [table-name]
   (t2/exists? :information_schema.tables :table_name (name table-name)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- drop-table! [table-name]
@@ -2900,29 +2901,45 @@ net.brehaut.ClojureTools = (function (SH) {
              ;; entity
              [:model_id :int :not-null]
              [:model [:varchar 254] :not-null] ;; TODO We could shrink this to just what we need.
+             [:name :text]
              ;; search
              [:search_vector :tsvector :not-null]
+             [:with_native_query_vector :tsvector :not-null]
              ;; results
-             [:display_data :text]
-             [:legacy_input :text]
+             [:display_data :text :not-null]
+             [:legacy_input :text :not-null]
              ;; scoring related
+             [:dashboardcard_count :int]
              [:model_rank :int :not-null]
+             [:pinned :boolean]
+             [:verified :boolean]
              ;; permission related entities
              [:collection_id :int]
              [:database_id :int]
              [:table_id :int]
              ;; filter related
-             [:archived :boolean]
+             [:archived :boolean :not-null [:default false]]
+             [:creator_id :int]
+             [:last_edited_at :timestamp]
+             [:last_editor_id :int]
+             [:model_created_at :timestamp]
+             [:model_updated_at :timestamp]
              ;; useful for tracking the speed and age of the index
              [:created_at :timestamp
               [:default [:raw &quot;CURRENT_TIMESTAMP&quot;]]
-              :not-null]])
+              :not-null]
+             [:updated_at :timestamp :not-null]])
           t2/query)
       ;; TODO I strongly suspect that there are more indexes that would help performance, we should examine EXPLAIN.
-      (t2/query
-       (format &quot;CREATE INDEX IF NOT EXISTS %s_tsvector_idx ON %s USING gin (search_vector)&quot;
-               (str/replace (str (name active-table) &quot;_&quot; (random-uuid)) #&quot;-&quot; &quot;_&quot;)
-               (name pending-table))))
+      (let [idx-prefix (str/replace (str (name active-table) &quot;_&quot; (random-uuid)) #&quot;-&quot; &quot;_&quot;)
+            table-name (name pending-table)]
+        (doseq [stmt [&quot;CREATE UNIQUE INDEX IF NOT EXISTS %s_identity_idx ON %s (model, model_id)&quot;
+                      &quot;CREATE INDEX IF NOT EXISTS %s_tsvector_idx ON %s USING gin (search_vector)&quot;
+                      &quot;CREATE INDEX IF NOT EXISTS %s_native_tsvector_idx ON %s USING gin (with_native_query_vector)&quot;
+                      ;; Spam all the indexes for now, let's see if they get used on Stats / Ephemeral envs.
+                      &quot;CREATE INDEX IF NOT EXISTS %s_model_archived_idx ON %s (model, archived)&quot;
+                      &quot;CREATE INDEX IF NOT EXISTS %s_archived_idx ON %s (archived)&quot;]]
+          (t2/query (format stmt idx-prefix table-name)))))
     (reset! reindexing? true)))</pre></td></tr><tr><td class="docs"><p>Make the pending index active if it exists. Returns true if it did so.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn activate-pending!
   []
@@ -2938,92 +2955,143 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defn- entity-&gt;entry [entity]
   (-&gt; entity
       (select-keys
-       [:model
-        :model_rank
-        :collection_id
-        :database_id
-        :display_data
-        :legacy_input
-        :table_id
-        :archived])
+       ;; remove attrs that get aliased
+       (remove #{:id :created_at :updated_at :native_query}
+               (conj search.spec/attr-columns
+                     :model :model_rank
+                     :display_data :legacy_input)))
       (update :display_data json/generate-string)
       (update :legacy_input json/generate-string)
       (assoc
-       :model_id      (:id entity)
-       :search_vector [:to_tsvector
-                       [:inline tsv-language]
-                       [:cast
-                        (:searchable_text entity)
-                        :text]])))</pre></td></tr><tr><td class="docs"><p>Create the given search index entries</p>
+       :updated_at       :%now
+       :model_id         (:id entity)
+       :model_created_at (:created_at entity)
+       :model_updated_at (:updated_at entity)
+       :search_vector [:||
+                       [:setweight [:to_tsvector [:inline tsv-language] [:cast (:name entity) :text]]
+                        [:inline &quot;A&quot;]]
+                       [:setweight [:to_tsvector
+                                    [:inline tsv-language]
+                                    [:cast
+                                     (:searchable_text entity )
+                                     :text]]
+                        [:inline &quot;B&quot;]]]
+       :with_native_query_vector [:||
+                                  [:setweight [:to_tsvector [:inline tsv-language] [:cast (:name entity) :text]]
+                                   [:inline &quot;A&quot;]]
+                                  [:setweight [:to_tsvector
+                                               [:inline tsv-language]
+                                               [:cast
+                                                (str (:searchable_text entity) &quot; &quot; (:native_query entity))
+                                                :text]]
+                                   [:inline &quot;B&quot;]]])))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- upsert! [table entry]
+  (t2/query
+   {:insert-into   table
+    :values        [entry]
+    :on-conflict   [:model :model_id]
+    :do-update-set entry}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- batch-upsert! [table entries]
+  (when (seq entries)
+    (t2/query
+     ;; The cost of dynamically calculating these keys should be small compared to the IO cost, so unoptimized.
+     (let [update-keys (vec (disj (set (keys (first entries))) :id :model :model_id))
+           excluded-kw (fn [column] (keyword (str &quot;excluded.&quot; (name column))))]
+       {:insert-into   table
+        :values        entries
+        :on-conflict   [:model :model_id]
+        :do-update-set (zipmap update-keys (map excluded-kw update-keys))}))))</pre></td></tr><tr><td class="docs"><p>Create the given search index entries</p>
 </td><td class="codes"><pre class="brush: clojure">(defn update!
   [entity]
   (let [entry (entity-&gt;entry entity)]
     (when @initialized?
-      (t2/insert! active-table entry))
+      (upsert! active-table entry))
     (when @reindexing?
-      (t2/insert! pending-table entry))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- process-negation [term]
-  (if (str/starts-with? term &quot;-&quot;)
-    (str &quot;!&quot; (subs term 1))
-    term))</pre></td></tr><tr><td class="docs">
+      (upsert! pending-table entry))))</pre></td></tr><tr><td class="docs"><p>Remove any entries corresponding directly to a given model instance.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn delete!
+  [id search-models]
+  ;; In practice, we expect this to be 1-1, but the data model does not preclude it.
+  (when (seq search-models)
+    (when @initialized?
+      (t2/delete! active-table :model_id id :model [:in search-models]))
+    (when @reindexing?
+      (t2/delete! pending-table :model_id id :model [:in search-models]))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- quote* [s]
+  (str &quot;'&quot; (str/replace s &quot;'&quot; &quot;''&quot;) &quot;'&quot;))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- process-phrase [word-or-phrase]
   ;; a phrase is quoted even if the closing quotation mark has not been typed yet
-  (if (str/starts-with? word-or-phrase &quot;\)
+  (cond
     ;; quoted phrases must be matched sequentially
+    (str/starts-with? word-or-phrase &quot;\)
     (as-&gt; word-or-phrase &lt;&gt;
       ;; remove the quote mark(s)
       (str/replace &lt;&gt; #&quot;^\&quot;|\&quot;$&quot; )
       (str/trim &lt;&gt;)
       (str/split &lt;&gt; #&quot;\s+&quot;)
+      (map quote* &lt;&gt;)
       (str/join &quot; &lt;-&gt; &quot; &lt;&gt;))
+    ;; negation
+    (str/starts-with? word-or-phrase &quot;-&quot;)
+    (str &quot;!&quot; (quote* (subs word-or-phrase 1)))
     ;; just a regular word
-    word-or-phrase))</pre></td></tr><tr><td class="docs"><p>Break up the words in the search input, preserving quoted and partially quoted segments.</p>
+    :else
+    (quote* word-or-phrase)))</pre></td></tr><tr><td class="docs"><p>Break up the words in the search input, preserving quoted and partially quoted segments.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- split-preserving-quotes
   [s]
   (re-seq #&quot;\&quot;[^\&quot;]*(?:\&quot;|$)|[^\s\&quot;]+|\s+&quot; (u/lower-case-en s)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- process-clause [words-and-phrases]
   (-&gt;&gt; words-and-phrases
        (remove #{&quot;and&quot;})
-       (map (comp process-phrase
-                  process-negation))
+       (map process-phrase)
        (str/join &quot; &amp; &quot;)))</pre></td></tr><tr><td class="docs"><p>Add wildcards at the end of the final word, so that we match ts completions.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- complete-last-word
   [expression]
   (str/replace expression #&quot;(\S+)(?=\s*$)&quot; &quot;$1:*&quot;))</pre></td></tr><tr><td class="docs"><p>Given the user input, construct a query in the Postgres tsvector query language.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- to-tsquery-expr
   [input]
-  (let [trimmed        (str/trim input)
-        complete?      (not (str/ends-with? trimmed &quot;\&quot;&quot;))
-        ;; TODO also only complete if search-typeahead-enabled and the context is the search palette
-        maybe-complete (if complete? complete-last-word identity)]
-    (-&gt;&gt; (split-preserving-quotes trimmed)
-         (remove str/blank?)
-         (partition-by #{&quot;or&quot;})
-         (remove #(= (first %) &quot;or&quot;))
-         (map process-clause)
-         (str/join &quot; | &quot;)
-         maybe-complete)))</pre></td></tr><tr><td class="docs"><p>Create the given search index entries in bulk</p>
+  (str
+   (when input
+     (let [trimmed        (str/trim input)
+           complete?      (not (str/ends-with? trimmed &quot;\&quot;&quot;))
+           ;; TODO also only complete if search-typeahead-enabled and the context is the search palette
+           maybe-complete (if complete? complete-last-word identity)]
+       (-&gt;&gt; (split-preserving-quotes trimmed)
+            (remove str/blank?)
+            (partition-by #{&quot;or&quot;})
+            (remove #(= (first %) &quot;or&quot;))
+            (map process-clause)
+            (str/join &quot; | &quot;)
+            maybe-complete)))))</pre></td></tr><tr><td class="docs"><p>Create the given search index entries in bulk</p>
 </td><td class="codes"><pre class="brush: clojure">(defn batch-update!
   [entities]
   (let [entries (map entity-&gt;entry entities)]
     (when @initialized?
-      (t2/insert! active-table entries))
+      (batch-upsert! active-table entries))
     (when @reindexing?
-      (t2/insert! pending-table entries))))</pre></td></tr><tr><td class="docs"><p>Query fragment for all models corresponding to a query parameter <code>:search-term</code>.</p>
+      (batch-upsert! pending-table entries))))</pre></td></tr><tr><td class="docs"><p>Query fragment for all models corresponding to a query parameter <code>:search-term</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn search-query
-  [search-term]
-  {:select [:model_id :model]
-   :from   [active-table]
-   :where  (if-not search-term
-             [:= [:inline 1] [:inline 1]]
-             [:raw
-              &quot;search_vector @@ to_tsquery('&quot;
-              tsv-language &quot;', &quot;
-              [:lift (to-tsquery-expr search-term)] &quot;)&quot;])})</pre></td></tr><tr><td class="docs"><p>Use the index table to search for records.</p>
+  ([search-term search-ctx]
+   (search-query search-term search-ctx [:model_id :model]))
+  ([search-term search-ctx select-items]
+   {:select    select-items
+    :from      [active-table]
+    ;; Using a join allows us to share the query expression between our SELECT and WHERE clauses.
+    :join      [[[:raw &quot;to_tsquery('&quot;
+                  tsv-language &quot;', &quot;
+                  [:lift (to-tsquery-expr search-term)] &quot;)&quot;]
+                 :query] [:= 1 1]]
+    :where     (if (str/blank? search-term)
+                 [:= [:inline 1] [:inline 1]]
+                 [:raw
+                  (str
+                   (if (:search-native-query search-ctx)
+                     &quot;with_native_query_vector&quot;
+                     &quot;search_vector&quot;)
+                   &quot; @@ query&quot;)])}))</pre></td></tr><tr><td class="docs"><p>Use the index table to search for records.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn search
-  [search-term]
+  [search-term &amp; [search-ctx]]
   (map (juxt :model_id :model)
-       (t2/query (search-query search-term))))</pre></td></tr><tr><td class="docs"><p>Ensure we have a blank slate; in case the table schema or stored data format has changed.</p>
+       (t2/query (search-query search-term search-ctx))))</pre></td></tr><tr><td class="docs"><p>Ensure we have a blank slate; in case the table schema or stored data format has changed.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn reset-index!
   []
   (reset! reindexing? false)
