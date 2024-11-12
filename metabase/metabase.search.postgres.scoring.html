@@ -2869,21 +2869,22 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.search.postgres.scoring
   (:require
    [honey.sql.helpers :as sql.helpers]
+   [metabase.public-settings.premium-features :refer [defenterprise]]
    [metabase.search.config :as search.config]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private seconds-in-a-day 86400)</pre></td></tr><tr><td class="docs"><p>Prefer it when a (potentially nullable) boolean is true.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- truthy
+</td><td class="codes"><pre class="brush: clojure">(defn truthy
   [column]
   [:coalesce [:cast column :integer] [:inline 0]])</pre></td></tr><tr><td class="docs"><p>Prefer items whose value is larger, up to some saturation point. Items beyond that point are equivalent.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- size
+</td><td class="codes"><pre class="brush: clojure">(defn size
   [column ceiling]
   [:least [:/ [:coalesce column [:inline 0]] [:inline (double ceiling)]] [:inline 1]])</pre></td></tr><tr><td class="docs"><p>Prefer items whose value is larger, with diminishing gains.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- atan-size
+</td><td class="codes"><pre class="brush: clojure">(defn atan-size
   [column scaling]
   ;; 2/PI * tan^-1 (x/N)
   [:*
    [:/ [:inline 2] [:pi]]
    [:atan [:/ [:cast [:coalesce column [:inline 0.0]] :float] [:inline scaling]]]])</pre></td></tr><tr><td class="docs"><p>Score at item based on the duration between two dates, where less is better.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- inverse-duration
+</td><td class="codes"><pre class="brush: clojure">(defn inverse-duration
   [from-column to-column ceiling-in-days]
   (let [ceiling [:inline ceiling-in-days]]
     [:/
@@ -2895,7 +2896,7 @@ net.brehaut.ClojureTools = (function (SH) {
         [:inline (double seconds-in-a-day)]]]
       [:inline 0]]
      ceiling]))</pre></td></tr><tr><td class="docs"><p>Prefer items whose value is earlier in some list.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- idx-rank
+</td><td class="codes"><pre class="brush: clojure">(defn idx-rank
   [idx-col len]
   (if (pos? len)
     [:/ [:- [:inline (dec len)] idx-col] [:inline len]]
@@ -2920,16 +2921,20 @@ See https://www.postgresql.org/docs/current/textsearch-controls.html#TEXTSEARCH-
 </td><td class="codes"><pre class="brush: clojure">(def ^:private bookmark-score-expr
   (let [match-clause (fn [m] [[:and [:= :model m] [:!= nil (keyword (str m &quot;_bookmark.&quot; m &quot;_id&quot;))]]
                               [:inline 1]])]
-    (into [:case] (concat (mapcat (comp match-clause name) bookmarked-models) [:else [:inline 0]]))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private scorers
+    (into [:case] (concat (mapcat (comp match-clause name) bookmarked-models) [:else [:inline 0]]))))</pre></td></tr><tr><td class="docs"><p>The default constituents of the search ranking scores.</p>
+</td><td class="codes"><pre class="brush: clojure">(def base-scorers
   {:text       [:ts_rank :search_vector :query [:inline ts-rank-normalization]]
    :view-count (atan-size :view_count search.config/view-count-scaling)
    :pinned     (truthy :pinned)
    :bookmarked bookmark-score-expr
    :recency    (inverse-duration :model_updated_at [:now] search.config/stale-time-in-days)
    :dashboard  (size :dashboardcard_count search.config/dashboard-count-ceiling)
-   :model      (idx-rank :model_rank (count search.config/all-models))})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private precalculated-select-items (select-items scorers))</pre></td></tr><tr><td class="docs">
+   :model      (idx-rank :model_rank (count search.config/all-models))})</pre></td></tr><tr><td class="docs"><p>Return the select-item expressions used to calculate the score for each search result.</p>
+</td><td class="codes"><pre class="brush: clojure">(defenterprise scorers
+  metabase-enterprise.search.scoring
+  []
+  base-scorers)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- scorer-select-items [] (select-items (scorers)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- bookmark-join [model user-id]
   (let [model-name (name model)
         table-name (str model-name &quot;_bookmark&quot;)]
@@ -2942,7 +2947,7 @@ See https://www.postgresql.org/docs/current/textsearch-controls.html#TEXTSEARCH-
   (apply sql.helpers/left-join qry (mapcat #(bookmark-join % user-id) bookmarked-models)))</pre></td></tr><tr><td class="docs"><p>Add a bunch of SELECT columns for the individual and total scores, and a corresponding ORDER BY.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn with-scores
   [search-ctx qry]
-  (-&gt; (apply sql.helpers/select qry precalculated-select-items)
+  (-&gt; (apply sql.helpers/select qry (scorer-select-items))
       (join-bookmarks (:current-user-id search-ctx))
       (sql.helpers/order-by [:total_score :desc])))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
