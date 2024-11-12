@@ -2899,7 +2899,7 @@ details and for the code for generating and updating the <em>data</em> permissio
   [:map-of [:or [:= :root] ms/PositiveInt] CollectionPermissions])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private PermissionsGraph
   [:map {:closed true}
-   [:revision :int]
+   [:revision {:optional true} [:maybe :int]]
    [:groups   [:map-of ms/PositiveInt GroupPermissionsGraph]]])</pre></td></tr><tr><td class="docs"><p>-------------------------------------------------- Fetch Graph ---------------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- group-id-&gt;permissions-set []
@@ -3021,8 +3021,10 @@ If there are changes, returns the future that is used to call <code>fill-revisio
 To run this syncronously deref the non-nil return value.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn update-graph!
   ([new-graph]
-   (update-graph! nil new-graph))
-  ([collection-namespace :- [:maybe ms/KeywordOrString], new-graph :- PermissionsGraph]
+   (update-graph! nil new-graph false))
+  ([collection-namespace :- [:maybe ms/KeywordOrString]
+    new-graph            :- PermissionsGraph
+    force?               :- [:maybe boolean?]]
    (let [old-graph          (graph collection-namespace)
          old-perms          (:groups old-graph)
          new-perms          (:groups new-graph)
@@ -3032,7 +3034,7 @@ To run this syncronously deref the non-nil return value.</p>
          new-perms          (into {} (for [[group-id collection-id-&gt;perms] new-perms]
                                        [group-id (select-keys collection-id-&gt;perms (keys (get old-perms group-id)))]))
          [diff-old changes] (data/diff old-perms new-perms)]
-     (perms.u/check-revision-numbers old-graph new-graph)
+     (when-not force? (perms.u/check-revision-numbers old-graph new-graph))
      (when (seq changes)
        (let [revision-id (t2/with-transaction [_conn]
                            (doseq [[group-id changes] changes]
