@@ -2978,10 +2978,23 @@ Can also be forced to be run synchronous for testing.</p>
    (if sync?
      (bulk-ingest! updates)
      (doseq [update updates]
-       (queue/put-with-delay! queue delay-ms update)))))</pre></td></tr><tr><td class="docs"><p>Given a new or updated instance, create or update all the corresponding search entries if needed.</p>
+       (queue/put-with-delay! queue delay-ms update)))))</pre></td></tr><tr><td class="docs"><p>An (incomplete) check where queries will definitely return nothing, to help avoid spurious index update queries.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- impossible-condition?
+  [where]
+  (when (vector? where)
+    (case (first where)
+      :=   (let [[a b] (rest where)]
+             (and (string? a) (string? b) (not= a b)))
+      :!=  (let [[a b] (rest where)]
+             (and (string? a) (string? b) (= a b)))
+      :and (boolean (some impossible-condition? (rest where)))
+      :or  (every? impossible-condition? (rest where))
+      false)))</pre></td></tr><tr><td class="docs"><p>Given a new or updated instance, create or update all the corresponding search entries if needed.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn update-index!
   [instance &amp; [always?]]
-  (when-let [updates (seq (search.spec/search-models-to-update instance always?))]
+  (when-let [updates (-&gt;&gt; (search.spec/search-models-to-update instance always?)
+                          (remove (comp impossible-condition? second))
+                          seq)]
     ;; We need to delay execution to handle deletes, which alert us *before* updating the database.
     (ingest-maybe-async! updates)
     nil))</pre></td></tr><tr><td class="docs"><p>Given a deleted instance, delete all the corresponding search entries.</p>
