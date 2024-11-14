@@ -2873,6 +2873,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.models.setting :refer [defsetting]]
    [metabase.permissions.util :as perms.u]
    [metabase.public-settings :as public-settings]
+   [metabase.util :as u]
    [metabase.util.i18n :refer [deferred-tru]]
    [metabase.util.malli :as mu]
    [metabase.util.malli.schema :as ms]))</pre></td></tr><tr><td class="docs">
@@ -2935,7 +2936,48 @@ list will be ranked higher.</p>
    :official-collection 2
    :verified            2
    :view-count          2
-   :text                10})</pre></td></tr><tr><td class="docs"><p>Strength of the various scorers. Copied from metabase.search.in-place.scoring, but allowing divergence.</p>
+   :text                10})</pre></td></tr><tr><td class="docs"><p>A relaxed definition, capturing how we can write the filter - with some fields omitted.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private FilterDef
+  [:map {:closed true}
+   [:key                               :keyword]
+   [:type                              :keyword]
+   [:field            {:optional true} :string]
+   [:context-key      {:optional true} :keyword]
+   [:supported-value? {:optional true} ifn?]
+   [:required-feature {:optional true} :keyword]])</pre></td></tr><tr><td class="docs"><p>A normalized representation, for the application to leverage.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private Filter
+  [:map {:closed true}
+   [:key              :keyword]
+   [:type             :keyword]
+   [:field            :string]
+   [:context-key      :keyword]
+   [:supported-value? ifn?]
+   [:required-feature [:maybe :keyword]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- build-filter :- Filter
+  [{k :key t :type :keys [context-key field supported-value? required-feature]} :- FilterDef]
+  {:key              k
+   :type             (keyword &quot;metabase.search.filter&quot; (name t))
+   :field            (or field (u/-&gt;snake_case_en (name k)))
+   :context-key      (or context-key k)
+   :supported-value? (or supported-value? (constantly true))
+   :required-feature required-feature})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- build-filters :- [:map-of :keyword Filter]
+  [m]
+  (-&gt; (reduce #(assoc-in %1 [%2 :key] %2) m (keys m))
+      (update-vals build-filter)))</pre></td></tr><tr><td class="docs"><p>Specifications for the optional search filters.</p>
+</td><td class="codes"><pre class="brush: clojure">(def filters
+  (build-filters
+   {:archived       {:type :single-value, :context-key :archived?}
+    ;; TODO dry this alias up with the index hydration code
+    :created-at     {:type :date-range, :field &quot;model_created_at&quot;}
+    :creator-id     {:type :list, :context-key :created-by}
+    ;; This actually has nothing to do with tables, as we also filter cards, it would be good to rename the context key.
+    :database-id    {:type :single-value, :context-key :table-db-id}
+    :id             {:type :list, :context-key :ids, :field &quot;model_id&quot;}
+    :last-edited-at {:type :date-range}
+    :last-editor-id {:type :list, :context-key :last-edited-by}
+    :native-query   {:type :native-query, :context-key :search-native-query}
+    :verified       {:type :single-value, :supported-value? #{true}, :required-feature :content-verification}}))</pre></td></tr><tr><td class="docs"><p>Strength of the various scorers. Copied from metabase.search.in-place.scoring, but allowing divergence.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn weights
   []
   (merge default-weights (public-settings/experimental-search-weight-overrides)))</pre></td></tr><tr><td class="docs"><p>The relative strength the corresponding score has in influencing the total score.</p>

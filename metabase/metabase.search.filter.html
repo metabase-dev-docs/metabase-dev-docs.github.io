@@ -2871,50 +2871,35 @@ net.brehaut.ClojureTools = (function (SH) {
    [honey.sql.helpers :as sql.helpers]
    [metabase.driver.common.parameters.dates :as params.dates]
    [metabase.public-settings.premium-features :as premium-features]
+   [metabase.search.config :as search.config]
    [metabase.search.in-place.filter :as search.in-place.filter]
    [metabase.search.permissions :as search.permissions]
    [metabase.search.spec :as search.spec]
-   [metabase.util :as u]
    [metabase.util.date-2 :as u.date]
    [metabase.util.i18n :refer [tru]])
   (:import
    (java.time LocalDate)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private filter-&gt;type
-  {:archived?      ::single-value
-   :created-at     ::date-range
-   :created-by     ::list
-   :last-edited-at ::date-range
-   :last-edited-by ::list
-   :table-db-id    ::single-value
-   :verified       ::verified})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private context-key-&gt;attr
-  {:archived?           :archived
-   :created-at          :created-at
-   :created-by          :creator-id
-   :last-edited-at      :last-edited-at
-   :last-edited-by      :last-editor-id
-   :search-native-query :native-query
-   ;; this actually has nothing to do with tables anymore, as we also filter cards.
-   :table-db-id         :database-id
-   :verified            :verified})</pre></td></tr><tr><td class="docs"><p>TODO dry this alias up with the index hydration code</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private field-alias {:created-at :model-created-at})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private attr-&gt;index-key
-  (into {} (for [k (vals context-key-&gt;attr)]
-             [k (keyword (str &quot;search_index.&quot; (u/-&gt;snake_case_en (name (get field-alias k k)))))])))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- remove-if-falsey [m k]
   (if (m k) m (dissoc m k)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- visible-to? [search-ctx {:keys [visibility] :as _spec}]
   (case visibility
     :all      true
-    :app-user (not (search.permissions/sandboxed-or-impersonated-user? search-ctx))))</pre></td></tr><tr><td class="docs"><p>Returns a set of models that are applicable given the search context.</p>
+    :app-user (not (search.permissions/sandboxed-or-impersonated-user? search-ctx))))</pre></td></tr><tr><td class="docs"><p>Map the context keys to their corresponding filters</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private context-key-&gt;filter
+  (reduce-kv (fn [m k {:keys [context-key]}]
+               (assoc m context-key k))
+             {}
+             ;; TODO remove special handling of :id
+             (dissoc search.config/filters :id)))</pre></td></tr><tr><td class="docs"><p>Returns a set of models that are applicable given the search context.</p>
 
 <p>If the context has optional filters, the models will be restricted for the set of supported models only.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn search-context-&gt;applicable-models
   [search-ctx]
   (if (= :search.engine/in-place (:search-engine search-ctx))
     (search.in-place.filter/search-context-&gt;applicable-models search-ctx)
-    ;; Archived is an eccentric one - we treat it as false for models that don't map it
-    (let [required (-&gt;&gt; (remove-if-falsey search-ctx :archived?) keys (keep context-key-&gt;attr))]
+    ;; Archived is an eccentric one - we treat it as false for models that don't map it, rather than removing them.
+    ;; TODO move this behavior to the spec somehow
+    (let [required (-&gt;&gt; (remove-if-falsey search-ctx :archived?) keys (keep context-key-&gt;filter))]
       (into #{}
             (remove nil?)
             (for [search-model (:models search-ctx)
@@ -2944,16 +2929,7 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defmulti ^:private where-clause* (fn [context-key _column _v] context-key))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod where-clause* ::single-value [_ k v] [:= k v])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod where-clause* ::date-range [_ k v] (date-range-filter-clause k v))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod where-clause* ::list [_ k v] [:in k v])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod where-clause* ::verified [_ k v]
-  (assert (true? v) &quot;filter for non-verified cards is not supported&quot;)
-  (when (premium-features/has-feature? :content-verification)
-    [:= k v]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private true-clause
-  [:inline [:= 1 1]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(assert (= (disj (set (keys context-key-&gt;attr)) :search-native-query)
-           (set (keys filter-&gt;type)))
-        &quot;All filters have been implemented.&quot;)</pre></td></tr><tr><td class="docs"><p>Return a HoneySQL clause corresponding to all the optional search filters.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmethod where-clause* ::list [_ k v] [:in k v])</pre></td></tr><tr><td class="docs"><p>Return a HoneySQL clause corresponding to all the optional search filters.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn with-filters
   [search-context qry]
   (as-&gt; qry qry
@@ -2963,17 +2939,17 @@ net.brehaut.ClojureTools = (function (SH) {
                              [:and
                               [:in :model_id ids]
                               ;; NOTE: we limit id-based search to only a subset of the models
-                              ;; TODO this should just become part of the spec e.g. :search-by-id?
+                              ;; TODO this should just become part of the model spec e.g. :search-by-id?
                               [:in :model [&quot;card&quot; &quot;dataset&quot; &quot;metric&quot; &quot;dashboard&quot; &quot;action&quot;]]]))
-    (reduce (fn [qry [ctx-key attr-key]]
-              (let [v (get search-context ctx-key)]
-                (if (some? v)
-                  (sql.helpers/where qry (or (where-clause* (filter-&gt;type ctx-key)
-                                                            (attr-&gt;index-key attr-key) v)
-                                             true-clause))
-                  qry)))
+    (reduce (fn [qry {t :type :keys [context-key required-feature supported-value? field]}]
+              (or (when-some [v (get search-context context-key)]
+                    (assert (supported-value? v) (str &quot;Unsupported value for &quot; context-key &quot; - &quot; v))
+                    (when (or (nil? required-feature) (premium-features/has-feature? required-feature))
+                      (when-some [c (where-clause* t (keyword (str &quot;search_index.&quot; field)) v)]
+                        (sql.helpers/where qry c))))
+                  qry))
             qry
-            (dissoc context-key-&gt;attr :search-native-query))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+            (vals (dissoc search.config/filters :id :native-query)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

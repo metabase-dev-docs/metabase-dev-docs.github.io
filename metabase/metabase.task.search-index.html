@@ -2886,10 +2886,9 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(def reindex-job-key
   (jobs/key (str reindex-stem &quot;.job&quot;)))</pre></td></tr><tr><td class="docs"><p>Key used to define and trigger a job that makes incremental updates to the search index.</p>
 </td><td class="codes"><pre class="brush: clojure">(def update-job-key
-  (jobs/key (str update-stem &quot;.job&quot;)))</pre></td></tr><tr><td class="docs"><p>Populate Search Index</p>
-</td><td class="codes"><pre class="brush: clojure">(jobs/defjob ^{DisallowConcurrentExecution true
-               :doc                        }
-  SearchIndexReindex [_ctx]
+  (jobs/key (str update-stem &quot;.job&quot;)))</pre></td></tr><tr><td class="docs"><p>We define the job bodies outside the defrecord, so that we can redefine them live from the REPL</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- reindex! []
   (when (search/supports-index?)
     (if (not @recreated?)
       (do (log/info &quot;Recreating search index from the latest schema&quot;)
@@ -2901,13 +2900,28 @@ net.brehaut.ClojureTools = (function (SH) {
           (reset! recreated? true))
       (do (log/info &quot;Reindexing searchable entities&quot;)
           (search/reindex!)))
+    ;; It would be nice to output how many entries were updated.
     (log/info &quot;Done indexing.&quot;)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- update-index! []
+  (when (search/supports-index?)
+    (while true
+      (let [updated-entry-count (search.ingestion/process-next-batch Long/MAX_VALUE 100)]
+        (when (pos? updated-entry-count)
+          (log/infof &quot;Updated %d search index entries&quot; updated-entry-count))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- force-scheduled-task! [^JobDetail job ^Trigger trigger]
   ;; For some reason, using the schedule-task! with a non-durable job causes it to only fire on the first trigger.
   #_(task/schedule-task! job trigger)
   (task/delete-task! (.getKey job) (.getKey trigger))
   (task/add-job! job)
-  (task/add-trigger! trigger))</pre></td></tr><tr><td class="docs">
+  (task/add-trigger! trigger))</pre></td></tr><tr><td class="docs"><p>Populate Search Index</p>
+</td><td class="codes"><pre class="brush: clojure">(jobs/defjob ^{DisallowConcurrentExecution true
+               :doc                        }
+  SearchIndexReindex [_ctx]
+  (reindex!))</pre></td></tr><tr><td class="docs"><p>Keep Search Index updated</p>
+</td><td class="codes"><pre class="brush: clojure">(jobs/defjob ^{DisallowConcurrentExecution true
+               :doc                        }
+  SearchIndexUpdate [_ctx]
+  (update-index!))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod task/init! ::SearchIndexReindex [_]
   (let [job         (jobs/build
                      (jobs/of-type SearchIndexReindex)
@@ -2920,15 +2934,7 @@ net.brehaut.ClojureTools = (function (SH) {
                      (triggers/start-now)
                      (triggers/with-schedule
                       (simple/schedule (simple/with-interval-in-hours 1))))]
-    (force-scheduled-task! job trigger)))</pre></td></tr><tr><td class="docs"><p>Keep Search Index updated</p>
-</td><td class="codes"><pre class="brush: clojure">(jobs/defjob ^{DisallowConcurrentExecution true
-               :doc                        }
-  SearchIndexUpdate [_ctx]
-  (when (search/supports-index?)
-    (while true
-      (let [updated-entry-count (search.ingestion/process-next-batch Long/MAX_VALUE 100)]
-        (when (pos? updated-entry-count)
-          (log/infof &quot;Updated %d search index entries&quot; updated-entry-count))))))</pre></td></tr><tr><td class="docs">
+    (force-scheduled-task! job trigger)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod task/init! ::SearchIndexUpdate [_]
   (let [job         (jobs/build
                      (jobs/of-type SearchIndexUpdate)
