@@ -2879,10 +2879,11 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.search.config
     :as search.config
     :refer [SearchContext SearchableModel]]
+   [metabase.search.filter :as search.filter]
    [metabase.search.in-place.filter :as search.in-place.filter]
    [metabase.search.in-place.scoring :as scoring]
+   [metabase.search.in-place.util :as search.util]
    [metabase.search.permissions :as search.permissions]
-   [metabase.search.util :as search.util]
    [metabase.util :as u]
    [metabase.util.honey-sql-2 :as h2x]
    [metabase.util.log :as log]
@@ -3003,7 +3004,23 @@ Used in data picker for joins because we can't join across DB's.</p>
   [query :- ms/Map id :- [:maybe ms/PositiveInt]]
   (if (some? id)
     (sql.helpers/where query [:= id :database_id])
-    query))</pre></td></tr><tr><td class="docs">
+    query))</pre></td></tr><tr><td class="docs"><p>Add a <code>WHERE</code> clause to the query to only return Collections the Current User has access to; join against Collection,
+so we can return its <code>:name</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn add-collection-join-and-where-clauses
+  [honeysql-query :- :map
+   model          :- [:maybe :string]
+   search-ctx     :- SearchContext]
+  (let [collection-id-col      (case model
+                                 &quot;collection&quot;    :collection.id
+                                 &quot;search-index&quot; :search_index.collection_id
+                                 :collection_id)
+        permitted-clause       (search.permissions/permitted-collections-clause search-ctx collection-id-col)
+        personal-clause        (search.filter/personal-collections-where-clause search-ctx collection-id-col)]
+    (cond-&gt; honeysql-query
+      ;; add a JOIN against Collection *unless* the source table is already Collection
+      (not= model &quot;collection&quot;) (sql.helpers/left-join [:collection :collection] [:= collection-id-col :collection.id])
+      true                      (sql.helpers/where permitted-clause)
+      personal-clause           (sql.helpers/where personal-clause))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn- replace-select :- :map
   &quot;Replace a select from query that has alias is `target-alias` with [`with` `target-alias`] column, throw an error if
   can't find the target select.
@@ -3228,7 +3245,7 @@ This is not guaranteed to be the final list of columns, new columns can be added
                              [:and
                               [:= :bookmark.card_id :card.id]
                               [:= :bookmark.user_id (:current-user-id search-ctx)]])
-      (search.permissions/add-collection-join-and-where-clauses &quot;card&quot; search-ctx)
+      (add-collection-join-and-where-clauses &quot;card&quot; search-ctx)
       (add-card-db-id-clause (:table-db-id search-ctx))
       (with-last-editing-info &quot;card&quot;)
       (with-moderated-status &quot;card&quot;)))</pre></td></tr><tr><td class="docs">
@@ -3239,7 +3256,7 @@ This is not guaranteed to be the final list of columns, new columns can be added
                              [:= :model.id :action.model_id])
       (sql.helpers/left-join :query_action
                              [:= :query_action.action_id :action.id])
-      (search.permissions/add-collection-join-and-where-clauses model search-ctx)))</pre></td></tr><tr><td class="docs">
+      (add-collection-join-and-where-clauses model search-ctx)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod search-query-for-model &quot;card&quot;
   [_model search-ctx]
   (shared-card-impl :question search-ctx))</pre></td></tr><tr><td class="docs">
@@ -3260,7 +3277,7 @@ This is not guaranteed to be the final list of columns, new columns can be added
                              [:and
                               [:= :bookmark.collection_id :collection.id]
                               [:= :bookmark.user_id (:current-user-id search-ctx)]])
-      (search.permissions/add-collection-join-and-where-clauses model search-ctx)))</pre></td></tr><tr><td class="docs">
+      (add-collection-join-and-where-clauses model search-ctx)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod search-query-for-model &quot;database&quot;
   [model search-ctx]
   (base-query-for-model model search-ctx))</pre></td></tr><tr><td class="docs">
@@ -3272,7 +3289,7 @@ This is not guaranteed to be the final list of columns, new columns can be added
                               [:= :bookmark.dashboard_id :dashboard.id]
                               [:= :bookmark.user_id (:current-user-id search-ctx)]])
       (with-moderated-status &quot;dashboard&quot;)
-      (search.permissions/add-collection-join-and-where-clauses model search-ctx)
+      (add-collection-join-and-where-clauses model search-ctx)
       (with-last-editing-info &quot;dashboard&quot;)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- add-model-index-permissions-clause
   [query {:keys [current-user-id is-superuser?]}]
