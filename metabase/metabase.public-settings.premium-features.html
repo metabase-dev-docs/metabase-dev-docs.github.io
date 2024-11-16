@@ -2912,7 +2912,9 @@ Specify the env var <code>METASTORE_DEV_SERVER_URL</code>.</p>
 |                                                TOKEN VALIDATION                                                |
 +----------------------------------------------------------------------------------------------------------------+</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(declare premium-embedding-token)</pre></td></tr><tr><td class="docs"><p>Primarily used for the settings because we don't wish it to be 100%. (HUH?)</p>
+</td><td class="codes"><pre class="brush: clojure">(declare premium-embedding-token)</pre></td></tr><tr><td class="docs"><p>Amount of time before we re-fetch the count of active users.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^:const active-users-count-cache-ttl
+  (u/minutes-&gt;ms 5))</pre></td></tr><tr><td class="docs"><p>Returns a count of users on the system, cached for 5 minutes.</p>
 
 <p>let's prevent the DB from getting slammed with calls to get the active user count, we only really need one in flight
 at a time.</p>
@@ -2928,27 +2930,27 @@ at a time.</p>
                    result))
       memoized (memoize/ttl
                 f
-                :ttl/threshold (u/minutes-&gt;ms 5))
+                :ttl/threshold (u/minutes-&gt;ms active-users-count-cache-ttl))
       lock     (Object.)]
-  (defn cached-active-users-count
+  (defn- cached-active-users-count'
     []
     (locking lock
       (memoized))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defsetting active-users-count
+</td><td class="codes"><pre class="brush: clojure">(defsetting cached-active-users-count
   (deferred-tru &quot;Cached number of active users. Refresh every 5 minutes.&quot;)
   :visibility :admin
   :type       :integer
   :audit      :never
   :setter     :none
   :default    0
+  :export?    false
   :getter     (fn []
                 (if-not ((requiring-resolve 'metabase.db/db-is-set-up?))
                   0
-                  (cached-active-users-count))))</pre></td></tr><tr><td class="docs">
+                  (cached-active-users-count'))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- token-status-url [token base-url]
   (when (seq token)
-    (format &quot;%s/api/%s/v2/status&quot; base-url token)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^:const fetch-token-status-timeout-ms (u/seconds-&gt;ms 10))</pre></td></tr><tr><td class="docs"><p>Schema for a response from the token status API.</p>
+    (format &quot;%s/api/%s/v2/status&quot; base-url token)))</pre></td></tr><tr><td class="docs"><p>Schema for a response from the token status API.</p>
 </td><td class="codes"><pre class="brush: clojure">(def TokenStatus
   [:map
    [:valid                          :boolean]
@@ -2959,18 +2961,16 @@ at a time.</p>
    [:trial         {:optional true} :boolean]
    [:valid-thru    {:optional true} [:string {:min 1}]]
    [:max-users     {:optional true} pos-int?]
-   [:company       {:optional true} [:string {:min 1}]]])</pre></td></tr><tr><td class="docs"><p>Caches API responses for 5 minutes. This is important to avoid making too many API calls to the Store, which will
-throttle us if we make too many requests; putting in a bad token could otherwise put us in a state where
-<code>valid-token-&gt;features*</code> made API calls over and over, never itself getting cached because checks failed.</p>
-
-<p>Note that we only cache successful responses, or 4XX responses!</p>
-
-<p>5XX errors, timeouts, etc. may be transient and will NOT be cached.</p>
+   [:company       {:optional true} [:string {:min 1}]]])</pre></td></tr><tr><td class="docs"><p>Amount of time to cache the status of a valid enterprise token before forcing a re-check.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^:const token-status-cache-ttl
+  (u/hours-&gt;ms 12))</pre></td></tr><tr><td class="docs"><p>Caches successful and 4XX API responses for 24 hours. 5XX errors, timeouts, etc. may be transient and will NOT be
+cached, but may trigger the <em>store-circuit-breaker</em>.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^{:arglists '([token base-url site-uuid active-users-count])} fetch-token-and-parse-body*
   (memoize/ttl
    ^{::memoize/args-fn (fn [[token base-url site-uuid _active-users-count]]
                          [token base-url site-uuid])}
    (fn [token base-url site-uuid active-users-count]
+     (log/infof &quot;Checking with the MetaStore to see whether token '%s' is valid...&quot; (u.str/mask token))
      (let [{:keys [body status] :as resp} (some-&gt; (token-status-url token base-url)
                                                   (http/get {:query-params     {:users      active-users-count
                                                                                 :site-uuid  site-uuid
@@ -2982,7 +2982,7 @@ throttle us if we make too many requests; putting in a bad token could otherwise
          ;; exceptions are not cached.
          :else (throw (ex-info &quot;An unknown error occurred when validating token.&quot; {:status status
                                                                                    :body body})))))
-   :ttl/threshold (u/minutes-&gt;ms 5)))</pre></td></tr><tr><td class="docs">
+   :ttl/threshold token-status-cache-ttl))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private store-circuit-breaker-config
   {;; if 10 requests within 10 seconds fail, open the circuit breaker.
    ;; (a lower threshold ratio wouldn't make sense here because successful results are cached, so as soon as we get
@@ -2999,6 +2999,7 @@ and then all instances everywhere fire off constant requests to get token status
 fail instantly until the circuit breaker is closed.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *store-circuit-breaker*
   (dh.cb/circuit-breaker store-circuit-breaker-config))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^:const fetch-token-status-timeout-ms (u/seconds-&gt;ms 10))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- fetch-token-and-parse-body
   [token base-url site-uuid]
   (let [active-user-count (cached-active-users-count)]
@@ -3020,6 +3021,7 @@ fail instantly until the circuit breaker is closed.</p>
       ;; other exceptions are wrapped by Diehard in a FailsafeException. Unwrap them before rethrowing.
       (catch dev.failsafe.FailsafeException e
         (throw (.getCause e))))))</pre></td></tr><tr><td class="docs"><p>Airgap Tokens ;;;;;;;;;;;;;;;;;;;;</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(declare decode-airgap-token)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn max-users-allowed :- [:maybe pos-int?]
   &quot;Returns the max users value from an airgapped key, or nil indicating there is no limt.&quot;
@@ -3040,29 +3042,26 @@ fail instantly until the circuit breaker is closed.</p>
   ;; will have taken a lock to call through to here, and could create a deadlock with the future's thread.  See
   ;; https://github.com/metabase/metabase/pull/38029/
   (cond (mc/validate [:re RemoteCheckedToken] token)
-        ;; attempt to query the metastore API about the status of this token. If the request doesn't complete in a
-        ;; reasonable amount of time throw a timeout exception
-        (do
-          (log/infof &quot;Checking with the MetaStore to see whether token '%s' is valid...&quot; (u.str/mask token))
-          (let [site-uuid (setting/get :site-uuid-for-premium-features-token-checks)]
-            (try (fetch-token-and-parse-body token token-check-url site-uuid)
-                 (catch Exception e1
-                   ;; Unwrap exception from inside the future
-                   (log/errorf e1 &quot;Error fetching token status from %s:&quot; token-check-url)
-                   ;; Try the fallback URL, which was the default URL prior to 45.2
-                   (try (fetch-token-and-parse-body token store-url site-uuid)
-                        ;; if there was an error fetching the token from both the normal and fallback URLs, log the
-                        ;; first error and return a generic message about the token being invalid. This message
-                        ;; will get displayed in the Settings page in the admin panel so we do not want something
-                        ;; complicated
-                        (catch Exception e2
-                          (log/errorf e2 &quot;Error fetching token status from %s:&quot; store-url)
-                          (let [body (u/ignore-exceptions (some-&gt; (ex-data e1) :body (json/parse-string keyword)))]
-                            (or
-                             body
-                             {:valid         false
-                              :status        (tru &quot;Unable to validate token&quot;)
-                              :error-details (.getMessage e1)}))))))))
+    ;; attempt to query the metastore API about the status of this token. If the request doesn't complete in a
+    ;; reasonable amount of time throw a timeout exception
+        (let [site-uuid (setting/get :site-uuid-for-premium-features-token-checks)]
+          (try (fetch-token-and-parse-body token token-check-url site-uuid)
+               (catch Exception e1
+                 (log/errorf e1 &quot;Error fetching token status from %s:&quot; token-check-url)
+                 ;; Try the fallback URL, which was the default URL prior to 45.2
+                 (try (fetch-token-and-parse-body token store-url site-uuid)
+                      ;; if there was an error fetching the token from both the normal and fallback URLs, log the
+                      ;; first error and return a generic message about the token being invalid. This message
+                      ;; will get displayed in the Settings page in the admin panel so we do not want something
+                      ;; complicated
+                      (catch Exception e2
+                        (log/errorf e2 &quot;Error fetching token status from %s:&quot; store-url)
+                        (let [body (u/ignore-exceptions (some-&gt; (ex-data e1) :body (json/parse-string keyword)))]
+                          (or
+                           body
+                           {:valid         false
+                            :status        (tru &quot;Unable to validate token&quot;)
+                            :error-details (.getMessage e1)})))))))
         (mc/validate [:re AirgapToken] token)
         (do
           (log/infof &quot;Checking airgapped token '%s'...&quot; (u.str/mask token))
@@ -3072,15 +3071,16 @@ fail instantly until the circuit breaker is closed.</p>
           (log/error (u/format-color 'red &quot;Invalid token format!&quot;))
           {:valid         false
            :status        &quot;invalid&quot;
-           :error-details (trs &quot;Token should be a valid 64 hexadecimal character token or an airgap token.&quot;)})))</pre></td></tr><tr><td class="docs"><p>Locked vesrion of <code>fetch-token-status</code> allowing one request at a time.</p>
+           :error-details (trs &quot;Token should be a valid 64 hexadecimal character token or an airgap token.&quot;)})))</pre></td></tr><tr><td class="docs"><p>Locked version of <code>fetch-token-status</code> allowing one request at a time.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^{:arglists '([token])} fetch-token-status
   (let [lock (Object.)]
     (fn [token]
       (locking lock
         (fetch-token-status* token)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(declare token-valid-now?)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- valid-token-&gt;features* :- [:set ms/NonBlankString]
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- valid-token-&gt;features :- [:set ms/NonBlankString]
   [token :- TokenStr]
+  (assert ((requiring-resolve 'metabase.db/db-is-set-up?)) &quot;Metabase DB is not yet set up&quot;)
   (let [{:keys [valid status features error-details] :as token-status} (fetch-token-status token)]
     ;; if token isn't valid throw an Exception with the `:status` message
     (when-not valid
@@ -3093,15 +3093,7 @@ fail instantly until the circuit breaker is closed.</p>
                       {:status-code 400
                        :error-details (tru &quot;Airgapped token is no longer valid. Please contact Metabase support.&quot;)})))
     ;; otherwise return the features this token supports
-    (set features)))</pre></td></tr><tr><td class="docs"><p>Amount of time to cache the status of a valid embedding token before forcing a re-check</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^:const valid-token-recheck-interval-ms
-  (u/hours-&gt;ms 24)) ; once a day</pre></td></tr><tr><td class="docs"><p>Check whether <code>token</code> is valid. Throws an Exception if not. Returns a set of supported features if it is.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([token])} valid-token-&gt;features
-  ;; this is just `valid-token-&gt;features*` with some light caching
-  (let [f (memoize/ttl valid-token-&gt;features* :ttl/threshold valid-token-recheck-interval-ms)]
-    (fn [token]
-      (assert ((requiring-resolve 'metabase.db/db-is-set-up?)) &quot;Metabase DB is not yet set up&quot;)
-      (f token))))</pre></td></tr><tr><td class="docs">
+    (set features)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defsetting token-status
   (deferred-tru &quot;Cached token status for premium features. This is to avoid an API request on the the first page load.&quot;)
   :visibility :admin
