@@ -2868,9 +2868,12 @@ net.brehaut.ClojureTools = (function (SH) {
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.search.postgres.scoring" name="metabase.search.postgres.scoring"><h1 class="project-name">metabase.search.postgres.scoring</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.search.postgres.scoring
   (:require
+   [clojure.core.memoize :as memoize]
    [honey.sql.helpers :as sql.helpers]
    [metabase.public-settings.premium-features :refer [defenterprise]]
-   [metabase.search.config :as search.config]))</pre></td></tr><tr><td class="docs">
+   [metabase.search.config :as search.config]
+   [metabase.util :as u]
+   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private seconds-in-a-day 86400)</pre></td></tr><tr><td class="docs"><p>Prefer it when a (potentially nullable) boolean is true.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn truthy
   [column]
@@ -2883,7 +2886,7 @@ net.brehaut.ClojureTools = (function (SH) {
   ;; 2/PI * tan^-1 (x/N)
   [:*
    [:/ [:inline 2] [:pi]]
-   [:atan [:/ [:cast [:coalesce column [:inline 0.0]] :float] [:inline scaling]]]])</pre></td></tr><tr><td class="docs"><p>Score at item based on the duration between two dates, where less is better.</p>
+   [:atan [:/ [:cast [:coalesce column [:inline 0.0]] :float] scaling]]])</pre></td></tr><tr><td class="docs"><p>Score at item based on the duration between two dates, where less is better.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn inverse-duration
   [from-column to-column ceiling-in-days]
   (let [ceiling [:inline ceiling-in-days]]
@@ -2921,10 +2924,27 @@ See https://www.postgresql.org/docs/current/textsearch-controls.html#TEXTSEARCH-
 </td><td class="codes"><pre class="brush: clojure">(def ^:private bookmark-score-expr
   (let [match-clause (fn [m] [[:and [:= :model m] [:!= nil (keyword (str m &quot;_bookmark.&quot; m &quot;_id&quot;))]]
                               [:inline 1]])]
-    (into [:case] (concat (mapcat (comp match-clause name) bookmarked-models) [:else [:inline 0]]))))</pre></td></tr><tr><td class="docs"><p>The default constituents of the search ranking scores.</p>
-</td><td class="codes"><pre class="brush: clojure">(def base-scorers
+    (into [:case] (concat (mapcat (comp match-clause name) bookmarked-models) [:else [:inline 0]]))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- view-count-percentile-query [p-value]
+  (let [expr [:raw &quot;percentile_cont(&quot; [:lift p-value] &quot;) WITHIN GROUP (ORDER BY view_count)&quot;]]
+    {:select   [:model [expr :vcp]]
+     :from     [:search_index]
+     :group-by [:model]
+     :having   [:is-not expr nil]}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private view-count-percentiles
+  (memoize/ttl (fn [p-value]
+                 (into {} (for [{:keys [model vcp]} (t2/query (view-count-percentile-query p-value))]
+                            [(keyword model) vcp])))
+               :ttl/threshold (u/hours-&gt;ms 1)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- view-count-expr [const-scaling percentile]
+  (let [views (view-count-percentiles percentile)
+        cases (for [[sm v] views]
+                [[:= :model (name sm)] v])]
+    (atan-size :view_count [:* const-scaling [:greatest 1 (into [:case] cat cases)]])))</pre></td></tr><tr><td class="docs"><p>The default constituents of the search ranking scores.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn base-scorers
+  []
   {:text       [:ts_rank :search_vector :query [:inline ts-rank-normalization]]
-   :view-count (atan-size :view_count search.config/view-count-scaling)
+   :view-count (view-count-expr search.config/view-count-scaling search.config/view-count-scaling-percentile)
    :pinned     (truthy :pinned)
    :bookmarked bookmark-score-expr
    :recency    (inverse-duration [:coalesce :last_viewed_at :model_updated_at] [:now] search.config/stale-time-in-days)
@@ -2933,7 +2953,7 @@ See https://www.postgresql.org/docs/current/textsearch-controls.html#TEXTSEARCH-
 </td><td class="codes"><pre class="brush: clojure">(defenterprise scorers
   metabase-enterprise.search.scoring
   []
-  base-scorers)</pre></td></tr><tr><td class="docs">
+  (base-scorers))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- scorer-select-items [] (select-items (scorers)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- bookmark-join [model user-id]
   (let [model-name (name model)
