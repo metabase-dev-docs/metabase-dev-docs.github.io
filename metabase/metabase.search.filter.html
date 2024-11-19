@@ -2933,10 +2933,23 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defmethod where-clause* ::list [_ k v] [:in k v])</pre></td></tr><tr><td class="docs"><p>Build a clause limiting the entries to those (not) within or within personal collections, if relevant.
 WARNING: this method queries the appdb, and its approach will get very slow when there are many users!</p>
 </td><td class="codes"><pre class="brush: clojure">(defn personal-collections-where-clause
-  [{filter-type :filter-items-in-personal-collection} collection-id-col]
-  (when filter-type
-    (let [parent-ids     (t2/select-pks-vec :model/Collection :personal_owner_id [:not= nil])
-          child-patterns (for [id parent-ids] (format &quot;/%d/%%&quot; id))]
+  [{filter-type :filter-items-in-personal-collection :keys [current-user-id] :as search-ctx} collection-id-col]
+  (case (or filter-type &quot;all&quot;)
+    &quot;all&quot; nil
+    &quot;only-mine&quot;
+    [:or
+     [:= :collection.personal_owner_id current-user-id]
+     (into [:or]
+           (let [your-collection-ids (t2/select-pks-vec :model/Collection :personal_owner_id [:= current-user-id])
+                 child-patterns      (for [id your-collection-ids] (format &quot;/%d/%%&quot; id))]
+             (for [p child-patterns] [:like :collection.location p])))]
+    &quot;exclude-others&quot;
+    (let [with-filter #(personal-collections-where-clause
+                        (assoc search-ctx :filter-items-in-personal-collection %)
+                        collection-id-col)]
+      [:or (with-filter &quot;only-mine&quot;) (with-filter &quot;exclude&quot;)])
+    (let [personal-ids   (t2/select-pks-vec :model/Collection :personal_owner_id [:not= nil])
+          child-patterns (for [id personal-ids] (format &quot;/%d/%%&quot; id))]
       (case filter-type
         &quot;only&quot;
         `[:or
