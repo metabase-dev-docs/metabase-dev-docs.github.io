@@ -2865,146 +2865,119 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.search.postgres.core" name="metabase.search.postgres.core"><h1 class="project-name">metabase.search.postgres.core</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.search.postgres.core
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.notification.seed" name="metabase.notification.seed"><h1 class="project-name">metabase.notification.seed</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Seed default notifications on startup.
+Will truncate al notifications related tables then reinsert the default notifications.</p>
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.notification.seed
   (:require
-   [cheshire.core :as json]
-   [honey.sql :as sql]
-   [honey.sql.helpers :as sql.helpers]
-   [metabase.api.common :as api]
-   [metabase.search.config :as search.config]
-   [metabase.search.filter :as search.filter]
-   [metabase.search.legacy :as search.legacy]
-   [metabase.search.permissions :as search.permissions]
-   [metabase.search.postgres.index :as search.index]
-   [metabase.search.postgres.ingestion :as search.ingestion]
-   [metabase.search.postgres.scoring :as search.scoring]
-   [toucan2.core :as t2])
-  (:import
-   (java.time OffsetDateTime)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- user-params [search-ctx]
-  (cond
-    (:current-user-id search-ctx)
-    (select-keys search-ctx [:is-superuser? :current-user-id :current-user-perms])
-    api/*current-user-id*
-    {:is-superuser?      api/*is-superuser?*
-     :current-user-id    api/*current-user-id*
-     :current-user-perms @api/*current-user-permissions-set*}
-    :else
-    {:is-superuser?      true
-     ;; this does not matter, we won't use it.
-     :current-user-id    1
-     :current-user-perms #{&quot;/&quot;}}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- in-place-query [{:keys [models search-term archived?] :as search-ctx}]
-  (search.legacy/full-search-query
-   (merge
-    (user-params search-ctx)
-    {:search-string    search-term
-     :models           (or models
-                           (if api/*current-user-id*
-                             search.config/all-models
-                             ;; For REPL convenience, skip these models as
-                             ;; they require the user to be initialized.
-                             (disj search.config/all-models &quot;indexed-entity&quot;)))
-     :archived?        archived?
-     :model-ancestors? true})))</pre></td></tr><tr><td class="docs"><p>Use the index for using the search string, but rely on the legacy code path for rendering
-the display data, applying permissions, additional filtering, etc.</p>
-
-<p>NOTE: this is less efficient than legacy search even. We plan to replace it with something
-less feature complete but much faster.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- hybrid
-  [search-term &amp; {:as search-ctx}]
-  (when-not @#'search.index/initialized?
-    (throw (ex-info &quot;Search index is not initialized. Use [[init!]] to ensure it exists.&quot;
-                    {:search-engine :postgres})))
-  (-&gt; (sql.helpers/with [:index-query (search.index/search-query search-term search-ctx)]
-                        [:source-query (in-place-query search-ctx)])
-      (sql.helpers/select :sq.*)
-      (sql.helpers/from [:source-query :sq])
-      (sql.helpers/join [:index-query :iq] [:and
-                                            [:= :sq.model :iq.model]
-                                            [:= :sq.id :iq.model_id]])
-      (sql/format {:quoted true})
-      t2/reducible-query))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- parse-datetime [s]
-  (when s
-    (OffsetDateTime/parse s)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- rehydrate [index-row]
-  ;; Useful for debugging scoring
-  #_(dissoc index-row :legacy_input :created_at :updated_at :last_edited_at)
-  (-&gt; (merge
-       (json/parse-string (:legacy_input index-row) keyword)
-       (select-keys index-row [:total_score :pinned]))
-      (assoc :scores (mapv (fn [k]
-                             (let [score  (get index-row k)
-                                   weight (search.config/weight k)]
-                               {:score        score
-                                :name         k
-                                :weight       weight
-                                :contribution (* weight score)}))
-                           (keys (search.scoring/scorers))))
-      (update :created_at parse-datetime)
-      (update :updated_at parse-datetime)
-      (update :last_edited_at parse-datetime)))</pre></td></tr><tr><td class="docs"><p>Add a <code>WHERE</code> clause to the query to only return Collections the Current User has access to; join against Collection,
-so we can return its <code>:name</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn add-collection-join-and-where-clauses
-  [search-ctx qry]
-  (let [collection-id-col      :search_index.collection_id
-        permitted-clause       (search.permissions/permitted-collections-clause search-ctx collection-id-col)
-        personal-clause        (search.filter/personal-collections-where-clause search-ctx collection-id-col)]
-    (cond-&gt; qry
-      true (sql.helpers/left-join [:collection :collection] [:= collection-id-col :collection.id])
-      true (sql.helpers/where permitted-clause)
-      personal-clause (sql.helpers/where personal-clause))))</pre></td></tr><tr><td class="docs"><p>Search purely using the index.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- fulltext
-  [search-term &amp; {:as search-ctx}]
-  (when-not @#'search.index/initialized?
-    (throw (ex-info &quot;Search index is not initialized. Use [[init!]] to ensure it exists.&quot;
-                    {:search-engine :postgres})))
-  (-&gt;&gt; (search.index/search-query search-term search-ctx [:legacy_input])
-       (add-collection-join-and-where-clauses search-ctx)
-       (search.scoring/with-scores search-ctx)
-       (search.filter/with-filters search-ctx)
-       (t2/query)
-       (map rehydrate)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private default-engine fulltext)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- search-fn [search-engine]
-  (case search-engine
-    :search.engine/hybrid             hybrid
-    :search.engine/fulltext           fulltext
-    default-engine))</pre></td></tr><tr><td class="docs"><p>Return a reducible-query corresponding to searching the entities via a tsvector.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn search
-  [search-ctx]
-  (let [f (search-fn (:search-engine search-ctx))]
-    (f (:search-string search-ctx)
-       (dissoc search-ctx :search-string))))</pre></td></tr><tr><td class="docs"><p>Return a set of the models which have at least one result for the given query.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn model-set
-  [search-ctx]
-  ;; We ignore any current models filter
-  (let [search-ctx (assoc search-ctx :models search.config/all-models)]
-    (-&gt;&gt; (search.index/search-query (:search-string search-ctx) search-ctx [[[:distinct :model] :model]])
-         (add-collection-join-and-where-clauses search-ctx)
-         (search.filter/with-filters search-ctx)
-         t2/query
-         (into #{} (map :model)))))</pre></td></tr><tr><td class="docs"><p>Do no scoring, whatsoever</p>
-</td><td class="codes"><pre class="brush: clojure">(defn no-scoring
-  [result _scoring-ctx]
-  {:score  (:total_score result 1)
-   :result (assoc result :all-scores (:scores result))})</pre></td></tr><tr><td class="docs"><p>Ensure that the search index exists, and has been populated with all the entities.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn init!
-  [&amp; [force-reset?]]
-  (search.index/ensure-ready! force-reset?)
-  (search.ingestion/populate-index!))</pre></td></tr><tr><td class="docs"><p>Populate a new index</p>
-</td><td class="codes"><pre class="brush: clojure">(defn reindex!
+   [metabase.db :as db]
+   [metabase.models.notification :as models.notification]
+   [metabase.models.permissions-group :as perms-group]
+   [metabase.util.log :as log]
+   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private default-notifications
+  (delay [;; user invited
+          {:notification  {:payload_type :notification/system-event}
+           :subscriptions [{:type            :notification-subscription/system-event
+                            :event_name      :event/user-invited}]
+           :handlers      [{:channel_type :channel/email
+                            :channel_id   nil
+                            :template     {:name         &quot;User joined Email template&quot;
+                                           :channel_type :channel/email
+                                           :details      {:type           &quot;email/handlebars-resource&quot;
+                                                          :subject        &quot;{{payload.custom.user_invited_email_subject}}&quot;
+                                                          :path           &quot;metabase/email/new_user_invite.hbs&quot;
+                                                          :recipient-type :cc}
+                                           :created_at   :%now
+                                           :updated_at   :%now}
+                            :recipients   [{:type    :notification-recipient/template
+                                            :details {:pattern &quot;{{payload.event_info.object.email}}&quot;}}]}]}
+          ;; alert created
+          {:notification  {:payload_type :notification/system-event}
+           :subscriptions [{:type            :notification-subscription/system-event
+                            :event_name      :event/alert-create}]
+           :handlers      [{:channel_type :channel/email
+                            :channel_id   nil
+                            :template     {:name         &quot;Alert Created Email template&quot;
+                                           :channel_type &quot;channel/email&quot;
+                                           :details      {:type           &quot;email/handlebars-resource&quot;
+                                                          :subject        &quot;You set up an alert&quot;
+                                                          :path           &quot;metabase/email/alert_new_confirmation.hbs&quot;
+                                                          :recipient-type :cc}
+                                           :created_at   :%now
+                                           :updated_at   :%now}
+                            :recipients   [{:type    :notification-recipient/template
+                                            :details {:pattern &quot;{{payload.event_info.user.email}}&quot;}}]}]}
+          ;; slack token invalid
+          {:notification  {:payload_type :notification/system-event}
+           :subscriptions [{:type            :notification-subscription/system-event
+                            :event_name      :event/slack-token-invalid}]
+           :handlers      [{:channel_type    :channel/email
+                            :channel_id      nil
+                            :template        {:name         &quot;Slack Token Error Email template&quot;
+                                              :channel_type &quot;channel/email&quot;
+                                              :details      {:type           &quot;email/handlebars-resource&quot;
+                                                             :subject        &quot;Your Slack connection stopped working&quot;
+                                                             :path           &quot;metabase/email/slack_token_error.hbs&quot;
+                                                             :recipient-type :cc}
+                                              :created_at   :%now
+                                              :updated_at   :%now}
+                            :recipients      [{:type    :notification-recipient/template
+                                               :details {:pattern     &quot;{{context.admin_email}}&quot;
+                                                         :is_optional true}}
+                                              {:type                 :notification-recipient/group
+                                               :permissions_group_id (:id (perms-group/admin))}]}]}]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private notification-related-models
+  [:model/Notification
+   :model/NotificationHandler
+   :model/NotificationSubscription
+   :model/NotificationRecipient
+   :model/ChannelTemplate])</pre></td></tr><tr><td class="docs"><p>Truncate a table and restart the identity column.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- truncate-table!
+  [table-name]
+  (case (db/db-type)
+    :postgres
+    (t2/query {:truncate [table-name :restart :identity :cascade]})
+    :mysql
+    (do
+      (t2/delete! table-name)
+      (t2/query (format &quot;ALTER TABLE `%s` AUTO_INCREMENT = 1&quot; (name table-name))))
+    (do
+      (t2/delete! table-name)
+      (t2/query {:alter-table [table-name {:alter-column [:id :restart :with 1]}]}))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- truncate-notification-related-tables!
   []
-  (search.index/ensure-ready! false)
-  (search.index/maybe-create-pending!)
-  (search.ingestion/populate-index!)
-  (search.index/activate-pending!))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(comment
-  (init! true)
-  (t2/select-fn-vec :legacy_input :search_index))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+  (doseq [model notification-related-models
+          :let [table (t2/table-name model)]]
+    (log/infof &quot;Truncating table %s&quot; table)
+    (truncate-table! table)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- create-notification!
+  [{:keys [notification subscriptions handlers]}]
+  (let [handlers (for [handler handlers]
+                   (if-let [template (:template handler)]
+                     (-&gt; handler
+                         (dissoc :template)
+                         (assoc :template_id (t2/insert-returning-pk!
+                                              :model/ChannelTemplate
+                                              template)))
+                     handler))]
+    (models.notification/create-notification! notification subscriptions handlers)))</pre></td></tr><tr><td class="docs"><p>Seed default notifications</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- seed-notification!
+  []
+  (log/info &quot;Seeding default notifications&quot;)
+  (doseq [row @default-notifications]
+    (create-notification! row))
+  (log/infof &quot;Seeded %d notifications&quot; (count @default-notifications)))</pre></td></tr><tr><td class="docs"><p>Truncate all notifications related tables then seed it with the default notifications.
+Runs on every deployment by metabase.task.seed_notification.</p>
+
+<p>We do this instead of migrations because we want to be able to modify the default notifications
+without having to write migrations.</p>
+
+<p>This is possible because as of now users can't modify notifications or channel template.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn truncate-then-seed-notification!
+  []
+  (t2/with-transaction []
+    (truncate-notification-related-tables!)
+    (seed-notification!)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
