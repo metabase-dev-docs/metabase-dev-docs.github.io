@@ -2880,7 +2880,13 @@ net.brehaut.ClojureTools = (function (SH) {
   [:coalesce [:cast column :integer] [:inline 0]])</pre></td></tr><tr><td class="docs"><p>Prefer items whose value is larger, up to some saturation point. Items beyond that point are equivalent.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn size
   [column ceiling]
-  [:least [:/ [:coalesce column [:inline 0]] [:inline (double ceiling)]] [:inline 1]])</pre></td></tr><tr><td class="docs"><p>Prefer items whose value is larger, with diminishing gains.</p>
+  [:least
+   [:inline 1]
+   [:/
+    [:coalesce column [:inline 0]]
+    (if (number? ceiling)
+      [:inline (double ceiling)]
+      [:cast ceiling :float])]])</pre></td></tr><tr><td class="docs"><p>Prefer items whose value is larger, with diminishing gains.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn atan-size
   [column scaling]
   ;; 2/PI * tan^-1 (x/N)
@@ -2917,9 +2923,15 @@ net.brehaut.ClojureTools = (function (SH) {
    (for [[column-alias expr] scorers]
      [expr column-alias])
    [[(sum-columns (map weighted-score scorers))
-     :total_score]]))</pre></td></tr><tr><td class="docs"><p>Divides rank by log(len(doc))
-See https://www.postgresql.org/docs/current/textsearch-controls.html#TEXTSEARCH-RANKING</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ts-rank-normalization 1)</pre></td></tr><tr><td class="docs"><p>TODO move these to the spec definitions</p>
+     :total_score]]))</pre></td></tr><tr><td class="docs"><p>See https://www.postgresql.org/docs/current/textsearch-controls.html#TEXTSEARCH-RANKING
+ 0 (the default) ignores the document length
+ 1 divides the rank by 1 + the logarithm of the document length
+ 2 divides the rank by the document length
+ 4 divides the rank by the mean harmonic distance between extents (this is implemented only by ts<em>rank</em>cd)
+ 8 divides the rank by the number of unique words in document
+16 divides the rank by 1 + the logarithm of the number of unique words in document
+32 divides the rank by itself + 1</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ts-rank-normalization 0)</pre></td></tr><tr><td class="docs"><p>TODO move these to the spec definitions</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private bookmarked-models [:card :collection :dashboard])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private bookmark-score-expr
   (let [match-clause (fn [m] [[:and [:= :model m] [:!= nil (keyword (str m &quot;_bookmark.&quot; m &quot;_id&quot;))]]
@@ -2936,15 +2948,16 @@ See https://www.postgresql.org/docs/current/textsearch-controls.html#TEXTSEARCH-
                  (into {} (for [{:keys [model vcp]} (t2/query (view-count-percentile-query p-value))]
                             [(keyword model) vcp])))
                :ttl/threshold (u/hours-&gt;ms 1)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- view-count-expr [const-scaling percentile]
+</td><td class="codes"><pre class="brush: clojure">(defn- view-count-expr [percentile]
   (let [views (view-count-percentiles percentile)
         cases (for [[sm v] views]
                 [[:= :model (name sm)] v])]
-    (atan-size :view_count [:* const-scaling [:greatest 1 (into [:case] cat cases)]])))</pre></td></tr><tr><td class="docs"><p>The default constituents of the search ranking scores.</p>
+    (size :view_count (into [:case] cat cases))
+    #_(atan-size :view_count [:* 0.1 [:greatest 1 (into [:case] cat cases)]])))</pre></td></tr><tr><td class="docs"><p>The default constituents of the search ranking scores.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn base-scorers
   []
   {:text       [:ts_rank :search_vector :query [:inline ts-rank-normalization]]
-   :view-count (view-count-expr search.config/view-count-scaling search.config/view-count-scaling-percentile)
+   :view-count (view-count-expr search.config/view-count-scaling-percentile)
    :pinned     (truthy :pinned)
    :bookmarked bookmark-score-expr
    :recency    (inverse-duration [:coalesce :last_viewed_at :model_updated_at] [:now] search.config/stale-time-in-days)
