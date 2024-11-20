@@ -2934,14 +2934,27 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(def ^:private ts-rank-normalization 0)</pre></td></tr><tr><td class="docs"><p>TODO move these to the spec definitions</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private bookmarked-models [:card :collection :dashboard])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private bookmark-score-expr
-  (let [match-clause (fn [m] [[:and [:= :model m] [:!= nil (keyword (str m &quot;_bookmark.&quot; m &quot;_id&quot;))]]
+  (let [match-clause (fn [m] [[:and
+                               [:= :search_index.model [:inline m]]
+                               [:!= nil (keyword (str m &quot;_bookmark.&quot; m &quot;_id&quot;))]]
                               [:inline 1]])]
     (into [:case] (concat (mapcat (comp match-clause name) bookmarked-models) [:else [:inline 0]]))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- user-recency-expr [{:keys [current-user-id]}]
+  {:select [[[:greatest :recent_views.timestamp] :last_viewed_at]]
+   :from   [:recent_views]
+   :where  [:and
+            [:= :recent_views.user_id current-user-id]
+            [:= :recent_views.model_id :search_index.model_id]
+            [:= :recent_views.model
+             [:case
+              [:= :search_index.model [:inline &quot;dataset&quot;]] [:inline &quot;card&quot;]
+              [:= :search_index.model [:inline &quot;metric&quot;]] [:inline &quot;card&quot;]
+              :else :search_index.model]]]})</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- view-count-percentile-query [p-value]
   (let [expr [:raw &quot;percentile_cont(&quot; [:lift p-value] &quot;) WITHIN GROUP (ORDER BY view_count)&quot;]]
-    {:select   [:model [expr :vcp]]
+    {:select   [:search_index.model [expr :vcp]]
      :from     [:search_index]
-     :group-by [:model]
+     :group-by [:search_index.model]
      :having   [:is-not expr nil]}))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private view-count-percentiles
   (memoize/ttl (fn [p-value]
@@ -2951,37 +2964,38 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defn- view-count-expr [percentile]
   (let [views (view-count-percentiles percentile)
         cases (for [[sm v] views]
-                [[:= :model (name sm)] v])]
+                [[:= :search_index.model [:inline (name sm)]] v])]
     (size :view_count (into [:case] cat cases))
     #_(atan-size :view_count [:* 0.1 [:greatest 1 (into [:case] cat cases)]])))</pre></td></tr><tr><td class="docs"><p>The default constituents of the search ranking scores.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn base-scorers
-  []
-  {:text       [:ts_rank :search_vector :query [:inline ts-rank-normalization]]
-   :view-count (view-count-expr search.config/view-count-scaling-percentile)
-   :pinned     (truthy :pinned)
-   :bookmarked bookmark-score-expr
-   :recency    (inverse-duration [:coalesce :last_viewed_at :model_updated_at] [:now] search.config/stale-time-in-days)
-   :dashboard  (size :dashboardcard_count search.config/dashboard-count-ceiling)
-   :model      (idx-rank :model_rank (count search.config/all-models))})</pre></td></tr><tr><td class="docs"><p>Return the select-item expressions used to calculate the score for each search result.</p>
+  [search-ctx]
+  {:text         [:ts_rank :search_vector :query [:inline ts-rank-normalization]]
+   :view-count   (view-count-expr search.config/view-count-scaling-percentile)
+   :pinned       (truthy :pinned)
+   :bookmarked   bookmark-score-expr
+   :recency      (inverse-duration [:coalesce :last_viewed_at :model_updated_at] [:now] search.config/stale-time-in-days)
+   :user-recency (inverse-duration (user-recency-expr search-ctx) [:now] search.config/stale-time-in-days)
+   :dashboard    (size :dashboardcard_count search.config/dashboard-count-ceiling)
+   :model        (idx-rank :model_rank (count search.config/all-models))})</pre></td></tr><tr><td class="docs"><p>Return the select-item expressions used to calculate the score for each search result.</p>
 </td><td class="codes"><pre class="brush: clojure">(defenterprise scorers
   metabase-enterprise.search.scoring
-  []
-  (base-scorers))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- scorer-select-items [] (select-items (scorers)))</pre></td></tr><tr><td class="docs">
+  [search-ctx]
+  (base-scorers search-ctx))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- scorer-select-items [search-ctx] (select-items (scorers search-ctx)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- bookmark-join [model user-id]
   (let [model-name (name model)
         table-name (str model-name &quot;_bookmark&quot;)]
     [(keyword table-name)
      [:and
-      [:= :model [:inline model-name]]
+      [:= :search_index.model [:inline model-name]]
       [:= (keyword (str table-name &quot;.user_id&quot;)) user-id]
       [:= :search_index.model_id (keyword (str table-name &quot;.&quot; model-name &quot;_id&quot;))]]]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- join-bookmarks [qry user-id]
   (apply sql.helpers/left-join qry (mapcat #(bookmark-join % user-id) bookmarked-models)))</pre></td></tr><tr><td class="docs"><p>Add a bunch of SELECT columns for the individual and total scores, and a corresponding ORDER BY.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn with-scores
-  [search-ctx qry]
-  (-&gt; (apply sql.helpers/select qry (scorer-select-items))
-      (join-bookmarks (:current-user-id search-ctx))
+  [{:keys [current-user-id] :as search-ctx} qry]
+  (-&gt; (apply sql.helpers/select qry (scorer-select-items search-ctx))
+      (join-bookmarks current-user-id)
       (sql.helpers/order-by [:total_score :desc])))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
