@@ -2865,13 +2865,14 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.search.postgres.scoring" name="metabase.search.postgres.scoring"><h1 class="project-name">metabase.search.postgres.scoring</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.search.postgres.scoring" name="metabase.search.postgres.scoring"><h1 class="project-name">metabase.search.postgres.scoring</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>This namespace is <em>mostly</em> appdb agnostic, but not committing to it at this stage.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.search.postgres.scoring
   (:require
    [clojure.core.memoize :as memoize]
    [honey.sql.helpers :as sql.helpers]
    [metabase.public-settings.premium-features :refer [defenterprise]]
    [metabase.search.config :as search.config]
+   [metabase.search.postgres.index :as search.index]
    [metabase.util :as u]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private seconds-in-a-day 86400)</pre></td></tr><tr><td class="docs"><p>Prefer it when a (potentially nullable) boolean is true.</p>
@@ -2884,9 +2885,12 @@ net.brehaut.ClojureTools = (function (SH) {
    [:inline 1]
    [:/
     [:coalesce column [:inline 0]]
-    (if (number? ceiling)
-      [:inline (double ceiling)]
-      [:cast ceiling :float])]])</pre></td></tr><tr><td class="docs"><p>Prefer items whose value is larger, with diminishing gains.</p>
+    ;; protect against div / 0
+    [:greatest
+     [:inline 1]
+     (if (number? ceiling)
+       [:inline (double ceiling)]
+       [:cast ceiling :float])]]])</pre></td></tr><tr><td class="docs"><p>Prefer items whose value is larger, with diminishing gains.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn atan-size
   [column scaling]
   ;; 2/PI * tan^-1 (x/N)
@@ -2940,7 +2944,7 @@ net.brehaut.ClojureTools = (function (SH) {
                               [:inline 1]])]
     (into [:case] (concat (mapcat (comp match-clause name) bookmarked-models) [:else [:inline 0]]))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- user-recency-expr [{:keys [current-user-id]}]
-  {:select [[[:greatest :recent_views.timestamp] :last_viewed_at]]
+  {:select [[[:max :recent_views.timestamp] :last_viewed_at]]
    :from   [:recent_views]
    :where  [:and
             [:= :recent_views.user_id current-user-id]
@@ -2953,7 +2957,7 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defn- view-count-percentile-query [p-value]
   (let [expr [:raw &quot;percentile_cont(&quot; [:lift p-value] &quot;) WITHIN GROUP (ORDER BY view_count)&quot;]]
     {:select   [:search_index.model [expr :vcp]]
-     :from     [:search_index]
+     :from     [[search.index/*active-table* :search_index]]
      :group-by [:search_index.model]
      :having   [:is-not expr nil]}))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private view-count-percentiles
@@ -2964,8 +2968,10 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defn- view-count-expr [percentile]
   (let [views (view-count-percentiles percentile)
         cases (for [[sm v] views]
-                [[:= :search_index.model [:inline (name sm)]] v])]
-    (size :view_count (into [:case] cat cases))
+                [[:= :search_index.model [:inline (name sm)]] (max v 1)])]
+    (size :view_count (if (seq cases)
+                        (into [:case] cat cases)
+                        1))
     #_(atan-size :view_count [:* 0.1 [:greatest 1 (into [:case] cat cases)]])))</pre></td></tr><tr><td class="docs"><p>The default constituents of the search ranking scores.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn base-scorers
   [search-ctx]
