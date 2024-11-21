@@ -2865,162 +2865,104 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.api.search" name="metabase.api.search"><h1 class="project-name">metabase.api.search</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.api.search
-  ;; Allowing search.config to be accessed for developer API to set weights
-  #_{:clj-kondo/ignore [:metabase/ns-module-checker]}
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.channel.template.handlebars-helper" name="metabase.channel.template.handlebars-helper"><h1 class="project-name">metabase.channel.template.handlebars-helper</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.channel.template.handlebars-helper
+  (:refer-clojure :exclude [hash])
   (:require
-   [clojure.string :as str]
-   [compojure.core :refer [GET]]
    [java-time.api :as t]
-   [metabase.api.common :as api]
-   [metabase.public-settings :as public-settings]
-   [metabase.public-settings.premium-features :as premium-features]
-   [metabase.search :as search]
-   [metabase.search.config :as search.config]
-   [metabase.server.middleware.offset-paging :as mw.offset-paging]
-   [metabase.task :as task]
-   [metabase.task.search-index :as task.search-index]
-   [metabase.util.malli.schema :as ms]
-   [ring.util.response :as response]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private engine-cookie-name &quot;metabase.SEARCH_ENGINE&quot;)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- cookie-expiry []
-  ;; 20 years should be long enough to trial an experimental search engine
-  (t/format :rfc-1123-date-time (t/plus (t/zoned-date-time) (t/years 20))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- set-engine-cookie! [respond engine]
-  (fn [response]
-    (respond
-     (response/set-cookie response
-                          engine-cookie-name
-                          engine
-                          {:http-only true
-                           :path      &quot;/&quot;
-                           :expires   (cookie-expiry)}))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- +engine-cookie [handler]
-  (with-meta
-   (fn [request respond raise]
-     (if-let [new-engine (get-in request [:params :search_engine])]
-       (handler request (set-engine-cookie! respond new-engine) raise)
-       (handler (-&gt;&gt; (get-in request [:cookies engine-cookie-name :value])
-                     (assoc-in request [:params :search_engine]))
-                respond
-                raise)))
-   (meta handler)))</pre></td></tr><tr><td class="docs"><p>/re-init</p>
-</td><td class="codes"><pre class="brush: clojure">(api/defendpoint POST 
-  &quot;If fulltext search is enabled, this will blow away the index table, re-create it, and re-populate it.&quot;
-  []
-  (api/check-superuser)
-  (cond
-    (not (public-settings/experimental-fulltext-search-enabled))
-    (throw (ex-info &quot;Search index is not enabled.&quot; {:status-code 501}))
-    (search/supports-index?)
-    (do (search/init-index! {:force-reset? true}) {:message &quot;done&quot;})
-    :else
-    (throw (ex-info &quot;Search index is not supported for this installation.&quot; {:status-code 501}))))</pre></td></tr><tr><td class="docs"><p>/force-reindex</p>
-</td><td class="codes"><pre class="brush: clojure">(api/defendpoint POST 
-  &quot;If fulltext search is enabled, this will trigger a synchronous reindexing operation.&quot;
-  []
-  (api/check-superuser)
-  (cond
-    (not (public-settings/experimental-fulltext-search-enabled))
-    (throw (ex-info &quot;Search index is not enabled.&quot; {:status-code 501}))
-    (search/supports-index?)
-    (if (task/job-exists? task.search-index/reindex-job-key)
-      (do (task/trigger-now! task.search-index/reindex-job-key) {:message &quot;task triggered&quot;})
-      (do (search/reindex!) {:message &quot;done&quot;}))
-    :else
-    (throw (ex-info &quot;Search index is not supported for this installation.&quot; {:status-code 501}))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- set-weights! [context overrides]
-  (api/check-superuser)
-  (when (= context :all)
-    (throw (ex-info (str &quot;Cannot set weights for all context&quot;)
-                    {:status-code 400})))
-  (let [known-ranker?   (set (keys (:default @#'search.config/static-weights)))
-        rankers         (into #{} (map (fn [k] (keyword (first (str/split (name k) #&quot;/&quot;))))) (keys overrides))
-        unknown-rankers (seq (remove known-ranker? rankers))]
-    (when unknown-rankers
-      (throw (ex-info (str &quot;Unknown rankers: &quot; (str/join &quot;, &quot; (map name (sort unknown-rankers))))
-                      {:status-code 400})))
-    (public-settings/experimental-search-weight-overrides!
-     (merge-with merge (public-settings/experimental-search-weight-overrides) {context overrides}))))</pre></td></tr><tr><td class="docs"><p>/weights</p>
-</td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
-  &quot;Return the current weights being used to rank the search results&quot;
-  [:as {overrides :params}]
-  ;; remove cookie
-  (let [context   (keyword (:context overrides :default))
-        overrides (-&gt; overrides (dissoc :search_engine :context) (update-vals parse-double))]
-    (when (seq overrides)
-      (set-weights! context overrides))
-    (search.config/weights context)))</pre></td></tr><tr><td class="docs"><p>/</p>
-</td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
-  &quot;Search for items in Metabase.
-  For the list of supported models, check [[metabase.search/all-models]].
-  Filters:
-  - `archived`: set to true to search archived items only, default is false
-  - `table_db_id`: search for tables, cards, and models of a certain DB
-  - `models`: only search for items of specific models. If not provided, search for all models
-  - `filters_items_in_personal_collection`: only search for items in personal collections
-  - `created_at`: search for items created at a specific timestamp
-  - `created_by`: search for items created by a specific user
-  - `last_edited_at`: search for items last edited at a specific timestamp
-  - `last_edited_by`: search for items last edited by a specific user
-  - `search_native_query`: set to true to search the content of native queries
-  - `verified`: set to true to search for verified items only (requires Content Management or Official Collections premium feature)
-  - `ids`: search for items with those ids, works iff single value passed to `models`
-  Note that not all item types support all filters, and the results will include only models that support the provided filters. For example:
-  - The `created-by` filter supports dashboards, models, actions, and cards.
-  - The `verified` filter supports models and cards.
-  A search query that has both filters applied will only return models and cards.&quot;
-  [q context archived created_at created_by table_db_id models last_edited_at last_edited_by
-   filter_items_in_personal_collection model_ancestors search_engine search_native_query
-   verified ids calculate_available_models]
-  {q                                   [:maybe ms/NonBlankString]
-   context                             [:maybe :keyword]
-   archived                            [:maybe :boolean]
-   table_db_id                         [:maybe ms/PositiveInt]
-   models                              [:maybe (ms/QueryVectorOf search/SearchableModel)]
-   filter_items_in_personal_collection [:maybe [:enum &quot;all&quot; &quot;only&quot; &quot;only-mine&quot; &quot;exclude&quot; &quot;exclude-others&quot;]]
-   created_at                          [:maybe ms/NonBlankString]
-   created_by                          [:maybe (ms/QueryVectorOf ms/PositiveInt)]
-   last_edited_at                      [:maybe ms/NonBlankString]
-   last_edited_by                      [:maybe (ms/QueryVectorOf ms/PositiveInt)]
-   model_ancestors                     [:maybe :boolean]
-   search_engine                       [:maybe string?]
-   search_native_query                 [:maybe true?]
-   verified                            [:maybe true?]
-   ids                                 [:maybe (ms/QueryVectorOf ms/PositiveInt)]
-   calculate_available_models          [:maybe true?]}
-  (api/check-valid-page-params mw.offset-paging/*limit* mw.offset-paging/*offset*)
-  (let  [models-set (if (seq models)
-                      (set models)
-                      search/all-models)]
-    (search/search
-     (search/search-context
-      {:archived                            archived
-       :context                             context
-       :created-at                          created_at
-       :created-by                          (set created_by)
-       :current-user-id                     api/*current-user-id*
-       :is-impersonated-user?               (premium-features/impersonated-user?)
-       :is-sandboxed-user?                  (premium-features/sandboxed-user?)
-       :is-superuser?                       api/*is-superuser?*
-       :current-user-perms                  @api/*current-user-permissions-set*
-       :filter-items-in-personal-collection filter_items_in_personal_collection
-       :last-edited-at                      last_edited_at
-       :last-edited-by                      (set last_edited_by)
-       :limit                               mw.offset-paging/*limit*
-       :model-ancestors?                    model_ancestors
-       :models                              models-set
-       :offset                              mw.offset-paging/*offset*
-       :search-engine                       search_engine
-       :search-native-query                 search_native_query
-       :search-string                       q
-       :table-db-id                         table_db_id
-       :verified                            verified
-       :ids                                 (set ids)
-       :calculate-available-models?         calculate_available_models}))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(api/define-routes +engine-cookie)</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+   [metabase.util.date-2 :as u.date]
+   [metabase.util.urls :as urls])
+  (:import
+   (com.github.jknack.handlebars
+    Options Handlebars Helper Handlebars$SafeString)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Get the block body.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn option-block-body
+  [^Options option]
+  (.fn option))</pre></td></tr><tr><td class="docs"><p>Get the else block.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn option-else-block
+  [^Options option]
+  (.inverse option))</pre></td></tr><tr><td class="docs"><p>A wrapper of Handlebars.SafeString</p>
+</td><td class="codes"><pre class="brush: clojure">(defn safe-str
+  [&amp; text]
+  (Handlebars$SafeString. (apply str text)))</pre></td></tr><tr><td class="docs"><p>Define a helper function.</p>
+
+<p>Helper is a function that takes 4 arguments: context, params, hash, and options.</p>
+
+<p>(defhelper format-name
+  "Format a name with title and uppercase options."
+  [name _params {:keys [title uppercase] :or {title "Mr."}} _options]
+  (if uppercase
+    (str title (u/upper-case-en name))
+    (str title name)))</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro defhelper
+  [helper-name description argvec &amp; body]
+  (let [helper-fn-name (symbol (str helper-name \*))
+        description#   description]
+    (assert (= 4 (count argvec)) &quot;Helper function must have 4 arguments: context, params, hash, and options&quot;)
+    `(do
+       (defn ~helper-fn-name
+         ~description#
+         ~argvec
+         ~@body)
+       (def ~(vary-meta helper-name
+                        merge
+                        {:doc        description
+                         :is-helper? true})
+         ~description#
+         (reify Helper (apply [_# context# option#]
+                         (~helper-fn-name context# (.params option#) (update-keys (.hash option#) keyword) option#)))))))</pre></td></tr><tr><td class="docs"><p>Register a helper.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn register-helper
+  [^Handlebars hbs ^String name ^Helper helper]
+  (.registerHelper hbs name helper))</pre></td></tr><tr><td class="docs"><p>Register a list of helpers.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn register-helpers
+  [^Handlebars hbs helpers]
+  (doseq [[name helper] helpers]
+    (register-helper hbs name helper)))</pre></td></tr><tr><td class="docs"><p>---------------- Predefined helpers ----------------;;</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Return true if two values are equal.</p>
+
+<p>{{if (equals product.name "Hot Dog")}}
+  Hot Dog
+{{else}}
+  Not Hot Dog
+{{/if}}</p>
+
+<p>Generics</p>
+</td><td class="codes"><pre class="brush: clojure">(defhelper equals
+  [x [y] _kparams _options]
+  (= x y))</pre></td></tr><tr><td class="docs"><p>Format date helper.</p>
+
+<p>{{format-date '2000-30-01''dd-MM-YY'}}
+;; => 30-01-00</p>
+
+<p>date can be either a string or a date time object.</p>
+</td><td class="codes"><pre class="brush: clojure">(defhelper format-date
+  [date [fmt] _kparams _options]
+  (assert (string? fmt) &quot;Format must be a string&quot;)
+  (u.date/format fmt
+                 (if (string? date)
+                   (u.date/parse date)
+                   date)))</pre></td></tr><tr><td class="docs"><p>Get the current date and time. Returned object is a java.time.Instant</p>
+</td><td class="codes"><pre class="brush: clojure">(defhelper now
+  [_context _params _kparams _options]
+  (t/instant))</pre></td></tr><tr><td class="docs"><p>Metabase specifics</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Return an appropriate URL for a <code>Card</code> with ID.</p>
+
+<p>{{card-url 10}}
+;; => "http://localhost:3000/question/10"</p>
+</td><td class="codes"><pre class="brush: clojure">(defhelper card-url
+  [id _params _kparams _options]
+  (urls/card-url id))</pre></td></tr><tr><td class="docs"><p>Return an appropriate URL for a <code>Dashboard</code> with ID.</p>
+
+<p>   {{dashboard-url 10}} -> "http://localhost:3000/dashboard/10"</p>
+</td><td class="codes"><pre class="brush: clojure">(defhelper dashboard-url
+  [id [parameters] _kparams _options]
+  (urls/dashboard-url id (map #(update-keys % keyword) parameters)))</pre></td></tr><tr><td class="docs"><p>A list of default helpers.</p>
+</td><td class="codes"><pre class="brush: clojure">(def default-helpers
+  {&quot;equals&quot;        equals
+   &quot;format-date&quot;   format-date
+   &quot;now&quot;           now
+   &quot;card-url&quot;      card-url
+   &quot;dashboard-url&quot; dashboard-url})</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

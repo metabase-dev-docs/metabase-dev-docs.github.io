@@ -2928,17 +2928,18 @@ list will be ranked higher.</p>
 </td><td class="codes"><pre class="brush: clojure">(def models-search-order
   [&quot;dashboard&quot; &quot;metric&quot; &quot;segment&quot; &quot;indexed-entity&quot; &quot;card&quot; &quot;dataset&quot; &quot;collection&quot; &quot;table&quot; &quot;action&quot; &quot;database&quot;])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(assert (= all-models (set models-search-order)) &quot;The models search order has to include all models&quot;)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private default-weights
-  {:pinned              0
-   :bookmarked          2
-   :recency             1.5
-   :user-recency        1.5
-   :dashboard           0.5
-   :model               2
-   :official-collection 2
-   :verified            2
-   :view-count          2
-   :text                10})</pre></td></tr><tr><td class="docs"><p>A relaxed definition, capturing how we can write the filter - with some fields omitted.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private static-weights
+  {:default
+   {:pinned              0
+    :bookmarked          2
+    :recency             1.5
+    :user-recency        1.5
+    :dashboard           0.5
+    :model               2
+    :official-collection 2
+    :verified            2
+    :view-count          2
+    :text                10}})</pre></td></tr><tr><td class="docs"><p>A relaxed definition, capturing how we can write the filter - with some fields omitted.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private FilterDef
   [:map {:closed true}
    [:key                               :keyword]
@@ -2981,11 +2982,21 @@ list will be ranked higher.</p>
     :native-query   {:type :native-query, :context-key :search-native-query}
     :verified       {:type :single-value, :supported-value? #{true}, :required-feature :content-verification}}))</pre></td></tr><tr><td class="docs"><p>Strength of the various scorers. Copied from metabase.search.in-place.scoring, but allowing divergence.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn weights
-  []
-  (merge default-weights (public-settings/experimental-search-weight-overrides)))</pre></td></tr><tr><td class="docs"><p>The relative strength the corresponding score has in influencing the total score.</p>
+  [context]
+  (let [context   (or context :default)
+        overrides (public-settings/experimental-search-weight-overrides)]
+    (if (= :all context)
+      (merge-with merge static-weights overrides)
+      (merge {}
+             (get static-weights context)
+             (get overrides context)))))</pre></td></tr><tr><td class="docs"><p>The relative strength the corresponding score has in influencing the total score.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn weight
-  [scorer-key]
-  (get (weights) scorer-key 0))</pre></td></tr><tr><td class="docs"><p>Given a model string returns the model alias</p>
+  [context scorer-key]
+  (get (weights context) scorer-key (when-not (namespace scorer-key) 0)))</pre></td></tr><tr><td class="docs"><p>Get a nested parameter scoped to the given scorer</p>
+</td><td class="codes"><pre class="brush: clojure">(defn scorer-param
+  [context scorer-key param-key]
+  (let [flat-key (keyword (name scorer-key) (name param-key))]
+    (weight context flat-key)))</pre></td></tr><tr><td class="docs"><p>Given a model string returns the model alias</p>
 </td><td class="codes"><pre class="brush: clojure">(defn model-&gt;alias
   [model]
   (-&gt; model model-to-db-model :alias))</pre></td></tr><tr><td class="docs">
