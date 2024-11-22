@@ -2980,14 +2980,30 @@ list will be ranked higher.</p>
     :last-edited-at {:type :date-range}
     :last-editor-id {:type :list, :context-key :last-edited-by}
     :native-query   {:type :native-query, :context-key :search-native-query}
-    :verified       {:type :single-value, :supported-value? #{true}, :required-feature :content-verification}}))</pre></td></tr><tr><td class="docs"><p>Strength of the various scorers. Copied from metabase.search.in-place.scoring, but allowing divergence.</p>
+    :verified       {:type :single-value, :supported-value? #{true}, :required-feature :content-verification}}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private filter-defaults-by-context
+  {:default         {:archived               false
+                     ;; keys will typically those in [[filters]], but this is an atypical filter.
+                     ;; we plan to generify it, by precalculating it on the index.
+                     :personal-collection-id &quot;all&quot;}
+   :command-palette {:personal-collection-id &quot;exclude-others&quot;}})</pre></td></tr><tr><td class="docs"><p>Get the default value for the given filter in the given context. Is non-contextual for legacy search.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn filter-default
+  [engine context filter-key]
+  (let [fetch (fn [ctx] (when ctx (-&gt; filter-defaults-by-context (get ctx) (get filter-key))))]
+    (if (= engine :search.engine/in-place)
+      (fetch :default)
+      (or (fetch context) (fetch :default)))))</pre></td></tr><tr><td class="docs"><p>Strength of the various scorers. Copied from metabase.search.in-place.scoring, but allowing divergence.</p>
+
+<p>This gets called <em>a lot</em> during a search request, so we'll almost certainly need to optimize it. Maybe just TTL.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn weights
   [context]
   (let [context   (or context :default)
         overrides (public-settings/experimental-search-weight-overrides)]
     (if (= :all context)
       (merge-with merge static-weights overrides)
-      (merge {}
+      (merge (get static-weights :default)
+             ;; Not sure which of the next two should have precedence, arguments for both &quot;¯\_(ツ)_/¯&quot;
+             (get overrides :default)
              (get static-weights context)
              (get overrides context)))))</pre></td></tr><tr><td class="docs"><p>The relative strength the corresponding score has in influencing the total score.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn weight

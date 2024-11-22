@@ -2892,7 +2892,8 @@ net.brehaut.ClojureTools = (function (SH) {
   :encryption :when-encryption-key-set
   :visibility :settings-manager
   :doc        false
-  :audit      :never)</pre></td></tr><tr><td class="docs">
+  :audit      :never
+  :export?    false)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defsetting slack-app-token
   (deferred-tru
    (str &quot;Bot user OAuth token for connecting the Metabase Slack app. &quot;
@@ -2922,7 +2923,8 @@ net.brehaut.ClojureTools = (function (SH) {
   :visibility :internal
   :type       :json
   :doc        false
-  :audit      :never)</pre></td></tr><tr><td class="docs">
+  :audit      :never
+  :export?    false)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private zoned-time-epoch (t/zoned-date-time 1970 1 1 0))</pre></td></tr><tr><td class="docs"><p>The updated-at time for the [[slack-cached-channels-and-usernames]] setting.</p>
 </td><td class="codes"><pre class="brush: clojure">(defsetting slack-channels-and-usernames-last-updated
   :visibility :internal
@@ -2930,7 +2932,8 @@ net.brehaut.ClojureTools = (function (SH) {
   :type       :timestamp
   :default    zoned-time-epoch
   :doc        false
-  :audit      :never)</pre></td></tr><tr><td class="docs">
+  :audit      :never
+  :export?    false)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defsetting slack-files-channel
   (deferred-tru &quot;The name of the channel to which Metabase files should be initially uploaded&quot;)
   :default &quot;metabase_files&quot;
@@ -2938,7 +2941,16 @@ net.brehaut.ClojureTools = (function (SH) {
   :visibility :settings-manager
   :audit      :getter
   :setter (fn [channel-name]
-            (setting/set-value-of-type! :string :slack-files-channel (process-files-channel-name channel-name))))</pre></td></tr><tr><td class="docs"><p>Is Slack integration configured?</p>
+            (setting/set-value-of-type! :string :slack-files-channel (process-files-channel-name channel-name))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defsetting slack-bug-report-channel
+  (deferred-tru &quot;The name of the channel where bug reports should be posted&quot;)
+  :default &quot;metabase-bugs&quot;
+  :encryption :no
+  :visibility :settings-manager
+  :audit      :getter
+  :export?    false
+  :setter (fn [channel-name]
+            (setting/set-value-of-type! :string :slack-bug-report-channel (process-files-channel-name channel-name))))</pre></td></tr><tr><td class="docs"><p>Is Slack integration configured?</p>
 </td><td class="codes"><pre class="brush: clojure">(defn slack-configured?
   []
   (boolean (or (seq (slack-app-token)) (seq (slack-token)))))</pre></td></tr><tr><td class="docs"><p>List of error codes that indicate an invalid or revoked Slack token.</p>
@@ -3100,7 +3112,7 @@ to [[paged-list-request]] will only fetch the first [[max-list-results]] items.<
       (when (needs-refresh?)
         (refresh-channels-and-usernames!)))))</pre></td></tr><tr><td class="docs"><p>Looks in [[slack-cached-channels-and-usernames]] to check whether a channel exists with the expected name from the
 [[slack-files-channel]] setting with an # prefix. If it does, returns the channel details as a map. If it doesn't,
-throws an error that advices an admin to create it.</p>
+throws an error that advises an admin to create it.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn files-channel
   []
   (let [channel-name (slack-files-channel)]
@@ -3111,6 +3123,20 @@ throws an error that advices an admin to create it.</p>
                          (tru &quot;Please create or unarchive the channel in order to complete the Slack integration.&quot;)
                          &quot; &quot;
                          (tru &quot;The channel is used for storing images that are included in dashboard subscriptions.&quot;))]
+        (log/error (u/format-color 'red message))
+        (throw (ex-info message {:status-code 400}))))))</pre></td></tr><tr><td class="docs"><p>Looks in [[slack-cached-channels-and-usernames]] to check whether a channel exists with the expected name from the
+[[slack-bug-report-channel]] setting with an # prefix. If it does, returns the channel details as a map. If it doesn't,
+throws an error that advices an admin to create it.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn bug-report-channel
+  []
+  (let [channel-name (slack-bug-report-channel)]
+    (if (channel-exists? channel-name)
+      channel-name
+      (let [message (str (tru &quot;Slack channel named `{0}` is missing!&quot; channel-name)
+                         &quot; &quot;
+                         (tru &quot;Please create or unarchive the channel in order to complete the Slack integration.&quot;)
+                         &quot; &quot;
+                         (tru &quot;The channel is used for storing bug reports.&quot;))]
         (log/error (u/format-color 'red message))
         (throw (ex-info message {:status-code 400}))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private NonEmptyByteArray
@@ -3201,21 +3227,27 @@ list of channels to obtain the internal id. Fallback to using the current channe
                              :file-id    file_id
                              :filename   filename})]
     (u/prog1 file-url
-      (log/debug &quot;Uploaded image&quot; &lt;&gt;))))</pre></td></tr><tr><td class="docs"><p>Calls Slack API <code>chat.postMessage</code> endpoint and posts a message to a channel. <code>attachments</code> should be serialized
-JSON.</p>
+      (log/debug &quot;Uploaded image&quot; &lt;&gt;))))</pre></td></tr><tr><td class="docs"><p>Calls Slack API <code>chat.postMessage</code> endpoint and posts a message to a channel. <code>attachments</code> can be either serialized JSON for notification attachments or a map containing blocks.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn post-chat-message!
   [channel-id  :- ms/NonBlankString
    text-or-nil :- [:maybe :string]
-   &amp; [attachments]]
+   &amp; [message-content]]
   ;; TODO: it would be nice to have an emoji or icon image to use here
-  (POST &quot;chat.postMessage&quot;
-    {:form-params
-     {:channel     channel-id
-      :username    &quot;MetaBot&quot;
-      :icon_url    &quot;http://static.metabase.com/metabot_slack_avatar_whitebg.png&quot;
-      :text        text-or-nil
-      :attachments (when (seq attachments)
-                     (json/generate-string attachments))}}))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+  (let [base-params {:channel     channel-id
+                     :username    &quot;MetaBot&quot;
+                     :icon_url    &quot;http://static.metabase.com/metabot_slack_avatar_whitebg.png&quot;
+                     :text        text-or-nil}
+        message-params (cond
+                        ;; If message-content contains :blocks key, it's a new-style message
+                         (:blocks message-content)
+                         {:blocks (json/generate-string (:blocks message-content))}
+                        ;; Otherwise treat it as notification attachments
+                         (seq message-content)
+                         {:attachments (json/generate-string message-content)}
+                         :else
+                         {})]
+    (POST &quot;chat.postMessage&quot;
+      {:form-params (merge base-params message-params)})))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
