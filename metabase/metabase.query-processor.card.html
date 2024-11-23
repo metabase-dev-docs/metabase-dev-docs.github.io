@@ -2874,7 +2874,6 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.legacy-mbql.normalize :as mbql.normalize]
    [metabase.legacy-mbql.schema :as mbql.s]
    [metabase.legacy-mbql.util :as mbql.u]
-   [metabase.lib.core :as lib]
    [metabase.lib.schema.id :as lib.schema.id]
    [metabase.lib.schema.parameter :as lib.schema.parameter]
    [metabase.lib.schema.template-tag :as lib.schema.template-tag]
@@ -2908,28 +2907,70 @@ net.brehaut.ClojureTools = (function (SH) {
     :ttl (let [et (query/average-execution-time-ms (qp.util/query-hash query))]
            (assoc strategy :avg-execution-ms (or et 0)))
     strategy))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- filter-stage-used?
+</td><td class="codes"><pre class="brush: clojure">(defn- explict-stage-references
   [parameters]
-  (boolean
-   (some (fn [{:keys [target]}]
-           (and (mbql.u/is-clause? :dimension target)
-                (contains? (get target 2) :stage-number)))
-         parameters)))</pre></td></tr><tr><td class="docs"><p>Generate a query for a saved Card</p>
+  (into #{}
+        (keep (fn [{:keys [target]}]
+                (when (mbql.u/is-clause? :dimension target)
+                  (get-in target [2 :stage-number]))))
+        parameters))</pre></td></tr><tr><td class="docs"><p>Points temporal-unit parameters to the last stage.
+This function is normally called for models or metrics, where the first and the last
+stages are the same. By using -1 as stage number we make sure that the expansion of
+models/metrics doesn't cause the filter to be added at the wrong stage.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- point-parameters-to-last-stage
+  [parameters]
+  (mapv (fn [{:keys [target], :as parameter}]
+          (cond-&gt; parameter
+            (and (mbql.u/is-clause? :dimension target)
+                 (some? (get-in target [2 :stage-number])))
+            (assoc-in [:target 2 :stage-number] -1)))
+        parameters))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- last-stage-number
+  [outer-query]
+  (mbql.u/legacy-last-stage-number (:query outer-query)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- nest-query
+  [query]
+  (assoc query :query {:source-query (:query query)}))</pre></td></tr><tr><td class="docs"><p>Points temporal-unit parameters to the penultimate stage unless the stage is specified.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- add-stage-to-temporal-unit-parameters
+  [parameters]
+  (mapv (fn [{param-type :type, :keys [target], :as parameter}]
+          (cond-&gt; parameter
+            (and (= param-type :temporal-unit)
+                 (mbql.u/is-clause? :dimension target)
+                 (nil? (get-in target [2 :stage-number])))
+            (assoc-in [:target 2 :stage-number] -2)))
+        parameters))</pre></td></tr><tr><td class="docs"><p>Generate a query for a saved Card</p>
 </td><td class="codes"><pre class="brush: clojure">(defn query-for-card
-  [{query :dataset_query
-    :as   card} parameters constraints middleware &amp; [ids]]
-  (let [query (-&gt; query
+  [{dataset-query :dataset_query
+    card-type     :type
+    :as           card} parameters constraints middleware &amp; [ids]]
+  (let [stage-numbers (explict-stage-references parameters)
+        explicit-stage-numbers? (boolean (seq stage-numbers))
+        parameters (cond-&gt; parameters
+                     ;; models are not transparent (questions and metrics are)
+                     (and explicit-stage-numbers? (= card-type :model))
+                     point-parameters-to-last-stage)
+        ;; The FE might have &quot;added&quot; a stage so that a question with breakouts
+        ;; at the last stage can be filtered on the summary results. We know
+        ;; this happened if we get a reference to one above the last stage.
+        filter-stage-added? (and explicit-stage-numbers?
+                                 (= (inc (last-stage-number dataset-query))
+                                    (apply max stage-numbers)))
+        query (cond-&gt; dataset-query
+                (and explicit-stage-numbers?
+                     (or
+                      ;; stage-number 0 means filtering the results of models and metrics
+                      (not= card-type :question)
+                      ;; the FE assumed an extra stage, so we add it
+                      filter-stage-added?))
+                nest-query)
+        query (-&gt; query
                   ;; don't want default constraints overridding anything that's already there
                   (m/dissoc-in [:middleware :add-default-userland-constraints?])
                   (assoc :constraints constraints
-                         :parameters  parameters
+                         :parameters  (cond-&gt; parameters
+                                        filter-stage-added? add-stage-to-temporal-unit-parameters)
                          :middleware  middleware))
-        query (cond-&gt; query
-                ;; If query has aggregation and breakout at the top level,
-                ;; parameters refer to stages as if a new stage was appended.
-                ;; This is so that we can distinguish if a filter should be applied
-                ;; before of after summarizing.
-                (filter-stage-used? parameters) lib/ensure-filter-stage)
         cs    (-&gt; (cache-strategy card (:dashboard-id ids))
                   (enrich-strategy query))]
     (assoc query :cache-strategy cs)))</pre></td></tr><tr><td class="docs"><p>In 0.41.0+ you can no longer add arbitrary <code>:parameters</code> to a query for a saved question -- only parameters for
