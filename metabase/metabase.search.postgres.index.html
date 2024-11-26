@@ -2873,13 +2873,19 @@ net.brehaut.ClojureTools = (function (SH) {
    [honey.sql.helpers :as sql.helpers]
    [metabase.search.spec :as search.spec]
    [metabase.util :as u]
-   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs"><p>The table against which we should currently make search queries. Dynamic for testing.</p>
+   [toucan2.core :as t2])
+  (:import (org.postgresql.util PSQLException)))</pre></td></tr><tr><td class="docs"><p>The table against which we should currently make search queries. Dynamic for testing.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *active-table*
   :search_index)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private pending-table :search_index_next)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private retired-table :search_index_retired)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defonce ^:private initialized? (atom false))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defonce ^:private reindexing? (atom false))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defonce ^:private reindexing? (atom false))</pre></td></tr><tr><td class="docs"><p>Remove assumptions about search indexing state. Not particularly safe, but only used in tests.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn reset-tracking!
+  []
+  ;; TODO we'll make this safe when we switch to the metadata table.
+  (reset! initialized? false)
+  (reset! reindexing? false))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private tsv-language &quot;english&quot;)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- random-prefix []
   (str/replace (str (name *active-table*) &quot;_&quot; (random-uuid)) #&quot;-&quot; &quot;_&quot;))</pre></td></tr><tr><td class="docs"><p>Generate a random name for a search index table.</p>
@@ -3072,15 +3078,23 @@ net.brehaut.ClojureTools = (function (SH) {
             (remove #(= (first %) &quot;or&quot;))
             (map process-clause)
             (str/join &quot; | &quot;)
-            maybe-complete)))))</pre></td></tr><tr><td class="docs"><p>Create the given search index entries in bulk</p>
+            maybe-complete)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- safe-batch-upsert! [table-name entries]
+  (try
+    (batch-upsert! table-name entries)
+    (catch Exception e
+      ;; ignore database errors, the table likely doesn't exist, or has a stale schema.
+      (when-not (instance? PSQLException (ex-cause e))
+        (throw e)))))</pre></td></tr><tr><td class="docs"><p>Create the given search index entries in bulk</p>
 </td><td class="codes"><pre class="brush: clojure">(defn batch-update!
   [entities]
-  (let [entries (map entity-&gt;entry entities)]
-    (when @initialized?
-      (batch-upsert! *active-table* entries))
-    (when @reindexing?
-      (batch-upsert! pending-table entries))
-    (-&gt;&gt; entries (map :model) frequencies)))</pre></td></tr><tr><td class="docs"><p>Query fragment for all models corresponding to a query parameter <code>:search-term</code>.</p>
+  (let [entries          (map entity-&gt;entry entities)
+        ;; Ideally, we would reset these atoms if the corresponding tables don't exist.
+        ;; We're about to rework this area, so just leaving this as a note for now.
+        active-updated?  (when @initialized? (safe-batch-upsert! *active-table* entries))
+        pending-updated? (when @reindexing?  (safe-batch-upsert! pending-table entries))]
+    (when (or active-updated? pending-updated?)
+      (-&gt;&gt; entries (map :model) frequencies))))</pre></td></tr><tr><td class="docs"><p>Query fragment for all models corresponding to a query parameter <code>:search-term</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn search-query
   ([search-term search-ctx]
    (search-query search-term search-ctx [:model_id :model]))
