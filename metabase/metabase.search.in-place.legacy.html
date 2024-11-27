@@ -2865,156 +2865,500 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.query-processor.streaming.csv" name="metabase.query-processor.streaming.csv"><h1 class="project-name">metabase.query-processor.streaming.csv</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.query-processor.streaming.csv
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.search.in-place.legacy" name="metabase.search.in-place.legacy"><h1 class="project-name">metabase.search.in-place.legacy</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.search.in-place.legacy
   (:require
-   [clojure.data.csv]
    [clojure.string :as str]
-   [java-time.api :as t]
+   [flatland.ordered.map :as ordered-map]
+   [honey.sql.helpers :as sql.helpers]
    [medley.core :as m]
-   [metabase.formatter :as formatter]
-   [metabase.models.visualization-settings :as mb.viz]
-   [metabase.public-settings :as public-settings]
-   [metabase.query-processor.pivot.postprocess :as qp.pivot.postprocess]
-   [metabase.query-processor.streaming.common :as common]
-   [metabase.query-processor.streaming.interface :as qp.si]
+   [metabase.db :as mdb]
+   [metabase.db.query :as mdb.query]
+   [metabase.models.collection :as collection]
+   [metabase.search.config
+    :as search.config
+    :refer [SearchContext SearchableModel]]
+   [metabase.search.engine :as search.engine]
+   [metabase.search.filter :as search.filter]
+   [metabase.search.in-place.filter :as search.in-place.filter]
+   [metabase.search.in-place.scoring :as scoring]
+   [metabase.search.in-place.util :as search.util]
+   [metabase.search.permissions :as search.permissions]
    [metabase.util :as u]
-   [metabase.util.date-2 :as u.date]
-   [metabase.util.performance :as perf])
-  (:import
-   (java.io BufferedWriter OutputStream OutputStreamWriter)
-   (java.nio.charset StandardCharsets)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod qp.si/stream-options :csv
-  ([_]
-   (qp.si/stream-options :csv &quot;query_result&quot;))
-  ([_ filename-prefix]
-   {:content-type              &quot;text/csv&quot;
-    :status                    200
-    :headers                   {&quot;Content-Disposition&quot; (format &quot;attachment; filename=\&quot;%s_%s.csv\&quot;&quot;
-                                                              (or filename-prefix &quot;query_result&quot;)
-                                                              (u.date/format (t/zoned-date-time)))}
-    :write-keepalive-newlines? false}))</pre></td></tr><tr><td class="docs"><p>Flag to enable/disable export post-processing of pivot tables.
-Disabled by default and should remain disabled until Issue #44556 is resolved and a clear plan is made.</p>
+   [metabase.util.honey-sql-2 :as h2x]
+   [metabase.util.log :as log]
+   [metabase.util.malli :as mu]
+   [metabase.util.malli.schema :as ms]
+   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private HoneySQLColumn
+  [:or
+   :keyword
+   [:tuple :any :keyword]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search.engine/supported-engine? :search.engine/in-place [_]
+  true)</pre></td></tr><tr><td class="docs"><p>Return the appropriate revision model given a search model.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn search-model-&gt;revision-model
+  [model]
+  (case model
+    &quot;dataset&quot; (recur &quot;card&quot;)
+    &quot;metric&quot; (recur &quot;card&quot;)
+    (str/capitalize model)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- -&gt;column-alias :- keyword?
+  &quot;Returns the column name. If the column is aliased, i.e. [`:original_name` `:aliased_name`], return the aliased
+  column name&quot;
+  [column-or-aliased :- HoneySQLColumn]
+  (if (sequential? column-or-aliased)
+    (second column-or-aliased)
+    column-or-aliased))</pre></td></tr><tr><td class="docs"><p>All columns that will appear in the search results, and the types of those columns. The generated search query is a
+<code>UNION ALL</code> of the queries for each different entity; it looks something like:</p>
 
-<p>As a first step towards hollistically solving this issue: https://github.com/metabase/metabase/issues/44556
-(which is basically that very large pivot tables can crash the export process),
-The post processing is disabled completely.
-This should remain <code>false</code> until it's fixed
-TODO: rework this post-processing once there's a clear way in app to enable/disable it, or to select alternate download options</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *pivot-export-post-processing-enabled*
-  false)</pre></td></tr><tr><td class="docs"><p>Custom implementation of <code>clojure.data.csv/write-csv</code> with a more efficient quote? predicate and no support for
-options (we don't use them).</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- write-csv
-  [writer data]
-  (let [separator \,
-        quote \&quot;
-        quote? (fn [^String s]
-                 (let [n (.length s)]
-                   (loop [i 0]
-                     (if (&gt;= i n) false
-                         (let [ch (.charAt s (unchecked-int i))]
-                           (if (or (= ch \,) ;; separator
-                                   (= ch \&quot;) ;; quote
-                                   (= ch \return)
-                                   (= ch \newline))
-                             true
-                             (recur (unchecked-inc i))))))))
-        newline &quot;\n&quot;]
-    (#'clojure.data.csv/write-csv* writer data separator quote quote? newline)))</pre></td></tr><tr><td class="docs"><p>Rebind write-cell to avoid using clojure.core/escape. Instead, use String.replace with known arguments (we never
-change quote symbol anyway).</p>
-</td><td class="codes"><pre class="brush: clojure">(.bindRoot #'clojure.data.csv/write-cell
-           (fn [^java.io.Writer writer obj _ _ quote?]
-             (let [^String string (str obj)
-                   must-quote (quote? string)]
-               (when must-quote (.write writer &quot;\&quot;&quot;))
-               (.write writer (if must-quote
-                                (.replace string &quot;\&quot;&quot; &quot;\&quot;\&quot;&quot;)
-                                string))
-               (when must-quote (.write writer &quot;\&quot;&quot;)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- col-&gt;aggregation-fn-key
-  [{agg-name :name source :source}]
-  (when (= :aggregation source)
-    (let [agg-name (u/lower-case-en agg-name)]
-      (cond
-        (str/starts-with? agg-name &quot;sum&quot;)    :sum
-        (str/starts-with? agg-name &quot;avg&quot;)    :avg
-        (str/starts-with? agg-name &quot;min&quot;)    :min
-        (str/starts-with? agg-name &quot;max&quot;)    :max
-        (str/starts-with? agg-name &quot;count&quot;)  :count
-        (str/starts-with? agg-name &quot;stddev&quot;) :stddev))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod qp.si/streaming-results-writer :csv
-  [_ ^OutputStream os]
-  (let [writer             (BufferedWriter. (OutputStreamWriter. os StandardCharsets/UTF_8))
-        ordered-formatters (volatile! nil)
-        pivot-data         (atom nil)]
-    (reify qp.si/StreamingResultsWriter
-      (begin! [_ {{:keys [ordered-cols results_timezone format-rows? pivot-export-options pivot?]
-                   :or   {format-rows? true
-                          pivot?       false}} :data} viz-settings]
-        (let [col-names          (vec (common/column-titles ordered-cols (::mb.viz/column-settings viz-settings) format-rows?))
-              opts               (when (and pivot? pivot-export-options)
-                                   (-&gt; (merge {:pivot-rows []
-                                               :pivot-cols []
-                                               :measures   (mapv col-&gt;aggregation-fn-key ordered-cols)}
-                                              pivot-export-options)
-                                       (assoc :column-titles col-names)
-                                       (qp.pivot.postprocess/add-totals-settings viz-settings)
-                                       qp.pivot.postprocess/add-pivot-measures))
-              pivot-grouping-key (qp.pivot.postprocess/pivot-grouping-key col-names)]
+<p>  SELECT 'card' AS model, id, cast(NULL AS integer) AS table_id, ...
+  FROM report_card
+  UNION ALL
+  SELECT 'metric' as model, id, table_id, ...
+  FROM metric</p>
 
-          ;; initialize the pivot-data
-          ;; If exporting pivoted, init the pivot data structure
-          ;; Otherwise, just store the pivot-grouping key index
-          (when (and pivot? pivot-export-options)
-            (reset! pivot-data (qp.pivot.postprocess/init-pivot opts)))
-          (when pivot-grouping-key
-            (swap! pivot-data assoc :pivot-grouping pivot-grouping-key))
-
-          (vreset! ordered-formatters
-                   (mapv #(formatter/create-formatter results_timezone % viz-settings format-rows?) ordered-cols))
-
-          ;; write the column names for non-pivot tables
-          (when (not opts)
-            (let [header (m/remove-nth (or pivot-grouping-key (inc (count col-names))) col-names)]
-              (write-csv writer [header])
-              (.flush writer)))))
-
-      (write-row! [_ row _row-num _ {:keys [output-order]}]
-        (let [ordered-row              (if output-order
-                                         (let [row-v (into [] row)]
-                                           (into [] (for [i output-order] (row-v i))))
-                                         row)
-              {:keys [pivot-grouping]} (or (:config @pivot-data) @pivot-data)
-              group                    (get ordered-row pivot-grouping)]
-          (if (and (contains? @pivot-data :config) (public-settings/enable-pivoted-exports))
-            ;; if we're processing a pivot result, we don't write it out yet, just aggregate it
-            ;; so that we can post process the data in finish!
-            (when (= qp.pivot.postprocess/NON_PIVOT_ROW_GROUP (int group))
-              (swap! pivot-data (fn [pivot-data] (qp.pivot.postprocess/add-row pivot-data ordered-row))))
-
-            (if group
-              (when (= qp.pivot.postprocess/NON_PIVOT_ROW_GROUP (int group))
-                (let [formatted-row (-&gt;&gt; (perf/mapv (fn [formatter r]
-                                                      (formatter (common/format-value r)))
-                                                    @ordered-formatters ordered-row)
-                                         (m/remove-nth pivot-grouping))]
-                  (write-csv writer [formatted-row])
-                  (.flush writer)))
-              (let [formatted-row (perf/mapv (fn [formatter r]
-                                               (formatter (common/format-value r)))
-                                             @ordered-formatters ordered-row)]
-                (write-csv writer [formatted-row])
-                (.flush writer))))))
-
-      (finish! [_ _]
-        ;; TODO -- not sure we need to flush both
-        (when (and (contains? @pivot-data :config) (public-settings/enable-pivoted-exports))
-          (doseq [xf-row (qp.pivot.postprocess/build-pivot-output @pivot-data @ordered-formatters)]
-            (write-csv writer [xf-row])))
-        (.flush writer)
-        (.flush os)
-        (.close writer)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+<p>Columns that aren't used in any individual query are replaced with <code>SELECT cast(NULL AS &lt;type&gt;)</code> statements. (These
+are cast to the appropriate type because Postgres will assume <code>SELECT NULL</code> is <code>TEXT</code> by default and will refuse to
+<code>UNION</code> two columns of two different types.)</p>
+</td><td class="codes"><pre class="brush: clojure">(def all-search-columns
+  (ordered-map/ordered-map
+   ;; returned for all models. Important to be first for changing model for dataset
+   :model               :text
+   :id                  :integer
+   :name                :text
+   :display_name        :text
+   :description         :text
+   :archived            :boolean
+   ;; returned for Card, Dashboard, and Collection
+   :collection_id       :integer
+   :collection_name     :text
+   :collection_type     :text
+   :collection_location :text
+   :collection_authority_level :text
+   :archived_directly   :boolean
+   ;; returned for Card and Dashboard
+   :collection_position :integer
+   :creator_id          :integer
+   :created_at          :timestamp
+   :bookmark            :boolean
+   ;; returned for everything except Collection
+   :updated_at          :timestamp
+   ;; returned only for Collection
+   :location            :text
+   ;; returned for Card only, used for scoring and displays
+   :dashboardcard_count :integer
+   :last_edited_at      :timestamp
+   :last_editor_id      :integer
+   :moderated_status    :text
+   :display             :text
+   ;; returned for Metric and Segment
+   :table_id            :integer
+   :table_schema        :text
+   :table_name          :text
+   :table_description   :text
+   ;; returned for Metric, Segment, and Action
+   :database_id         :integer
+   ;; returned for Database and Table
+   :initial_sync_status :text
+   :database_name       :text
+   ;; returned for Action
+   :model_id            :integer
+   :model_name          :text
+   ;; returned for indexed-entity
+   :pk_ref              :text
+   :model_index_id      :integer
+   ;; returned for Card and Action
+   :dataset_query       :text))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- canonical-columns :- [:sequential HoneySQLColumn]
+  &quot;Returns a seq of lists of canonical columns for the search query with the given `model` Will return column names
+  prefixed with the `model` name so that it can be used in criteria. Projects a `nil` for columns the `model` doesn't
+  have and doesn't modify aliases.&quot;
+  [model :- SearchableModel, col-alias-&gt;honeysql-clause :- [:map-of :keyword HoneySQLColumn]]
+  (for [[search-col col-type] all-search-columns
+        :let [maybe-aliased-col (get col-alias-&gt;honeysql-clause search-col)]]
+    (cond
+      (= search-col :model)
+      [(h2x/literal model) :model]
+      ;; This is an aliased column, no need to include the table alias
+      (sequential? maybe-aliased-col)
+      maybe-aliased-col
+      ;; This is a column reference, need to add the table alias to the column
+      maybe-aliased-col
+      (search.config/column-with-model-alias model maybe-aliased-col)
+      ;; This entity is missing the column, project a null for that column value. For Postgres and H2, cast it to the
+      ;; correct type, e.g.,
+      ;;
+      ;;    SELECT cast(NULL AS integer)
+      ;;
+      ;; For MySQL, this is not needed.
+      :else
+      [(when-not (= (mdb/db-type) :mysql)
+         [:cast nil col-type])
+       search-col])))</pre></td></tr><tr><td class="docs"><p>Add a WHERE clause to only return tables with the given DB id.
+Used in data picker for joins because we can't join across DB's.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- add-table-db-id-clause
+  [query :- ms/Map id :- [:maybe ms/PositiveInt]]
+  (if (some? id)
+    (sql.helpers/where query [:= id :db_id])
+    query))</pre></td></tr><tr><td class="docs"><p>Add a WHERE clause to only return cards with the given DB id.
+Used in data picker for joins because we can't join across DB's.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- add-card-db-id-clause
+  [query :- ms/Map id :- [:maybe ms/PositiveInt]]
+  (if (some? id)
+    (sql.helpers/where query [:= id :database_id])
+    query))</pre></td></tr><tr><td class="docs"><p>Add a <code>WHERE</code> clause to the query to only return Collections the Current User has access to; join against Collection,
+so we can return its <code>:name</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn add-collection-join-and-where-clauses
+  [honeysql-query :- :map
+   model          :- [:maybe :string]
+   search-ctx     :- SearchContext]
+  (let [collection-id-col      (case model
+                                 &quot;collection&quot;    :collection.id
+                                 &quot;search-index&quot; :search_index.collection_id
+                                 :collection_id)
+        permitted-clause       (search.permissions/permitted-collections-clause search-ctx collection-id-col)
+        personal-clause        (search.filter/personal-collections-where-clause search-ctx collection-id-col)]
+    (cond-&gt; honeysql-query
+      ;; add a JOIN against Collection *unless* the source table is already Collection
+      (not= model &quot;collection&quot;) (sql.helpers/left-join [:collection :collection] [:= collection-id-col :collection.id])
+      true                      (sql.helpers/where permitted-clause)
+      personal-clause           (sql.helpers/where personal-clause))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- replace-select :- :map
+  &quot;Replace a select from query that has alias is `target-alias` with [`with` `target-alias`] column, throw an error if
+  can't find the target select.
+  This works with the assumption that `query` contains a list of select from [[select-clause-for-model]],
+  and some of them are dummy column casted to the correct type.
+  This function then will replace the dummy column with alias is `target-alias` with the `with` column.&quot;
+  [query :- :map
+   target-alias :- :keyword
+   with :- :keyword]
+  (let [selects     (:select query)
+        idx         (first (keep-indexed (fn [index item]
+                                           (when (and (coll? item)
+                                                      (= (last item) target-alias))
+                                             index))
+                                         selects))
+        with-select [with target-alias]]
+    (if (some? idx)
+      (assoc query :select (m/replace-nth idx with-select selects))
+      (throw (ex-info &quot;Failed to replace selector&quot; {:status-code  400
+                                                    :target-alias target-alias
+                                                    :with         with})))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- with-last-editing-info :- :map
+  [query :- :map
+   model :- [:enum &quot;card&quot; &quot;dashboard&quot;]]
+  (-&gt; query
+      (replace-select :last_editor_id :r.user_id)
+      (replace-select :last_edited_at :r.timestamp)
+      (sql.helpers/left-join [:revision :r]
+                             [:and [:= :r.model_id (search.config/column-with-model-alias model :id)]
+                              [:= :r.most_recent true]
+                              [:= :r.model (search-model-&gt;revision-model model)]])))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- with-moderated-status :- :map
+  [query :- :map
+   model :- [:enum &quot;card&quot; &quot;dataset&quot; &quot;dashboard&quot;]]
+  (-&gt; query
+      (replace-select :moderated_status :mr.status)
+      (sql.helpers/left-join [:moderation_review :mr]
+                             [:and
+                              [:= :mr.moderated_item_type (if (= model &quot;dashboard&quot;) model &quot;card&quot;)]
+                              [:= :mr.moderated_item_id (search.config/column-with-model-alias model :id)]
+                              [:= :mr.most_recent true]])))</pre></td></tr><tr><td class="docs"><p>CASE expression that lets the results be ordered by whether they're an exact (non-fuzzy) match or not</p>
+</td><td class="codes"><pre class="brush: clojure">(defn order-clause
+  [query]
+  (let [match             (search.util/wildcard-match (search.util/normalize query))
+        columns-to-search (-&gt;&gt; all-search-columns
+                               (filter (fn [[_k v]] (= v :text)))
+                               (map first)
+                               (remove #{:collection_authority_level :moderated_status
+                                         :initial_sync_status :pk_ref :location
+                                         :collection_location}))
+        case-clauses      (as-&gt; columns-to-search &lt;&gt;
+                            (map (fn [col] [:like [:lower col] match]) &lt;&gt;)
+                            (interleave &lt;&gt; (repeat [:inline 0]))
+                            (concat &lt;&gt; [:else [:inline 1]]))]
+    [(into [:case] case-clauses)]))</pre></td></tr><tr><td class="docs"><p>Build a HoneySQL query with all the data relevant to a given model, padded
+with NULL fields to support UNION queries.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmulti search-query-for-model
+  {:arglists '([model search-context])}
+  (fn [model _] model))</pre></td></tr><tr><td class="docs"><p>The columns that can be searched for each model.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmulti searchable-columns
+  {:arglists '([model search-native-query])}
+  (fn [model _] model))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod searchable-columns :default
+  [_ _]
+  [:name])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod searchable-columns &quot;action&quot;
+  [_ search-native-query]
+  (cond-&gt; [:name
+           :description]
+    search-native-query
+    (conj :dataset_query)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod searchable-columns &quot;card&quot;
+  [_ search-native-query]
+  (cond-&gt; [:name
+           :description]
+    search-native-query
+    (conj :dataset_query)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod searchable-columns &quot;dataset&quot;
+  [_ search-native-query]
+  (searchable-columns &quot;card&quot; search-native-query))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod searchable-columns &quot;metric&quot;
+  [_ search-native-query]
+  (searchable-columns &quot;card&quot; search-native-query))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod searchable-columns &quot;dashboard&quot;
+  [_ _]
+  [:name
+   :description])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod searchable-columns &quot;page&quot;
+  [_ search-native-query]
+  (searchable-columns &quot;dashboard&quot; search-native-query))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod searchable-columns &quot;database&quot;
+  [_ _]
+  [:name
+   :description])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod searchable-columns &quot;table&quot;
+  [_ _]
+  [:name
+   :display_name
+   :description])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod searchable-columns &quot;indexed-entity&quot;
+  [_ _]
+  [:name])</pre></td></tr><tr><td class="docs"><p>Columns returned for all models.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private default-columns
+  [:id :name :description :archived :created_at :updated_at])</pre></td></tr><tr><td class="docs"><p>Case statement to return boolean values of <code>:bookmark</code> for Card, Collection and Dashboard.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private bookmark-col
+  [[:case [:not= :bookmark.id nil] true :else false] :bookmark])</pre></td></tr><tr><td class="docs"><p>Subselect to get the count of associated DashboardCards</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private dashboardcard-count-col
+  [{:select [:%count.*]
+    :from   [:report_dashboardcard]
+    :where  [:= :report_dashboardcard.card_id :card.id]}
+   :dashboardcard_count])</pre></td></tr><tr><td class="docs"><p>Columns containing information about the Table this model references. Returned for Metrics and Segments.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private table-columns
+  [:table_id
+   :created_at
+   [:table.db_id       :database_id]
+   [:table.schema      :table_schema]
+   [:table.name        :table_name]
+   [:table.description :table_description]])</pre></td></tr><tr><td class="docs"><p>The columns that will be returned by the query for <code>model</code>, excluding <code>:model</code>, which is added automatically.
+This is not guaranteed to be the final list of columns, new columns can be added by calling [[api.search/replace-select]]</p>
+</td><td class="codes"><pre class="brush: clojure">(defmulti columns-for-model
+  {:arglists '([model])}
+  (fn [model] model))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod columns-for-model &quot;action&quot;
+  [_]
+  (conj default-columns :model_id
+        :creator_id
+        [:model.collection_id        :collection_id]
+        [:model.id                   :model_id]
+        [:model.name                 :model_name]
+        [:query_action.database_id   :database_id]
+        [:query_action.dataset_query :dataset_query]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod columns-for-model &quot;card&quot;
+  [_]
+  (conj default-columns :collection_id :archived_directly :collection_position :dataset_query :display :creator_id
+        [:collection.name :collection_name]
+        [:collection.type :collection_type]
+        [:collection.location :collection_location]
+        [:collection.authority_level :collection_authority_level]
+        bookmark-col dashboardcard-count-col))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod columns-for-model &quot;indexed-entity&quot; [_]
+  [[:model-index-value.name     :name]
+   [:model-index-value.model_pk :id]
+   [:model-index.pk_ref         :pk_ref]
+   [:model-index.id             :model_index_id]
+   [:collection.name            :collection_name]
+   [:collection.type            :collection_type]
+   [:model.collection_id        :collection_id]
+   [:model.id                   :model_id]
+   [:model.name                 :model_name]
+   [:model.database_id          :database_id]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod columns-for-model &quot;dashboard&quot;
+  [_]
+  (conj default-columns :archived_directly :collection_id :collection_position :creator_id bookmark-col
+        [:collection.name :collection_name]
+        [:collection.type :collection_type]
+        [:collection.authority_level :collection_authority_level]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod columns-for-model &quot;database&quot;
+  [_]
+  [:id :name :description :created_at :updated_at :initial_sync_status])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod columns-for-model &quot;collection&quot;
+  [_]
+  (conj (remove #{:updated_at} default-columns)
+        [:collection.id :collection_id]
+        [:name :collection_name]
+        [:type :collection_type]
+        [:authority_level :collection_authority_level]
+        :archived_directly
+        :location
+        bookmark-col))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod columns-for-model &quot;segment&quot;
+  [_]
+  (concat default-columns table-columns [:creator_id]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod columns-for-model &quot;metric&quot;
+  [_]
+  (concat default-columns table-columns [:creator_id]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod columns-for-model &quot;table&quot;
+  [_]
+  [[:table.id :id]
+   [:table.name :name]
+   [:table.created_at :created_at]
+   [:table.display_name :display_name]
+   [:table.description :description]
+   [:table.updated_at :updated_at]
+   [:table.initial_sync_status :initial_sync_status]
+   [:table.id :table_id]
+   [:table.db_id :database_id]
+   [:table.schema :table_schema]
+   [:table.name :table_name]
+   [:table.description :table_description]
+   [:metabase_database.name :database_name]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- select-clause-for-model :- [:sequential HoneySQLColumn]
+  &quot;The search query uses a `union-all` which requires that there be the same number of columns in each of the segments
+  of the query. This function will take the columns for `model` and will inject constant `nil` values for any column
+  missing from `entity-columns` but found in `all-search-columns`.&quot;
+  [model :- SearchableModel]
+  (let [entity-columns                (columns-for-model model)
+        column-alias-&gt;honeysql-clause (m/index-by -&gt;column-alias entity-columns)
+        cols-or-nils                  (canonical-columns model column-alias-&gt;honeysql-clause)]
+    cols-or-nils))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- from-clause-for-model :- [:tuple [:tuple :keyword :keyword]]
+  [model :- SearchableModel]
+  (let [{:keys [db-model alias]} (get search.config/model-to-db-model model)]
+    [[(t2/table-name db-model) alias]]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- base-query-for-model :- [:map {:closed true}
+                                   [:select :any]
+                                   [:from :any]
+                                   [:where {:optional true} :any]
+                                   [:join {:optional true} :any]
+                                   [:left-join {:optional true} :any]]
+  &quot;Create a HoneySQL query map with `:select`, `:from`, and `:where` clauses for `model`, suitable for the `UNION ALL`
+  used in search.&quot;
+  [model :- SearchableModel context :- SearchContext]
+  (-&gt; {:select (select-clause-for-model model)
+       :from   (from-clause-for-model model)}
+      (search.in-place.filter/build-filters model context)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- shared-card-impl
+  [model :- :metabase.models.card/type
+   search-ctx :- SearchContext]
+  (-&gt; (base-query-for-model &quot;card&quot; search-ctx)
+      (sql.helpers/where [:= :card.type (name model)])
+      (sql.helpers/left-join [:card_bookmark :bookmark]
+                             [:and
+                              [:= :bookmark.card_id :card.id]
+                              [:= :bookmark.user_id (:current-user-id search-ctx)]])
+      (add-collection-join-and-where-clauses &quot;card&quot; search-ctx)
+      (add-card-db-id-clause (:table-db-id search-ctx))
+      (with-last-editing-info &quot;card&quot;)
+      (with-moderated-status &quot;card&quot;)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search-query-for-model &quot;action&quot;
+  [model search-ctx]
+  (-&gt; (base-query-for-model model search-ctx)
+      (sql.helpers/left-join [:report_card :model]
+                             [:= :model.id :action.model_id])
+      (sql.helpers/left-join :query_action
+                             [:= :query_action.action_id :action.id])
+      (add-collection-join-and-where-clauses model search-ctx)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search-query-for-model &quot;card&quot;
+  [_model search-ctx]
+  (shared-card-impl :question search-ctx))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search-query-for-model &quot;dataset&quot;
+  [_model search-ctx]
+  (-&gt; (shared-card-impl :model search-ctx)
+      (update :select (fn [columns]
+                        (cons [(h2x/literal &quot;dataset&quot;) :model] (rest columns))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search-query-for-model &quot;metric&quot;
+  [_model search-ctx]
+  (-&gt; (shared-card-impl :metric search-ctx)
+      (update :select (fn [columns]
+                        (cons [(h2x/literal &quot;metric&quot;) :model] (rest columns))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search-query-for-model &quot;collection&quot;
+  [model search-ctx]
+  (-&gt; (base-query-for-model &quot;collection&quot; search-ctx)
+      (sql.helpers/left-join [:collection_bookmark :bookmark]
+                             [:and
+                              [:= :bookmark.collection_id :collection.id]
+                              [:= :bookmark.user_id (:current-user-id search-ctx)]])
+      (add-collection-join-and-where-clauses model search-ctx)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search-query-for-model &quot;database&quot;
+  [model search-ctx]
+  (base-query-for-model model search-ctx))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search-query-for-model &quot;dashboard&quot;
+  [model search-ctx]
+  (-&gt; (base-query-for-model model search-ctx)
+      (sql.helpers/left-join [:dashboard_bookmark :bookmark]
+                             [:and
+                              [:= :bookmark.dashboard_id :dashboard.id]
+                              [:= :bookmark.user_id (:current-user-id search-ctx)]])
+      (with-moderated-status &quot;dashboard&quot;)
+      (add-collection-join-and-where-clauses model search-ctx)
+      (with-last-editing-info &quot;dashboard&quot;)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- add-model-index-permissions-clause
+  [query {:keys [current-user-id is-superuser?]}]
+  (sql.helpers/where
+   query
+   (collection/visible-collection-filter-clause
+    :collection_id
+    {}
+    {:current-user-id current-user-id
+     :is-superuser?   is-superuser?})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search-query-for-model &quot;indexed-entity&quot;
+  [model search-ctx]
+  (-&gt; (base-query-for-model model search-ctx)
+      (sql.helpers/left-join [:model_index :model-index]
+                             [:= :model-index.id :model-index-value.model_index_id])
+      (sql.helpers/left-join [:report_card :model] [:= :model-index.model_id :model.id])
+      (sql.helpers/left-join [:collection :collection] [:= :model.collection_id :collection.id])
+      (add-model-index-permissions-clause search-ctx)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search-query-for-model &quot;segment&quot;
+  [model search-ctx]
+  (-&gt; (base-query-for-model model search-ctx)
+      (sql.helpers/left-join [:metabase_table :table] [:= :segment.table_id :table.id])))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search-query-for-model &quot;table&quot;
+  [model {:keys [current-user-perms table-db-id], :as search-ctx}]
+  (when (seq current-user-perms)
+    (-&gt; (base-query-for-model model search-ctx)
+        (add-table-db-id-clause table-db-id)
+        (sql.helpers/left-join :metabase_database [:= :table.db_id :metabase_database.id]))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search.engine/model-set :search.engine/in-place
+  [search-ctx]
+  (let [model-queries (for [model (search.in-place.filter/search-context-&gt;applicable-models
+                                   ;; It's unclear why we don't use the existing :models
+                                   (assoc search-ctx :models search.config/all-models))]
+                        {:nest (sql.helpers/limit (search-query-for-model model search-ctx) 1)})
+        query         (when (pos-int? (count model-queries))
+                        {:select [:*]
+                         :from   [[{:union-all model-queries} :dummy_alias]]})]
+    (into #{} (map :model) (some-&gt; query mdb.query/query))))</pre></td></tr><tr><td class="docs"><p>Postgres 9 is not happy with the type munging it needs to do to make the union-all degenerate down to a trivial case
+of one model without errors. Therefore, we degenerate it down for it</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn full-search-query
+  [search-ctx :- SearchContext]
+  (let [models       (:models search-ctx)
+        order-clause [((fnil order-clause &quot;&quot;) (:search-string search-ctx))]]
+    (cond
+      (= (count models) 0)
+      {:select [nil]}
+      (= (count models) 1)
+      (merge (search-query-for-model (first models) search-ctx)
+             {:limit search.config/*db-max-results*})
+      :else
+      {:select   [:*]
+       :from     [[{:union-all (vec (for [model models
+                                          :let [query (search-query-for-model model search-ctx)]
+                                          :when (seq query)]
+                                      query))} :alias_is_required_by_sql_but_not_needed_here]]
+       :order-by order-clause
+       :limit    search.config/*db-max-results*})))</pre></td></tr><tr><td class="docs"><p>Return a reducible-query corresponding to searching the entities without an index.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmethod search.engine/results
+  :search.engine/in-place
+  [search-ctx]
+  (let [search-query (full-search-query search-ctx)]
+    (log/tracef &quot;Searching with query:\n%s\n%s&quot;
+                (u/pprint-to-str search-query)
+                (mdb.query/format-sql (first (mdb.query/compile search-query))))
+    (t2/reducible-query search-query)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search.engine/score :search.engine/in-place [search-ctx result]
+  (scoring/score-and-result result search-ctx))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

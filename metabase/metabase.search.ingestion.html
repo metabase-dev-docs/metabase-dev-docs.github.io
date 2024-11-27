@@ -2865,156 +2865,128 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.query-processor.streaming.csv" name="metabase.query-processor.streaming.csv"><h1 class="project-name">metabase.query-processor.streaming.csv</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.query-processor.streaming.csv
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.search.ingestion" name="metabase.search.ingestion"><h1 class="project-name">metabase.search.ingestion</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.search.ingestion
   (:require
-   [clojure.data.csv]
    [clojure.string :as str]
-   [java-time.api :as t]
+   [honey.sql.helpers :as sql.helpers]
    [medley.core :as m]
-   [metabase.formatter :as formatter]
-   [metabase.models.visualization-settings :as mb.viz]
-   [metabase.public-settings :as public-settings]
-   [metabase.query-processor.pivot.postprocess :as qp.pivot.postprocess]
-   [metabase.query-processor.streaming.common :as common]
-   [metabase.query-processor.streaming.interface :as qp.si]
+   [metabase.search.engine :as search.engine]
+   [metabase.search.spec :as search.spec]
+   [metabase.task :as task]
    [metabase.util :as u]
-   [metabase.util.date-2 :as u.date]
-   [metabase.util.performance :as perf])
-  (:import
-   (java.io BufferedWriter OutputStream OutputStreamWriter)
-   (java.nio.charset StandardCharsets)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod qp.si/stream-options :csv
-  ([_]
-   (qp.si/stream-options :csv &quot;query_result&quot;))
-  ([_ filename-prefix]
-   {:content-type              &quot;text/csv&quot;
-    :status                    200
-    :headers                   {&quot;Content-Disposition&quot; (format &quot;attachment; filename=\&quot;%s_%s.csv\&quot;&quot;
-                                                              (or filename-prefix &quot;query_result&quot;)
-                                                              (u.date/format (t/zoned-date-time)))}
-    :write-keepalive-newlines? false}))</pre></td></tr><tr><td class="docs"><p>Flag to enable/disable export post-processing of pivot tables.
-Disabled by default and should remain disabled until Issue #44556 is resolved and a clear plan is made.</p>
-
-<p>As a first step towards hollistically solving this issue: https://github.com/metabase/metabase/issues/44556
-(which is basically that very large pivot tables can crash the export process),
-The post processing is disabled completely.
-This should remain <code>false</code> until it's fixed
-TODO: rework this post-processing once there's a clear way in app to enable/disable it, or to select alternate download options</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *pivot-export-post-processing-enabled*
-  false)</pre></td></tr><tr><td class="docs"><p>Custom implementation of <code>clojure.data.csv/write-csv</code> with a more efficient quote? predicate and no support for
-options (we don't use them).</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- write-csv
-  [writer data]
-  (let [separator \,
-        quote \&quot;
-        quote? (fn [^String s]
-                 (let [n (.length s)]
-                   (loop [i 0]
-                     (if (&gt;= i n) false
-                         (let [ch (.charAt s (unchecked-int i))]
-                           (if (or (= ch \,) ;; separator
-                                   (= ch \&quot;) ;; quote
-                                   (= ch \return)
-                                   (= ch \newline))
-                             true
-                             (recur (unchecked-inc i))))))))
-        newline &quot;\n&quot;]
-    (#'clojure.data.csv/write-csv* writer data separator quote quote? newline)))</pre></td></tr><tr><td class="docs"><p>Rebind write-cell to avoid using clojure.core/escape. Instead, use String.replace with known arguments (we never
-change quote symbol anyway).</p>
-</td><td class="codes"><pre class="brush: clojure">(.bindRoot #'clojure.data.csv/write-cell
-           (fn [^java.io.Writer writer obj _ _ quote?]
-             (let [^String string (str obj)
-                   must-quote (quote? string)]
-               (when must-quote (.write writer &quot;\&quot;&quot;))
-               (.write writer (if must-quote
-                                (.replace string &quot;\&quot;&quot; &quot;\&quot;\&quot;&quot;)
-                                string))
-               (when must-quote (.write writer &quot;\&quot;&quot;)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- col-&gt;aggregation-fn-key
-  [{agg-name :name source :source}]
-  (when (= :aggregation source)
-    (let [agg-name (u/lower-case-en agg-name)]
-      (cond
-        (str/starts-with? agg-name &quot;sum&quot;)    :sum
-        (str/starts-with? agg-name &quot;avg&quot;)    :avg
-        (str/starts-with? agg-name &quot;min&quot;)    :min
-        (str/starts-with? agg-name &quot;max&quot;)    :max
-        (str/starts-with? agg-name &quot;count&quot;)  :count
-        (str/starts-with? agg-name &quot;stddev&quot;) :stddev))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod qp.si/streaming-results-writer :csv
-  [_ ^OutputStream os]
-  (let [writer             (BufferedWriter. (OutputStreamWriter. os StandardCharsets/UTF_8))
-        ordered-formatters (volatile! nil)
-        pivot-data         (atom nil)]
-    (reify qp.si/StreamingResultsWriter
-      (begin! [_ {{:keys [ordered-cols results_timezone format-rows? pivot-export-options pivot?]
-                   :or   {format-rows? true
-                          pivot?       false}} :data} viz-settings]
-        (let [col-names          (vec (common/column-titles ordered-cols (::mb.viz/column-settings viz-settings) format-rows?))
-              opts               (when (and pivot? pivot-export-options)
-                                   (-&gt; (merge {:pivot-rows []
-                                               :pivot-cols []
-                                               :measures   (mapv col-&gt;aggregation-fn-key ordered-cols)}
-                                              pivot-export-options)
-                                       (assoc :column-titles col-names)
-                                       (qp.pivot.postprocess/add-totals-settings viz-settings)
-                                       qp.pivot.postprocess/add-pivot-measures))
-              pivot-grouping-key (qp.pivot.postprocess/pivot-grouping-key col-names)]
-
-          ;; initialize the pivot-data
-          ;; If exporting pivoted, init the pivot data structure
-          ;; Otherwise, just store the pivot-grouping key index
-          (when (and pivot? pivot-export-options)
-            (reset! pivot-data (qp.pivot.postprocess/init-pivot opts)))
-          (when pivot-grouping-key
-            (swap! pivot-data assoc :pivot-grouping pivot-grouping-key))
-
-          (vreset! ordered-formatters
-                   (mapv #(formatter/create-formatter results_timezone % viz-settings format-rows?) ordered-cols))
-
-          ;; write the column names for non-pivot tables
-          (when (not opts)
-            (let [header (m/remove-nth (or pivot-grouping-key (inc (count col-names))) col-names)]
-              (write-csv writer [header])
-              (.flush writer)))))
-
-      (write-row! [_ row _row-num _ {:keys [output-order]}]
-        (let [ordered-row              (if output-order
-                                         (let [row-v (into [] row)]
-                                           (into [] (for [i output-order] (row-v i))))
-                                         row)
-              {:keys [pivot-grouping]} (or (:config @pivot-data) @pivot-data)
-              group                    (get ordered-row pivot-grouping)]
-          (if (and (contains? @pivot-data :config) (public-settings/enable-pivoted-exports))
-            ;; if we're processing a pivot result, we don't write it out yet, just aggregate it
-            ;; so that we can post process the data in finish!
-            (when (= qp.pivot.postprocess/NON_PIVOT_ROW_GROUP (int group))
-              (swap! pivot-data (fn [pivot-data] (qp.pivot.postprocess/add-row pivot-data ordered-row))))
-
-            (if group
-              (when (= qp.pivot.postprocess/NON_PIVOT_ROW_GROUP (int group))
-                (let [formatted-row (-&gt;&gt; (perf/mapv (fn [formatter r]
-                                                      (formatter (common/format-value r)))
-                                                    @ordered-formatters ordered-row)
-                                         (m/remove-nth pivot-grouping))]
-                  (write-csv writer [formatted-row])
-                  (.flush writer)))
-              (let [formatted-row (perf/mapv (fn [formatter r]
-                                               (formatter (common/format-value r)))
-                                             @ordered-formatters ordered-row)]
-                (write-csv writer [formatted-row])
-                (.flush writer))))))
-
-      (finish! [_ _]
-        ;; TODO -- not sure we need to flush both
-        (when (and (contains? @pivot-data :config) (public-settings/enable-pivoted-exports))
-          (doseq [xf-row (qp.pivot.postprocess/build-pivot-output @pivot-data @ordered-formatters)]
-            (write-csv writer [xf-row])))
-        (.flush writer)
-        (.flush os)
-        (.close writer)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+   [metabase.util.queue :as queue]
+   [toucan2.core :as t2]
+   [toucan2.realize :as t2.realize]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Currently we use a single queue, even if multiple engines are enabled, but may want to revisit this.</p>
+</td><td class="codes"><pre class="brush: clojure">(defonce ^:private queue (queue/delay-queue))</pre></td></tr><tr><td class="docs"><p>Perhaps this config move up somewhere more visible? Conversely, we may want to specialize it per engine.</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>The minimum time we must wait before updating the index. This delay exists to dedupe and batch changes efficiently.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private delay-ms
+  100)</pre></td></tr><tr><td class="docs"><p>The maximum number of update messages to process together.
+Note that each message can correspond to multiple documents, for example there would be 1 message for updating all
+the tables within a given database when it is renamed.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private batch-max
+  50)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- searchable-text [m]
+  ;; For now, we never index the native query content
+  (-&gt;&gt; (:search-terms (search.spec/spec (:model m)))
+       (keep m)
+       (map str/trim)
+       (remove str/blank?)
+       (str/join &quot; &quot;)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- display-data [m]
+  (select-keys m [:name :display_name :description :collection_name]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- -&gt;document [m]
+  (-&gt; m
+      (select-keys
+       (into [:model] search.spec/attr-columns))
+      (update :archived boolean)
+      (assoc
+       :display_data (display-data m)
+       :legacy_input m
+       :searchable_text (searchable-text m))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- attrs-&gt;select-items [attrs]
+  (for [[k v] attrs :when v]
+    (let [as (keyword (u/-&gt;snake_case_en (name k)))]
+      (if (true? v) as [v as]))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- spec-index-query*
+  [search-model]
+  (let [spec (search.spec/spec search-model)]
+    (u/remove-nils
+     {:select    (search.spec/qualify-columns :this
+                                              (concat
+                                               (:search-terms spec)
+                                               (mapcat (fn [k] (attrs-&gt;select-items (get spec k)))
+                                                       [:attrs :render-terms])))
+      :from      [[(t2/table-name (:model spec)) :this]]
+      :where     (:where spec [:inline [:= 1 1]])
+      :left-join (when (:joins spec)
+                   (into []
+                         cat
+                         (for [[join-alias [join-model join-condition]] (:joins spec)]
+                           [[(t2/table-name join-model) join-alias]
+                            join-condition])))})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^{:private true, :arglists '([search-model])} spec-index-query
+  (memoize spec-index-query*))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- spec-index-query-where [search-model where-clause]
+  (-&gt; (spec-index-query search-model)
+      (sql.helpers/where where-clause)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- spec-index-reducible [search-model &amp; [where-clause]]
+  (-&gt;&gt; (spec-index-query-where search-model where-clause)
+       t2/reducible-query
+       (eduction (map #(assoc % :model search-model)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- search-items-reducible []
+  (reduce u/rconcat [] (map spec-index-reducible (keys (methods search.spec/spec)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- query-&gt;documents [query-reducible]
+  (-&gt;&gt; query-reducible
+       (eduction
+        (comp
+         (map t2.realize/realize)
+         ;; It's possible to get redundant entries from the indexed-entities table.
+         ;; We remove duplicates to avoid creating invalid insert statements.
+         (m/distinct-by (juxt :id :model))
+         (map -&gt;document)))))</pre></td></tr><tr><td class="docs"><p>Go over all searchable items and populate the index with them.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn populate-index!
+  [engine]
+  (search.engine/consume! engine (query-&gt;documents (search-items-reducible))))</pre></td></tr><tr><td class="docs"><p>Force ingestion to happen immediately, on the same thread.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *force-sync*
+  false)</pre></td></tr><tr><td class="docs"><p>Used by tests to disable updates, for example when testing migrations, where the schema is wrong.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *disable-updates*
+  false)</pre></td></tr><tr><td class="docs"><p>Update all active engines' indexes with the given documents</p>
+</td><td class="codes"><pre class="brush: clojure">(defn consume!
+  [documents-reducible]
+  (when-let [engines (seq (search.engine/active-engines))]
+    (if (= 1 (count engines))
+      (search.engine/consume! (first engines) documents-reducible)
+      ;; TODO um, multiplexing over the reducible awkwardly feels strange. We at least use a magic number for now.
+      (doseq [batch (eduction (partition-all 150) documents-reducible)
+              e     engines]
+        (search.engine/consume! e batch)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- bulk-ingest! [updates]
+  (-&gt;&gt; (for [[search-model where-clauses] (u/group-by first second updates)]
+         (spec-index-reducible search-model (into [:or] (distinct where-clauses))))
+       ;; init collection is only for clj-kondo, as we know that the list is non-empty
+       (reduce u/rconcat [])
+       query-&gt;documents
+       consume!))</pre></td></tr><tr><td class="docs"><p>Wait up to 'delay-ms' for a queued batch to become ready, and process the batch if we get one.
+Returns the number of search index entries that get updated as a result.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn process-next-batch!
+  [first-delay-ms next-delay-ms]
+  (when-let [queued-updates (queue/take-delayed-batch! queue batch-max first-delay-ms next-delay-ms)]
+    (bulk-ingest! queued-updates)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- index-worker-exists? []
+  (task/job-exists? @(requiring-resolve 'metabase.task.search-index/update-job-key)))</pre></td></tr><tr><td class="docs"><p>Update or create any search index entries related to the given updates.
+Will be async if the worker exists, otherwise it will be done synchronously on the calling thread.
+Can also be forced to run synchronously for testing.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn ingest-maybe-async!
+  ([updates]
+   (ingest-maybe-async! updates (or *force-sync* (not (index-worker-exists?)))))
+  ([updates sync?]
+   (when-not *disable-updates*
+     (if sync?
+       (bulk-ingest! updates)
+       (doseq [update updates]
+         (queue/put-with-delay! queue delay-ms update))))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

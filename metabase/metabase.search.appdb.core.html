@@ -2865,156 +2865,94 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.query-processor.streaming.csv" name="metabase.query-processor.streaming.csv"><h1 class="project-name">metabase.query-processor.streaming.csv</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.query-processor.streaming.csv
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.search.appdb.core" name="metabase.search.appdb.core"><h1 class="project-name">metabase.search.appdb.core</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.search.appdb.core
   (:require
-   [clojure.data.csv]
-   [clojure.string :as str]
-   [java-time.api :as t]
-   [medley.core :as m]
-   [metabase.formatter :as formatter]
-   [metabase.models.visualization-settings :as mb.viz]
+   [cheshire.core :as json]
+   [honey.sql.helpers :as sql.helpers]
+   [metabase.db :as mdb]
    [metabase.public-settings :as public-settings]
-   [metabase.query-processor.pivot.postprocess :as qp.pivot.postprocess]
-   [metabase.query-processor.streaming.common :as common]
-   [metabase.query-processor.streaming.interface :as qp.si]
+   [metabase.search.appdb.index :as search.index]
+   [metabase.search.appdb.scoring :as search.scoring]
+   [metabase.search.appdb.specialization.postgres :as specialization.postgres]
+   [metabase.search.config :as search.config]
+   [metabase.search.engine :as search.engine]
+   [metabase.search.filter :as search.filter]
+   [metabase.search.ingestion :as search.ingestion]
+   [metabase.search.permissions :as search.permissions]
    [metabase.util :as u]
-   [metabase.util.date-2 :as u.date]
-   [metabase.util.performance :as perf])
+   [toucan2.core :as t2])
   (:import
-   (java.io BufferedWriter OutputStream OutputStreamWriter)
-   (java.nio.charset StandardCharsets)))</pre></td></tr><tr><td class="docs">
+   (java.time OffsetDateTime)))</pre></td></tr><tr><td class="docs"><p>Register the multimethods for each specialization</p>
+</td><td class="codes"><pre class="brush: clojure">(comment
+  specialization.postgres/keep-me)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod qp.si/stream-options :csv
-  ([_]
-   (qp.si/stream-options :csv &quot;query_result&quot;))
-  ([_ filename-prefix]
-   {:content-type              &quot;text/csv&quot;
-    :status                    200
-    :headers                   {&quot;Content-Disposition&quot; (format &quot;attachment; filename=\&quot;%s_%s.csv\&quot;&quot;
-                                                              (or filename-prefix &quot;query_result&quot;)
-                                                              (u.date/format (t/zoned-date-time)))}
-    :write-keepalive-newlines? false}))</pre></td></tr><tr><td class="docs"><p>Flag to enable/disable export post-processing of pivot tables.
-Disabled by default and should remain disabled until Issue #44556 is resolved and a clear plan is made.</p>
-
-<p>As a first step towards hollistically solving this issue: https://github.com/metabase/metabase/issues/44556
-(which is basically that very large pivot tables can crash the export process),
-The post processing is disabled completely.
-This should remain <code>false</code> until it's fixed
-TODO: rework this post-processing once there's a clear way in app to enable/disable it, or to select alternate download options</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *pivot-export-post-processing-enabled*
-  false)</pre></td></tr><tr><td class="docs"><p>Custom implementation of <code>clojure.data.csv/write-csv</code> with a more efficient quote? predicate and no support for
-options (we don't use them).</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- write-csv
-  [writer data]
-  (let [separator \,
-        quote \&quot;
-        quote? (fn [^String s]
-                 (let [n (.length s)]
-                   (loop [i 0]
-                     (if (&gt;= i n) false
-                         (let [ch (.charAt s (unchecked-int i))]
-                           (if (or (= ch \,) ;; separator
-                                   (= ch \&quot;) ;; quote
-                                   (= ch \return)
-                                   (= ch \newline))
-                             true
-                             (recur (unchecked-inc i))))))))
-        newline &quot;\n&quot;]
-    (#'clojure.data.csv/write-csv* writer data separator quote quote? newline)))</pre></td></tr><tr><td class="docs"><p>Rebind write-cell to avoid using clojure.core/escape. Instead, use String.replace with known arguments (we never
-change quote symbol anyway).</p>
-</td><td class="codes"><pre class="brush: clojure">(.bindRoot #'clojure.data.csv/write-cell
-           (fn [^java.io.Writer writer obj _ _ quote?]
-             (let [^String string (str obj)
-                   must-quote (quote? string)]
-               (when must-quote (.write writer &quot;\&quot;&quot;))
-               (.write writer (if must-quote
-                                (.replace string &quot;\&quot;&quot; &quot;\&quot;\&quot;&quot;)
-                                string))
-               (when must-quote (.write writer &quot;\&quot;&quot;)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- col-&gt;aggregation-fn-key
-  [{agg-name :name source :source}]
-  (when (= :aggregation source)
-    (let [agg-name (u/lower-case-en agg-name)]
-      (cond
-        (str/starts-with? agg-name &quot;sum&quot;)    :sum
-        (str/starts-with? agg-name &quot;avg&quot;)    :avg
-        (str/starts-with? agg-name &quot;min&quot;)    :min
-        (str/starts-with? agg-name &quot;max&quot;)    :max
-        (str/starts-with? agg-name &quot;count&quot;)  :count
-        (str/starts-with? agg-name &quot;stddev&quot;) :stddev))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod qp.si/streaming-results-writer :csv
-  [_ ^OutputStream os]
-  (let [writer             (BufferedWriter. (OutputStreamWriter. os StandardCharsets/UTF_8))
-        ordered-formatters (volatile! nil)
-        pivot-data         (atom nil)]
-    (reify qp.si/StreamingResultsWriter
-      (begin! [_ {{:keys [ordered-cols results_timezone format-rows? pivot-export-options pivot?]
-                   :or   {format-rows? true
-                          pivot?       false}} :data} viz-settings]
-        (let [col-names          (vec (common/column-titles ordered-cols (::mb.viz/column-settings viz-settings) format-rows?))
-              opts               (when (and pivot? pivot-export-options)
-                                   (-&gt; (merge {:pivot-rows []
-                                               :pivot-cols []
-                                               :measures   (mapv col-&gt;aggregation-fn-key ordered-cols)}
-                                              pivot-export-options)
-                                       (assoc :column-titles col-names)
-                                       (qp.pivot.postprocess/add-totals-settings viz-settings)
-                                       qp.pivot.postprocess/add-pivot-measures))
-              pivot-grouping-key (qp.pivot.postprocess/pivot-grouping-key col-names)]
-
-          ;; initialize the pivot-data
-          ;; If exporting pivoted, init the pivot data structure
-          ;; Otherwise, just store the pivot-grouping key index
-          (when (and pivot? pivot-export-options)
-            (reset! pivot-data (qp.pivot.postprocess/init-pivot opts)))
-          (when pivot-grouping-key
-            (swap! pivot-data assoc :pivot-grouping pivot-grouping-key))
-
-          (vreset! ordered-formatters
-                   (mapv #(formatter/create-formatter results_timezone % viz-settings format-rows?) ordered-cols))
-
-          ;; write the column names for non-pivot tables
-          (when (not opts)
-            (let [header (m/remove-nth (or pivot-grouping-key (inc (count col-names))) col-names)]
-              (write-csv writer [header])
-              (.flush writer)))))
-
-      (write-row! [_ row _row-num _ {:keys [output-order]}]
-        (let [ordered-row              (if output-order
-                                         (let [row-v (into [] row)]
-                                           (into [] (for [i output-order] (row-v i))))
-                                         row)
-              {:keys [pivot-grouping]} (or (:config @pivot-data) @pivot-data)
-              group                    (get ordered-row pivot-grouping)]
-          (if (and (contains? @pivot-data :config) (public-settings/enable-pivoted-exports))
-            ;; if we're processing a pivot result, we don't write it out yet, just aggregate it
-            ;; so that we can post process the data in finish!
-            (when (= qp.pivot.postprocess/NON_PIVOT_ROW_GROUP (int group))
-              (swap! pivot-data (fn [pivot-data] (qp.pivot.postprocess/add-row pivot-data ordered-row))))
-
-            (if group
-              (when (= qp.pivot.postprocess/NON_PIVOT_ROW_GROUP (int group))
-                (let [formatted-row (-&gt;&gt; (perf/mapv (fn [formatter r]
-                                                      (formatter (common/format-value r)))
-                                                    @ordered-formatters ordered-row)
-                                         (m/remove-nth pivot-grouping))]
-                  (write-csv writer [formatted-row])
-                  (.flush writer)))
-              (let [formatted-row (perf/mapv (fn [formatter r]
-                                               (formatter (common/format-value r)))
-                                             @ordered-formatters ordered-row)]
-                (write-csv writer [formatted-row])
-                (.flush writer))))))
-
-      (finish! [_ _]
-        ;; TODO -- not sure we need to flush both
-        (when (and (contains? @pivot-data :config) (public-settings/enable-pivoted-exports))
-          (doseq [xf-row (qp.pivot.postprocess/build-pivot-output @pivot-data @ordered-formatters)]
-            (write-csv writer [xf-row])))
-        (.flush writer)
-        (.flush os)
-        (.close writer)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+</td><td class="codes"><pre class="brush: clojure">(defmethod search.engine/supported-engine? :search.engine/fulltext [_]
+  (and (public-settings/experimental-fulltext-search-enabled)
+       (= (mdb/db-type) :postgres)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- parse-datetime [s]
+  (when s (OffsetDateTime/parse s)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- rehydrate [weights active-scorers index-row]
+  (-&gt; (merge
+       (json/parse-string (:legacy_input index-row) keyword)
+       (select-keys index-row [:pinned]))
+      (assoc
+       :score      (:total_score index-row 1)
+       :all-scores (mapv (fn [k]
+                           ;; we shouldn't get null scores, but just in case (i.e., because there are bugs)
+                           (let [score  (or (get index-row k) 0)
+                                 weight (or (weights k) 0)]
+                             {:score        score
+                              :name         k
+                              :weight       weight
+                              :contribution (* weight score)}))
+                         active-scorers))
+      (update :created_at parse-datetime)
+      (update :updated_at parse-datetime)
+      (update :last_edited_at parse-datetime)))</pre></td></tr><tr><td class="docs"><p>Add a <code>WHERE</code> clause to the query to only return Collections the Current User has access to; join against Collection,
+so we can return its <code>:name</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn add-collection-join-and-where-clauses
+  [search-ctx qry]
+  (let [collection-id-col :search_index.collection_id
+        permitted-clause  (search.permissions/permitted-collections-clause search-ctx collection-id-col)
+        personal-clause   (search.filter/personal-collections-where-clause search-ctx collection-id-col)]
+    (cond-&gt; qry
+      true (sql.helpers/left-join [:collection :collection] [:= collection-id-col :collection.id])
+      true (sql.helpers/where permitted-clause)
+      personal-clause (sql.helpers/where personal-clause))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search.engine/results :search.engine/fulltext
+  [{:keys [search-string] :as search-ctx}]
+  (when-not @#'search.index/initialized?
+    (throw (ex-info &quot;Search index is not initialized. Use [[init!]] to ensure it exists.&quot;
+                    {:search-engine :postgres})))
+  (let [weights (search.config/weights search-ctx)
+        scorers (search.scoring/scorers search-ctx)]
+    (-&gt;&gt; (search.index/search-query search-string search-ctx [:legacy_input])
+         (add-collection-join-and-where-clauses search-ctx)
+         (search.scoring/with-scores search-ctx scorers)
+         (search.filter/with-filters search-ctx)
+         t2/query
+         (map (partial rehydrate weights (keys scorers))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search.engine/model-set :search.engine/fulltext
+  [search-ctx]
+  ;; We ignore any current models filter
+  (let [search-ctx (assoc search-ctx :models search.config/all-models)]
+    (-&gt;&gt; (search.index/search-query (:search-string search-ctx) search-ctx [[[:distinct :model] :model]])
+         (add-collection-join-and-where-clauses search-ctx)
+         (search.filter/with-filters search-ctx)
+         t2/query
+         (into #{} (map :model)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search.engine/init! :search.engine/fulltext
+  [&amp; {:keys [force-reset? populate?] :or {populate? true}}]
+  (search.index/ensure-ready! force-reset?)
+  (when populate?
+    (search.ingestion/populate-index! :search.engine/fulltext)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search.engine/reindex! :search.engine/fulltext
+  []
+  (search.index/ensure-ready! false)
+  (search.index/maybe-create-pending!)
+  (u/prog1 (search.ingestion/populate-index! :search.engine/fulltext)
+    (search.index/activate-pending!)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

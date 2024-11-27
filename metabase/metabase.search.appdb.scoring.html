@@ -2865,156 +2865,156 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.query-processor.streaming.csv" name="metabase.query-processor.streaming.csv"><h1 class="project-name">metabase.query-processor.streaming.csv</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.query-processor.streaming.csv
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.search.appdb.scoring" name="metabase.search.appdb.scoring"><h1 class="project-name">metabase.search.appdb.scoring</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.search.appdb.scoring
   (:require
-   [clojure.data.csv]
-   [clojure.string :as str]
-   [java-time.api :as t]
-   [medley.core :as m]
-   [metabase.formatter :as formatter]
-   [metabase.models.visualization-settings :as mb.viz]
-   [metabase.public-settings :as public-settings]
-   [metabase.query-processor.pivot.postprocess :as qp.pivot.postprocess]
-   [metabase.query-processor.streaming.common :as common]
-   [metabase.query-processor.streaming.interface :as qp.si]
+   [clojure.core.memoize :as memoize]
+   [honey.sql.helpers :as sql.helpers]
+   [metabase.config :as config]
+   [metabase.public-settings.premium-features :refer [defenterprise]]
+   [metabase.search.appdb.index :as search.index]
+   [metabase.search.config :as search.config]
    [metabase.util :as u]
-   [metabase.util.date-2 :as u.date]
-   [metabase.util.performance :as perf])
-  (:import
-   (java.io BufferedWriter OutputStream OutputStreamWriter)
-   (java.nio.charset StandardCharsets)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod qp.si/stream-options :csv
-  ([_]
-   (qp.si/stream-options :csv &quot;query_result&quot;))
-  ([_ filename-prefix]
-   {:content-type              &quot;text/csv&quot;
-    :status                    200
-    :headers                   {&quot;Content-Disposition&quot; (format &quot;attachment; filename=\&quot;%s_%s.csv\&quot;&quot;
-                                                              (or filename-prefix &quot;query_result&quot;)
-                                                              (u.date/format (t/zoned-date-time)))}
-    :write-keepalive-newlines? false}))</pre></td></tr><tr><td class="docs"><p>Flag to enable/disable export post-processing of pivot tables.
-Disabled by default and should remain disabled until Issue #44556 is resolved and a clear plan is made.</p>
-
-<p>As a first step towards hollistically solving this issue: https://github.com/metabase/metabase/issues/44556
-(which is basically that very large pivot tables can crash the export process),
-The post processing is disabled completely.
-This should remain <code>false</code> until it's fixed
-TODO: rework this post-processing once there's a clear way in app to enable/disable it, or to select alternate download options</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *pivot-export-post-processing-enabled*
-  false)</pre></td></tr><tr><td class="docs"><p>Custom implementation of <code>clojure.data.csv/write-csv</code> with a more efficient quote? predicate and no support for
-options (we don't use them).</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- write-csv
-  [writer data]
-  (let [separator \,
-        quote \&quot;
-        quote? (fn [^String s]
-                 (let [n (.length s)]
-                   (loop [i 0]
-                     (if (&gt;= i n) false
-                         (let [ch (.charAt s (unchecked-int i))]
-                           (if (or (= ch \,) ;; separator
-                                   (= ch \&quot;) ;; quote
-                                   (= ch \return)
-                                   (= ch \newline))
-                             true
-                             (recur (unchecked-inc i))))))))
-        newline &quot;\n&quot;]
-    (#'clojure.data.csv/write-csv* writer data separator quote quote? newline)))</pre></td></tr><tr><td class="docs"><p>Rebind write-cell to avoid using clojure.core/escape. Instead, use String.replace with known arguments (we never
-change quote symbol anyway).</p>
-</td><td class="codes"><pre class="brush: clojure">(.bindRoot #'clojure.data.csv/write-cell
-           (fn [^java.io.Writer writer obj _ _ quote?]
-             (let [^String string (str obj)
-                   must-quote (quote? string)]
-               (when must-quote (.write writer &quot;\&quot;&quot;))
-               (.write writer (if must-quote
-                                (.replace string &quot;\&quot;&quot; &quot;\&quot;\&quot;&quot;)
-                                string))
-               (when must-quote (.write writer &quot;\&quot;&quot;)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- col-&gt;aggregation-fn-key
-  [{agg-name :name source :source}]
-  (when (= :aggregation source)
-    (let [agg-name (u/lower-case-en agg-name)]
-      (cond
-        (str/starts-with? agg-name &quot;sum&quot;)    :sum
-        (str/starts-with? agg-name &quot;avg&quot;)    :avg
-        (str/starts-with? agg-name &quot;min&quot;)    :min
-        (str/starts-with? agg-name &quot;max&quot;)    :max
-        (str/starts-with? agg-name &quot;count&quot;)  :count
-        (str/starts-with? agg-name &quot;stddev&quot;) :stddev))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod qp.si/streaming-results-writer :csv
-  [_ ^OutputStream os]
-  (let [writer             (BufferedWriter. (OutputStreamWriter. os StandardCharsets/UTF_8))
-        ordered-formatters (volatile! nil)
-        pivot-data         (atom nil)]
-    (reify qp.si/StreamingResultsWriter
-      (begin! [_ {{:keys [ordered-cols results_timezone format-rows? pivot-export-options pivot?]
-                   :or   {format-rows? true
-                          pivot?       false}} :data} viz-settings]
-        (let [col-names          (vec (common/column-titles ordered-cols (::mb.viz/column-settings viz-settings) format-rows?))
-              opts               (when (and pivot? pivot-export-options)
-                                   (-&gt; (merge {:pivot-rows []
-                                               :pivot-cols []
-                                               :measures   (mapv col-&gt;aggregation-fn-key ordered-cols)}
-                                              pivot-export-options)
-                                       (assoc :column-titles col-names)
-                                       (qp.pivot.postprocess/add-totals-settings viz-settings)
-                                       qp.pivot.postprocess/add-pivot-measures))
-              pivot-grouping-key (qp.pivot.postprocess/pivot-grouping-key col-names)]
-
-          ;; initialize the pivot-data
-          ;; If exporting pivoted, init the pivot data structure
-          ;; Otherwise, just store the pivot-grouping key index
-          (when (and pivot? pivot-export-options)
-            (reset! pivot-data (qp.pivot.postprocess/init-pivot opts)))
-          (when pivot-grouping-key
-            (swap! pivot-data assoc :pivot-grouping pivot-grouping-key))
-
-          (vreset! ordered-formatters
-                   (mapv #(formatter/create-formatter results_timezone % viz-settings format-rows?) ordered-cols))
-
-          ;; write the column names for non-pivot tables
-          (when (not opts)
-            (let [header (m/remove-nth (or pivot-grouping-key (inc (count col-names))) col-names)]
-              (write-csv writer [header])
-              (.flush writer)))))
-
-      (write-row! [_ row _row-num _ {:keys [output-order]}]
-        (let [ordered-row              (if output-order
-                                         (let [row-v (into [] row)]
-                                           (into [] (for [i output-order] (row-v i))))
-                                         row)
-              {:keys [pivot-grouping]} (or (:config @pivot-data) @pivot-data)
-              group                    (get ordered-row pivot-grouping)]
-          (if (and (contains? @pivot-data :config) (public-settings/enable-pivoted-exports))
-            ;; if we're processing a pivot result, we don't write it out yet, just aggregate it
-            ;; so that we can post process the data in finish!
-            (when (= qp.pivot.postprocess/NON_PIVOT_ROW_GROUP (int group))
-              (swap! pivot-data (fn [pivot-data] (qp.pivot.postprocess/add-row pivot-data ordered-row))))
-
-            (if group
-              (when (= qp.pivot.postprocess/NON_PIVOT_ROW_GROUP (int group))
-                (let [formatted-row (-&gt;&gt; (perf/mapv (fn [formatter r]
-                                                      (formatter (common/format-value r)))
-                                                    @ordered-formatters ordered-row)
-                                         (m/remove-nth pivot-grouping))]
-                  (write-csv writer [formatted-row])
-                  (.flush writer)))
-              (let [formatted-row (perf/mapv (fn [formatter r]
-                                               (formatter (common/format-value r)))
-                                             @ordered-formatters ordered-row)]
-                (write-csv writer [formatted-row])
-                (.flush writer))))))
-
-      (finish! [_ _]
-        ;; TODO -- not sure we need to flush both
-        (when (and (contains? @pivot-data :config) (public-settings/enable-pivoted-exports))
-          (doseq [xf-row (qp.pivot.postprocess/build-pivot-output @pivot-data @ordered-formatters)]
-            (write-csv writer [xf-row])))
-        (.flush writer)
-        (.flush os)
-        (.close writer)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private seconds-in-a-day 86400)</pre></td></tr><tr><td class="docs"><p>Prefer it when a (potentially nullable) boolean is true.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn truthy
+  [column]
+  [:coalesce [:cast column :integer] [:inline 0]])</pre></td></tr><tr><td class="docs"><p>Prefer items whose value is larger, up to some saturation point. Items beyond that point are equivalent.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn size
+  [column ceiling]
+  [:least
+   [:inline 1]
+   [:/
+    [:coalesce column [:inline 0]]
+    ;; protect against div / 0
+    [:greatest
+     [:inline 1]
+     (if (number? ceiling)
+       [:inline (double ceiling)]
+       [:cast ceiling :float])]]])</pre></td></tr><tr><td class="docs"><p>Score at item based on the duration between two dates, where less is better.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn inverse-duration
+  [from-column to-column ceiling-in-days]
+  (let [ceiling [:inline ceiling-in-days]]
+    [:/
+     [:greatest
+      [:- ceiling
+       [:/
+        ;; Use seconds for granularity in the fraction.
+        ;; TODO will probably need to specialize this based on (mdb/db-type)
+        [[:raw &quot;EXTRACT(epoch FROM (&quot; [:- to-column from-column] [:raw &quot;))&quot;]]]
+        [:inline (double seconds-in-a-day)]]]
+      [:inline 0]]
+     ceiling]))</pre></td></tr><tr><td class="docs"><p>Prefer items whose value is earlier in some list.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn idx-rank
+  [idx-col len]
+  (if (pos? len)
+    [:/ [:- [:inline (dec len)] idx-col] [:inline (double len)]]
+    [:inline 1]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- sum-columns [column-names]
+  (if (seq column-names)
+    (reduce (fn [expr col] [:+ expr col])
+            (first column-names)
+            (rest column-names))
+    [:inline 1]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- weighted-score [context [column-alias expr]]
+  [:* [:inline (search.config/weight context column-alias)] expr])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- select-items [context scorers]
+  (concat
+   (for [[column-alias expr] scorers]
+     [expr column-alias])
+   [[(sum-columns (map (partial weighted-score context) scorers))
+     :total_score]]))</pre></td></tr><tr><td class="docs"><p>See https://www.postgresql.org/docs/current/textsearch-controls.html#TEXTSEARCH-RANKING
+ 0 (the default) ignores the document length
+ 1 divides the rank by 1 + the logarithm of the document length
+ 2 divides the rank by the document length
+ 4 divides the rank by the mean harmonic distance between extents (this is implemented only by ts<em>rank</em>cd)
+ 8 divides the rank by the number of unique words in document
+16 divides the rank by 1 + the logarithm of the number of unique words in document
+32 divides the rank by itself + 1</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ts-rank-normalization 0)</pre></td></tr><tr><td class="docs"><p>TODO move these to the spec definitions</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private bookmarked-models [:card :collection :dashboard])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private bookmark-score-expr
+  (let [match-clause (fn [m] [[:and
+                               [:= :search_index.model [:inline m]]
+                               [:!= nil (keyword (str m &quot;_bookmark.&quot; m &quot;_id&quot;))]]
+                              [:inline 1]])]
+    (into [:case] (concat (mapcat (comp match-clause name) bookmarked-models) [:else [:inline 0]]))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- user-recency-expr [{:keys [current-user-id]}]
+  {:select [[[:max :recent_views.timestamp] :last_viewed_at]]
+   :from   [:recent_views]
+   :where  [:and
+            [:= :recent_views.user_id current-user-id]
+            [:= :recent_views.model_id :search_index.model_id]
+            [:= :recent_views.model
+             [:case
+              [:= :search_index.model [:inline &quot;dataset&quot;]] [:inline &quot;card&quot;]
+              [:= :search_index.model [:inline &quot;metric&quot;]] [:inline &quot;card&quot;]
+              :else :search_index.model]]]})</pre></td></tr><tr><td class="docs"><p>TODO this will need to be abstracted for other appdbs</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- view-count-percentile-query [p-value]
+  (let [expr [:raw &quot;percentile_cont(&quot; [:lift p-value] &quot;) WITHIN GROUP (ORDER BY view_count)&quot;]]
+    {:select   [:search_index.model [expr :vcp]]
+     :from     [[search.index/*active-table* :search_index]]
+     :group-by [:search_index.model]
+     :having   [:is-not expr nil]}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- view-count-percentiles*
+  [p-value]
+  (into {} (for [{:keys [model vcp]} (t2/query (view-count-percentile-query p-value))]
+             [(keyword model) vcp])))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^{:private true
+       :arglists '([p-value])}
+  view-count-percentiles
+  (if config/is-prod?
+    (memoize/ttl view-count-percentiles*
+                 :ttl/threshold (u/hours-&gt;ms 1))
+    view-count-percentiles*))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- view-count-expr [percentile]
+  (let [views (view-count-percentiles percentile)
+        cases (for [[sm v] views]
+                [[:= :search_index.model [:inline (name sm)]] (max v 1)])]
+    (size :view_count (if (seq cases)
+                        (into [:case] cat cases)
+                        1))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- model-rank-exp [{:keys [context]}]
+  (let [search-order search.config/models-search-order
+        n            (double (count search-order))
+        cases        (map-indexed (fn [i sm]
+                                    [[:= :search_index.model sm]
+                                     (or (search.config/scorer-param context :model sm)
+                                         [:inline (/ (- n i) n)])])
+                                  search-order)]
+    (-&gt; (into [:case] cat (concat cases))
+        ;; if you're not listed, get a very poor score
+        (into [:else [:inline 0.01]]))))</pre></td></tr><tr><td class="docs"><p>The default constituents of the search ranking scores.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn base-scorers
+  [search-ctx]
+  {:text         [:ts_rank :search_vector :query [:inline ts-rank-normalization]]
+   :view-count   (view-count-expr search.config/view-count-scaling-percentile)
+   :pinned       (truthy :pinned)
+   :bookmarked   bookmark-score-expr
+   :recency      (inverse-duration [:coalesce :last_viewed_at :model_updated_at] [:now] search.config/stale-time-in-days)
+   :user-recency (inverse-duration (user-recency-expr search-ctx) [:now] search.config/stale-time-in-days)
+   :dashboard    (size :dashboardcard_count search.config/dashboard-count-ceiling)
+   :model        (model-rank-exp search-ctx)})</pre></td></tr><tr><td class="docs"><p>Return the select-item expressions used to calculate the score for each search result.</p>
+</td><td class="codes"><pre class="brush: clojure">(defenterprise scorers
+  metabase-enterprise.search.scoring
+  [search-ctx]
+  (base-scorers search-ctx))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- scorer-select-items [search-ctx scorers] (select-items (:context search-ctx) scorers))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- bookmark-join [model user-id]
+  (let [model-name (name model)
+        table-name (str model-name &quot;_bookmark&quot;)]
+    [(keyword table-name)
+     [:and
+      [:= :search_index.model [:inline model-name]]
+      [:= (keyword (str table-name &quot;.user_id&quot;)) user-id]
+      [:= :search_index.model_id (keyword (str table-name &quot;.&quot; model-name &quot;_id&quot;))]]]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- join-bookmarks [qry user-id]
+  (apply sql.helpers/left-join qry (mapcat #(bookmark-join % user-id) bookmarked-models)))</pre></td></tr><tr><td class="docs"><p>Add a bunch of SELECT columns for the individual and total scores, and a corresponding ORDER BY.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn with-scores
+  [{:keys [current-user-id] :as search-ctx} scorers qry]
+  (-&gt; (apply sql.helpers/select qry (scorer-select-items search-ctx scorers))
+      (join-bookmarks current-user-id)
+      (sql.helpers/order-by [:total_score :desc])))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
