@@ -2909,11 +2909,13 @@ net.brehaut.ClojureTools = (function (SH) {
     (doseq [stmt (specialization/post-create-statements idx-prefix table-name)]
       (t2/query stmt))))</pre></td></tr><tr><td class="docs"><p>Create a search index table.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn maybe-create-pending!
-  []
-  (when (not @reindexing?)
-    (when-not (exists? pending-table)
-      (create-table! pending-table))
-    (reset! reindexing? true)))</pre></td></tr><tr><td class="docs"><p>Make the pending index active if it exists. Returns true if it did so.</p>
+  ([]
+   (when (not @reindexing?)
+     (maybe-create-pending! pending-table)
+     (reset! reindexing? true)))
+  ([table-name]
+   (when-not (exists? table-name)
+     (create-table! table-name))))</pre></td></tr><tr><td class="docs"><p>Make the pending index active if it exists. Returns true if it did so.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn activate-pending!
   []
   ;; ... just in case it wasn't cleaned up last time.
@@ -2957,9 +2959,11 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defn- batch-update!
   [documents]
   (let [entries          (map document-&gt;entry documents)
+        ;; When stubbing the table in tests, always treat it as active
+        active?          (or @initialized? (not= :search_index *active-table*))
         ;; Ideally, we would reset these atoms if the corresponding tables don't exist.
         ;; We're about to rework this area, so just leaving this as a note for now.
-        active-updated?  (when @initialized? (safe-batch-upsert! *active-table* entries))
+        active-updated?  (when active? (safe-batch-upsert! *active-table* entries))
         pending-updated? (when @reindexing?  (safe-batch-upsert! pending-table entries))]
     (when (or active-updated? pending-updated?)
       (-&gt;&gt; entries (map :model) frequencies))))</pre></td></tr><tr><td class="docs">
@@ -2983,11 +2987,17 @@ net.brehaut.ClojureTools = (function (SH) {
        (t2/query (search-query search-term search-ctx [:model :name]))))</pre></td></tr><tr><td class="docs"><p>Ensure we have a blank slate; in case the table schema or stored data format has changed.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn reset-index!
   []
-  (reset! reindexing? false)
-  (drop-table! pending-table)
-  (maybe-create-pending!)
-  (activate-pending!)
-  (reset! initialized? true))</pre></td></tr><tr><td class="docs"><p>Ensure the index is ready to be populated. Return false if it was already ready.</p>
+  ;; Moving to random tables will clean this up
+  (let [testing?   (not= *active-table* :search_index)
+        table-name (if testing? *active-table* pending-table)]
+    (when-not testing?
+      (reset! reindexing? false))
+    (drop-table! table-name)
+    (maybe-create-pending! table-name)
+    (when-not testing?
+      (activate-pending!)
+      (reset! initialized? true))
+    true))</pre></td></tr><tr><td class="docs"><p>Ensure the index is ready to be populated. Return false if it was already ready.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn ensure-ready!
   [force-recreation?]
   (if (or force-recreation? (not (exists? *active-table*)))

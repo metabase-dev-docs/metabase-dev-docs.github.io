@@ -2891,21 +2891,25 @@ net.brehaut.ClojureTools = (function (SH) {
   (doseq [[model cnt] report]
     (prometheus/inc! :metabase-search/index {:model model} cnt)))</pre></td></tr><tr><td class="docs"><p>Reindex the whole AppDB</p>
 </td><td class="codes"><pre class="brush: clojure">(defn reindex!
-  []
-  (when (search/supports-index?)
-    (let [timer  (u/start-timer)
-          report (if (not @recreated?)
-                   (do (log/info &quot;Recreating search index from the latest schema&quot;)
-                       ;; Each instance in a multi-instance deployment will recreate the table the first time it is
-                       ;; selected to run the job, resulting in a momentary lack of search results.  One solution to
-                       ;; this would be to store metadata about the index in another table, which we can use to
-                       ;; determine whether it was built by another version of Metabase and should be rebuilt.
-                       (u/prog1 (search/init-index! {:force-reset? (not @recreated?)})
-                         (reset! recreated? true)))
-                   (do (log/info &quot;Reindexing searchable entities&quot;)
-                       (search/reindex!)))]
-      (report-&gt;prometheus! report)
-      (log/infof &quot;Done indexing in %.0fms %s&quot; (u/since-ms timer) (sort-by (comp - val) report)))))</pre></td></tr><tr><td class="docs">
+  ([]
+   (let [recreate? (not @recreated?)]
+     (u/prog1 (reindex! recreate?)
+       (when recreate?
+         (reset! recreated? true)))))
+  ([recreate?]
+   (when (search/supports-index?)
+     (let [timer  (u/start-timer)
+           report (if recreate?
+                    (do (log/info &quot;Recreating search index from the latest schema&quot;)
+                        ;; Each instance in a multi-instance deployment will recreate the table the first time it is
+                        ;; selected to run the job, resulting in a momentary lack of search results.  One solution to
+                        ;; this would be to store metadata about the index in another table, which we can use to
+                        ;; determine whether it was built by another version of Metabase and should be rebuilt.
+                        (search/init-index! {:force-reset? recreate?}))
+                    (do (log/info &quot;Reindexing searchable entities&quot;)
+                        (search/reindex!)))]
+       (report-&gt;prometheus! report)
+       (log/infof &quot;Done indexing in %.0fms %s&quot; (u/since-ms timer) (sort-by (comp - val) report))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- update-index! []
   (when (search/supports-index?)
     (while true
