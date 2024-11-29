@@ -2875,7 +2875,6 @@ net.brehaut.ClojureTools = (function (SH) {
 <p> If you need to use code from elsewhere, consider copying it into this namespace to minimize risk of the code changing behaviour.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.db.custom-migrations
   (:require
-   [cheshire.core :as json]
    [clojure.core.match :refer [match]]
    [clojure.edn :as edn]
    [clojure.java.io :as io]
@@ -2894,6 +2893,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.util.date-2 :as u.date]
    [metabase.util.encryption :as encryption]
    [metabase.util.honey-sql-2 :as h2x]
+   [metabase.util.json :as json]
    [metabase.util.log :as log]
    [toucan2.core :as t2]
    [toucan2.execute :as t2.execute])
@@ -2962,11 +2962,11 @@ similar to the bodies of multi-arity Clojure functions.</p>
   [obj]
   (if (string? obj)
     obj
-    (json/generate-string obj)))</pre></td></tr><tr><td class="docs">
+    (json/encode obj)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- json-out [s keywordize-keys?]
   (if (string? s)
     (try
-      (json/parse-string s keywordize-keys?)
+      (json/decode s keywordize-keys?)
       (catch Throwable e
         (log/error e &quot;Error parsing JSON&quot;)
         s))
@@ -2977,7 +2977,7 @@ similar to the bodies of multi-arity Clojure functions.</p>
   [v]
   (let [decrypted (encryption/maybe-decrypt v)]
     (try
-      (json/parse-string decrypted true)
+      (json/decode+kw decrypted)
       (catch Throwable e
         (if (or (encryption/possibly-encrypted-string? decrypted)
                 (encryption/possibly-encrypted-bytes? decrypted))
@@ -3061,7 +3061,7 @@ connection properties ahead of time, we'll need to set these at runtime rather t
                                   ;; so we need to remove databases that have it set to false
                                   (filter (fn [{:keys [details]}]
                                             (when details
-                                              (false? (:json-unfolding (json/parse-string details true))))))
+                                              (false? (:json-unfolding (json/decode+kw details))))))
                                   (map :id))
         field-ids-to-update  (-&gt;&gt; (t2/query {:select [:f.id]
                                              :from   [[:metabase_field :f]]
@@ -3094,21 +3094,21 @@ connection properties ahead of time, we'll need to set these at runtime rather t
     (m/update-existing viz-settings &quot;column_settings&quot; update-keys
                        (fn [k]
                          (-&gt; k
-                             json/parse-string
+                             json/decode
                              vec
                              old-to-new
-                             json/generate-string)))))</pre></td></tr><tr><td class="docs">
+                             json/encode)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(define-migration MigrateLegacyColumnSettingsFieldRefs
   (let [update! (fn [{:keys [id visualization_settings]}]
                   (t2/query-one {:update :report_card
                                  :set    {:visualization_settings visualization_settings}
                                  :where  [:= :id id]}))]
     (run! update! (eduction (keep (fn [{:keys [id visualization_settings]}]
-                                    (let [parsed  (json/parse-string visualization_settings)
+                                    (let [parsed  (json/decode visualization_settings)
                                           updated (update-legacy-field-refs-in-viz-settings parsed)]
                                       (when (not= parsed updated)
                                         {:id                     id
-                                         :visualization_settings (json/generate-string updated)}))))
+                                         :visualization_settings (json/encode updated)}))))
                             (t2/reducible-query {:select [:id :visualization_settings]
                                                  :from   [:report_card]
                                                  :where  [:or
@@ -3134,9 +3134,9 @@ connection properties ahead of time, we'll need to set these at runtime rather t
                                       [&quot;field&quot; y {:source-field x}])
                        _ ref))]
     (-&gt;&gt; result-metadata
-         json/parse-string
+         json/decode
          (map #(m/update-existing % &quot;field_ref&quot; old-to-new))
-         json/generate-string)))</pre></td></tr><tr><td class="docs">
+         json/encode)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(define-migration MigrateLegacyResultMetadataFieldRefs
   (let [update! (fn [{:keys [id result_metadata]}]
                   (t2/query-one {:update :report_card
@@ -3163,32 +3163,32 @@ connection properties ahead of time, we'll need to set these at runtime rather t
           (fn [column_settings]
             (into {}
                   (map (fn [[k v]]
-                         (match (vec (json/parse-string k))
+                         (match (vec (json/decode k))
                            [&quot;ref&quot; [&quot;field&quot; id opts]]
-                           [(json/generate-string [&quot;ref&quot; (remove-opts [&quot;field&quot; id opts] &quot;join-alias&quot;)]) v]
+                           [(json/encode [&quot;ref&quot; (remove-opts [&quot;field&quot; id opts] &quot;join-alias&quot;)]) v]
                            _ [k v]))
                        column_settings)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- add-join-alias-to-column-settings-refs [{:keys [visualization_settings result_metadata]}]
-  (let [result_metadata        (json/parse-string result_metadata)
-        visualization_settings (json/parse-string visualization_settings)
+  (let [result_metadata        (json/decode result_metadata)
+        visualization_settings (json/decode visualization_settings)
         column-key-&gt;metadata   (group-by #(-&gt; (get % &quot;field_ref&quot;)
                                               ;; like the FE's `getColumnKey` function, remove &quot;join-alias&quot;,
                                               ;; &quot;temporal-unit&quot; and &quot;binning&quot; options from the field_ref
                                               (remove-opts &quot;join-alias&quot; &quot;temporal-unit&quot; &quot;binning&quot;))
                                          result_metadata)]
-    (json/generate-string
+    (json/encode
      (update visualization_settings &quot;column_settings&quot;
              (fn [column_settings]
                (into {}
                      (mapcat (fn [[k v]]
-                               (match (vec (json/parse-string k))
+                               (match (vec (json/decode k))
                                  [&quot;ref&quot; [&quot;field&quot; id opts]]
                                  (for [column-metadata (column-key-&gt;metadata [&quot;field&quot; id opts])
                                        ;; remove &quot;temporal-unit&quot; and &quot;binning&quot; options from the matching field refs,
                                        ;; but not &quot;join-alias&quot; as before.
                                        :let [field-ref (-&gt; (get column-metadata &quot;field_ref&quot;)
                                                            (remove-opts &quot;temporal-unit&quot; &quot;binning&quot;))]]
-                                   [(json/generate-string [&quot;ref&quot; field-ref]) v])
+                                   [(json/encode [&quot;ref&quot; field-ref]) v])
                                  _ [[k v]]))
                              column_settings)))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(define-reversible-migration AddJoinAliasToVisualizationSettingsFieldRefs
@@ -3211,9 +3211,9 @@ connection properties ahead of time, we'll need to set these at runtime rather t
                                                     [:like :result_metadata &quot;%join-alias%&quot;]]})))
   (let [update! (fn [{:keys [id visualization_settings]}]
                   (let [updated (-&gt; visualization_settings
-                                    json/parse-string
+                                    json/decode
                                     remove-join-alias-from-column-settings-field-refs
-                                    json/generate-string)]
+                                    json/encode)]
                     (when (not= visualization_settings updated)
                       (t2/query-one {:update :report_card
                                      :set    {:visualization_settings updated}
@@ -3303,30 +3303,30 @@ The card in revision contains legacy field name and maybe even lacking fields.</
         card))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(define-reversible-migration RevisionDashboardMigrateGridFrom18To24
   (let [migrate! (fn [revision]
-                   (let [object (json/parse-string (:object revision) keyword)]
+                   (let [object (json/decode+kw (:object revision))]
                      (when (seq (:cards object))
                        (t2/query {:update :revision
-                                  :set {:object (json/generate-string (update object :cards #(map migrate-dashboard-grid-from-18-to-24 %)))}
+                                  :set {:object (json/encode (update object :cards #(map migrate-dashboard-grid-from-18-to-24 %)))}
                                   :where [:= :id (:id revision)]}))))]
     (run! migrate! (t2/reducible-query {:select [:*]
                                         :from   [:revision]
                                         :where  [:= :model &quot;Dashboard&quot;]})))
   (let [roll-back! (fn [revision]
-                     (let [object (json/parse-string (:object revision) keyword)]
+                     (let [object (json/decode+kw (:object revision))]
                        (when (seq (:cards object))
                          (t2/query {:update :revision
-                                    :set {:object (json/generate-string (update object :cards #(map migrate-dashboard-grid-from-24-to-18 %)))}
+                                    :set {:object (json/encode (update object :cards #(map migrate-dashboard-grid-from-24-to-18 %)))}
                                     :where [:= :id (:id revision)]}))))]
     (run! roll-back! (t2/reducible-query {:select [:*]
                                           :from   [:revision]
                                           :where  [:= :model &quot;Dashboard&quot;]}))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(define-migration RevisionMigrateLegacyColumnSettingsFieldRefs
   (let [update-one! (fn [{:keys [id object]}]
-                      (let [object  (json/parse-string object)
+                      (let [object  (json/decode object)
                             updated (update object &quot;visualization_settings&quot; update-legacy-field-refs-in-viz-settings)]
                         (when (not= updated object)
                           (t2/query-one {:update :revision
-                                         :set    {:object (json/generate-string updated)}
+                                         :set    {:object (json/encode updated)}
                                          :where  [:= :id id]}))))]
     (run! update-one! (t2/reducible-query {:select [:id :object]
                                            :from   [:revision]
@@ -3356,10 +3356,10 @@ The card in revision contains legacy field name and maybe even lacking fields.</
                       (fn [column_settings]
                         (let [copies-with-join-alias (into {}
                                                            (mapcat (fn [[k v]]
-                                                                     (match (vec (json/parse-string k))
+                                                                     (match (vec (json/decode k))
                                                                        [&quot;ref&quot; [&quot;field&quot; id opts]]
                                                                        (for [alias join-aliases]
-                                                                         [(json/generate-string [&quot;ref&quot; [&quot;field&quot; id (assoc opts &quot;join-alias&quot; alias)]]) v])
+                                                                         [(json/encode [&quot;ref&quot; [&quot;field&quot; id (assoc opts &quot;join-alias&quot; alias)]]) v])
                                                                        _ '()))
                                                                    column_settings))]
                           ;; existing column settings should take precedence over the copies in case there is a conflict
@@ -3367,12 +3367,12 @@ The card in revision contains legacy field name and maybe even lacking fields.</
               card)))
         update-one!
         (fn [revision]
-          (let [card (json/parse-string (:object revision))]
+          (let [card (json/decode (:object revision))]
             (when (not= (get card &quot;query_type&quot;) &quot;native&quot;) ; native queries won't have join aliases, so we can exclude them straight away
               (let [updated (add-join-aliases card)]
                 (when (not= updated (get &quot;visualization_settings&quot; card))
                   (t2/query {:update :revision
-                             :set {:object (json/generate-string (assoc card &quot;visualization_settings&quot; updated))}
+                             :set {:object (json/encode (assoc card &quot;visualization_settings&quot; updated))}
                              :where [:= :id (:id revision)]}))))))]
     (run! update-one! (t2/reducible-query {:select [:*]
                                            :from   [:revision]
@@ -3387,13 +3387,13 @@ The card in revision contains legacy field name and maybe even lacking fields.</
   ;; Reverse migration
   (let [update-one!
         (fn [revision]
-          (let [card (json/parse-string (:object revision))]
+          (let [card (json/decode (:object revision))]
             (when (not= (get card &quot;query_type&quot;) &quot;native&quot;)
               (let [viz-settings (get card &quot;visualization_settings&quot;)
                     updated      (remove-join-alias-from-column-settings-field-refs viz-settings)]
                 (when (not= updated viz-settings)
                   (t2/query {:update :revision
-                             :set {:object (json/generate-string (assoc card &quot;visualization_settings&quot; updated))}
+                             :set {:object (json/encode (assoc card &quot;visualization_settings&quot; updated))}
                              :where [:= :id (:id revision)]}))))))]
     (run! update-one! (t2/reducible-query {:select [:*]
                                            :from   [:revision]
@@ -3405,11 +3405,11 @@ The card in revision contains legacy field name and maybe even lacking fields.</
                                                     [:= :model &quot;Card&quot;]]}))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(define-migration MigrateLegacyDashboardCardColumnSettingsFieldRefs
   (let [update-one! (fn [{:keys [id visualization_settings]}]
-                      (let [parsed  (json/parse-string visualization_settings)
+                      (let [parsed  (json/decode visualization_settings)
                             updated (update-legacy-field-refs-in-viz-settings parsed)]
                         (when (not= parsed updated)
                           (t2/query-one {:update :report_dashboardcard
-                                         :set    {:visualization_settings (json/generate-string updated)}
+                                         :set    {:visualization_settings (json/encode updated)}
                                          :where  [:= :id id]}))))]
     (run! update-one! (t2/reducible-query
                        {:select [:id :visualization_settings]
@@ -3446,11 +3446,11 @@ The card in revision contains legacy field name and maybe even lacking fields.</
                                                      [:like :dc.visualization_settings &quot;%ref\\\\\\\&quot;,[\\\\\\\&quot;field%&quot;]]
                                                     [:like :c.result_metadata &quot;%join-alias%&quot;]]})))
   (let [update! (fn [{:keys [id visualization_settings]}]
-                  (let [parsed  (json/parse-string visualization_settings)
+                  (let [parsed  (json/decode visualization_settings)
                         updated (remove-join-alias-from-column-settings-field-refs parsed)]
                     (when (not= parsed updated)
                       (t2/query-one {:update :report_dashboardcard
-                                     :set    {:visualization_settings (json/generate-string updated)}
+                                     :set    {:visualization_settings (json/encode updated)}
                                      :where  [:= :id id]}))))]
     (run! update! (t2/reducible-query {:select [:dc.id :dc.visualization_settings]
                                        :from   [[:report_card :c]]
@@ -3465,12 +3465,12 @@ The card in revision contains legacy field name and maybe even lacking fields.</
                                                 [:like :dc.visualization_settings &quot;%join-alias%&quot;]]}))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(define-migration RevisionMigrateLegacyDashboardCardColumnSettingsFieldRefs
   (let [update-one! (fn [{:keys [id object]}]
-                      (let [object  (json/parse-string object)
+                      (let [object  (json/decode object)
                             updated (update object &quot;cards&quot; (fn [cards]
                                                              (map #(update % &quot;visualization_settings&quot; update-legacy-field-refs-in-viz-settings) cards)))]
                         (when (not= updated object)
                           (t2/query-one {:update :revision
-                                         :set    {:object (json/generate-string updated)}
+                                         :set    {:object (json/encode updated)}
                                          :where  [:= :id id]}))))]
     (run! update-one! (t2/reducible-query {:select [:id :object]
                                            :from   [:revision]
@@ -3498,7 +3498,7 @@ The card in revision contains legacy field name and maybe even lacking fields.</
                                                                    [:= :id (get dashcard &quot;card_id&quot;)]
                                                                    ;; only include cards with joins
                                                                    [:like :dataset_query &quot;%joins%&quot;]]})]
-            (if-let [join-aliases (-&gt;&gt; (get-in (json/parse-string dataset_query) [&quot;query&quot; &quot;joins&quot;])
+            (if-let [join-aliases (-&gt;&gt; (get-in (json/decode dataset_query) [&quot;query&quot; &quot;joins&quot;])
                                        (map #(get % &quot;alias&quot;))
                                        set
                                        seq)]
@@ -3506,10 +3506,10 @@ The card in revision contains legacy field name and maybe even lacking fields.</
                                     (fn [column_settings]
                                       (let [copies-with-join-alias (into {}
                                                                          (mapcat (fn [[k v]]
-                                                                                   (match (vec (json/parse-string k))
+                                                                                   (match (vec (json/decode k))
                                                                                      [&quot;ref&quot; [&quot;field&quot; id opts]]
                                                                                      (for [alias join-aliases]
-                                                                                       [(json/generate-string [&quot;ref&quot; [&quot;field&quot; id (assoc opts &quot;join-alias&quot; alias)]]) v])
+                                                                                       [(json/encode [&quot;ref&quot; [&quot;field&quot; id (assoc opts &quot;join-alias&quot; alias)]]) v])
                                                                                      _ '()))
                                                                                  column_settings))]
                                         ;; existing column settings should take precedence over the copies in case there is a conflict
@@ -3518,12 +3518,12 @@ The card in revision contains legacy field name and maybe even lacking fields.</
             dashcard))
         update-one!
         (fn [revision]
-          (let [dashboard (json/parse-string (:object revision))
+          (let [dashboard (json/decode (:object revision))
                 updated   (update dashboard &quot;cards&quot; (fn [dashcards]
                                                       (map add-join-aliases dashcards)))]
             (when (not= updated dashboard)
               (t2/query {:update :revision
-                         :set    {:object (json/generate-string updated)}
+                         :set    {:object (json/encode updated)}
                          :where  [:= :id (:id revision)]}))))]
     (run! update-one! (t2/reducible-query {:select [:*]
                                            :from   [:revision]
@@ -3536,14 +3536,14 @@ The card in revision contains legacy field name and maybe even lacking fields.</
   ;; Reverse migration
   (let [update-one!
         (fn [revision]
-          (let [dashboard (json/parse-string (:object revision))
+          (let [dashboard (json/decode (:object revision))
                 updated   (update dashboard &quot;cards&quot;
                                   (fn [dashcards]
                                     (map #(update % &quot;visualization_settings&quot; remove-join-alias-from-column-settings-field-refs)
                                          dashcards)))]
             (when (not= updated dashboard)
               (t2/query {:update :revision
-                         :set    {:object (json/generate-string updated)}
+                         :set    {:object (json/encode updated)}
                          :where  [:= :id (:id revision)]}))))]
     (run! update-one! (t2/reducible-query {:select [:*]
                                            :from   [:revision]
@@ -3572,7 +3572,7 @@ The card in revision contains legacy field name and maybe even lacking fields.</
                               options  (json-out options true)]
                           (when (some? (:persist-models-enabled settings))
                             (t2/query {:update :metabase_database
-                                       :set    {:options (json/generate-string (select-keys settings [:persist-models-enabled]))
+                                       :set    {:options (json/encode (select-keys settings [:persist-models-enabled]))
                                                 :settings (encrypted-json-in (dissoc settings :persist-models-enabled))}
                                        :where  [:= :id id]}))))]
     (run! rollback-one! (t2/reducible-query {:select [:id :settings :options]
@@ -3663,7 +3663,7 @@ statements that are replacing data for no purpose.</p>
        :visualization_settings final-settings})))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- parse-to-json [&amp; ks]
   (fn [x]
-    (reduce #(update %1 %2 json/parse-string)
+    (reduce #(update %1 %2 json/decode)
             x
             ks)))</pre></td></tr><tr><td class="docs"><p>This was previously a data migration, hence the metadata. The metadata is unused but potentially useful
 as documentation.</p>
@@ -3678,7 +3678,7 @@ as documentation.</p>
              (completing
               (fn [_ {:keys [id visualization_settings]}]
                 (t2/update! :report_dashboardcard id
-                            {:visualization_settings (json/generate-string visualization_settings)})))
+                            {:visualization_settings (json/encode visualization_settings)})))
              nil
              ;; flamber wrote a manual postgres migration that this faithfully recreates: see
              ;; https://github.com/metabase/metabase/issues/15014
@@ -3708,7 +3708,7 @@ For some reasons during data-migration [[metabase.models.setting/get]] return th
   [mapping-setting-key]
   (let [admin-group-id (t2/select-one-pk :permissions_group :name &quot;Administrators&quot;)
         mapping        (try
-                         (json/parse-string (raw-setting mapping-setting-key))
+                         (json/decode (raw-setting mapping-setting-key))
                          (catch Exception _e
                            {}))]
     (when-not (empty? mapping)
@@ -3717,7 +3717,7 @@ For some reasons during data-migration [[metabase.models.setting/get]] return th
                    (-&gt;&gt; mapping
                         (map (fn [[k v]] [k (filter #(not= admin-group-id %) v)]))
                         (into {})
-                        json/generate-string)}))))</pre></td></tr><tr><td class="docs">
+                        json/encode)}))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- migrate-remove-admin-from-group-mapping-if-needed
   {:author &quot;qnkhuat&quot;
    :added  &quot;0.43.0&quot;
@@ -3852,12 +3852,12 @@ For some reasons during data-migration [[metabase.models.setting/get]] return th
     ;; So we do this in clojure land for mariadb
     (:h2 :mariadb)
     (let [migrate! (fn [revision]
-                     (let [object     (json/parse-string (:object revision) keyword)
+                     (let [object     (json/decode+kw (:object revision))
                            new-object (assoc object :type (if (:dataset object)
                                                             &quot;model&quot;
                                                             &quot;question&quot;))]
                        (t2/query {:update :revision
-                                  :set    {:object (json/generate-string new-object)}
+                                  :set    {:object (json/encode new-object)}
                                   :where  [:= :id (:id revision)]})))]
       (run! migrate! (t2/reducible-query {:select [:*]
                                           :from   [:revision]
@@ -3889,12 +3889,12 @@ For some reasons during data-migration [[metabase.models.setting/get]] return th
                  WHERE model = 'Card' AND JSON_UNQUOTE(JSON_EXTRACT(object, '$.type')) IS NOT NULL;&quot;]))
     (:h2 :mariadb)
     (let [rollback! (fn [revision]
-                      (let [object     (json/parse-string (:object revision) keyword)
+                      (let [object     (json/decode+kw (:object revision))
                             new-object (-&gt; object
                                            (assoc :dataset (= (:type object) &quot;model&quot;))
                                            (dissoc :type))]
                         (t2/query {:update :revision
-                                   :set    {:object (json/generate-string new-object)}
+                                   :set    {:object (json/encode new-object)}
                                    :where  [:= :id (:id revision)]})))]
       (run! rollback! (t2/reducible-query {:select [:*]
                                            :from   [:revision]
@@ -4159,7 +4159,7 @@ on the second migrate up.</p>
                                           :display                display}
                                  :where  [:= :id id]}))]
     (run! update! (eduction (keep (fn [{:keys [id display visualization_settings]}]
-                                    (let [parsed-viz           (json/parse-string visualization_settings keyword)
+                                    (let [parsed-viz           (json/decode+kw visualization_settings)
                                           partial-card         {:display display :visualization_settings parsed-viz}
                                           updated-partial-card (update-stacked-viz-cards partial-card)]
                                       (when (not= partial-card updated-partial-card)
@@ -4167,7 +4167,7 @@ on the second migrate up.</p>
                                                updated-viz     :visualization_settings} updated-partial-card]
                                           {:id                     id
                                            :display                (name updated-display)
-                                           :visualization_settings (json/generate-string updated-viz)})))))
+                                           :visualization_settings (json/encode updated-viz)})))))
                             (t2/reducible-query {:select [:id :display :visualization_settings]
                                                  :from   [:report_card]
                                                  :where  [:like :visualization_settings &quot;%stackable%&quot;]})))))</pre></td></tr><tr><td class="docs">
@@ -4210,7 +4210,7 @@ on the second migrate up.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- column-&gt;column-key
   [{name &quot;name&quot;}]
   (when name
-    (json/generate-string [&quot;name&quot; name])))</pre></td></tr><tr><td class="docs"><p>Computes a legacy viz setting column key for a <code>column</code>.
+    (json/encode [&quot;name&quot; name])))</pre></td></tr><tr><td class="docs"><p>Computes a legacy viz setting column key for a <code>column</code>.
 If the <code>field_ref</code> has a field name and not a field id, or if the <code>field_ref</code> is for an aggregation column, returns a
 column key of the modern format ["name",<code>name</code>].
 In other cases returns a legacy column key of the format ["ref",<code>field_ref</code>] where <code>:binning</code> and <code>:temporal-unit</code>
@@ -4226,7 +4226,7 @@ options are removed from the <code>field_ref</code>.</p>
       (or (and (= ref-type &quot;field&quot;) (string? field-id-or-name)) (= ref-type &quot;aggregation&quot;))
       (column-&gt;column-key column)
       field-ref
-      (json/generate-string [&quot;ref&quot; field-ref]))))</pre></td></tr><tr><td class="docs"><p>Updates <code>:column_settings</code> keys. Unmatched keys are retained.</p>
+      (json/encode [&quot;ref&quot; field-ref]))))</pre></td></tr><tr><td class="docs"><p>Updates <code>:column_settings</code> keys. Unmatched keys are retained.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- update-legacy-column-keys-in-viz-settings
   [viz-settings result-metadata old-key-fn new-key-fn]
   (let [key-&gt;column (m/index-by old-key-fn result-metadata)]
@@ -4253,12 +4253,12 @@ to find the deduplicated column name by the field reference and compute the new 
 </td><td class="codes"><pre class="brush: clojure">(defn- update-legacy-column-keys-in-card-viz-settings
   [column-key-tag update-viz-settings-fn]
   (let [update-one! (fn [{id :id viz-settings :visualization_settings result-metadata :result_metadata}]
-                      (let [viz-settings         (json/parse-string viz-settings)
-                            result-metadata      (json/parse-string result-metadata)
+                      (let [viz-settings         (json/decode viz-settings)
+                            result-metadata      (json/decode result-metadata)
                             updated-viz-settings (update-viz-settings-fn viz-settings result-metadata)]
                         (when (not= viz-settings updated-viz-settings)
                           (t2/query-one {:update :report_card
-                                         :set    {:visualization_settings (json/generate-string updated-viz-settings)}
+                                         :set    {:visualization_settings (json/encode updated-viz-settings)}
                                          :where  [:= :id id]}))))]
     (run! update-one! (t2/reducible-query {:select [:id :visualization_settings :result_metadata]
                                            :from   [:report_card]
@@ -4274,12 +4274,12 @@ key.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- update-legacy-column-keys-in-dashboard-card-viz-settings
   [column-key-tag update-viz-settings-fn]
   (let [update-one! (fn [{id :id viz-settings :visualization_settings result-metadata :result_metadata}]
-                      (let [viz-settings         (json/parse-string viz-settings)
-                            result-metadata      (json/parse-string result-metadata)
+                      (let [viz-settings         (json/decode viz-settings)
+                            result-metadata      (json/decode result-metadata)
                             updated-viz-settings (update-viz-settings-fn viz-settings result-metadata)]
                         (when (not= viz-settings updated-viz-settings)
                           (t2/query-one {:update :report_dashboardcard
-                                         :set    {:visualization_settings (json/generate-string updated-viz-settings)}
+                                         :set    {:visualization_settings (json/encode updated-viz-settings)}
                                          :where  [:= :id id]}))))]
     (run! update-one! (t2/reducible-query {:select [:dc.id :dc.visualization_settings :c.result_metadata]
                                            :from   [[:report_card :c]]
@@ -4305,7 +4305,7 @@ key.</p>
     mapping))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- set-parameter-stage-numbers
   [record last-stage]
-  (when-let [orig-pmappings (some-&gt; record :parameter_mappings (json/parse-string true))]
+  (when-let [orig-pmappings (some-&gt; record :parameter_mappings json/decode+kw)]
     (let [pmappings (map #(set-target-stage-number % last-stage) orig-pmappings)]
       (when (not= pmappings orig-pmappings)
         pmappings))))</pre></td></tr><tr><td class="docs">
@@ -4317,7 +4317,7 @@ key.</p>
     ;; questions and metrics are
     (-&gt; record
         :dataset_query
-        (json/parse-string true)
+        json/decode+kw
         last-stage-number)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- add-stage-numbers-to-parameter-mapping-targets
   []
@@ -4333,7 +4333,7 @@ key.</p>
                             ls))]
          (when-let [new-mappings (set-parameter-stage-numbers record last-stage)]
            (t2/query {:update :report_dashboardcard
-                      :set    {:parameter_mappings (json/generate-string new-mappings)}
+                      :set    {:parameter_mappings (json/encode new-mappings)}
                       :where  [:= :id (:dc_id record)]}))))
      (t2/reducible-query {:select     [[:c.id :c_id] [:c.type :c_type] :c.dataset_query
                                        [:dc.id :dc_id] :dc.parameter_mappings]
@@ -4350,7 +4350,7 @@ key.</p>
     mapping))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- remove-parameter-stage-numbers
   [record]
-  (when-let [orig-pmappings (some-&gt; record :parameter_mappings (json/parse-string true))]
+  (when-let [orig-pmappings (some-&gt; record :parameter_mappings json/decode+kw)]
     (let [pmappings (map remove-target-stage-number orig-pmappings)]
       (when (not= pmappings orig-pmappings)
         pmappings))))</pre></td></tr><tr><td class="docs">
@@ -4360,7 +4360,7 @@ key.</p>
    (fn [record]
      (when-let [new-mappings (remove-parameter-stage-numbers record)]
        (t2/query {:update :report_dashboardcard
-                  :set    {:parameter_mappings (json/generate-string new-mappings)}
+                  :set    {:parameter_mappings (json/encode new-mappings)}
                   :where  [:= :id (:id record)]})))
    (t2/reducible-query {:select [:id :parameter_mappings]
                         :from   [:report_dashboardcard]
@@ -4383,7 +4383,7 @@ key.</p>
                              (dimension? dimension))
                         update-fn)]
     (if (not= new-dimension dimension)
-      (let [new-dimension-str (json/generate-string new-dimension)
+      (let [new-dimension-str (json/encode new-dimension)
             new-dimension-key (keyword new-dimension-str)]
         [new-dimension-key (-&gt; parameter-mapping
                                (assoc :id new-dimension-str)
@@ -4431,7 +4431,7 @@ key.</p>
   []
   (let [id-viz-settings                 ; based on Hosting Insights, a few hundred records are expected
         (into []
-              (map (juxt :id (comp #(json/parse-string % true) :visualization_settings)))
+              (map (juxt :id (comp json/decode+kw :visualization_settings)))
               (t2/reducible-query {:select [:id :visualization_settings]
                                    :from   [:report_dashboardcard]
                                    :where  [:and
@@ -4455,12 +4455,12 @@ key.</p>
      (fn [[id viz-settings]]
        (when-let [new-viz-settings (set-viz-settings-parameter-stage-numbers viz-settings card-id-&gt;last-stage)]
          (t2/query {:update :report_dashboardcard
-                    :set    {:visualization_settings (json/generate-string new-viz-settings)}
+                    :set    {:visualization_settings (json/encode new-viz-settings)}
                     :where  [:= :id id]})))
      id-viz-settings)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- remove-viz-settings-parameter-stage-numbers
   [record]
-  (let [orig-viz-settings (some-&gt; record :visualization_settings (json/parse-string true))
+  (let [orig-viz-settings (some-&gt; record :visualization_settings json/decode+kw)
         remove-stage-numbers (constantly #(subvec % 0 2))
         viz-settings (-&gt; orig-viz-settings
                          (update-viz-settings-target-dimensions remove-stage-numbers)
@@ -4473,7 +4473,7 @@ key.</p>
    (fn [record]
      (when-let [new-mappings (remove-viz-settings-parameter-stage-numbers record)]
        (t2/query {:update :report_dashboardcard
-                  :set    {:visualization_settings (json/generate-string new-mappings)}
+                  :set    {:visualization_settings (json/encode new-mappings)}
                   :where  [:= :id (:id record)]})))
    (t2/reducible-query {:select [:id :visualization_settings]
                         :from   [:report_dashboardcard]

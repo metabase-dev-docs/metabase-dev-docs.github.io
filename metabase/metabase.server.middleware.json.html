@@ -2868,41 +2868,34 @@ net.brehaut.ClojureTools = (function (SH) {
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.server.middleware.json" name="metabase.server.middleware.json"><h1 class="project-name">metabase.server.middleware.json</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Middleware related to parsing JSON requests and generating JSON responses.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.server.middleware.json
   (:require
-   [cheshire.core :as json]
-   [cheshire.factory]
-   [cheshire.generate :as json.generate]
    [metabase.util.date-2 :as u.date]
+   [metabase.util.json :as json]
    [metabase.util.log :as log]
    [ring.util.io :as rui]
    [ring.util.response :as response])
   (:import
-   (com.fasterxml.jackson.core JsonGenerator)
    (java.io BufferedWriter OutputStream OutputStreamWriter)
    (java.nio.charset StandardCharsets)
    (java.time.temporal Temporal)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
 |                                           JSON SERIALIZATION CONFIG                                            |
 +----------------------------------------------------------------------------------------------------------------+</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Tell the JSON middleware to use a date format that includes milliseconds (why?)</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private default-date-format &quot;yyyy-MM-dd'T'HH:mm:ss.SSS'Z'&quot;)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(alter-var-root #'cheshire.factory/default-date-format (constantly default-date-format))
-(alter-var-root #'json.generate/*date-format* (constantly default-date-format))</pre></td></tr><tr><td class="docs"><h2>Custom JSON encoders</h2>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- write-string! [^JsonGenerator json-generator, ^String s]
-  (.writeString json-generator s))</pre></td></tr><tr><td class="docs"><p>For java.time classes use the date util function that writes them as ISO-8601</p>
-</td><td class="codes"><pre class="brush: clojure">(json.generate/add-encoder Temporal (fn [t json-generator]
-                                      (write-string! json-generator (u.date/format t))))</pre></td></tr><tr><td class="docs"><p>Always fall back to <code>.toString</code> instead of barfing. In some cases we should be able to improve upon this behavior;
+</td><td class="codes"></td></tr><tr><td class="docs"><h2>Custom JSON encoders</h2>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>For java.time classes use the date util function that writes them as ISO-8601</p>
+</td><td class="codes"><pre class="brush: clojure">(json/add-encoder Temporal (fn [t json-generator]
+                             (json/write-string json-generator (u.date/format t))))</pre></td></tr><tr><td class="docs"><p>Always fall back to <code>.toString</code> instead of barfing. In some cases we should be able to improve upon this behavior;
 <code>.toString</code> may just return the Class and address, e.g. <code>some.Class@72a8b25e</code>
 The following are known few classes where <code>.toString</code> is the optimal behavior:
 *  <code>org.postgresql.jdbc4.Jdbc4Array</code> (Postgres arrays)
 *  <code>org.bson.types.ObjectId</code>         (Mongo BSON IDs)
 *  <code>java.sql.Date</code>                   (SQL Dates -- .toString returns YYYY-MM-DD)</p>
-</td><td class="codes"><pre class="brush: clojure">(json.generate/add-encoder Object json.generate/encode-str)</pre></td></tr><tr><td class="docs"><p>Binary arrays ("[B") -- hex-encode their first four bytes, e.g. "0xC42360D7"</p>
-</td><td class="codes"><pre class="brush: clojure">(json.generate/add-encoder
+</td><td class="codes"><pre class="brush: clojure">(json/add-encoder Object (fn [obj json-generator]
+                           (json/write-string json-generator (str obj))))</pre></td></tr><tr><td class="docs"><p>Binary arrays ("[B") -- hex-encode their first four bytes, e.g. "0xC42360D7"</p>
+</td><td class="codes"><pre class="brush: clojure">(json/add-encoder
  (Class/forName &quot;[B&quot;)
  (fn [byte-ar json-generator]
-   (write-string! json-generator (apply str &quot;0x&quot; (for [b (take 4 byte-ar)]
-                                                   (format &quot;%02X&quot; b))))))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
+   (json/write-string json-generator (apply str &quot;0x&quot; (for [b (take 4 byte-ar)]
+                                                       (format &quot;%02X&quot; b))))))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
 |                                            Streaming JSON Responses                                            |
 +----------------------------------------------------------------------------------------------------------------+</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Write <code>response-seq</code> to a PipedOutputStream as JSON, returning the connected PipedInputStream</p>
@@ -2913,7 +2906,7 @@ The following are known few classes where <code>.toString</code> is the optimal 
      (with-open [output-writer   (OutputStreamWriter. output-stream StandardCharsets/UTF_8)
                  buffered-writer (BufferedWriter. output-writer)]
        (try
-         (json/generate-stream response-seq buffered-writer opts)
+         (json/encode-to response-seq buffered-writer opts)
          (catch Throwable e
            (log/errorf &quot;Error generating JSON response stream: %s&quot; (ex-message e))
            (throw e)))))))</pre></td></tr><tr><td class="docs">

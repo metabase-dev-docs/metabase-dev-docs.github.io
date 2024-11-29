@@ -2878,10 +2878,12 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.util.log :as log])
   (:import
    (org.quartz DisallowConcurrentExecution JobDetail Trigger)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>This is problematic multi-instance deployments, see below.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private recreated? (atom false))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private reindex-stem &quot;metabase.task.search-index.reindex&quot;)
-(def ^:private update-stem &quot;metabase.task.search-index.update&quot;)</pre></td></tr><tr><td class="docs"><p>Key used to define and trigger a job that rebuilds the entire index from scratch.</p>
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private init-stem &quot;metabase.task.search-index.init&quot;)
+(def ^:private reindex-stem &quot;metabase.task.search-index.reindex&quot;)
+(def ^:private update-stem &quot;metabase.task.search-index.update&quot;)</pre></td></tr><tr><td class="docs"><p>Key used to define and trigger a job that ensures there is an active index.</p>
+</td><td class="codes"><pre class="brush: clojure">(def init-job-key
+  (jobs/key (str init-stem &quot;.job&quot;)))</pre></td></tr><tr><td class="docs"><p>Key used to define and trigger a job that rebuilds the entire index from scratch.</p>
 </td><td class="codes"><pre class="brush: clojure">(def reindex-job-key
   (jobs/key (str reindex-stem &quot;.job&quot;)))</pre></td></tr><tr><td class="docs"><p>Key used to define and trigger a job that makes incremental updates to the search index.</p>
 </td><td class="codes"><pre class="brush: clojure">(def update-job-key
@@ -2889,27 +2891,26 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- report-&gt;prometheus! [report]
   (doseq [[model cnt] report]
-    (prometheus/inc! :metabase-search/index {:model model} cnt)))</pre></td></tr><tr><td class="docs"><p>Reindex the whole AppDB</p>
+    (prometheus/inc! :metabase-search/index {:model model} cnt)))</pre></td></tr><tr><td class="docs"><p>Create a new index, if necessary</p>
+</td><td class="codes"><pre class="brush: clojure">(defn init!
+  []
+  (when (search/supports-index?)
+    (let [timer  (u/start-timer)
+          report (search/init-index! {:force-reset? false, :re-populate? false})]
+      (if (seq report)
+        (do (report-&gt;prometheus! report)
+            (log/infof &quot;Done indexing in %.0fms %s&quot; (u/since-ms timer) (sort-by (comp - val) report))
+            true)
+        (log/info &quot;Found existing search index, and using it.&quot;)))))</pre></td></tr><tr><td class="docs"><p>Reindex the whole AppDB</p>
 </td><td class="codes"><pre class="brush: clojure">(defn reindex!
-  ([]
-   (let [recreate? (not @recreated?)]
-     (u/prog1 (reindex! recreate?)
-       (when recreate?
-         (reset! recreated? true)))))
-  ([recreate?]
-   (when (search/supports-index?)
-     (let [timer  (u/start-timer)
-           report (if recreate?
-                    (do (log/info &quot;Recreating search index from the latest schema&quot;)
-                        ;; Each instance in a multi-instance deployment will recreate the table the first time it is
-                        ;; selected to run the job, resulting in a momentary lack of search results.  One solution to
-                        ;; this would be to store metadata about the index in another table, which we can use to
-                        ;; determine whether it was built by another version of Metabase and should be rebuilt.
-                        (search/init-index! {:force-reset? recreate?}))
-                    (do (log/info &quot;Reindexing searchable entities&quot;)
-                        (search/reindex!)))]
-       (report-&gt;prometheus! report)
-       (log/infof &quot;Done indexing in %.0fms %s&quot; (u/since-ms timer) (sort-by (comp - val) report))))))</pre></td></tr><tr><td class="docs">
+  []
+  (when (search/supports-index?)
+    (log/info &quot;Reindexing searchable entities&quot;)
+    (let [timer  (u/start-timer)
+          report (search/reindex!)]
+      (report-&gt;prometheus! report)
+      (log/infof &quot;Done reindexing in %.0fms %s&quot; (u/since-ms timer) (sort-by (comp - val) report))
+      report)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- update-index! []
   (when (search/supports-index?)
     (while true
@@ -2923,7 +2924,10 @@ net.brehaut.ClojureTools = (function (SH) {
   #_(task/schedule-task! job trigger)
   (task/delete-task! (.getKey job) (.getKey trigger))
   (task/add-job! job)
-  (task/add-trigger! trigger))</pre></td></tr><tr><td class="docs"><p>Populate Search Index</p>
+  (task/add-trigger! trigger))</pre></td></tr><tr><td class="docs"><p>Ensure a Search Index exists</p>
+</td><td class="codes"><pre class="brush: clojure">(jobs/defjob 
+  SearchIndexInit [_ctx]
+  (init!))</pre></td></tr><tr><td class="docs"><p>Populate a new Search Index</p>
 </td><td class="codes"><pre class="brush: clojure">(jobs/defjob ^{DisallowConcurrentExecution true
                :doc                        }
   SearchIndexReindex [_ctx]
@@ -2932,6 +2936,13 @@ net.brehaut.ClojureTools = (function (SH) {
                :doc                        }
   SearchIndexUpdate [_ctx]
   (update-index!))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod task/init! ::SearchIndexInit [_]
+  (let [job (jobs/build
+             (jobs/of-type SearchIndexInit)
+             (jobs/store-durably)
+             (jobs/with-identity init-job-key))]
+    (task/add-job! job)
+    (task/trigger-now! init-job-key)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod task/init! ::SearchIndexReindex [_]
   (let [job         (jobs/build
                      (jobs/of-type SearchIndexReindex)
@@ -2941,10 +2952,9 @@ net.brehaut.ClojureTools = (function (SH) {
         trigger     (triggers/build
                      (triggers/with-identity trigger-key)
                      (triggers/for-job reindex-job-key)
-                     (triggers/start-now)
                      (triggers/with-schedule
                       (simple/schedule (simple/with-interval-in-hours 1))))]
-    (force-scheduled-task! job trigger)))</pre></td></tr><tr><td class="docs">
+    (task/schedule-task! job trigger)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod task/init! ::SearchIndexUpdate [_]
   (let [job         (jobs/build
                      (jobs/of-type SearchIndexUpdate)
