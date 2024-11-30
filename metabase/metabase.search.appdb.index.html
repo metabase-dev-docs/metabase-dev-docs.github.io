@@ -2881,6 +2881,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.util.log :as log]
    [toucan2.core :as t2])
   (:import
+   (clojure.lang ExceptionInfo)
    (org.postgresql.util PSQLException)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(comment
   postgres/keep-me)</pre></td></tr><tr><td class="docs">
@@ -2915,7 +2916,10 @@ net.brehaut.ClojureTools = (function (SH) {
   (map (comp keyword :table_name)
        (t2/query {:select [:table_name]
                   :from   :information_schema.tables
-                  :where  [:like :table_name &quot;search_index__%&quot;]})))</pre></td></tr><tr><td class="docs">
+                  :where  [:or
+                           [:like :table_name &quot;search\\_index\\_\\_%&quot;]
+                           ;; legacy table names
+                           [:in :table_name [&quot;search_index&quot; &quot;search_index_next&quot; &quot;search_index_retired&quot;]]]})))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- sync-metadata [_old-setting-raw new-setting-raw]
   ;; Oh dear, we get the raw setting. Save a little bit of overhead by no keywordizing the keys.
   (let [new-setting                          (json/decode new-setting-raw)
@@ -2933,8 +2937,11 @@ net.brehaut.ClojureTools = (function (SH) {
                              (keyword table-name)))
           to-drop     (remove keep-table? (existing-indexes))]
       (when (seq to-drop)
-        (log/infof &quot;Dropping %d stale indexes&quot; (count to-drop))
-        (t2/query (apply sql.helpers/drop-table to-drop))))))</pre></td></tr><tr><td class="docs"><p>Internation state used to maintain the AppDb Search Index</p>
+        (try
+          (t2/query (apply sql.helpers/drop-table to-drop))
+          ;; Deletion could fail if it races with other instances
+          (catch ExceptionInfo _))
+        (log/infof &quot;Dropped %d stale indexes&quot; (count to-drop))))))</pre></td></tr><tr><td class="docs"><p>Internation state used to maintain the AppDb Search Index</p>
 </td><td class="codes"><pre class="brush: clojure">(defsetting search-engine-appdb-index-state
   :visibility :internal
   :encryption :no
