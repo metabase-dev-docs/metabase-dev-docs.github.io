@@ -2889,7 +2889,7 @@ task to the scheduler as usual via <code>schedule-task!</code>.</p>
    [metabase.util.malli :as mu]
    [metabase.util.malli.schema :as ms])
   (:import
-   (org.quartz CronTrigger JobDetail JobKey JobPersistenceException Scheduler Trigger TriggerKey)))</pre></td></tr><tr><td class="docs">
+   (org.quartz CronTrigger JobDetail JobKey JobPersistenceException ObjectAlreadyExistsException Scheduler Trigger TriggerKey)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
 |                                               SCHEDULER INSTANCE                                               |
 +----------------------------------------------------------------------------------------------------------------+</p>
@@ -3020,17 +3020,31 @@ standby mode. Call [[start-scheduler!]] to begin running scheduled tasks.</p>
       (qs/shutdown old-scheduler))))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
 |                                           SCHEDULING/DELETING TASKS                                            |
 +----------------------------------------------------------------------------------------------------------------+</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Assuming that [[job]] is already registered, ensure that [[new-trigger]] is scheduled to trigger it.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn- reschedule-task!
   [job         :- (ms/InstanceOfClass JobDetail)
    new-trigger :- (ms/InstanceOfClass Trigger)]
   (try
     (when-let [scheduler (scheduler)]
-      ;; TODO: a job could have multiple triggers, so the first trigger is not guaranteed to be the one we want to
-      ;; replace. Should we check that the key name is matching?
-      (when-let [[^Trigger old-trigger] (seq (qs/get-triggers-of-job scheduler (.getKey ^JobDetail job)))]
-        (log/debugf &quot;Rescheduling job %s&quot; (-&gt; ^JobDetail job .getKey .getName))
-        (.rescheduleJob scheduler (.getKey old-trigger) new-trigger)))
+      (let [job-key          (.getKey ^JobDetail job)
+            new-trigger-key  (.getKey ^Trigger new-trigger)
+            triggers         (qs/get-triggers-of-job scheduler job-key)
+            matching-trigger (first (filter (comp #{new-trigger-key} #(.getKey ^Trigger %)) triggers))
+            replaced-trigger (or matching-trigger (first triggers))]
+        (when replaced-trigger
+          (log/debugf &quot;Rescheduling job %s&quot; (.getName job-key))
+          (let [replaced-key (.getKey ^Trigger replaced-trigger)]
+            (when-not matching-trigger
+              (log/warnf &quot;Replacing trigger %s with trigger %s%s&quot;
+                         (.getName replaced-key)
+                         (.getName new-trigger-key)
+                         (when (&gt; (count triggers) 1)
+                           ;; We probably want more intuitive rescheduling semantics for multi-trigger jobs...
+                           ;; Ideally we would pass *all* the new triggers at once, so we can match them up atomically.
+                           ;; The current behavior is especially confounding if replacing N triggers with M ones.
+                           (str &quot; (chosen randomly from &quot; (count triggers) &quot; existing ones)&quot;)))
+              matching-trigger)
+            (.rescheduleJob scheduler (.getKey ^Trigger matching-trigger) new-trigger)))))
     (catch Throwable e
       (log/error e &quot;Error rescheduling job&quot;))))</pre></td></tr><tr><td class="docs"><p>Reschedule a trigger with the same key as the given trigger.</p>
 
@@ -3044,9 +3058,9 @@ standby mode. Call [[start-scheduler!]] to begin running scheduled tasks.</p>
   (when-let [scheduler (scheduler)]
     (try
       (qs/schedule scheduler job trigger)
-      (catch org.quartz.ObjectAlreadyExistsException _
+      (catch ObjectAlreadyExistsException _
         (log/debug &quot;Job already exists:&quot; (-&gt; ^JobDetail job .getKey .getName))
-        (reschedule-task! job trigger)))))</pre></td></tr><tr><td class="docs"><p>Immediatley trigger exeuction of task</p>
+        (reschedule-task! job trigger)))))</pre></td></tr><tr><td class="docs"><p>Immediately trigger execution of task</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn trigger-now!
   [job-key :- (ms/InstanceOfClass JobKey)]
   (try
