@@ -2912,32 +2912,27 @@ Specify the env var <code>METASTORE_DEV_SERVER_URL</code>.</p>
 |                                                TOKEN VALIDATION                                                |
 +----------------------------------------------------------------------------------------------------------------+</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(declare premium-embedding-token)</pre></td></tr><tr><td class="docs"><p>Amount of time before we re-fetch the count of active users.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^:const active-users-count-cache-ttl
-  (u/minutes-&gt;ms 5))</pre></td></tr><tr><td class="docs"><p>Returns a count of users on the system, cached for 5 minutes.</p>
+</td><td class="codes"><pre class="brush: clojure">(declare premium-embedding-token)</pre></td></tr><tr><td class="docs"><p>Returns a count of users on the system</p>
 
 <p>let's prevent the DB from getting slammed with calls to get the active user count, we only really need one in flight
 at a time.</p>
-</td><td class="codes"><pre class="brush: clojure">(let [f        (fn []
-                 {:post [(integer? %)]}
-                 (log/debug (u/colorize :yellow &quot;GETTING ACTIVE USER COUNT!&quot;))
-                 (assert ((requiring-resolve 'metabase.db/db-is-set-up?)) &quot;Metabase DB is not yet set up&quot;)
-                 ;; force this to use a new Connection, it seems to be getting called in situations where the Connection
-                 ;; is from a different thread and is invalid by the time we get to use it
-                 (let [result (binding [t2.conn/*current-connectable* nil]
-                                (t2/count :model/User :is_active true :type :personal))]
-                   (log/debug (u/colorize :green &quot;=&gt;&quot;) result)
-                   result))
-      memoized (memoize/ttl
-                f
-                :ttl/threshold (u/minutes-&gt;ms active-users-count-cache-ttl))
-      lock     (Object.)]
-  (defn- cached-active-users-count'
+</td><td class="codes"><pre class="brush: clojure">(let [f    (fn []
+             {:post [(integer? %)]}
+             (log/debug (u/colorize :yellow &quot;GETTING ACTIVE USER COUNT!&quot;))
+             (assert ((requiring-resolve 'metabase.db/db-is-set-up?)) &quot;Metabase DB is not yet set up&quot;)
+             ;; force this to use a new Connection, it seems to be getting called in situations where the Connection
+             ;; is from a different thread and is invalid by the time we get to use it
+             (let [result (binding [t2.conn/*current-connectable* nil]
+                            (t2/count :model/User :is_active true :type :personal))]
+               (log/debug (u/colorize :green &quot;=&gt;&quot;) result)
+               result))
+      lock (Object.)]
+  (defn- locking-active-user-count
     []
     (locking lock
-      (memoized))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defsetting cached-active-users-count
-  (deferred-tru &quot;Cached number of active users. Refresh every 5 minutes.&quot;)
+      (f))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defsetting active-users-count
+  (deferred-tru &quot;Number of active users&quot;)
   :visibility :admin
   :type       :integer
   :audit      :never
@@ -2947,7 +2942,7 @@ at a time.</p>
   :getter     (fn []
                 (if-not ((requiring-resolve 'metabase.db/db-is-set-up?))
                   0
-                  (cached-active-users-count'))))</pre></td></tr><tr><td class="docs">
+                  (locking-active-user-count))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- token-status-url [token base-url]
   (when (seq token)
     (format &quot;%s/api/%s/v2/status&quot; base-url token)))</pre></td></tr><tr><td class="docs"><p>Schema for a response from the token status API.</p>
@@ -3002,25 +2997,24 @@ fail instantly until the circuit breaker is closed.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private ^:const fetch-token-status-timeout-ms (u/seconds-&gt;ms 10))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- fetch-token-and-parse-body
   [token base-url site-uuid]
-  (let [active-user-count (cached-active-users-count)]
-    (try
-      (dh/with-circuit-breaker *store-circuit-breaker*
-        (dh/with-timeout {:timeout-ms fetch-token-status-timeout-ms
-                          :interrupt? true}
-          (try (fetch-token-and-parse-body* token base-url site-uuid active-user-count)
-               (catch Exception e
-                 (throw e)))))
-      (catch dev.failsafe.TimeoutExceededException _e
-        {:valid         false
-         :status        (tru &quot;Unable to validate token&quot;)
-         :error-details (tru &quot;Token validation timed out.&quot;)})
-      (catch dev.failsafe.CircuitBreakerOpenException _e
-        {:valid         false
-         :status        (tru &quot;Unable to validate token&quot;)
-         :error-details (tru &quot;Token validation is currently unavailable.&quot;)})
-      ;; other exceptions are wrapped by Diehard in a FailsafeException. Unwrap them before rethrowing.
-      (catch dev.failsafe.FailsafeException e
-        (throw (.getCause e))))))</pre></td></tr><tr><td class="docs"><p>Airgap Tokens ;;;;;;;;;;;;;;;;;;;;</p>
+  (try
+    (dh/with-circuit-breaker *store-circuit-breaker*
+      (dh/with-timeout {:timeout-ms fetch-token-status-timeout-ms
+                        :interrupt? true}
+        (try (fetch-token-and-parse-body* token base-url site-uuid (active-users-count))
+             (catch Exception e
+               (throw e)))))
+    (catch dev.failsafe.TimeoutExceededException _e
+      {:valid         false
+       :status        (tru &quot;Unable to validate token&quot;)
+       :error-details (tru &quot;Token validation timed out.&quot;)})
+    (catch dev.failsafe.CircuitBreakerOpenException _e
+      {:valid         false
+       :status        (tru &quot;Unable to validate token&quot;)
+       :error-details (tru &quot;Token validation is currently unavailable.&quot;)})
+    ;; other exceptions are wrapped by Diehard in a FailsafeException. Unwrap them before rethrowing.
+    (catch dev.failsafe.FailsafeException e
+      (throw (.getCause e)))))</pre></td></tr><tr><td class="docs"><p>Airgap Tokens ;;;;;;;;;;;;;;;;;;;;</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(declare decode-airgap-token)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn max-users-allowed :- [:maybe pos-int?]

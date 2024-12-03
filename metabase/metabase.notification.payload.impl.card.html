@@ -2865,92 +2865,52 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.channel.impl.http" name="metabase.channel.impl.http"><h1 class="project-name">metabase.channel.impl.http</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.channel.impl.http
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.notification.payload.impl.card" name="metabase.notification.payload.impl.card"><h1 class="project-name">metabase.notification.payload.impl.card</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.notification.payload.impl.card
   (:require
-   [clj-http.client :as http]
-   [java-time.api :as t]
-   [metabase.channel.core :as channel]
    [metabase.channel.render.core :as channel.render]
-   [metabase.channel.shared :as channel.shared]
-   [metabase.util.i18n :refer [tru]]
-   [metabase.util.json :as json]
+   [metabase.notification.payload.core :as notification.payload]
+   [metabase.notification.payload.execute :as notification.execute]
    [metabase.util.malli :as mu]
-   [metabase.util.malli.schema :as ms]
-   [metabase.util.urls :as urls]))</pre></td></tr><tr><td class="docs"><p>Maximum width of the rendered PNG of HTML to be sent to HTTP Content that exceeds this width (e.g. a table with
-many columns) is truncated.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private image-width
-  1200)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private string-or-keyword
-  [:or :string :keyword])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private HTTPDetails
-  [:map {:closed true}
-   [:url                           ms/Url]
-   [:auth-method                   [:enum &quot;none&quot; &quot;header&quot; &quot;query-param&quot; &quot;request-body&quot;]]
-   [:auth-info    {:optional true} [:map-of string-or-keyword :any]]
-   ;; used by the frontend to display the auth info properly
-   [:fe-form-type {:optional true} [:enum &quot;api-key&quot; &quot;bearer&quot; &quot;basic&quot; &quot;none&quot;]]
-   ;; request method
-   [:method       {:optional true} [:enum &quot;get&quot; &quot;post&quot; &quot;put&quot;]]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private HTTPChannel
-  [:map
-   [:type    [:= :channel/http]]
-   [:details HTTPDetails]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defmethod channel/send! :channel/http
-  [{{:keys [url method auth-method auth-info]} :details} :- HTTPChannel
-   request]
-  (let [req (merge
-             {:accept       :json
-              :content-type :json
-              :method       :post
-              :url          url}
-             (when method
-               {:method (keyword method)})
-             (cond-&gt; request
-               (= &quot;request-body&quot; auth-method) (update :body merge auth-info)
-               (= &quot;header&quot; auth-method)       (update :headers merge auth-info)
-               (= &quot;query-param&quot; auth-method)  (update :query-params merge auth-info)))]
-    (http/request (cond-&gt; req
-                    (or (map? (:body req))
-                        (sequential? (:body req))) (update :body json/encode)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod channel/can-connect? :channel/http
-  [_channel-type details]
-  (channel.shared/validate-channel-details HTTPDetails details)
-  (try
-    (channel/send! {:type :channel/http :details details} {})
-    true
-    (catch Exception e
-      (let [data (ex-data e)]
-        ;; throw an appriopriate error if it's a connection error
-        (if (= ::http/unexceptional-status (:type data))
-          (throw (ex-info (tru &quot;Failed to connect to channel&quot;) {:request-status (:status data)
-                                                                :request-body   (:body data)}))
-          (throw e))))))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------------------------------------------------------;;
-                                          Alerts                                                ;;
-------------------------------------------------------------------------------------------------;;</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- qp-result-&gt;raw-data
-  [qp-result]
-  (let [data (:data qp-result)]
-    {:cols (map :name (:cols data))
-     :rows (:rows data)}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defmethod channel/render-notification [:channel/http :notification/card]
-  [_channel-type {:keys [payload creator]} _template _recipients]
-  (let [{:keys [card alert card_part]} payload
-        request-body {:type               &quot;alert&quot;
-                      :alert_id           (:id alert)
-                      :alert_creator_id   (:id creator)
-                      :alert_creator_name (:common_name creator)
-                      :data               {:type          &quot;question&quot;
-                                           :question_id   (:id card)
-                                           :question_name (:name card)
-                                           :question_url  (urls/card-url (:id card))
-                                           :visualization (let [{:keys [card dashcard result]} card_part]
-                                                            (channel.render/render-pulse-card-to-base64
-                                                             (channel.render/defaulted-timezone card) card dashcard result image-width))
-                                           :raw_data      (qp-result-&gt;raw-data (:result card_part))}
-                      :sent_at            (t/offset-date-time)}]
-    [{:body request-body}]))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+   [metabase.util.ui-logic :as ui-logic]
+   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defmethod notification.payload/payload :notification/card
+  [{:keys [creator_id alert] :as _notification-info} :- notification.payload/Notification]
+  (let [card_id (:card_id alert)]
+    {:card_part   (notification.execute/execute-card creator_id card_id
+                                                     ;; for query_execution's context purposes
+                                                     ;; TODO: check whether we can remove this or name it?
+                                                     :pulse-id (:id alert))
+     :card        (t2/select-one :model/Card card_id)
+     :style       {:color_text_dark   channel.render/color-text-dark
+                   :color_text_light  channel.render/color-text-light
+                   :color_text_medium channel.render/color-text-medium}
+     :alert       alert}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- goal-met? [{:keys [alert_above_goal], :as alert} card_part]
+  (let [goal-comparison      (if alert_above_goal &gt;= &lt;)
+        goal-val             (ui-logic/find-goal-value card_part)
+        comparison-col-rowfn (ui-logic/make-goal-comparison-rowfn (:card card_part)
+                                                                  (get-in card_part [:result :data]))]
+    (when-not (and goal-val comparison-col-rowfn)
+      (throw (ex-info &quot;Unable to compare results to goal for alert.&quot;
+                      {:alert  alert
+                       :result card_part})))
+    (boolean
+     (some (fn [row]
+             (goal-comparison (comparison-col-rowfn row) goal-val))
+           (get-in card_part [:result :data :rows])))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defmethod notification.payload/should-send-notification? :notification/card
+  [{:keys [payload]}]
+  (let [{:keys [alert card_part]} payload
+        alert_condition        (:alert_condition alert)]
+    (cond
+      (= &quot;rows&quot; alert_condition)
+      (not (notification.execute/is-card-empty? card_part))
+      (= &quot;goal&quot; alert_condition)
+      (goal-met? alert card_part)
+      :else
+      (let [^String error-text (format &quot;Unrecognized alert with condition '%s'&quot; alert_condition)]
+        (throw (IllegalArgumentException. error-text))))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
