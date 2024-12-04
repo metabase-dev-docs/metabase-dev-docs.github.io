@@ -2877,9 +2877,8 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.config :as config]
    [metabase.public-settings :as public-settings]
    [metabase.public-settings.premium-features :as premium-features]
-   [metabase.search :as search]
    [metabase.search.config :as search.config]
-   [metabase.search.core :as search.core]
+   [metabase.search.core :as search]
    [metabase.server.middleware.offset-paging :as mw.offset-paging]
    [metabase.task :as task]
    [metabase.task.search-index :as task.search-index]
@@ -2910,29 +2909,21 @@ net.brehaut.ClojureTools = (function (SH) {
                 raise)))
    (meta handler)))</pre></td></tr><tr><td class="docs"><p>/re-init</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint POST 
-  &quot;If fulltext search is enabled, this will blow away the index table, re-create it, and re-populate it.&quot;
+  &quot;This will blow away any search indexes, re-create, and re-populate them.&quot;
   []
   (api/check-superuser)
-  (cond
-    (not (public-settings/experimental-fulltext-search-enabled))
-    (throw (ex-info &quot;Search index is not enabled.&quot; {:status-code 501}))
-    (search.core/supports-index?)
-    {:message (search.core/init-index! {:force-reset? true})}
-    :else
+  (if (search/supports-index?)
+    {:message (search/init-index! {:force-reset? true})}
     (throw (ex-info &quot;Search index is not supported for this installation.&quot; {:status-code 501}))))</pre></td></tr><tr><td class="docs"><p>/force-reindex</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint POST 
-  &quot;If fulltext search is enabled, this will trigger a synchronous reindexing operation.&quot;
+  &quot;This will trigger an immediate reindexing, if we are using search index.&quot;
   []
   (api/check-superuser)
-  (cond
-    (not (public-settings/experimental-fulltext-search-enabled))
-    (throw (ex-info &quot;Search index is not enabled.&quot; {:status-code 501}))
-    (search.core/supports-index?)
+  (if  (search/supports-index?)
     ;; The job appears to wait on the main thread when run from tests, so, unfortunately, testing this branch is hard.
     (if (and (task/job-exists? task.search-index/reindex-job-key) (not config/is-test?))
       (do (task/trigger-now! task.search-index/reindex-job-key) {:message &quot;task triggered&quot;})
       (do (task.search-index/reindex!) {:message &quot;done&quot;}))
-    :else
     (throw (ex-info &quot;Search index is not supported for this installation.&quot; {:status-code 501}))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- set-weights! [context overrides]
   (api/check-superuser)
