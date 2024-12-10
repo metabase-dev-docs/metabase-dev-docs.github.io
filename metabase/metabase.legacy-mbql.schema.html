@@ -3194,7 +3194,7 @@ wouldn't it</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Expressions are "calculated column" definitions, defined once and then used elsewhere in the MBQL query.</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Functions that return string values. Should match [[StringExpression]].</p>
 </td><td class="codes"><pre class="brush: clojure">(def string-functions
-  #{:substring :trim :rtrim :ltrim :upper :lower :replace :concat :regex-match-first :coalesce :case
+  #{:substring :trim :rtrim :ltrim :upper :lower :replace :concat :regex-match-first :coalesce :case :if
     :host :domain :subdomain :month-name :quarter-name :day-name})</pre></td></tr><tr><td class="docs"><p>Schema for the definition of an string expression.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private StringExpression
   [:ref ::StringExpression])</pre></td></tr><tr><td class="docs">
@@ -3213,7 +3213,7 @@ wouldn't it</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private StringExpressionArg
   [:ref ::StringExpressionArg])</pre></td></tr><tr><td class="docs"><p>Functions that return numeric values. Should match [[NumericExpression]].</p>
 </td><td class="codes"><pre class="brush: clojure">(def numeric-functions
-  #{:+ :- :/ :* :coalesce :length :round :ceil :floor :abs :power :sqrt :log :exp :case :datetime-diff
+  #{:+ :- :/ :* :coalesce :length :round :ceil :floor :abs :power :sqrt :log :exp :case :if :datetime-diff
     ;; extraction functions (get some component of a given temporal value/column)
     :temporal-extract
     ;; SUGAR drivers do not need to implement
@@ -3611,13 +3611,15 @@ segments and pass-thru to GA.</p>
    [:default {:optional true} ExpressionArg]])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defclause ^{:requires-features #{:basic-aggregations}} case
   clauses CaseClauses, options (optional CaseOptions))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defclause ^:sugar ^{:requires-features #{:basic-aggregations}} [case:if if]
+  clauses CaseClauses, options (optional CaseOptions))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::NumericExpression
-  (one-of + - / * coalesce length floor ceil round abs power sqrt exp log case datetime-diff
+  (one-of + - / * coalesce length floor ceil round abs power sqrt exp log case case:if datetime-diff
           temporal-extract get-year get-quarter get-month get-week get-day get-day-of-week
           get-hour get-minute get-second))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::StringExpression
-  (one-of substring trim ltrim rtrim replace lower upper concat regex-match-first coalesce case host domain subdomain
-          month-name quarter-name day-name))</pre></td></tr><tr><td class="docs">
+  (one-of substring trim ltrim rtrim replace lower upper concat regex-match-first coalesce case case:if host domain
+          subdomain month-name quarter-name day-name))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::FieldOrExpressionDef
   &quot;Schema for anything that is accepted as a top-level expression definition, either an arithmetic expression such as a
   `:+` clause or a `:field` clause.&quot;
@@ -3631,6 +3633,7 @@ segments and pass-thru to GA.</p>
                        (is-clause? boolean-functions x)  :boolean
                        (is-clause? datetime-functions x) :datetime
                        (is-clause? :case x)              :case
+                       (is-clause? :if   x)              :if
                        (is-clause? :offset x)            :offset
                        :else                             :else))}
    [:numeric  NumericExpression]
@@ -3638,6 +3641,7 @@ segments and pass-thru to GA.</p>
    [:boolean  BooleanExpression]
    [:datetime DatetimeExpression]
    [:case     case]
+   [:if       case:if]
    [:offset   offset]
    [:else     Field]])</pre></td></tr><tr><td class="docs"><p>-------------------------------------------------- Aggregations --------------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>For all of the 'normal' Aggregations below (excluding Metrics) fields are implicit Field IDs</p>
@@ -3687,7 +3691,7 @@ expanded to other aggregations/etc. in the expand-macros middleware</p>
                        :else))}
    [:numeric-expression NumericExpression]
    [:else (one-of avg cum-sum distinct stddev sum min max metric share count-where
-                  sum-where case median percentile ag:var cum-count count offset)]])</pre></td></tr><tr><td class="docs">
+                  sum-where case case:if median percentile ag:var cum-count count offset)]])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private UnnamedAggregation
   ::UnnamedAggregation)</pre></td></tr><tr><td class="docs"><p>Additional options for any aggregation clause when wrapping it in <code>:aggregation-options</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private AggregationOptions
@@ -4008,6 +4012,13 @@ driver supports <code>:full-join</code> before generating a Join clause using th
   Driver implementations: This is guaranteed to be present after pre-processing.&quot;}
      ::lib.schema.common/non-blank-string]
 
+    [:ident
+     {:optional true
+      :description
+      &quot;An opaque string used as a unique identifier for this join clause, even if it evolves. This string is randomly
+      generated when a join clause is created, so it can never be confused with another join of the same table.&quot;}
+     ::Ident]
+
     [:fk-field-id
      {:optional true
       :description &quot;Mostly used only internally. When a join is implicitly generated via a `:field` clause with
@@ -4051,20 +4062,41 @@ driver supports <code>:full-join</code> before generating a Join clause using th
   [:map
    [:page  PositiveInt]
    [:items PositiveInt]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::Ident
+  &quot;Unique identifier string for new `:column` refs. The new refs aren't used in legacy MBQL (currently) but the
+  idents for column-introducing new clauses (joins, aggregations, breakouts, expressions) are randomly generated when
+  the clauses are created, so the idents must be preserved in legacy MBQL.
+
+  These are opaque strings under the initial design; I've made them a separate schema for documentation and
+  future-proofing.&quot;
+  [:or ::lib.schema.common/non-blank-string :keyword])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::IndexedIdents
+  &quot;Aggregations and breakouts get their `:ident` in legacy MBQL from a separate map, which maps the index of the
+  aggregation or breakout to its ident.
+
+  (That's super unstable, but legacy MBQL is never manipulated anymore. We just need a clean round trip through
+  legacy, so indexes work fine. Idents are stored directly on the clauses in pMBQL.)&quot;
+  [:map-of ::lib.schema.common/int-greater-than-or-equal-to-zero ::Ident])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::ExpressionIdents
+  &quot;Expressions get their `:ident` in legacy MBQL from a separate map, which maps expression names to idents.&quot;
+  [:map-of ::lib.schema.common/non-blank-string ::Ident])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::MBQLQuery
   [:and
    [:map
-    [:source-query    {:optional true} SourceQuery]
-    [:source-table    {:optional true} SourceTable]
-    [:aggregation     {:optional true} [:sequential {:min 1} Aggregation]]
-    [:breakout        {:optional true} [:sequential {:min 1} Field]]
-    [:expressions     {:optional true} [:map-of ::lib.schema.common/non-blank-string [:ref ::FieldOrExpressionDef]]]
-    [:fields          {:optional true} Fields]
-    [:filter          {:optional true} Filter]
-    [:limit           {:optional true} ::lib.schema.common/int-greater-than-or-equal-to-zero]
-    [:order-by        {:optional true} (helpers/distinct [:sequential {:min 1} [:ref ::OrderBy]])]
-    [:page            {:optional true} [:ref ::Page]]
-    [:joins           {:optional true} [:ref ::Joins]]
+    [:source-query       {:optional true} SourceQuery]
+    [:source-table       {:optional true} SourceTable]
+    [:aggregation        {:optional true} [:sequential {:min 1} Aggregation]]
+    [:aggregation-idents {:optional true} [:ref ::IndexedIdents]]
+    [:breakout           {:optional true} [:sequential {:min 1} Field]]
+    [:breakout-idents    {:optional true} [:ref ::IndexedIdents]]
+    [:expressions        {:optional true} [:map-of ::lib.schema.common/non-blank-string [:ref ::FieldOrExpressionDef]]]
+    [:expression-idents  {:optional true} [:ref ::ExpressionIdents]]
+    [:fields             {:optional true} Fields]
+    [:filter             {:optional true} Filter]
+    [:limit              {:optional true} ::lib.schema.common/int-greater-than-or-equal-to-zero]
+    [:order-by           {:optional true} (helpers/distinct [:sequential {:min 1} [:ref ::OrderBy]])]
+    [:page               {:optional true} [:ref ::Page]]
+    [:joins              {:optional true} [:ref ::Joins]]
 
     [:source-metadata
      {:optional true
@@ -4081,7 +4113,16 @@ driver supports <code>:full-join</code> before generating a Join clause using th
    [:fn
     {:error/message &quot;Fields specified in `:breakout` should not be specified in `:fields`; this is implied.&quot;}
     (fn [{:keys [breakout fields]}]
-      (empty? (set/intersection (set breakout) (set fields))))]])</pre></td></tr><tr><td class="docs"><p>----------------------------------------------------- Params -----------------------------------------------------</p>
+      (empty? (set/intersection (set breakout) (set fields))))]
+   ;; TODO: Re-enable this - it's a useful check but it currently breaks a pile of too-literal legacy tests.
+   #_[:fn
+      {:error/message &quot;:expressions must have the same keys as :expression-idents&quot;}
+      (fn [{:keys [expressions expression-idents]}]
+        (core/or (core/= nil expressions expression-idents)
+                 (core/and (map? expressions)
+                           (map? expression-idents)
+                           (core/= (set (keys expressions))
+                                   (set (keys expression-idents))))))]])</pre></td></tr><tr><td class="docs"><p>----------------------------------------------------- Params -----------------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mr/def ::WidgetType
   &quot;Schema for valid values of `:widget-type` for a [[::TemplateTag:FieldFilter]].&quot;
