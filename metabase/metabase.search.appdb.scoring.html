@@ -2874,6 +2874,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.config :as config]
    [metabase.public-settings.premium-features :refer [defenterprise]]
    [metabase.search.appdb.index :as search.index]
+   [metabase.search.appdb.specialization.api :as specialization]
    [metabase.search.config :as search.config]
    [metabase.util :as u]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
@@ -2930,15 +2931,7 @@ net.brehaut.ClojureTools = (function (SH) {
    (for [[column-alias expr] scorers]
      [expr column-alias])
    [[(sum-columns (map (partial weighted-score context) scorers))
-     :total_score]]))</pre></td></tr><tr><td class="docs"><p>See https://www.postgresql.org/docs/current/textsearch-controls.html#TEXTSEARCH-RANKING
- 0 (the default) ignores the document length
- 1 divides the rank by 1 + the logarithm of the document length
- 2 divides the rank by the document length
- 4 divides the rank by the mean harmonic distance between extents (this is implemented only by ts<em>rank</em>cd)
- 8 divides the rank by the number of unique words in document
-16 divides the rank by 1 + the logarithm of the number of unique words in document
-32 divides the rank by itself + 1</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ts-rank-normalization 0)</pre></td></tr><tr><td class="docs"><p>TODO move these to the spec definitions</p>
+     :total_score]]))</pre></td></tr><tr><td class="docs"><p>TODO move these to the spec definitions</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private bookmarked-models [:card :collection :dashboard])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private bookmark-score-expr
   (let [match-clause (fn [m] [[:and
@@ -2956,16 +2949,12 @@ net.brehaut.ClojureTools = (function (SH) {
              [:case
               [:= :search_index.model [:inline &quot;dataset&quot;]] [:inline &quot;card&quot;]
               [:= :search_index.model [:inline &quot;metric&quot;]] [:inline &quot;card&quot;]
-              :else :search_index.model]]]})</pre></td></tr><tr><td class="docs"><p>TODO this will need to be abstracted for other appdbs</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- view-count-percentile-query [p-value]
-  (let [expr [:raw &quot;percentile_cont(&quot; [:lift p-value] &quot;) WITHIN GROUP (ORDER BY view_count)&quot;]]
-    {:select   [:search_index.model [expr :vcp]]
-     :from     [[(search.index/active-table) :search_index]]
-     :group-by [:search_index.model]
-     :having   [:is-not expr nil]}))</pre></td></tr><tr><td class="docs">
+              :else :search_index.model]]]})</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- view-count-percentiles*
   [p-value]
-  (into {} (for [{:keys [model vcp]} (t2/query (view-count-percentile-query p-value))]
+  (into {} (for [{:keys [model vcp]} (t2/query (specialization/view-count-percentile-query
+                                                (search.index/active-table)
+                                                p-value))]
              [(keyword model) vcp])))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^{:private true
        :arglists '([p-value])}
@@ -2977,7 +2966,7 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defn- view-count-expr [percentile]
   (let [views (view-count-percentiles percentile)
         cases (for [[sm v] views]
-                [[:= :search_index.model [:inline (name sm)]] (max v 1)])]
+                [[:= :search_index.model [:inline (name sm)]] (max (or v 0) 1)])]
     (size :view_count (if (seq cases)
                         (into [:case] cat cases)
                         1))))</pre></td></tr><tr><td class="docs">
@@ -2998,7 +2987,7 @@ net.brehaut.ClojureTools = (function (SH) {
     {:model       [:inline 1]}
     ;; NOTE: we calculate scores even if the weight is zero, so that it's easy to consider how we could affect any
     ;; given set of results. At some point, we should optimize away the irrelevant scores for any given context.
-    {:text         [:ts_rank :search_vector :query [:inline ts-rank-normalization]]
+    {:text         (specialization/text-score)
      :view-count   (view-count-expr search.config/view-count-scaling-percentile)
      :pinned       (truthy :pinned)
      :bookmarked   bookmark-score-expr

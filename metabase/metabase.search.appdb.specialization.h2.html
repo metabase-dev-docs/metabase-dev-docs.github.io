@@ -2865,257 +2865,58 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.search.spec" name="metabase.search.spec"><h1 class="project-name">metabase.search.spec</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.search.spec
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.search.appdb.specialization.h2" name="metabase.search.appdb.specialization.h2"><h1 class="project-name">metabase.search.appdb.specialization.h2</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.search.appdb.specialization.h2
   (:require
-   [clojure.set :as set]
+   [clojure.math :as math]
    [clojure.string :as str]
-   [clojure.walk :as walk]
-   [malli.core :as mc]
-   [malli.error :as me]
-   [metabase.config :as config]
-   [metabase.search.config :as search.config]
+   [honey.sql.helpers :as sql.helpers]
+   [metabase.search.appdb.specialization.api :as specialization]
    [metabase.util :as u]
-   [toucan2.core :as t2]
-   [toucan2.tools.transformed :as t2.transformed]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private SearchModel
-  [:enum &quot;dashboard&quot; &quot;table&quot; &quot;dataset&quot; &quot;segment&quot; &quot;collection&quot; &quot;database&quot; &quot;action&quot; &quot;indexed-entity&quot; &quot;metric&quot; &quot;card&quot;])</pre></td></tr><tr><td class="docs"><p>Key must be present, to show it's been explicitly considered.</p>
-
-<ul>
-<li>false: not present [not: consider making the nil instead, since it implies writing NULL to the column]</li>
-<li>true: given by a column with the same name (snake case) [note: consider removing this sugar, just repeat the column]</li>
-<li>keyword: given by the corresponding column</li>
-<li>vector: calculated by the given expression</li>
-<li>map: a sub-select</li>
-</ul>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private AttrValue
-  [:union :boolean :keyword vector? :map])</pre></td></tr><tr><td class="docs"><p>The abstract types of each attribute.</p>
-</td><td class="codes"><pre class="brush: clojure">(def attr-types
-  {:archived            :boolean
-   :collection-id       :pk
-   :created-at          :timestamp
-   :creator-id          :pk
-   :dashboardcard-count :int
-   :database-id         :pk
-   :id                  :pk
-   :last-edited-at      :timestamp
-   :last-editor-id      :pk
-   :last-viewed-at      :timestamp
-   :name                :text
-   :native-query        nil
-   :official-collection :boolean
-   :pinned              :boolean
-   :updated-at          :timestamp
-   :verified            :boolean
-   :view-count          :int})</pre></td></tr><tr><td class="docs"><p>These attributes must be explicitly defined, omitting them could be a source of bugs.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private explicit-attrs
-  [:archived
-   :collection-id])</pre></td></tr><tr><td class="docs"><p>These attributes may be omitted (for now) in the interest of brevity in the definitions.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private optional-attrs
-  (-&gt;&gt; (keys (apply dissoc search.config/filters explicit-attrs))
-       ;; identifiers and rankers
-       (into
-        [:id                                                ;;  in addition to being a filter, this is a key property
-         :name
-         :official-collection
-         :dashboardcard-count
-         :last-viewed-at
-         :pinned
-         :verified                                          ;;  in addition to being a filter, this is also a ranker
-         :view-count
-         :updated-at])
-       distinct
-       vec))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private default-attrs
-  {:id   true
-   :name true})</pre></td></tr><tr><td class="docs"><p>Keys of a search-model that correspond to concrete columns in the index</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private attr-keys
-  (into explicit-attrs optional-attrs))</pre></td></tr><tr><td class="docs"><p>Make sure to keep attr-types up to date</p>
-</td><td class="codes"><pre class="brush: clojure">(assert (= (set (keys attr-types)) (set attr-keys)))</pre></td></tr><tr><td class="docs"><p>Columns of an ingestion query that correspond to concrete columns in the index</p>
-</td><td class="codes"><pre class="brush: clojure">(def attr-columns
-  (mapv (comp keyword u/-&gt;snake_case_en name) attr-keys))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(assert (not-any? (set explicit-attrs) optional-attrs) &quot;Attribute must only be mentioned in one list&quot;)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private Attrs
-  (into [:map {:closed true}]
-        (concat (for [k explicit-attrs] [k AttrValue])
-                (for [k optional-attrs] [k {:optional true} AttrValue]))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private NonAttrKey
-  ;; This is rather slow, not great for REPL development.
-  (if config/is-dev?
-    :keyword
-    [:and :keyword [:not (into [:enum] attr-columns)]]))</pre></td></tr><tr><td class="docs"><p>We use our own schema instead of raw HoneySQL, so that we can invert it to calculate the update hooks.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private JoinMap
-  [:map-of :keyword [:tuple :keyword vector?]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private Specification
-  [:map {:closed true}
-   [:name SearchModel]
-   [:visibility [:enum :all :app-user]]
-   [:model :keyword]
-   [:attrs Attrs]
-   [:search-terms [:sequential {:min 1} :keyword]]
-   [:render-terms [:map-of NonAttrKey AttrValue]]
-   [:where {:optional true} vector?]
-   [:bookmark {:optional true} vector?]
-   [:joins {:optional true} JoinMap]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- qualify-column* [table column]
-  (if (str/includes? (name column) &quot;.&quot;)
-    column
-    (keyword (str (name table) &quot;.&quot; (name column)))))</pre></td></tr><tr><td class="docs"><p>Given a select-item, qualify the (potentially nested) column reference if it is naked.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- qualify-column
-  [table select-item]
-  (cond
-    (keyword? select-item)
-    (let [qualified (qualify-column* table select-item)]
-      (if (= select-item qualified)
-        select-item
-        [qualified select-item]))
-    (and (vector? select-item) (keyword? (first select-item)))
-    (assoc select-item 0 (qualify-column* table (first select-item)))
-    :else
-    select-item))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- has-table? [table kw]
-  (and (not (namespace kw))
-       (if table
-         (str/starts-with? (name kw) (str (name table) &quot;.&quot;))
-         (not (str/includes? (name kw) &quot;.&quot;)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- get-table [kw]
-  (let [parts (str/split (name kw) #&quot;\.&quot;)]
-    (when (&gt; (count parts) 1)
-      (keyword (first parts)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- remove-table [table kw]
-  (if (and table (not (namespace kw)))
-    (keyword (subs (name kw) (inc (count (name table)))))
-    kw))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- find-fields-kw [kw]
-  ;; Filter out SQL functions
-  (when-not (str/starts-with? (name kw) &quot;%&quot;)
-    (when-not (#{:else :integer :float} kw)
-      (let [table (get-table kw)]
-        (list [(or table :this) (remove-table table kw)])))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- find-fields-expr [expr]
-  (cond
-    (keyword? expr)
-    (find-fields-kw expr)
-    (vector? expr)
-    (mapcat find-fields-expr (rest expr))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- find-fields-attr [[k v]]
-  (when v
-    (if (true? v)
-      [[:this (keyword (u/-&gt;snake_case_en (name k)))]]
-      (find-fields-expr v))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- find-fields-select-item [x]
-  (cond
-    (keyword? x)
-    (find-fields-kw x)
-    (vector? x)
-    (find-fields-expr (first x))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- find-fields-top [x]
-  (cond
-    (map? x)
-    (mapcat find-fields-attr x)
-    (sequential? x)
-    (mapcat find-fields-select-item x)
-    :else
-    (throw (ex-info &quot;Unexpected format for fields&quot; {:x x}))))</pre></td></tr><tr><td class="docs"><p>Search within a definition for all the fields referenced on the given table alias.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- find-fields
-  [spec]
-  (u/group-by first second conj #{}
-              (concat
-               (mapcat
-                find-fields-top
-                ;; Remove the keys with special meanings (should probably switch this to an allowlist rather)
-                (vals (dissoc spec :name :visibility :native-query :where :joins :bookmark :model)))
-               (find-fields-expr (:where spec)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- replace-qualification [expr from to]
-  (cond
-    (and (keyword? expr) (has-table? from expr))
-    (keyword (str/replace (name expr) (str (name from) &quot;.&quot;) (str (name to) &quot;.&quot;)))
-    (sequential? expr)
-    (into (empty expr) (map #(replace-qualification % from to) expr))
-    :else
-    expr))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- insert-values [expr table m]
-  (walk/postwalk
-   (fn [x]
-     (if (and (keyword? x) (has-table? table x))
-       (get m (remove-table table x))
-       x))
-   expr))</pre></td></tr><tr><td class="docs"><p>Generate a map indicating which search-models to update based on which fields are modified for a given model.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- search-model-hooks
-  [spec]
-  (let [s      (:name spec)
-        fields (find-fields spec)]
-    (into {}
-          (cons
-           [(:model spec) #{{:search-model s
-                             :fields       (:this (find-fields spec))
-                             :where        [:= :updated.id :this.id]}}]
-           (for [[table-alias [model join-condition]] (:joins spec)]
-             (let [table-fields (fields table-alias)]
-               [model #{{:search-model s
-                         :fields       table-fields
-                         :where        (replace-qualification join-condition table-alias :updated)}}]))))))</pre></td></tr><tr><td class="docs"><p>Combine the search index hooks corresponding to different search models.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- merge-hooks
-  [hooks]
-  (reduce (partial merge-with set/union) {} hooks))</pre></td></tr><tr><td class="docs"><p>Given a list of select-item, qualify all naked column references to refer to the given table.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn qualify-columns
-  [table select-item]
-  (for [column select-item
-        :when (and column (or (not (vector? column))
-                              (some? (first column))))]
-    (qualify-column table column)))</pre></td></tr><tr><td class="docs"><p>Register a metabase model as a search-model.
-Once we're trying up the fulltext search project, we can inline a detailed explanation.
-For now, see its schema, and the existing definitions that use it.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti spec
-  (fn [search-model] search-model))</pre></td></tr><tr><td class="docs"><p>A mapping from each search-model to its specification.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn specifications
-  []
-  (into {} (for [[s spec-fn] (methods spec)] [s (spec-fn s)])))</pre></td></tr><tr><td class="docs"><p>Check whether a given specification is valid</p>
-</td><td class="codes"><pre class="brush: clojure">(defn validate-spec!
-  [spec]
-  (when-let [info (mc/explain Specification spec)]
-    (throw (ex-info (str &quot;Invalid search specification for &quot; (:name spec) &quot;: &quot; (me/humanize info)) info)))
-  (doseq [table (keys (find-fields spec))
-          :when (not= :this table)]
-    (assert (contains? (:joins spec) table) (str &quot;Reference to table without a join: &quot; table))))</pre></td></tr><tr><td class="docs"><p>Define a spec for a search model.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro define-spec
-  [search-model spec]
-  `(let [spec# (-&gt; ~spec
-                   (assoc :name ~search-model)
-                   (update :visibility #(or % :all))
-                   (update :attrs #(merge ~default-attrs %)))]
-     (validate-spec! spec#)
-     (derive (:model spec#) :hook/search-index)
-     (defmethod spec ~search-model [~'_] spec#)))</pre></td></tr><tr><td class="docs"><p>Return an inverted map of data dependencies to search models, used for updating them based on underlying models.</p>
-
-<p>TODO we should memoize this for production (based on spec values)</p>
-</td><td class="codes"><pre class="brush: clojure">(defn model-hooks
-  []
-  (merge-hooks
-   (for [[search-model spec-fn] (methods spec)]
-     (search-model-hooks (spec-fn search-model)))))</pre></td></tr><tr><td class="docs"><p>Given a transformed toucan map, get back a mapping to the raw db values that we can use in a query.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- instance-&gt;db-values
-  [instance]
-  (let [xforms (#'t2.transformed/in-transforms (t2/model instance))]
-    (reduce-kv
-     (fn [m k v]
-       (assoc m k (if-let [f (get xforms k)] (f v) v)))
-     {}
-     instance)))</pre></td></tr><tr><td class="docs"><p>Given an updated or created instance, return a description of which search-models to (re)index.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn search-models-to-update
-  [instance &amp; [always?]]
-  (let [raw-values (delay (instance-&gt;db-values instance))]
-    (into #{}
-          (keep
-           (fn [{:keys [search-model fields where]}]
-             (when (or always? (and fields (some fields (keys (or (t2/changes instance) instance)))))
-               [search-model (insert-values where :updated @raw-values)])))
-          (get (model-hooks) (t2/model instance)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(comment
-  (doseq [d (descendants :hook/search-index)]
-    (underive d :hook/search-index))
-  (doseq [d (keys (model-hooks))]
-    (derive d :hook/search-index)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod specialization/table-schema :h2 [base-schema]
+  (into [[:id :bigint :auto-increment :primary-key]
+         [:search_terms :text]
+         [:native_search_terms :text]]
+        base-schema))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod specialization/post-create-statements :h2 [prefix table-name]
+  (mapv
+   (fn [template] (format template prefix table-name))
+   [&quot;CREATE UNIQUE INDEX %s_identity_idx ON %s (model, model_id)&quot;]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod specialization/batch-upsert! :h2 [table entries]
+  ;; it's in memory, let's just do it quick and dirty (HoneySQL can't speak MERGE WITH)
+  ;; TODO just generate raw SQL
+  (when (seq entries)
+    (doseq [{:keys [model model_id]} entries]
+      (t2/delete! table :model model :model_id model_id))
+    (t2/insert! table entries)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- wildcard-tokens [search-term]
+  (-&gt;&gt; (str/split search-term #&quot;\s+&quot;)
+       (map #(u/lower-case-en (str/trim %)))
+       (remove str/blank?)
+       (map (fn [s] (str &quot;%&quot; s &quot;%&quot;)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod specialization/base-query :h2
+  [active-table search-term search-ctx select-items]
+  (let [search-column (if (:search-native-query search-ctx)
+                        :search_index.native_search_terms
+                        :search_index.search_terms)]
+    (cond-&gt; {:select select-items
+             :from   [[active-table :search_index]]}
+      (not (str/blank? search-term))
+      (sql.helpers/where (into [:and] (for [pattern (wildcard-tokens search-term)]
+                                        [:like [:lower search-column] pattern]))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod specialization/extra-entry-fields :h2 [entity]
+  {:search_terms        (:searchable_text entity)
+   :native_search_terms (str/join &quot; &quot; (keep entity [:searchable_text :native_query]))})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod specialization/text-score :h2 []
+  [:inline 1])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod specialization/view-count-percentile-query :h2
+  [index-table p-value]
+  ;; Since H2 doesn't support calculating percentiles, we just scale the max &gt;_&lt;
+  ;; We take the power of the p-value to simulate a one-sided, long-tailed distribution
+  {:select   [:search_index.model [[:* [:inline (math/pow p-value 10)] [:max :view_count]] :vcp]]
+   :from     [[index-table :search_index]]
+   :group-by [:search_index.model]})</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

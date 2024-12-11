@@ -2956,7 +2956,11 @@ so returns <code>{:explicit #{...int ids}}</code> map.</p>
      ;; We may want to change to record model references directly rather than resolving them.
      ;; This would remove the need to invalidate consuming cards when a given model changes.
      :query      (explicit-references (mbql.u/referenced-field-ids query))
-     :mbql/query (explicit-references (lib.util/referenced-field-ids query)))))</pre></td></tr><tr><td class="docs"><p>Clears QueryFields associated with this card and creates fresh, up-to-date-ones.</p>
+     :mbql/query (explicit-references (lib.util/referenced-field-ids query)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- truncate-string [x]
+  (if (and (string? x) (&gt; (count x) 254))
+    (subs x 0 254)
+    x))</pre></td></tr><tr><td class="docs"><p>Clears QueryFields associated with this card and creates fresh, up-to-date-ones.</p>
 
 <p>Returns <code>nil</code> (and logs the error) if there was a parse error.
 Returns <code>nil</code> and leaves the database records as-is if analysis is disabled for the given query type.</p>
@@ -2967,21 +2971,24 @@ Returns <code>nil</code> and leaves the database records as-is if analysis is di
       (t2/with-transaction [_conn]
         (let [analysis-id (t2/insert-returning-pk! :model/QueryAnalysis {:card_id card-id :status &quot;running&quot;})
               result      (query-references query query-type)
-              table-&gt;row  (fn [{:keys [schema table table-id]}]
-                            {:card_id     card-id
-                             :analysis_id analysis-id
-                             :schema      schema
-                             :table       table
-                             :table_id    table-id})
-              field-&gt;row  (fn [{:keys [schema table column table-id field-id explicit-reference]}]
-                            {:card_id            card-id
-                             :analysis_id        analysis-id
-                             :schema             schema
-                             :table              table
-                             :column             column
-                             :table_id           table-id
-                             :field_id           field-id
-                             :explicit_reference explicit-reference})]
+              safely      (fn [f] (fn [m] (update-vals (f m) truncate-string)))
+              table-&gt;row  (safely
+                           (fn [{:keys [schema table table-id]}]
+                             {:card_id     card-id
+                              :analysis_id analysis-id
+                              :schema      schema
+                              :table       table
+                              :table_id    table-id}))
+              field-&gt;row  (safely
+                           (fn [{:keys [schema table column table-id field-id explicit-reference]}]
+                             {:card_id            card-id
+                              :analysis_id        analysis-id
+                              :schema             schema
+                              :table              table
+                              :column             column
+                              :table_id           table-id
+                              :field_id           field-id
+                              :explicit_reference explicit-reference}))]
           (if (contains? result :error)
             ;; TODO we should track cases where the driver is disabled or not-supported differently.
             (t2/update! :model/QueryAnalysis analysis-id {:status &quot;failed&quot;})
@@ -3080,7 +3087,11 @@ Should only be called from [[metabase.task.analyze-queries]].</p>
 </td><td class="codes"><pre class="brush: clojure">(defn analyze!
   [card-or-id]
   (when-not (= ::disabled (execution))
-    (analyze!* card-or-id)))</pre></td></tr><tr><td class="docs"><p>Synchronously hand off the given card for analysis, at a low priority. May block indefinitely, relies on consumer.</p>
+    (try
+      (analyze!* card-or-id)
+      ;; Don't throw exceptions on the main thread path, analysis is best-effort.
+      (catch Exception e
+        (log/errorf e &quot;Failure analysing card %s&quot; (u/the-id card-or-id))))))</pre></td></tr><tr><td class="docs"><p>Synchronously hand off the given card for analysis, at a low priority. May block indefinitely, relies on consumer.</p>
 
 <p>Note that only the <em>hand-off</em> is sync; if we're using the queue the processing could happen asynchronously.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn queue-analysis!
