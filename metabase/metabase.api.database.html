@@ -3319,7 +3319,7 @@ match the virtual ID (and nothing else).</p>
  If the search string contains a number at the start AND text like '123-foo' we match do an exact match on card ID, and a substring match on the card name.
  If the search string does not start with a number, and is text like 'foo' we match that as a substring on the card name.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- autocomplete-cards
-  [database-id search-card-slug]
+  [database-id search-card-slug include-dashboard-questions?]
   (let [search-id   (re-find #&quot;\d*&quot; search-card-slug)
         search-name (-&gt; (re-matches #&quot;\d*-?(.*)&quot; search-card-slug)
                         second
@@ -3329,6 +3329,8 @@ match the virtual ID (and nothing else).</p>
                {:where    [:and
                            [:= :report_card.database_id database-id]
                            [:= :report_card.archived false]
+                           (when-not include-dashboard-questions?
+                             [:= :report_card.dashboard_id nil])
                            (cond
                              ;; e.g. search-string = &quot;123&quot;
                              (and (not-empty search-id) (empty? search-name))
@@ -3438,12 +3440,13 @@ causes too many problems.</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
   &quot;Return a list of `Card` autocomplete suggestions for a given `query` in a given `Database`.
   This is intended for use with the ACE Editor when the User is typing in a template tag for a `Card`, e.g. {{#...}}.&quot;
-  [id query]
-  {id    ms/PositiveInt
-   query ms/NonBlankString}
+  [id query include_dashboard_questions]
+  {id                          ms/PositiveInt
+   query                       ms/NonBlankString
+   include_dashboard_questions ms/MaybeBooleanValue}
   (api/read-check Database id)
   (try
-    (-&gt;&gt; (autocomplete-cards id query)
+    (-&gt;&gt; (autocomplete-cards id query include_dashboard_questions)
          (filter mi/can-read?)
          (map #(select-keys % [:id :name :type :collection_name])))
     (catch Throwable e

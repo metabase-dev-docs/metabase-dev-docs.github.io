@@ -3020,14 +3020,16 @@ TODO characterize by # w/ sql access, # of users, no self-serve data access</p>
 TODO characterize by # executions and avg latency</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- question-metrics
   []
-  (let [cards (t2/select [:model/Card :query_type :public_uuid :enable_embedding :embedding_params :dataset_query]
+  (let [cards (t2/select [:model/Card :query_type :public_uuid :enable_embedding :embedding_params :dataset_query :dashboard_id]
                          {:where (mi/exclude-internal-content-hsql :model/Card)})]
     {:questions (merge-count-maps (for [card cards]
-                                    (let [native? (= (keyword (:query_type card)) :native)]
-                                      {:total       1
-                                       :native      native?
-                                       :gui         (not native?)
-                                       :with_params (card-has-params? card)})))
+                                    (let [native? (= (keyword (:query_type card)) :native)
+                                          dq? (some? (:dashboard_id card))]
+                                      {:total                 1
+                                       :native                native?
+                                       :gui                   (not native?)
+                                       :is_dashboard_question dq?
+                                       :with_params           (card-has-params? card)})))
      :public    (merge-count-maps (for [card  cards
                                         :when (:public_uuid card)]
                                     {:total       1
@@ -3381,17 +3383,17 @@ completed activation signals. Returns nil for non-Pro or Starter plans.</p>
   []
   (u/prog1 eid-translation/default-counter
     (setting/set-value-of-type! :json :entity-id-translation-counter &lt;&gt;)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- categorize-query-execution [{client :embedding_client executor :executor_id}]
+</td><td class="codes"><pre class="brush: clojure">(defn- categorize-query-execution [{:keys [context embedding_client executor_id]}]
   (cond
-    (= &quot;embedding-sdk-react&quot; client)                     &quot;sdk_embed&quot;
-    (and (= &quot;embedding-iframe&quot; client) (some? executor)) &quot;interactive_embed&quot;
-    (and (= &quot;embedding-iframe&quot; client) (nil? executor))  &quot;static_embed&quot;
-    (and (#{ nil} client) (nil? executor))             &quot;public_link&quot;
-    :else                                                &quot;internal&quot;))</pre></td></tr><tr><td class="docs">
+    (= &quot;embedding-sdk-react&quot; embedding_client)                        &quot;sdk_embed&quot;
+    (and (= &quot;embedding-iframe&quot; embedding_client) (some? executor_id)) &quot;interactive_embed&quot;
+    (and (= &quot;embedding-iframe&quot; embedding_client) (nil? executor_id))  &quot;static_embed&quot;
+    (some-&gt; context name (str/starts-with? &quot;public-&quot;))                &quot;public_link&quot;
+    :else                                                             &quot;internal&quot;))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- -&gt;one-day-ago []
   (t/minus (t/offset-date-time) (t/days 1)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- -&gt;snowplow-grouped-metric-info []
-  (let [qe (t2/select [:model/QueryExecution :embedding_client :executor_id :started_at])
+  (let [qe (t2/select [:model/QueryExecution :embedding_client :context :executor_id :started_at])
         one-day-ago (-&gt;one-day-ago)
         ;; reuse the query data:
         qe-24h (filter (fn [{started-at :started_at}] (t/after? one-day-ago started-at)) qe)]

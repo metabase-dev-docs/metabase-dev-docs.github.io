@@ -2915,6 +2915,7 @@ matter! The calling function, <code>present-items</code>, is responsible for ens
 </td><td class="codes"><pre class="brush: clojure">(defmethod present-model-items :model/Card [_ cards]
   (-&gt;&gt; (t2/hydrate (t2/select [:model/Card
                                :id
+                               :dashboard_id
                                :description
                                :collection_id
                                :name
@@ -2939,13 +2940,20 @@ matter! The calling function, <code>present-items</code>, is responsible for ens
                                  :limit    1}
                                 :moderated_status]]
                               :id [:in (set (map :id cards))])
-                   :can_write :can_delete :can_restore [:collection :effective_location])
+                   :can_write :can_delete :can_restore [:collection :effective_location] :dashboard_count [:dashboard :moderation_status])
        present-collections
        (map (fn [card]
               (-&gt; card
                   (assoc :model (if (card/model? card) &quot;dataset&quot; &quot;card&quot;))
                   (assoc :fully_parameterized (api.collection/fully-parameterized-query? card))
-                  (dissoc :dataset_query))))))</pre></td></tr><tr><td class="docs">
+                  (dissoc :dataset_query))))))</pre></td></tr><tr><td class="docs"><p>For dashboards, we want <code>here</code> and <code>location</code> since they can contain cards as children.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- annotate-dashboard-with-collection-info
+  [dashboards]
+  (for [{parent-coll :collection
+         :as dashboard} (api.collection/annotate-dashboards dashboards)]
+    (assoc dashboard
+           :location (or (some-&gt; parent-coll collection/children-location)
+                         &quot;/&quot;))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod present-model-items :model/Dashboard [_ dashboards]
   (-&gt;&gt; (t2/hydrate (t2/select [:model/Dashboard
                                :id
@@ -2957,11 +2965,13 @@ matter! The calling function, <code>present-items</code>, is responsible for ens
                                :collection_position
                                [:last_viewed_at :last_used_at]
                                [&quot;dashboard&quot; :model]
+                               [nil :dashboard_id]
                                [nil :location]
                                [nil :database_id]]
 
                               :id [:in (set (map :id dashboards))])
                    :can_write :can_delete :can_restore [:collection :effective_location])
+       annotate-dashboard-with-collection-info
        present-collections))</pre></td></tr><tr><td class="docs"><p>/:id</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
   &quot;A flexible endpoint that returns stale entities, in the same shape as collections/items, with the following options:

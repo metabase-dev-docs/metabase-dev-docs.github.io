@@ -2865,179 +2865,54 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.query-processor.util.transformations.nest-breakouts" name="metabase.query-processor.util.transformations.nest-breakouts"><h1 class="project-name">metabase.query-processor.util.transformations.nest-breakouts</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.query-processor.util.transformations.nest-breakouts
-  (:require
-   [flatland.ordered.set :as ordered-set]
-   [medley.core :as m]
-   [metabase.lib.core :as lib]
-   [metabase.lib.equality :as lib.equality]
-   [metabase.lib.options :as lib.options]
-   [metabase.lib.schema :as lib.schema]
-   [metabase.lib.schema.metadata :as lib.schema.metadata]
-   [metabase.lib.util :as lib.util]
-   [metabase.lib.util.match :as lib.util.match]
-   [metabase.lib.walk :as lib.walk]
-   [metabase.util.malli :as mu]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- stage-has-window-aggregation? [stage]
-  (lib.util.match/match (:aggregation stage)
-    #{:cum-sum :cum-count :offset}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- stage-has-breakout? [stage]
-  (seq (:breakout stage)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- fields-used-in-breakouts-aggregations-or-expressions :- [:set [:or :mbql.clause/field :mbql.clause/expression]]
-  [stage :- ::lib.schema/stage]
-  ;; use an ordered set so we preserve the order we saw things when we walked the query so the fields we return are
-  ;; determinate. Otherwise tests using this are liable to be flaky because results can change because test metadata has
-  ;; randomly generated IDs
-  (into (ordered-set/ordered-set)
-        (m/distinct-by (fn [[tag opts id-or-name]]
-                         [tag
-                          (select-keys opts [:join-alias :temporal-unit :bucketing])
-                          id-or-name]))
-        (lib.util.match/match (concat (:breakout stage) (:aggregation stage) (:expressions stage))
-          #{:field :expression})))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- new-first-stage :- ::lib.schema/stage
-  &quot;Remove breakouts, aggregations, order bys, and limit. Add `:fields` to return the things needed by the second stage.&quot;
-  [stage :- ::lib.schema/stage]
-  (-&gt; stage
-      (dissoc :breakout :aggregation :order-by :limit :lib/stage-metadata)
-      (assoc :fields (mapv
-                      lib.util/fresh-uuids
-                      (fields-used-in-breakouts-aggregations-or-expressions stage)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- update-metadata-from-previous-stage-to-produce-correct-ref-in-current-stage :- ::lib.schema.metadata/column
-  &quot;Force a `[:field {} &lt;name&gt;]` ref.&quot;
-  [col :- ::lib.schema.metadata/column]
-  (-&gt; col
-      (assoc :lib/source              :source/previous-stage
-             :lib/source-column-alias (:lib/desired-column-alias col))
-      (lib/with-temporal-bucket (if (isa? ((some-fn :effective-type :base-type) col) :type/Temporal)
-                                  ;; for temporal columns: set temporal type to `:default` to
-                                  ;; prevent [[metabase.query-processor.middleware.auto-bucket-datetimes]] from
-                                  ;; trying to mess with it.
-                                  :default
-                                  ;; for other columns: remove temporal type, it should be nil anyway but remove it to
-                                  ;; be safe.
-                                  nil))
-      (lib/with-binning nil)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- update-second-stage-refs :- ::lib.schema/stage
-  [stage            :- ::lib.schema/stage
-   first-stage-cols :- [:sequential ::lib.schema.metadata/column]]
-  (lib.util.match/replace stage
-    #{:field :expression}
-    (if-let [col (when-not (some #{:expressions} &amp;parents)
-                   (lib.equality/find-matching-column &amp;match first-stage-cols))]
-      (-&gt; col
-          update-metadata-from-previous-stage-to-produce-correct-ref-in-current-stage
-          lib/ref)
-      (lib.util/fresh-uuids &amp;match))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private granularity
-  {:time-unbucketed 0
-   :minute 1
-   :minute-of-hour 2
-   :hour 3
-   :hour-of-day 4
-   :day 5
-   :date-unbucketed 5
-   :day-of-week 6
-   :day-of-month 7
-   :day-of-year 8
-   :week 9
-   :week-of-year 10
-   :month 11
-   :month-of-year 12
-   :quarter 13
-   :quarter-of-year 14
-   :year 15
-   :year-of-era 16})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- original-temporal-unit
-  [temporal-attributes]
-  (let [temporal-unit (:temporal-unit temporal-attributes)]
-    (if (and (some? temporal-unit) (not= temporal-unit :default))
-      temporal-unit
-      (or (:original-temporal-unit temporal-attributes)
-          (:metabase.lib.field/original-temporal-unit temporal-attributes)
-          temporal-unit))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- column-granularity
-  [temporal-attributes]
-  (let [effective-type ((some-fn :effective-type :base-type) temporal-attributes)
-        temporal-unit (original-temporal-unit temporal-attributes)]
-    (when temporal-unit
-      (-&gt; (if (or (nil? temporal-unit) (= temporal-unit :default))
-            (cond
-              (isa? effective-type :type/DateTime) :time-unbucketed
-              (isa? effective-type :type/Date)     :date-unbucketed
-              (isa? effective-type :type/Time)     :time-unbucketed
-              :else                                nil)
-            temporal-unit)
-          granularity))))</pre></td></tr><tr><td class="docs"><p>Returns the index of leftmost breakout among the breakouts with the finest temporal granularity.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn finest-temporal-breakout-index
-  [breakouts option-index]
-  (loop [bs (seq breakouts)
-         i 0
-         min-granularity (inc (apply max (vals granularity)))
-         finest-index nil]
-    (if-not bs
-      finest-index
-      (let [b (first bs)
-            granularity (-&gt; b (get option-index) column-granularity)]
-        (if (and granularity (&lt; granularity min-granularity))
-          (recur (next bs) (inc i) granularity     i)
-          (recur (next bs) (inc i) min-granularity finest-index))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- add-implicit-breakouts
-  [stage]
-  (if-let [breakouts (not-empty (:breakout stage))]
-    (let [finest-temp-breakout (finest-temporal-breakout-index breakouts 1)
-          breakout-exprs (if finest-temp-breakout
-                           (concat (m/remove-nth finest-temp-breakout breakouts)
-                                   [(nth breakouts finest-temp-breakout)])
-                           breakouts)
-          explicit-order-bys (vec (:order-by stage))
-          remove-uuid #(lib.options/update-options % dissoc :lib/uuid)
-          explicit-order-by-exprs (into #{} (map #(remove-uuid (get % 2))) explicit-order-bys)
-          order-bys (into explicit-order-bys
-                          (comp (map remove-uuid)
-                                (remove explicit-order-by-exprs)
-                                (map (fn [expr]
-                                       (lib.options/ensure-uuid [:asc (lib.options/ensure-uuid expr)]))))
-                          breakout-exprs)]
-      (assoc stage :order-by order-bys))
-    stage))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- new-second-stage :- ::lib.schema/stage
-  &quot;All references need to be updated to be prior-stage references using the desired alias from the previous stage.
-  Remove expressions, joins, and source(s).&quot;
-  [query       :- ::lib.schema/query
-   path        :- ::lib.walk/stage-path
-   stage       :- ::lib.schema/stage
-   first-stage :- ::lib.schema/stage]
-  (let [query            (assoc-in query path first-stage)
-        first-stage-cols (lib.walk/apply-f-for-stage-at-path lib/returned-columns query path)]
-    (-&gt; stage
-        (dissoc :joins :source-table :source-card :lib/stage-metadata :filters)
-        (update-second-stage-refs first-stage-cols)
-        (dissoc :expressions)
-        add-implicit-breakouts)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- nest-breakouts-in-stage :- [:maybe [:sequential {:min 2, :max 2} ::lib.schema/stage]]
-  [query :- ::lib.schema/query
-   path  :- ::lib.walk/stage-path
-   stage :- ::lib.schema/stage]
-  (let [first-stage (new-first-stage stage)]
-    [first-stage
-     (new-second-stage query path stage first-stage)]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn nest-breakouts-in-stages-with-window-aggregation :- ::lib.schema/query
-  &quot;Some picky databases like BigQuery don't let you use anything inside `ORDER BY` in `OVER` expressions except for
-  plain column identifiers that also appear in the `GROUP BY` clause... no inline temporal bucketing or things like
-  that.
-  This query transformation takes queries with cumulative aggregations and breakouts in the same stage and then adds a
-  new prior stage that does all of the breakout-column calculations so the original stage can just use raw column
-  identifiers. See #40982 for more info.&quot;
-  {:added &quot;0.50.0&quot;}
-  [query :- ::lib.schema/query]
-  (lib.walk/walk-stages
-   query
-   (fn [query path stage]
-     (when (and (stage-has-window-aggregation? stage)
-                (stage-has-breakout? stage))
-       (nest-breakouts-in-stage query path stage)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.util.autoplace" name="metabase.util.autoplace"><h1 class="project-name">metabase.util.autoplace</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>NOTE: It's not SUPER high impact if it falls out of sync - hopefully both will place things in a reasonable spot - but
+ideally this namespace should be kept in sync with
+<a href="https://github.com/metabase/metabase/blob/master/frontend/src/metabase/lib/dashboard_grid.js">the frontend version</a>.</p>
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.util.autoplace
+  (:require [metabase.models.dashboard.constants :as dashboard.constants]))</pre></td></tr><tr><td class="docs"><p>The default grid width.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:constant default-grid-width
+  dashboard.constants/GRID_WIDTH)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- intersects? [a b]
+  (not (or
+        (&gt;= (:col b) (+ (:col a) (:size_x a)))
+        (&lt;= (+ (:col b) (:size_x b)) (:col a))
+        (&gt;= (:row b) (+ (:row a) (:size_y a)))
+        (&lt;= (+ (:row b) (:size_y b)) (:row a)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- intersects-with-any-card? [cards position]
+  (boolean (some #(intersects? position %) cards)))</pre></td></tr><tr><td class="docs"><p>Where should a new card be placed on a tab, given the existing dashcards?</p>
+
+<p>NOTE: almost identical in behavior to <code>getPositionForNewDashCard</code> in
+https://github.com/metabase/metabase/blob/master/frontend/src/metabase/lib/dashboard_grid.js</p>
+
+<p>If you make changes here, we should keep the frontend version in sync.</p>
+
+<p>There are two differences, both unlikely to matter:</p>
+
+<ul>
+<li><p>in the case where we couldn't find any position at all (there is no space at all in 1000 rows) this will return
+<code>nil</code>, which will result in an error bubbling up. This should never happen, but something to call out.</p></li>
+<li><p>this includes a <code>dashboard_tab_id</code> in the returned value (which may be <code>nil</code>). This is just to make it a bit
+easier for the caller.</p></li>
+</ul>
+</td><td class="codes"><pre class="brush: clojure">(defn get-position-for-new-dashcard
+  ([cards display-type]
+   (let [{:keys [width height]} (:default (get dashboard.constants/card-size-defaults display-type))]
+     (get-position-for-new-dashcard cards
+                                    width
+                                    height
+                                    default-grid-width)))
+  ([cards size_x size_y grid-width]
+   (let [dashboard-tab-id (:dashboard_tab_id (first cards))]
+     (first
+      (for [row (range 1000)
+            col (range (inc (- grid-width size_x)))
+            :let [this-card {:col col
+                             :row row
+                             :size_x size_x
+                             :size_y size_y
+                             :dashboard_tab_id dashboard-tab-id}]
+            :when (not (intersects-with-any-card? cards this-card))]
+        this-card)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

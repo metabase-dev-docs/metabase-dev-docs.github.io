@@ -2931,31 +2931,24 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defn- maybe-add-expressions
   [bindings {:keys [expressions name]} query]
   (if expressions
-    (let [expr-clauses (-&gt;&gt; expressions
-                            keys
-                            (select-keys (get-in bindings [name :dimensions])))]
-      (-&gt; query
-          (assoc :expressions       expr-clauses
-                 :expression-idents (update-vals expr-clauses (fn [_] (u/generate-nano-id))))
-          (update :fields concat (for [expression (keys expressions)]
-                                   [:expression expression]))))
+    (-&gt; query
+        (assoc :expressions (-&gt;&gt; expressions
+                                 keys
+                                 (select-keys (get-in bindings [name :dimensions]))))
+        (update :fields concat (for [expression (keys expressions)]
+                                 [:expression expression])))
     query))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- indexed-idents [seqable]
-  (when (seq seqable)
-    (into {} (map (fn [i] [i (u/generate-nano-id)]))
-          (range (count seqable)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- maybe-add-aggregation
   [bindings {:keys [name aggregation]} query]
-  (let [aggs (-&gt;&gt; (for [agg (keys aggregation)]
-                    [:aggregation-options (get-in bindings [name :dimensions agg]) {:name agg}])
-                  not-empty)]
-    (m/assoc-some query :aggregation aggs :aggregation-idents (indexed-idents aggs))))</pre></td></tr><tr><td class="docs">
+  (-&gt;&gt; (for [agg (keys aggregation)]
+         [:aggregation-options (get-in bindings [name :dimensions agg]) {:name agg}])
+       not-empty
+       (m/assoc-some query :aggregation)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- maybe-add-breakout
   [bindings {:keys [name breakout]} query]
-  (let [breakouts (not-empty
-                   (for [breakout breakout]
-                     (de/resolve-dimension-clauses bindings name breakout)))]
-    (m/assoc-some query :breakout breakouts :breakout-idents (indexed-idents breakouts))))</pre></td></tr><tr><td class="docs"><p>Serialize <code>entity</code> into a form suitable as <code>:source-table</code> value.</p>
+  (m/assoc-some query :breakout (not-empty
+                                 (for [breakout breakout]
+                                   (de/resolve-dimension-clauses bindings name breakout)))))</pre></td></tr><tr><td class="docs"><p>Serialize <code>entity</code> into a form suitable as <code>:source-table</code> value.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn- -&gt;source-table-reference
   [entity :- SourceEntity]
   (if (mi/instance-of? Table entity)
@@ -2969,7 +2962,6 @@ net.brehaut.ClojureTools = (function (SH) {
                    (-&gt; {:condition    (de/resolve-dimension-clauses bindings context-source condition)
                         :source-table (-&gt; source bindings :entity -&gt;source-table-reference)
                         :alias        source
-                        :ident        (u/generate-nano-id)
                         :fields       :all}
                        (m/assoc-some :strategy strategy))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- maybe-add-filter
@@ -2978,9 +2970,6 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defn- maybe-add-limit
   [_bindings {:keys [limit]} query]
   (m/assoc-some query :limit limit))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- add-expression-idents [{:keys [expressions] :as inner-query}]
-  (cond-&gt; inner-query
-    (seq expressions) (assoc :expression-idents (update-vals expressions (fn [_] (u/generate-nano-id))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn- transform-step! :- Bindings
   [bindings :- Bindings
    {:keys [name source aggregation expressions] :as step} :- Step]
@@ -2989,20 +2978,15 @@ net.brehaut.ClojureTools = (function (SH) {
                            (add-bindings name (get-in bindings [source :dimensions]))
                            (add-bindings name expressions)
                            (add-bindings name aggregation))
-        inner-query    (-&gt;&gt; {:source-table (-&gt;source-table-reference source-entity)}
-                            (maybe-add-fields local-bindings step)
-                            (maybe-add-expressions local-bindings step)
-                            (maybe-add-aggregation local-bindings step)
-                            (maybe-add-breakout local-bindings step)
-                            (maybe-add-joins local-bindings step)
-                            (maybe-add-filter local-bindings step)
-                            (maybe-add-limit local-bindings step))
-        inner-query    (-&gt; inner-query
-                           add-expression-idents
-                           (m/assoc-some :aggregation-idents (indexed-idents (:aggregation inner-query)))
-                           (m/assoc-some :breakout-idents    (indexed-idents (:breakout inner-query))))
         query          {:type     :query
-                        :query    inner-query
+                        :query    (-&gt;&gt; {:source-table (-&gt;source-table-reference source-entity)}
+                                       (maybe-add-fields local-bindings step)
+                                       (maybe-add-expressions local-bindings step)
+                                       (maybe-add-aggregation local-bindings step)
+                                       (maybe-add-breakout local-bindings step)
+                                       (maybe-add-joins local-bindings step)
+                                       (maybe-add-filter local-bindings step)
+                                       (maybe-add-limit local-bindings step))
                         :database ((some-fn :db_id :database_id) source-entity)}]
     (assoc bindings name {:entity     (tf.materialize/make-card-for-step! step query)
                           :dimensions (infer-resulting-dimensions local-bindings step query)})))</pre></td></tr><tr><td class="docs">
