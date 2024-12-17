@@ -2865,100 +2865,71 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.channel.impl.http" name="metabase.channel.impl.http"><h1 class="project-name">metabase.channel.impl.http</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.channel.impl.http
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.models.search-index-metadata" name="metabase.models.search-index-metadata"><h1 class="project-name">metabase.models.search-index-metadata</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.models.search-index-metadata
   (:require
-   [clj-http.client :as http]
    [java-time.api :as t]
-   [metabase.channel.core :as channel]
-   [metabase.channel.render.core :as channel.render]
-   [metabase.channel.shared :as channel.shared]
-   [metabase.util.i18n :refer [tru]]
-   [metabase.util.json :as json]
-   [metabase.util.malli :as mu]
-   [metabase.util.malli.schema :as ms]
-   [metabase.util.urls :as urls]))</pre></td></tr><tr><td class="docs"><p>Maximum width of the rendered PNG of HTML to be sent to HTTP Content that exceeds this width (e.g. a table with
-many columns) is truncated.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private image-width
-  1200)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private string-or-keyword
-  [:or :string :keyword])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private HTTPDetails
-  [:map {:closed true}
-   [:url                           ms/Url]
-   [:auth-method                   [:enum &quot;none&quot; &quot;header&quot; &quot;query-param&quot; &quot;request-body&quot;]]
-   [:auth-info    {:optional true} [:map-of string-or-keyword :any]]
-   ;; used by the frontend to display the auth info properly
-   [:fe-form-type {:optional true} [:enum &quot;api-key&quot; &quot;bearer&quot; &quot;basic&quot; &quot;none&quot;]]
-   ;; request method
-   [:method       {:optional true} [:enum &quot;get&quot; &quot;post&quot; &quot;put&quot;]]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private HTTPChannel
-  [:map
-   [:type    [:= :channel/http]]
-   [:details HTTPDetails]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defmethod channel/send! :channel/http
-  [{{:keys [url method auth-method auth-info]} :details} :- HTTPChannel
-   request]
-  (let [req (merge
-             {:accept       :json
-              :content-type :json
-              :method       :post
-              :url          url}
-             (when method
-               {:method (keyword method)})
-             (cond-&gt; request
-               (= &quot;request-body&quot; auth-method) (update :body merge auth-info)
-               (= &quot;header&quot; auth-method)       (update :headers merge auth-info)
-               (= &quot;query-param&quot; auth-method)  (update :query-params merge auth-info)))]
-    (http/request (cond-&gt; req
-                    (or (map? (:body req))
-                        (sequential? (:body req))) (update :body json/encode)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- maybe-parse-json
-  [x]
-  (if (string? x)
-    (try
-      (json/decode x)
-      (catch Exception _e
-        x))
-    x))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod channel/can-connect? :channel/http
-  [_channel-type details]
-  (channel.shared/validate-channel-details HTTPDetails details)
-  (try
-    (channel/send! {:type :channel/http :details details} {})
-    true
-    (catch Exception e
-      (let [data (ex-data e)]
-        ;; throw an appriopriate error if it's a connection error
-        (if (= ::http/unexceptional-status (:type data))
-          (throw (ex-info (tru &quot;Failed to connect to channel&quot;) {:request-status (:status data)
-                                                                :request-body   (maybe-parse-json (:body data))}))
-          (throw e))))))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------------------------------------------------------;;
-                                          Alerts                                                ;;
-------------------------------------------------------------------------------------------------;;</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- qp-result-&gt;raw-data
-  [qp-result]
-  (let [data (:data qp-result)]
-    {:cols (map :name (:cols data))
-     :rows (:rows data)}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defmethod channel/render-notification [:channel/http :notification/card]
-  [_channel-type {:keys [payload creator]} _template _recipients]
-  (let [{:keys [card alert card_part]} payload
-        request-body {:type               &quot;alert&quot;
-                      :alert_id           (:id alert)
-                      :alert_creator_id   (:id creator)
-                      :alert_creator_name (:common_name creator)
-                      :data               {:type          &quot;question&quot;
-                                           :question_id   (:id card)
-                                           :question_name (:name card)
-                                           :question_url  (urls/card-url (:id card))
-                                           :visualization (let [{:keys [card dashcard result]} card_part]
-                                                            (channel.render/render-pulse-card-to-base64
-                                                             (channel.render/defaulted-timezone card) card dashcard result image-width))
-                                           :raw_data      (qp-result-&gt;raw-data (:result card_part))}
-                      :sent_at            (t/offset-date-time)}]
-    [{:body request-body}]))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+   [metabase.models.interface :as mi]
+   [methodical.core :as methodical]
+   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/table-name :model/SearchIndexMetadata [_model] :search_index_metadata)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(doto :model/SearchIndexMetadata
+  (derive :metabase/model)
+  (derive :hook/timestamped?))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(t2/deftransforms :model/SearchIndexMetadata
+  {:engine mi/transform-keyword
+   :status (mi/transform-validator mi/transform-keyword (partial mi/assert-enum #{:pending :active :retired}))})</pre></td></tr><tr><td class="docs"><p>The current 'pending' and 'active' indexes for the given co-ordinates, where they exist.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn indexes
+  [engine version]
+  (t2/select-fn-&gt;fn :status :index_name :model/SearchIndexMetadata
+                    :engine engine
+                    :version version
+                    :status [:in [:active :pending]]))</pre></td></tr><tr><td class="docs"><p>Create a 'pending' entry, unless one already exists. Return whether it was created.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn create-pending!
+  [engine version index-name]
+  (boolean
+   (when-not (t2/exists? :model/SearchIndexMetadata
+                         :engine engine
+                         :version version
+                         :status :pending)
+     (try
+       (t2/insert! :model/SearchIndexMetadata {:engine     engine
+                                               :version    version
+                                               :status     :pending
+                                               :index_name (name index-name)})
+       true
+       (catch Exception _
+         ;; We assume that failure corresponds to a unique index conflict (a pending entry already exists)
+         false)))))</pre></td></tr><tr><td class="docs"><p>Delete the given pending index, as long as its still pending.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn delete-index!
+  [engine version index-name]
+  (t2/delete! :model/SearchIndexMetadata :engine engine :version version :index_name (name index-name)))</pre></td></tr><tr><td class="docs"><p>If there is 'pending' index, make it 'active'. Return the name of the active index, regardless.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn active-pending!
+  [engine version]
+  (t2/with-transaction [_conn]
+    (when (t2/exists? :model/SearchIndexMetadata :engine engine :version version :status :pending)
+      (t2/delete! :model/SearchIndexMetadata :engine engine :version version :status :retired)
+      (t2/update! :model/SearchIndexMetadata {:engine engine :version version :status :active} {:status :retired})
+      (t2/update! :model/SearchIndexMetadata {:engine engine :version version :status :pending} {:status :active}))
+    (t2/select-one-fn :index_name :model/SearchIndexMetadata :engine engine :version version :status :active)))</pre></td></tr><tr><td class="docs"><p>Remove metadata corresponding to obsolete Metabase versions.
+It is up to the relevant engine to delete the actual indexes themselves.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn delete-obsolete!
+  [our-version]
+  ;; If there are no recent versions, then there is nothing to delete.
+  (when-let [most-recent (seq (map :version (t2/query {:select   [:version]
+                                                       :from     [(t2/table-name :model/SearchIndexMetadata)]
+                                                       :group-by [:version]
+                                                       ;; use pk as a tie-breaker
+                                                       :order-by [[[:max :updated_at] :desc]
+                                                                  [[:max :id] :desc]]
+                                                       :limit    3})))]
+    (t2/query-one {:delete-from [(t2/table-name :model/SearchIndexMetadata)]
+                   :where       [:or
+                                 [:not-in :version most-recent]
+                                 ;; Drop those older than 1 day, unless we are using them, or they are the most recent.
+                                 [:and
+                                  [:not-in :version (filter some? [our-version (first most-recent)])]
+                                  [:&lt; :updated_at (t/minus (t/zoned-date-time) (t/days 1))]]]})))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
