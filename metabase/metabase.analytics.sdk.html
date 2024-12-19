@@ -2876,6 +2876,7 @@ The X-Metabase-Client and X-Metabase-Client-Version headers are sent, and if pre
 and TODO: send it out in <code>summarize-execution</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.analytics.sdk
   (:require [metabase.analytics.prometheus :as prometheus]
+            [metabase.util.log :as log]
             [metabase.util.malli :as mu]))</pre></td></tr><tr><td class="docs"><p>Used to track information about the metabase embedding client version.</p>
 
 <p>Used to track information about the metabase embedding client.</p>
@@ -2888,7 +2889,7 @@ and TODO: send it out in <code>summarize-execution</code>.</p>
   (-&gt; m
       (update :embedding_client (fn [client] (or *client* client)))
       (update :embedding_version (fn [version] (or *version* version)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- categorize-request :- [:maybe [:enum :ok :error]]
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- categorize-response :- [:maybe [:enum :ok :error]]
   [{:keys [status]}]
   (when status
     (cond
@@ -2904,7 +2905,8 @@ and TODO: send it out in <code>summarize-execution</code>.</p>
     [embedding-sdk-client :ok]       (prometheus/inc! :metabase-sdk/response-ok)
     [embedding-sdk-client :error]    (prometheus/inc! :metabase-sdk/response-error)
     [embedding-iframe-client :ok]    (prometheus/inc! :metabase-embedding-iframe/response-ok)
-    [embedding-iframe-client :error] (prometheus/inc! :metabase-embedding-iframe/response-error)))</pre></td></tr><tr><td class="docs"><p>Should we track this request as being made by an embedding client?</p>
+    [embedding-iframe-client :error] (prometheus/inc! :metabase-embedding-iframe/response-error)
+    (log/infof &quot;Unknown client or status. client: %s status %s&quot; sdk-client status)))</pre></td></tr><tr><td class="docs"><p>Should we track this request as being made by an embedding client?</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- embedding-context?
   [client]
   (or (= client embedding-sdk-client)
@@ -2919,8 +2921,9 @@ and TODO: send it out in <code>summarize-execution</code>.</p>
                 *version* version]
         (handler request
                  (fn responder [response]
-                   (when (embedding-context? sdk-client)
-                     (track-sdk-response sdk-client (categorize-request response)))
+                   (when-let [response-status (and (embedding-context? sdk-client)
+                                                   (categorize-response response))]
+                     (track-sdk-response sdk-client response-status))
                    (respond response))
                  (fn raiser [response]
                    (when (embedding-context? sdk-client)
