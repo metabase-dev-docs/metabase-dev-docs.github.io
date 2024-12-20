@@ -2870,74 +2870,62 @@ net.brehaut.ClojureTools = (function (SH) {
   (:require
    [clojure.set :as set]
    [clojure.string :as str]
-   [clojure.walk :as walk]
-   [malli.core :as mc]
    [malli.json-schema :as mjs]
+   [medley.core :as m]
    [metabase.util :as u]
    [metabase.util.malli.schema :as ms])
-  (:import [clojure.lang PersistentVector]))</pre></td></tr><tr><td class="docs">
+  (:import
+   (clojure.lang PersistentVector)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private ^:dynamic *definitions* nil)</pre></td></tr><tr><td class="docs"><p>Helpers</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Fixes all {:$ref ....} locations - could be in properties, or in allOf/anyOf with arbitrary nesting.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- fix-locations
-  [schema]
-  (walk/postwalk (fn [x]
-                   (cond-&gt; x
-                     (:$ref x) (update :$ref str/replace &quot;#/definitions/&quot; &quot;#/components/schemas/&quot;)))
-                 schema))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- json-schema-transform [malli-schema]
-  (let [jss         (mjs/transform malli-schema)
-        definitions (update-vals (:definitions jss) fix-locations)]
+</td><td class="codes"></td></tr><tr><td class="docs"><p>We transform json-schema in a few different places, but we need to collect all defitions in a single one.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- mjs-collect-definitions
+  [malli-schema]
+  (let [jss         (mjs/transform malli-schema {::mjs/definitions-path &quot;#/components/schemas/&quot;})]
     (when *definitions*
-      (swap! *definitions* merge definitions))
-    (-&gt; jss
-        (dissoc :definitions)
-        (update :properties fix-locations))))</pre></td></tr><tr><td class="docs"><p>Change type of params to make it more understandable to Rapidoc.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- fix-type
-  [{:keys [schema] :as param}]
-  ;; TODO: figure out how to teach rapidoc `[:or [:enum &quot;all&quot;] nat-int?]`
-  (cond
-    (and (:oneOf schema)
-         (= (second (:oneOf schema)) {:type &quot;null&quot;}))
-    (let [real-schema (merge (first (:oneOf schema))
-                             (select-keys schema [:description :default]))]
-      (recur
-       (assoc param :required false :schema real-schema)))
-    (= (:enum schema) (mc/children ms/BooleanValue))
-    (assoc param :schema (-&gt; (dissoc schema :enum) (assoc :type &quot;boolean&quot;)))
-    (= (:enum schema) (mc/children ms/MaybeBooleanValue))
-    (assoc param
-           :schema (-&gt; (dissoc schema :enum) (assoc :type &quot;boolean&quot;))
-           :required false)
-    :else
-    param))</pre></td></tr><tr><td class="docs"><p>Change type of request body to make it more understandable to Rapidoc.</p>
-</td><td class="codes"><pre class="brush: clojure">(let [file-schema (json-schema-transform ms/File)]
-  ;; TODO: unify this with `fix-type` somehow, but `:required` is making this hard
-  (defn- fix-schema
-    [{:keys [required] :as schema}]
-    (let [not-required (atom #{})]
-      (-&gt; schema
-          (update :properties (fn [props]
-                                (into {}
-                                      (for [[k v] props]
-                                        [k
-                                         (cond
-                                           (and (:oneOf v)
-                                                (= (second (:oneOf v)) {:type &quot;null&quot;}))
-                                           (do
-                                             (swap! not-required conj k)
-                                             (merge (first (:oneOf v))
-                                                    (select-keys v [:description :default])))
-                                           (= (select-keys v (keys file-schema)) file-schema)
-                                           ;; I got this from StackOverflow and docs are not in agreement, but RapiDoc
-                                           ;; shows file input, so... :)
-                                           (merge {:type &quot;string&quot; :format &quot;binary&quot;}
-                                                  (select-keys v [:description :default]))
-                                           (= (:enum v) [&quot;true&quot; &quot;false&quot; true false])
-                                           (-&gt; (dissoc v :enum) (assoc :type &quot;boolean&quot;))
-                                           :else
-                                           v)]))))
-          (assoc :required (vec (remove @not-required required)))))))</pre></td></tr><tr><td class="docs">
+      (swap! *definitions* merge (:definitions jss)))
+    (dissoc jss :definitions)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- merge-required [schema]
+  (let [optional? (set (keep (fn [[k v]] (when (:optional v) k))
+                             (:properties schema)))]
+    (-&gt; schema
+        (m/update-existing :required #(vec (remove optional? %)))
+        (m/update-existing :properties #(update-vals % (fn [v] (dissoc v :optional)))))))</pre></td></tr><tr><td class="docs"><p>Clean-up JSON schema to make it more understandable for OpenAPI tools.</p>
+
+<p>  Returns a new schema WITH an indicator if it's <em>NOT</em> required.</p>
+
+<p>  NOTE: maybe instead of fixing it up later we should re-work Malli's json-schema transformation into a way we want it to be?</p>
+</td><td class="codes"><pre class="brush: clojure">(let [file-schema (mjs/transform ms/File)]
+  (defn- fix-json-schema
+    [schema]
+    (cond
+      ;; we're using `[:maybe ...]` a lot, and it generates `{:oneOf [... {:type &quot;null&quot;}]}`
+      ;; it needs to be cleaned up to be presented in OpenAPI viewers
+      (and (:oneOf schema)
+           (= (second (:oneOf schema)) {:type &quot;null&quot;}))
+      (recur (-&gt; (first (:oneOf schema))
+                 (merge (select-keys schema [:description :default]))
+                 (assoc :optional true)))
+      ;; this happens when we use `[:and ... [:fn ...]]`, the `:fn` schema gets converted into an empty object
+      (:allOf schema)
+      (cond
+        (= {} (first (:allOf schema)))  (recur (merge (second (:allOf schema))
+                                                      (select-keys schema [:description :default])))
+        (= {} (second (:allOf schema))) (recur (merge (first (:allOf schema))
+                                                      (select-keys schema [:description :default])))
+        :else                           (update schema :allOf (partial mapv fix-json-schema)))
+      (= (select-keys schema (keys file-schema)) file-schema)
+      ;; I got this from StackOverflow and docs are not in agreement, but RapiDoc
+      ;; shows file input, so... :)
+      (merge {:type &quot;string&quot; :format &quot;binary&quot;}
+             (select-keys schema [:description :default]))
+      (:properties schema)
+      (merge-required
+       (update schema :properties #(update-vals % fix-json-schema)))
+      (= (:type schema) &quot;array&quot;)
+      (update schema :items fix-json-schema)
+      :else
+      schema)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- path-&gt;openapi [path]
   (str/replace path #&quot;:([^/]+)&quot; &quot;{$1}&quot;))</pre></td></tr><tr><td class="docs"><p>OpenAPI generation</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Collect routes with schemas with their full paths.</p>
@@ -2986,20 +2974,22 @@ net.brehaut.ClojureTools = (function (SH) {
         (update-keys renames keyword)))))</pre></td></tr><tr><td class="docs"><p>https://spec.openapis.org/oas/latest.html#parameter-object</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- schema-&gt;params
   [full-path args schema]
-  (let [{:keys [properties required]} (json-schema-transform schema)
+  (let [{:keys [properties required]} (mjs-collect-definitions schema)
         required                      (set required)
         in-path?                      (set (map (comp keyword second) (re-seq #&quot;\{([^}]+)\}&quot; full-path)))
         in-query?                     (set (compojure-query-params args))
         renames                       (compojure-renames args)]
     (for [[k param-schema] properties
           :let             [k (get renames k k)]
-          :when            (or (in-path? k) (in-query? k))]
-      (fix-type
-       (cond-&gt; {:in          (if (in-path? k) :path :query)
-                :name        k
-                :required    (contains? required k)
-                :schema      (dissoc param-schema :description)}
-         (:description param-schema) (assoc :description (:description param-schema)))))))</pre></td></tr><tr><td class="docs"><p>Generate OpenAPI desc for a single handler</p>
+          :when            (or (in-path? k) (in-query? k))
+          :let             [schema    (fix-json-schema param-schema)
+                            ;; if schema does not indicate it's optional, it's not :)
+                            optional? (:optional schema)]]
+      (cond-&gt; {:in          (if (in-path? k) :path :query)
+               :name        k
+               :required    (and (contains? required k) (not optional?))
+               :schema      (dissoc schema :optional :description)}
+        (:description schema) (assoc :description (:description schema))))))</pre></td></tr><tr><td class="docs"><p>Generate OpenAPI desc for a single handler</p>
 
 <p>https://spec.openapis.org/oas/latest.html#path-item-object</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- defendpoint-&gt;path-item
@@ -3010,8 +3000,8 @@ net.brehaut.ClojureTools = (function (SH) {
         body-params               (when (not= method :get)
                                     (remove #(non-body-param? (first %)) (rest (:schema data))))
         body-schema               (when (seq body-params)
-                                    (fix-schema
-                                     (json-schema-transform (into [:map] body-params))))
+                                    (fix-json-schema
+                                     (mjs-collect-definitions (into [:map] body-params))))
         ctype                     (if (:multipart (meta handler-var))
                                     &quot;multipart/form-data&quot;
                                     &quot;application/json&quot;)]
@@ -3037,7 +3027,7 @@ net.brehaut.ClojureTools = (function (SH) {
                             (catch Exception e
                               (throw (ex-info (str &quot;Exception at &quot; path) {} e))))))]
       {:paths      paths
-       :components {:schemas @*definitions*}})))</pre></td></tr><tr><td class="docs">
+       :components {:schemas (update-vals @*definitions* fix-json-schema)}})))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(comment
   ;; See what is the result of generation, could be helpful debugging what's wrong with display in rapidoc
   ;; `resolve` is to appease clj-kondo which will complain for #'
