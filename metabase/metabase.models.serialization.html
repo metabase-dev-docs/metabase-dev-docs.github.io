@@ -3648,14 +3648,15 @@ portable ID string.. Nested entities are returned as a vector of such ID strings
                                                                   :skip  true
                                                                   ::type :target-not-found}))
         (= (count path) 1) (first path)
-        :else              path))))</pre></td></tr><tr><td class="docs"><p>Exactly like the above <code>*export-fk*</code>, except returns <code>nil</code> if the target was not found</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- maybe-export-fk
-  [id model]
-  (try (*export-fk* id model)
-       (catch clojure.lang.ExceptionInfo e
-         (when-not (= (::type (ex-data e)) :target-not-found)
-           (throw e))
-         nil)))</pre></td></tr><tr><td class="docs"><p>Given an identifier, and the model it represents (symbol, name or IModel), looks up the corresponding
+        :else              path))))</pre></td></tr><tr><td class="docs"><p>If a call to <code>*export-fk*</code> inside of this fails, do not export the whole data structure</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro ^:private fk-elide
+  [&amp; body]
+  `(try
+     ~@body
+     (catch clojure.lang.ExceptionInfo e#
+       (when-not (= (::type (ex-data e#)) :target-not-found)
+         (throw e#))
+       nil)))</pre></td></tr><tr><td class="docs"><p>Given an identifier, and the model it represents (symbol, name or IModel), looks up the corresponding
 entity and gets its primary key.</p>
 
 <p>The identifier can be a single entity ID string, a single identity-hash string, or a vector of entity ID and hash
@@ -4049,16 +4050,16 @@ Returns a new JSON string with teh IDs converted inside.</p>
       mbql-fully-qualified-names-&gt;ids
       json/encode))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- export-viz-click-behavior-link
-  [{:keys [linkType type] old-target-id :targetId :as click-behavior}]
-  (if-not (= type &quot;link&quot;)
-    click-behavior
-    ;; if the card doesn't exist anymore, just remove the entire click behavior
-    (when-let [new-target-id (maybe-export-fk old-target-id (link-card-model-&gt;toucan-model linkType))]
-      (assoc click-behavior :targetId new-target-id))))</pre></td></tr><tr><td class="docs">
+  [{:keys [linkType type] :as click-behavior}]
+  (fk-elide
+   (cond-&gt; click-behavior
+     (= type &quot;link&quot;) (-&gt; (update :targetId *export-fk* (link-card-model-&gt;toucan-model linkType))
+                         (u/update-some :tabId *export-fk* :model/DashboardTab)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- import-viz-click-behavior-link
   [{:keys [linkType type] :as click-behavior}]
   (cond-&gt; click-behavior
-    (= type &quot;link&quot;) (update :targetId *import-fk* (link-card-model-&gt;toucan-model linkType))))</pre></td></tr><tr><td class="docs">
+    (= type &quot;link&quot;) (-&gt; (update :targetId *import-fk* (link-card-model-&gt;toucan-model linkType))
+                        (u/update-some :tabId *import-fk* :model/DashboardTab))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- export-viz-click-behavior-mapping [mapping]
   (-&gt; mapping
       (m/update-existing    :id                  json-ids-&gt;fully-qualified-names)
@@ -4093,11 +4094,8 @@ form used internally.</p>
                [json-key mapping]))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- export-viz-click-behavior [settings]
   (some-&gt; settings
-          (m/update-existing    :click_behavior export-viz-click-behavior-link)
-          (m/update-existing-in [:click_behavior :parameterMapping] export-viz-click-behavior-mappings)
-          (as-&gt; updated-settings
-                (cond-&gt; updated-settings
-                  (nil? (:click_behavior updated-settings)) (dissoc :click_behavior)))))</pre></td></tr><tr><td class="docs">
+          (u/update-some :click_behavior export-viz-click-behavior-link)
+          (m/update-existing-in [:click_behavior :parameterMapping] export-viz-click-behavior-mappings)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- import-viz-click-behavior [settings]
   (some-&gt; settings
           (m/update-existing    :click_behavior import-viz-click-behavior-link)
@@ -4191,10 +4189,11 @@ references into Field IDs.</p>
           :id    id}])}))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- viz-click-behavior-deps
   [settings]
-  (when-let [{:keys [linkType targetId type]} (:click_behavior settings)]
+  (let [{:keys [linkType targetId type]} (:click_behavior settings)
+        model (when linkType (link-card-model-&gt;toucan-model linkType))]
     (case type
-      &quot;link&quot; (when-let [model (some-&gt; linkType link-card-model-&gt;toucan-model name)]
-               #{[{:model model
+      &quot;link&quot; (when model
+               #{[{:model (name model)
                    :id    targetId}]})
       ;; TODO: We might need to handle the click behavior that updates dashboard filters? I can't figure out how get
       ;; that to actually attach to a filter to check what it looks like.
@@ -4218,12 +4217,12 @@ Always returns an empty set even if the input is nil.</p>
          (filter some?)
          (reduce set/union #{}))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- viz-click-behavior-descendants [{:keys [click_behavior]} src]
-  (when-let [{:keys [linkType targetId type]} click_behavior]
+  (let [{:keys [linkType targetId type]} click_behavior
+        model (when linkType (link-card-model-&gt;toucan-model linkType))]
     (case type
-      &quot;link&quot; (when-let [model (link-card-model-&gt;toucan-model linkType)]
-               ;; if the card was deleted, just ignore it.
-               (when (maybe-export-fk targetId model)
-                 {[(name model) targetId] src}))
+      &quot;link&quot; (when (and model
+                        (fk-elide (*export-fk* targetId model)))
+               {[(name model) targetId] src})
       ;; TODO: We might need to handle the click behavior that updates dashboard filters? I can't figure out how get
       ;; that to actually attach to a filter to check what it looks like.
       nil)))</pre></td></tr><tr><td class="docs">
