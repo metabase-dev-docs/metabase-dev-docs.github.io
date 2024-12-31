@@ -2874,21 +2874,8 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.legacy-mbql.normalize :as mbql.normalize]
    [metabase.lib.schema.id :as lib.schema.id]
    [metabase.lib.util.match :as lib.util.match]
-   [metabase.models.card :refer [Card]]
-   [metabase.models.dashboard :refer [Dashboard]]
-   [metabase.models.dashboard-card :refer [DashboardCard]]
-   [metabase.models.dashboard-card-series :refer [DashboardCardSeries]]
-   [metabase.models.database :refer [Database]]
-   [metabase.models.dimension :refer [Dimension]]
-   [metabase.models.field :as field :refer [Field]]
+   [metabase.models.field :as field]
    [metabase.models.interface :as mi]
-   [metabase.models.native-query-snippet :refer [NativeQuerySnippet]]
-   [metabase.models.pulse :refer [Pulse]]
-   [metabase.models.pulse-card :refer [PulseCard]]
-   [metabase.models.pulse-channel :refer [PulseChannel]]
-   [metabase.models.segment :refer [Segment]]
-   [metabase.models.table :refer [Table]]
-   [metabase.models.user :refer [User]]
    [metabase.models.visualization-settings :as mb.viz]
    [metabase.util :as u]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
@@ -2909,17 +2896,17 @@ net.brehaut.ClojureTools = (function (SH) {
       (lib.util.match/replace
         ;; `integer?` guard is here to make the operation idempotent
         [:field (id :guard integer?) opts]
-        [:field (fully-qualified-name Field id) (mbql-id-&gt;fully-qualified-name opts)]
+        [:field (fully-qualified-name :model/Field id) (mbql-id-&gt;fully-qualified-name opts)]
         ;; field-id is still used within parameter mapping dimensions
         ;; example relevant clause - [:dimension [:fk-&gt; [:field-id 1] [:field-id 2]]]
         [:field-id (id :guard integer?)]
-        [:field-id (fully-qualified-name Field id)]
+        [:field-id (fully-qualified-name :model/Field id)]
         ;; source-field is also used within parameter mapping dimensions
         ;; example relevant clause - [:field 2 {:source-field 1}]
         {:source-field (id :guard integer?)}
-        (assoc &amp;match :source-field (fully-qualified-name Field id))
+        (assoc &amp;match :source-field (fully-qualified-name :model/Field id))
         [:segment (id :guard integer?)]
-        [:segment (fully-qualified-name Segment id)])))</pre></td></tr><tr><td class="docs">
+        [:segment (fully-qualified-name :model/Segment id)])))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- ids-&gt;fully-qualified-names
   [entity]
   (lib.util.match/replace entity
@@ -2930,25 +2917,25 @@ net.brehaut.ClojureTools = (function (SH) {
       (m/update-existing entity :database (fn [db-id]
                                             (if (= db-id lib.schema.id/saved-questions-virtual-database-id)
                                               &quot;database/__virtual&quot;
-                                              (fully-qualified-name Database db-id))))
-      (m/update-existing entity :card_id (partial fully-qualified-name Card)) ; attibutes that refer to db fields use _
-      (m/update-existing entity :card-id (partial fully-qualified-name Card)) ; template-tags use dash
+                                              (fully-qualified-name :model/Database db-id))))
+      (m/update-existing entity :card_id (partial fully-qualified-name :model/Card)) ; attibutes that refer to db fields use _
+      (m/update-existing entity :card-id (partial fully-qualified-name :model/Card)) ; template-tags use dash
       (m/update-existing entity :source-table (fn [source-table]
                                                 (if (and (string? source-table)
                                                          (str/starts-with? source-table &quot;card__&quot;))
-                                                  (fully-qualified-name Card (-&gt; source-table
-                                                                                 (str/split #&quot;__&quot;)
-                                                                                 second
-                                                                                 Integer/parseInt))
-                                                  (fully-qualified-name Table source-table))))
+                                                  (fully-qualified-name :model/Card (-&gt; source-table
+                                                                                        (str/split #&quot;__&quot;)
+                                                                                        second
+                                                                                        Integer/parseInt))
+                                                  (fully-qualified-name :model/Table source-table))))
       (m/update-existing entity :breakout (fn [breakout]
                                             (map mbql-id-&gt;fully-qualified-name breakout)))
       (m/update-existing entity :aggregation (fn [aggregation]
                                                (m/map-vals mbql-id-&gt;fully-qualified-name aggregation)))
       (m/update-existing entity :filter (fn [filter]
                                           (m/map-vals mbql-id-&gt;fully-qualified-name filter)))
-      (m/update-existing entity ::mb.viz/param-mapping-source (partial fully-qualified-name Field))
-      (m/update-existing entity :snippet-id (partial fully-qualified-name NativeQuerySnippet))
+      (m/update-existing entity ::mb.viz/param-mapping-source (partial fully-qualified-name :model/Field))
+      (m/update-existing entity :snippet-id (partial fully-qualified-name :model/NativeQuerySnippet))
       (m/map-vals ids-&gt;fully-qualified-names entity))))</pre></td></tr><tr><td class="docs"><p>Removes unneeded fields that can either be reconstructed from context or are meaningless
  (eg. :created_at).</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- strip-crud
@@ -2957,7 +2944,7 @@ net.brehaut.ClojureTools = (function (SH) {
                   :dashboard_id :fields_hash :personal_owner_id :made_public_by_id :collection_id
                   :pulse_id :result_metadata :action_id)
     (not *include-entity-id*)   (dissoc :entity_id)
-    (some #(instance? % entity) (map type [Field Segment])) (dissoc :table_id)))</pre></td></tr><tr><td class="docs">
+    (some #(instance? % entity) (map type [:model/Field :model/Segment])) (dissoc :table_id)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmulti ^:private serialize-one
   {:arglists '([instance])}
   mi/model)</pre></td></tr><tr><td class="docs"><p>Serialize entity <code>entity</code>.</p>
@@ -2966,14 +2953,14 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defmethod serialize-one :default
   [instance]
   instance)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serialize-one Database
+</td><td class="codes"><pre class="brush: clojure">(defmethod serialize-one :model/Database
   [db]
   (dissoc db :features))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serialize-one Field
+</td><td class="codes"><pre class="brush: clojure">(defmethod serialize-one :model/Field
   [field]
   (let [field (-&gt; field
-                  (update :parent_id (partial fully-qualified-name Field))
-                  (update :fk_target_field_id (partial fully-qualified-name Field)))]
+                  (update :parent_id (partial fully-qualified-name :model/Field))
+                  (update :fk_target_field_id (partial fully-qualified-name :model/Field)))]
     (if (contains? field :values)
       (update field :values u/select-non-nil-keys [:values :human_readable_values])
       (assoc field :values (-&gt; field
@@ -2981,7 +2968,7 @@ net.brehaut.ClojureTools = (function (SH) {
                                (u/select-non-nil-keys [:values :human_readable_values]))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- convert-column-settings-key [k]
   (if-let [field-id (::mb.viz/field-id k)]
-    (-&gt; (t2/select-one Field :id field-id)
+    (-&gt; (t2/select-one :model/Field :id field-id)
         fully-qualified-name
         mb.viz/field-str-&gt;column-ref)
     k))</pre></td></tr><tr><td class="docs"><p>The <code>k</code> is something like [:dimension [:fk-> [:field-id <id1>] [:field-id <id2]]]</p>
@@ -3005,9 +2992,9 @@ net.brehaut.ClojureTools = (function (SH) {
                         (convert-param-mapping-val nil v))) {} param-mapping)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- convert-click-behavior [{:keys [::mb.viz/link-type ::mb.viz/link-target-id] :as click}]
   (-&gt; (if-let [new-target-id (case link-type
-                               ::mb.viz/card      (-&gt; (t2/select-one Card :id link-target-id)
+                               ::mb.viz/card      (-&gt; (t2/select-one :model/Card :id link-target-id)
                                                       fully-qualified-name)
-                               ::mb.viz/dashboard (-&gt; (t2/select-one Dashboard :id link-target-id)
+                               ::mb.viz/dashboard (-&gt; (t2/select-one :model/Dashboard :id link-target-id)
                                                       fully-qualified-name)
                                nil)]
         (assoc click ::mb.viz/link-target-id new-target-id)
@@ -3026,46 +3013,46 @@ net.brehaut.ClojureTools = (function (SH) {
       mb.viz/norm-&gt;db))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- dashboard-cards-for-dashboard
   [dashboard]
-  (let [dashboard-cards   (t2/select DashboardCard :dashboard_id (u/the-id dashboard))
+  (let [dashboard-cards   (t2/select :model/DashboardCard :dashboard_id (u/the-id dashboard))
         series            (when (not-empty dashboard-cards)
-                            (t2/select DashboardCardSeries
+                            (t2/select :model/DashboardCardSeries
                                        :dashboardcard_id [:in (map u/the-id dashboard-cards)]))]
     (for [dashboard-card dashboard-cards]
       (-&gt; dashboard-card
           (assoc :series (for [series series
                                :when (= (:dashboardcard_id series) (u/the-id dashboard-card))]
                            (-&gt; series
-                               (update :card_id (partial fully-qualified-name Card))
+                               (update :card_id (partial fully-qualified-name :model/Card))
                                (dissoc :id :dashboardcard_id))))
           (assoc :visualization_settings (convert-viz-settings (:visualization_settings dashboard-card)))
           strip-crud))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serialize-one Dashboard
+</td><td class="codes"><pre class="brush: clojure">(defmethod serialize-one :model/Dashboard
   [dashboard]
   (assoc dashboard :dashboard_cards (dashboard-cards-for-dashboard dashboard)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serialize-one Card
+</td><td class="codes"><pre class="brush: clojure">(defmethod serialize-one :model/Card
   [card]
   (-&gt; card
-      (m/update-existing :table_id (partial fully-qualified-name Table))
-      (update :database_id (partial fully-qualified-name Database))
+      (m/update-existing :table_id (partial fully-qualified-name :model/Table))
+      (update :database_id (partial fully-qualified-name :model/Database))
       (m/update-existing :visualization_settings convert-viz-settings)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serialize-one Pulse
+</td><td class="codes"><pre class="brush: clojure">(defmethod serialize-one :model/Pulse
   [pulse]
   (assoc pulse
-         :cards    (for [card (t2/select PulseCard :pulse_id (u/the-id pulse))]
+         :cards    (for [card (t2/select :model/PulseCard :pulse_id (u/the-id pulse))]
                      (-&gt; card
                          (dissoc :id :pulse_id)
-                         (update :card_id (partial fully-qualified-name Card))))
-         :channels (for [channel (t2/select PulseChannel :pulse_id (u/the-id pulse))]
+                         (update :card_id (partial fully-qualified-name :model/Card))))
+         :channels (for [channel (t2/select :model/PulseChannel :pulse_id (u/the-id pulse))]
                      (strip-crud channel))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serialize-one User
+</td><td class="codes"><pre class="brush: clojure">(defmethod serialize-one :model/User
   [user]
   (select-keys user [:first_name :last_name :email :is_superuser]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serialize-one Dimension
+</td><td class="codes"><pre class="brush: clojure">(defmethod serialize-one :model/Dimension
   [dimension]
   (-&gt; dimension
-      (update :field_id (partial fully-qualified-name Field))
-      (update :human_readable_field_id (partial fully-qualified-name Field))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod serialize-one NativeQuerySnippet
+      (update :field_id (partial fully-qualified-name :model/Field))
+      (update :human_readable_field_id (partial fully-qualified-name :model/Field))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod serialize-one :model/NativeQuerySnippet
   [snippet]
   (select-keys snippet [:name :description :content]))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();

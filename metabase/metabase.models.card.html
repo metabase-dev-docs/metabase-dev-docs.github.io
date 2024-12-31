@@ -2893,7 +2893,7 @@ is a historical name, but is the same thing; both terms are used interchangeably
    [metabase.models.field-values :as field-values]
    [metabase.models.interface :as mi]
    [metabase.models.moderation-review :as moderation-review]
-   [metabase.models.parameter-card :as parameter-card :refer [ParameterCard]]
+   [metabase.models.parameter-card :as parameter-card]
    [metabase.models.params :as params]
    [metabase.models.permissions :as perms]
    [metabase.models.pulse :as models.pulse]
@@ -2917,10 +2917,7 @@ is a historical name, but is the same thing; both terms are used interchangeably
    [methodical.core :as methodical]
    [toucan2.core :as t2]
    [toucan2.tools.hydrate :as t2.hydrate]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Used to be the toucan1 model name defined using [[toucan.models/defmodel]], not it's a reference to the toucan2 model name.
-We'll keep this till we replace all the Card symbol in our codebase.</p>
-</td><td class="codes"><pre class="brush: clojure">(def Card
-  :model/Card)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/table-name :model/Card [_model] :report_card)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2.hydrate/model-for-automagic-hydration [#_model :default #_k :card]
   [_original-model _k]
@@ -2941,7 +2938,7 @@ We'll keep this till we replace all the Card symbol in our codebase.</p>
   (derive ::perms/use-parent-collection-perms)
   (derive :hook/timestamped?)
   (derive :hook/entity-id))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod mi/can-write? Card
+</td><td class="codes"><pre class="brush: clojure">(defmethod mi/can-write? :model/Card
   ([instance]
    ;; Cards in audit collection should not be writable.
    (if (and
@@ -2954,7 +2951,7 @@ We'll keep this till we replace all the Card symbol in our codebase.</p>
      (mi/current-user-has-full-permissions? (perms/perms-objects-set-for-parent-collection instance :write))))
   ([_ pk]
    (mi/can-write? (t2/select-one :model/Card :id pk))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod mi/can-read? Card
+</td><td class="codes"><pre class="brush: clojure">(defmethod mi/can-read? :model/Card
   ([instance]
    (perms/can-read-audit-helper :model/Card instance))
   ([_ pk]
@@ -3057,7 +3054,7 @@ enabled, as per https://github.com/metabase/metabase/pull/45050. Returns <code>n
           (log/errorf t &quot;Failed prefething cards `%s`.&quot; (pr-str (map :id dataset-cards))))))
     (binding [query-perms/*card-instances*
               (when (seq source-card-ids)
-                (t2/select-fn-&gt;fn :id identity [Card :id :collection_id] :id [:in source-card-ids]))]
+                (t2/select-fn-&gt;fn :id identity [:model/Card :id :collection_id] :id [:in source-card-ids]))]
       (mi/instances-with-hydrated-data
        cards :can_run_adhoc_query
        (fn []
@@ -3151,7 +3148,7 @@ the <code>:can_run_adhoc_query</code> above</p>
     ((get-method revision/revert-to-revision! :default) model id user-id serialized-card)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod revision/serialize-instance :model/Card
   ([instance]
-   (revision/serialize-instance Card nil instance))
+   (revision/serialize-instance :model/Card nil instance))
   ([_model _id instance]
    (cond-&gt; (apply dissoc instance excluded-columns-for-card-revision)
      ;; datasets should preserve edits to metadata
@@ -3197,7 +3194,7 @@ forth.)</p>
          (ex-info (tru &quot;Cannot save Question: source query has circular references.&quot;)
                   {:status-code 400}))
         :else
-        (recur (or (t2/select-one-fn :dataset_query Card :id source-card-id)
+        (recur (or (t2/select-one-fn :dataset_query :model/Card :id source-card-id)
                    (throw (ex-info (tru &quot;Card {0} does not exist.&quot; source-card-id)
                                    {:status-code 404})))
                (conj ids-already-seen source-card-id))))))</pre></td></tr><tr><td class="docs">
@@ -3338,7 +3335,7 @@ targets. See https://github.com/metabase/metabase/issues/14145 for more details.
       (assert-valid-type card)
       (params/assert-valid-parameters card)
       (params/assert-valid-parameter-mappings card)
-      (collection/check-collection-namespace Card (:collection_id card)))))</pre></td></tr><tr><td class="docs"><p>Checks additional sandboxing constraints for Metabase Enterprise Edition. The OSS implementation is a no-op.</p>
+      (collection/check-collection-namespace :model/Card (:collection_id card)))))</pre></td></tr><tr><td class="docs"><p>Checks additional sandboxing constraints for Metabase Enterprise Edition. The OSS implementation is a no-op.</p>
 </td><td class="codes"><pre class="brush: clojure">(defenterprise pre-update-check-sandbox-constraints
   metabase-enterprise.sandbox.models.group-table-access-policy
   [_])</pre></td></tr><tr><td class="docs"><p>Update the config of parameter on any Dashboard/Card use this <code>card</code> as values source .</p>
@@ -3349,7 +3346,7 @@ targets. See https://github.com/metabase/metabase/issues/14145 for more details.
 </td><td class="codes"><pre class="brush: clojure">(defn- update-parameters-using-card-as-values-source
   [{id :id, :as changes}]
   (when (some #{:archived :result_metadata} (keys changes))
-    (let [parameter-cards (t2/select ParameterCard :card_id id)]
+    (let [parameter-cards (t2/select :model/ParameterCard :card_id id)]
       (doseq [[[po-type po-id] param-cards]
               (group-by (juxt :parameterized_object_type :parameterized_object_id) parameter-cards)]
         (let [model                  (case po-type :card 'Card :dashboard 'Dashboard)
@@ -3435,7 +3432,7 @@ meaning there are no clauses such as filter, limit, breakout...</p>
       (check-field-filter-fields-are-from-correct-database changes)
       ;; Make sure the Collection is in the default Collection namespace (e.g. as opposed to the Snippets Collection
       ;; namespace)
-      (collection/check-collection-namespace Card (:collection_id changes))
+      (collection/check-collection-namespace :model/Card (:collection_id changes))
       (params/assert-valid-parameters changes)
       (params/assert-valid-parameter-mappings changes)
       (update-parameters-using-card-as-values-source changes)
@@ -3518,7 +3515,7 @@ fetching multiple metric cards having common database, as done in eg. dashboard 
   ;; delete any ParameterCard that the parameters on this card linked to
   (parameter-card/delete-all-for-parameterized-object! &quot;card&quot; id)
   ;; delete any ParameterCard linked to this card
-  (t2/delete! ParameterCard :card_id id)
+  (t2/delete! :model/ParameterCard :card_id id)
   (t2/delete! 'ModerationReview :moderated_item_type &quot;card&quot;, :moderated_item_id id)
   (t2/delete! 'Revision :model &quot;Card&quot;, :model_id id))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/hash-fields :model/Card
@@ -3641,9 +3638,9 @@ created.</p>
                                               ;; Adding a new card at `collection_position` could cause other cards in
                                               ;; this collection to change position, check that and fix it if needed
                                               (api/maybe-reconcile-collection-position! position-info)
-                                              (t2/insert-returning-instance! Card (cond-&gt; card-data
-                                                                                    metadata
-                                                                                    (assoc :result_metadata metadata))))]
+                                              (t2/insert-returning-instance! :model/Card (cond-&gt; card-data
+                                                                                           metadata
+                                                                                           (assoc :result_metadata metadata))))]
      (when-let [dashboard-id (and autoplace-dashboard-questions? (:dashboard_id card))]
        (autoplace-dashcard-for-card! dashboard-id card))
      (when-not delay-event?
@@ -3832,7 +3829,7 @@ included, otherwise the metadata will be saved to the database asynchronously.</
                                          :status              nil
                                          :text                (tru &quot;Unverified due to edit&quot;)}))
     ;; ok, now save the Card
-    (t2/update! Card (:id card-before-update)
+    (t2/update! :model/Card (:id card-before-update)
                 ;; `collection_id` and `description` can be `nil` (in order to unset them).
                 ;; Other values should only be modified if they're passed in as non-nil
                 (u/select-keys-when card-updates
@@ -3849,7 +3846,7 @@ included, otherwise the metadata will be saved to the database asynchronously.</
                    &quot;`card-before-update`:&quot; (pr-str card-before-update)
                    &quot;`card-updates`:&quot; (pr-str card-updates)))))
   ;; Fetch the updated Card from the DB
-  (let [card (t2/select-one Card :id (:id card-before-update))]
+  (let [card (t2/select-one :model/Card :id (:id card-before-update))]
     (delete-alerts-if-needed! :old-card card-before-update, :new-card card, :actor actor)
     ;; skip publishing the event if it's just a change in its collection position
     (when-not (= #{:collection_position}
@@ -3937,7 +3934,7 @@ included, otherwise the metadata will be saved to the database asynchronously.</
     (serdes/mbql-deps dataset_query)
     (serdes/visualization-settings-deps visualization_settings))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/descendants &quot;Card&quot; [_model-name id]
-  (let [card               (t2/select-one Card :id id)
+  (let [card               (t2/select-one :model/Card :id id)
         source-table       (some-&gt;  card :dataset_query :query :source-table)
         template-tags      (some-&gt;&gt; card :dataset_query :native :template-tags vals (keep :card-id))
         parameters-card-id (some-&gt;&gt; card :parameters (keep (comp :card_id :values_source_config)))

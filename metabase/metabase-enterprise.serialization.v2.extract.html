@@ -2874,7 +2874,6 @@ net.brehaut.ClojureTools = (function (SH) {
    [clojure.string :as str]
    [metabase-enterprise.serialization.v2.backfill-ids :as serdes.backfill]
    [metabase-enterprise.serialization.v2.models :as serdes.models]
-   [metabase.models :refer [Card Collection Dashboard]]
    [metabase.models.collection :as collection]
    [metabase.models.serialization :as serdes]
    [metabase.util :as u]
@@ -2903,25 +2902,25 @@ net.brehaut.ClojureTools = (function (SH) {
 <p>Does not export ee-only analytics collections.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- collection-set-for-user
   [user-id]
-  (let [roots (t2/select Collection {:where [:and [:= :location &quot;/&quot;]
-                                             [:or [:= :personal_owner_id nil]
-                                              [:= :personal_owner_id user-id]]
-                                             [:or [:= :namespace nil]
-                                              [:!= :namespace &quot;analytics&quot;]]]})]
+  (let [roots (t2/select :model/Collection {:where [:and [:= :location &quot;/&quot;]
+                                                    [:or [:= :personal_owner_id nil]
+                                                     [:= :personal_owner_id user-id]]
+                                                    [:or [:= :namespace nil]
+                                                     [:!= :namespace &quot;analytics&quot;]]]})]
     ;; start with the special &quot;nil&quot; root collection ID
     (-&gt; #{nil}
         (into (map :id) roots)
         (into (mapcat collection/descendant-ids) roots))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- collection-label [coll-id]
   (if coll-id
-    (let [collection (t2/hydrate (t2/select-one Collection :id coll-id) :ancestors)
+    (let [collection (t2/hydrate (t2/select-one :model/Collection :id coll-id) :ancestors)
           names      (-&gt;&gt; (conj (:ancestors collection) collection)
                           (map :name)
                           (str/join &quot; &gt; &quot;))]
       (format &quot;%d: %s&quot; coll-id names))
     &quot;[no collection]&quot;))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- card-label [card-id]
-  (let [card (t2/select-one [Card :collection_id :name] :id card-id)]
+  (let [card (t2/select-one [:model/Card :collection_id :name] :id card-id)]
     (format &quot;Card %d (%s from collection %s)&quot; card-id (:name card) (collection-label (:collection_id card)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- parse-target [[model-name id :as target]]
   (if (string? id)
@@ -2930,10 +2929,10 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defn- escape-analysis [{colls &quot;Collection&quot; cards &quot;Card&quot;} nodes]
   (log/tracef &quot;Running escape analysis for %d colls and %d cards&quot; (count colls) (count cards))
   (when-let [colls (-&gt; colls set not-empty)]
-    (let [known-cards (t2/select-pks-set Card {:where [:or
-                                                       [:in :collection_id colls]
-                                                       (when (contains? colls nil)
-                                                         [:= :collection_id nil])]})
+    (let [known-cards (t2/select-pks-set :model/Card {:where [:or
+                                                              [:in :collection_id colls]
+                                                              (when (contains? colls nil)
+                                                                [:= :collection_id nil])]})
           escaped     (-&gt;&gt; (set/difference (set cards) known-cards)
                            (mapv (fn [id]
                                    (-&gt; (get nodes [&quot;Card&quot; id])
@@ -2944,7 +2943,7 @@ net.brehaut.ClojureTools = (function (SH) {
     (doseq [[dash-id escapes] (dissoc dashboards nil)]
       (log/warnf &quot;Failed to export Dashboard %d (%s) containing Card saved outside requested collections: %s&quot;
                  dash-id
-                 (t2/select-one-fn :name Dashboard :id dash-id)
+                 (t2/select-one-fn :name :model/Dashboard :id dash-id)
                  (str/join &quot;, &quot; (map #(card-label (:escapee %)) escapes))))
     (when-let [other (not-empty (get dashboards nil))]
       (log/warnf &quot;Failed to export Cards based on questions outside requested collections: %s&quot;

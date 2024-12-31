@@ -2884,10 +2884,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.lib.schema.info :as lib.schema.info]
    [metabase.lib.util.match :as lib.util.match]
    [metabase.models.action :as action]
-   [metabase.models.card :as card :refer [Card]]
-   [metabase.models.dashboard :refer [Dashboard]]
-   [metabase.models.dimension :refer [Dimension]]
-   [metabase.models.field :refer [Field]]
+   [metabase.models.card :as card]
    [metabase.models.interface :as mi]
    [metabase.models.params :as params]
    [metabase.query-processor.card :as qp.card]
@@ -2938,14 +2935,14 @@ This function ensures that all template-tags are converted to parameters and add
   (if qp.perms/*param-values-query*
     card
     (mi/instance
-     Card
+     :model/Card
      (u/select-nested-keys card [:id :name :description :display :visualization_settings :parameters
                                  [:dataset_query :type [:native :template-tags]]]))))</pre></td></tr><tr><td class="docs"><p>Return a public Card matching key-value <code>conditions</code>, removing all columns that should not be visible to the general
 public. Throws a 404 if the Card doesn't exist.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn public-card
   [&amp; conditions]
   (binding [params/*ignore-current-user-perms-and-return-all-field-values* true]
-    (-&gt; (api/check-404 (apply t2/select-one [Card :id :dataset_query :description :display :name :parameters :visualization_settings]
+    (-&gt; (api/check-404 (apply t2/select-one [:model/Card :id :dataset_query :description :display :name :parameters :visualization_settings]
                               :archived false, conditions))
         remove-card-non-public-columns
         combine-parameters-and-template-tags
@@ -3018,7 +3015,7 @@ Returns a <code>StreamingResponse</code> object that should be returned as the r
 </td><td class="codes"><pre class="brush: clojure">(defn ^:private process-query-for-card-with-public-uuid
   [uuid export-format parameters &amp; options]
   (validation/check-public-sharing-enabled)
-  (let [card-id (api/check-404 (t2/select-one-pk Card :public_uuid uuid, :archived false))]
+  (let [card-id (api/check-404 (t2/select-one-pk :model/Card :public_uuid uuid, :archived false))]
     (apply process-query-for-card-with-id card-id export-format parameters options)))</pre></td></tr><tr><td class="docs"><p>/card/:uuid/query</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
   &quot;Fetch a publicly-accessible Card an return query results as well as `:card` information. Does not require auth
@@ -3072,7 +3069,7 @@ general public. Throws a 404 if the Dashboard doesn't exist.</p>
   {:pre [(even? (count conditions))]}
   (binding [params/*ignore-current-user-perms-and-return-all-field-values* true
             params/*field-id-context* (atom params/empty-field-id-context)]
-    (-&gt; (api/check-404 (apply t2/select-one [Dashboard :name :description :id :parameters :auto_apply_filters :width], :archived false, conditions))
+    (-&gt; (api/check-404 (apply t2/select-one [:model/Dashboard :name :description :id :parameters :auto_apply_filters :width], :archived false, conditions))
         (t2/hydrate [:dashcards :card :series :dashcard/action] :tabs :param_values :param_fields)
         api.dashboard/add-query-average-durations
         (update :dashcards (fn [dashcards]
@@ -3131,7 +3128,7 @@ general public. Throws a 404 if the Dashboard doesn't exist.</p>
    parameters  [:maybe ms/JSONString]}
   (validation/check-public-sharing-enabled)
   (api/check-404 (t2/select-one-pk :model/Card :id card-id :archived false))
-  (let [dashboard-id (api/check-404 (t2/select-one-pk Dashboard :public_uuid uuid, :archived false))]
+  (let [dashboard-id (api/check-404 (t2/select-one-pk :model/Dashboard :public_uuid uuid, :archived false))]
     (u/prog1 (process-query-for-dashcard
               :dashboard-id  dashboard-id
               :card-id       card-id
@@ -3152,7 +3149,7 @@ general public. Throws a 404 if the Dashboard doesn't exist.</p>
    export-format (into [:enum] api.dataset/export-formats)}
   (validation/check-public-sharing-enabled)
   (api/check-404 (t2/select-one-pk :model/Card :id card-id :archived false))
-  (let [dashboard-id (api/check-404 (t2/select-one-pk Dashboard :public_uuid uuid, :archived false))]
+  (let [dashboard-id (api/check-404 (t2/select-one-pk :model/Dashboard :public_uuid uuid, :archived false))]
     (u/prog1 (process-query-for-dashcard
               :dashboard-id  dashboard-id
               :card-id       card-id
@@ -3170,7 +3167,7 @@ general public. Throws a 404 if the Dashboard doesn't exist.</p>
    dashcard-id ms/PositiveInt
    parameters  ms/JSONString}
   (validation/check-public-sharing-enabled)
-  (api/check-404 (t2/select-one-pk Dashboard :public_uuid uuid :archived false))
+  (api/check-404 (t2/select-one-pk :model/Dashboard :public_uuid uuid :archived false))
   (actions/fetch-values
    (api/check-404 (action/dashcard-&gt;action dashcard-id))
    (json/decode parameters)))</pre></td></tr><tr><td class="docs">
@@ -3195,7 +3192,7 @@ general public. Throws a 404 if the Dashboard doesn't exist.</p>
         throttle-time (assoc :headers {&quot;Retry-After&quot; throttle-time}))
       (do
         (validation/check-public-sharing-enabled)
-        (let [dashboard-id (api/check-404 (t2/select-one-pk Dashboard :public_uuid uuid, :archived false))]
+        (let [dashboard-id (api/check-404 (t2/select-one-pk :model/Dashboard :public_uuid uuid, :archived false))]
           ;; Run this query with full superuser perms. We don't want the various perms checks
           ;; failing because there are no current user perms; if this Dashcard is public
           ;; you're by definition allowed to run it without a perms check anyway
@@ -3242,7 +3239,7 @@ tags').</p>
 cannot be found, throw an Exception.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- check-field-is-referenced-by-card
   [field-id card-id]
-  (let [card                 (api/check-404 (t2/select-one [Card :dataset_query] :id card-id))
+  (let [card                 (api/check-404 (t2/select-one [:model/Card :dataset_query] :id card-id))
         referenced-field-ids (card-&gt;referenced-field-ids card)]
     (api/check-404 (contains? referenced-field-ids field-id))))</pre></td></tr><tr><td class="docs"><p>Check whether a search Field is allowed to be used in conjunction with another Field. A search Field is allowed if
 <em>any</em> of the following conditions is true:</p>
@@ -3260,15 +3257,15 @@ field, and an 400 exception will be thrown.</p>
   {:pre [(integer? field-id) (integer? search-field-id)]}
   (api/check-400
    (or (= field-id search-field-id)
-       (t2/exists? Dimension :field_id field-id, :human_readable_field_id search-field-id)
+       (t2/exists? :model/Dimension :field_id field-id, :human_readable_field_id search-field-id)
        ;; just do a couple small queries to figure this out, we could write a fancy query to join Field against itself
        ;; and do this in one but the extra code complexity isn't worth it IMO
-       (when-let [table-id (t2/select-one-fn :table_id Field :id field-id, :semantic_type (mdb.query/isa :type/PK))]
-         (t2/exists? Field :id search-field-id, :table_id table-id, :semantic_type (mdb.query/isa :type/Name))))))</pre></td></tr><tr><td class="docs"><p>Check that <code>field-id</code> belongs to a Field that is used as a parameter in a Dashboard with <code>dashboard-id</code>, or throw a
+       (when-let [table-id (t2/select-one-fn :table_id :model/Field :id field-id, :semantic_type (mdb.query/isa :type/PK))]
+         (t2/exists? :model/Field :id search-field-id, :table_id table-id, :semantic_type (mdb.query/isa :type/Name))))))</pre></td></tr><tr><td class="docs"><p>Check that <code>field-id</code> belongs to a Field that is used as a parameter in a Dashboard with <code>dashboard-id</code>, or throw a
 404 Exception.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- check-field-is-referenced-by-dashboard
   [field-id dashboard-id]
-  (let [dashboard       (-&gt; (t2/select-one Dashboard :id dashboard-id)
+  (let [dashboard       (-&gt; (t2/select-one :model/Dashboard :id dashboard-id)
                             api/check-404
                             (t2/hydrate [:dashcards :card]))
         param-field-ids (params/dashcards-&gt;param-field-ids (:dashcards dashboard))]
@@ -3276,27 +3273,27 @@ field, and an 400 exception will be thrown.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn card-and-field-id-&gt;values
   [card-id field-id]
   (check-field-is-referenced-by-card field-id card-id)
-  (api.field/field-&gt;values (t2/select-one Field :id field-id)))</pre></td></tr><tr><td class="docs"><p>/card/:uuid/field/:field-id/values</p>
+  (api.field/field-&gt;values (t2/select-one :model/Field :id field-id)))</pre></td></tr><tr><td class="docs"><p>/card/:uuid/field/:field-id/values</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
   &quot;Fetch FieldValues for a Field that is referenced by a public Card.&quot;
   [uuid field-id]
   {uuid     ms/UUIDString
    field-id ms/PositiveInt}
   (validation/check-public-sharing-enabled)
-  (let [card-id (t2/select-one-pk Card :public_uuid uuid, :archived false)]
+  (let [card-id (t2/select-one-pk :model/Card :public_uuid uuid, :archived false)]
     (card-and-field-id-&gt;values card-id field-id)))</pre></td></tr><tr><td class="docs"><p>Return the FieldValues for a Field with <code>field-id</code> that is referenced by Card with <code>card-id</code> which itself is present
 in Dashboard with <code>dashboard-id</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn dashboard-and-field-id-&gt;values
   [dashboard-id field-id]
   (check-field-is-referenced-by-dashboard field-id dashboard-id)
-  (api.field/field-&gt;values (t2/select-one Field :id field-id)))</pre></td></tr><tr><td class="docs"><p>/dashboard/:uuid/field/:field-id/values</p>
+  (api.field/field-&gt;values (t2/select-one :model/Field :id field-id)))</pre></td></tr><tr><td class="docs"><p>/dashboard/:uuid/field/:field-id/values</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
   &quot;Fetch FieldValues for a Field that is referenced by a Card in a public Dashboard.&quot;
   [uuid field-id]
   {uuid     ms/UUIDString
    field-id ms/PositiveInt}
   (validation/check-public-sharing-enabled)
-  (let [dashboard-id (api/check-404 (t2/select-one-pk Dashboard :public_uuid uuid, :archived false))]
+  (let [dashboard-id (api/check-404 (t2/select-one-pk :model/Dashboard :public_uuid uuid, :archived false))]
     (dashboard-and-field-id-&gt;values dashboard-id field-id)))</pre></td></tr><tr><td class="docs"><p>--------------------------------------------------- Searching ----------------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Wrapper for <code>metabase.api.field/search-values</code> for use with public/embedded Cards. See that functions
 documentation for a more detailed explanation of exactly what this does.</p>
@@ -3304,13 +3301,13 @@ documentation for a more detailed explanation of exactly what this does.</p>
   [card-id field-id search-id value limit]
   (check-field-is-referenced-by-card field-id card-id)
   (check-search-field-is-allowed field-id search-id)
-  (api.field/search-values (t2/select-one Field :id field-id) (t2/select-one Field :id search-id) value limit))</pre></td></tr><tr><td class="docs"><p>Wrapper for <code>metabase.api.field/search-values</code> for use with public/embedded Dashboards. See that functions
+  (api.field/search-values (t2/select-one :model/Field :id field-id) (t2/select-one :model/Field :id search-id) value limit))</pre></td></tr><tr><td class="docs"><p>Wrapper for <code>metabase.api.field/search-values</code> for use with public/embedded Dashboards. See that functions
 documentation for a more detailed explanation of exactly what this does.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn search-dashboard-fields
   [dashboard-id field-id search-id value limit]
   (check-field-is-referenced-by-dashboard field-id dashboard-id)
   (check-search-field-is-allowed field-id search-id)
-  (api.field/search-values (t2/select-one Field :id field-id) (t2/select-one Field :id search-id) value limit))</pre></td></tr><tr><td class="docs"><p>/card/:uuid/field/:field-id/search/:search-field-id</p>
+  (api.field/search-values (t2/select-one :model/Field :id field-id) (t2/select-one :model/Field :id search-id) value limit))</pre></td></tr><tr><td class="docs"><p>/card/:uuid/field/:field-id/search/:search-field-id</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
   &quot;Search for values of a Field that is referenced by a public Card.&quot;
   [uuid field-id search-field-id value limit]
@@ -3320,7 +3317,7 @@ documentation for a more detailed explanation of exactly what this does.</p>
    value           ms/NonBlankString
    limit           [:maybe ms/PositiveInt]}
   (validation/check-public-sharing-enabled)
-  (let [card-id (t2/select-one-pk Card :public_uuid uuid, :archived false)]
+  (let [card-id (t2/select-one-pk :model/Card :public_uuid uuid, :archived false)]
     (search-card-fields card-id field-id search-field-id value limit)))</pre></td></tr><tr><td class="docs"><p>/dashboard/:uuid/field/:field-id/search/:search-field-id</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
   &quot;Search for values of a Field that is referenced by a Card in a public Dashboard.&quot;
@@ -3331,12 +3328,12 @@ documentation for a more detailed explanation of exactly what this does.</p>
    value           ms/NonBlankString
    limit           [:maybe ms/PositiveInt]}
   (validation/check-public-sharing-enabled)
-  (let [dashboard-id (api/check-404 (t2/select-one-pk Dashboard :public_uuid uuid, :archived false))]
+  (let [dashboard-id (api/check-404 (t2/select-one-pk :model/Dashboard :public_uuid uuid, :archived false))]
     (search-dashboard-fields dashboard-id field-id search-field-id value limit)))</pre></td></tr><tr><td class="docs"><p>--------------------------------------------------- Remappings ---------------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- field-remapped-values [field-id remapped-field-id, ^String value-str]
-  (let [field          (api/check-404 (t2/select-one Field :id field-id))
-        remapped-field (api/check-404 (t2/select-one Field :id remapped-field-id))]
+  (let [field          (api/check-404 (t2/select-one :model/Field :id field-id))
+        remapped-field (api/check-404 (t2/select-one :model/Field :id remapped-field-id))]
     (check-search-field-is-allowed field-id remapped-field-id)
     (api.field/remapped-value field remapped-field (api.field/parse-query-param-value-for-field field value-str))))</pre></td></tr><tr><td class="docs"><p>Return the reampped Field values for a Field referenced by a <em>Card</em>. This explanation is almost useless, so see the
 one in <code>metabase.api.field/remapped-value</code> if you would actually like to understand what is going on here.</p>
@@ -3358,7 +3355,7 @@ the one in <code>metabase.api.field/remapped-value</code> if you would actually 
    remapped-id ms/PositiveInt
    value       ms/NonBlankString}
   (validation/check-public-sharing-enabled)
-  (let [card-id (api/check-404 (t2/select-one-pk Card :public_uuid uuid, :archived false))]
+  (let [card-id (api/check-404 (t2/select-one-pk :model/Card :public_uuid uuid, :archived false))]
     (card-field-remapped-values card-id field-id remapped-id value)))</pre></td></tr><tr><td class="docs"><p>/dashboard/:uuid/field/:field-id/remapping/:remapped-id</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
   &quot;Fetch remapped Field values. This is the same as `GET /api/field/:id/remapping/:remapped-id`, but for use with public
@@ -3369,7 +3366,7 @@ the one in <code>metabase.api.field/remapped-value</code> if you would actually 
    remapped-id ms/PositiveInt
    value       ms/NonBlankString}
   (validation/check-public-sharing-enabled)
-  (let [dashboard-id (t2/select-one-pk Dashboard :public_uuid uuid, :archived false)]
+  (let [dashboard-id (t2/select-one-pk :model/Dashboard :public_uuid uuid, :archived false)]
     (dashboard-field-remapped-values dashboard-id field-id remapped-id value)))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------ Param Values -------------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>/card/:uuid/params/:param-key/values</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
@@ -3378,7 +3375,7 @@ the one in <code>metabase.api.field/remapped-value</code> if you would actually 
   {uuid      ms/UUIDString
    param-key ms/NonBlankString}
   (validation/check-public-sharing-enabled)
-  (let [card (t2/select-one Card :public_uuid uuid, :archived false)]
+  (let [card (t2/select-one :model/Card :public_uuid uuid, :archived false)]
     (request/as-admin
       (api.card/param-values card param-key))))</pre></td></tr><tr><td class="docs"><p>/card/:uuid/params/:param-key/search/:query</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
@@ -3388,7 +3385,7 @@ the one in <code>metabase.api.field/remapped-value</code> if you would actually 
    param-key ms/NonBlankString
    query     ms/NonBlankString}
   (validation/check-public-sharing-enabled)
-  (let [card (t2/select-one Card :public_uuid uuid, :archived false)]
+  (let [card (t2/select-one :model/Card :public_uuid uuid, :archived false)]
     (request/as-admin
       (api.card/param-values card param-key query))))</pre></td></tr><tr><td class="docs"><p>/dashboard/:uuid/params/:param-key/values</p>
 </td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
@@ -3431,7 +3428,7 @@ the one in <code>metabase.api.field/remapped-value</code> if you would actually 
    parameters  [:maybe ms/JSONString]}
   (validation/check-public-sharing-enabled)
   (api/check-404 (t2/select-one-pk :model/Card :id card-id :archived false))
-  (let [dashboard-id (api/check-404 (t2/select-one-pk Dashboard :public_uuid uuid, :archived false))]
+  (let [dashboard-id (api/check-404 (t2/select-one-pk :model/Dashboard :public_uuid uuid, :archived false))]
     (u/prog1 (process-query-for-dashcard
               :dashboard-id  dashboard-id
               :card-id       card-id

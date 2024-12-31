@@ -2872,10 +2872,8 @@ net.brehaut.ClojureTools = (function (SH) {
    [clojure.set :as set]
    [medley.core :as m]
    [metabase.lib.schema.common :as lib.schema.common]
-   [metabase.models.database :refer [Database]]
    [metabase.models.humanization :as humanization]
    [metabase.models.interface :as mi]
-   [metabase.models.table :refer [Table]]
    [metabase.sync.fetch-metadata :as fetch-metadata]
    [metabase.sync.interface :as i]
    [metabase.sync.sync-metadata.metabase-metadata :as metabase-metadata]
@@ -2947,7 +2945,7 @@ net.brehaut.ClojureTools = (function (SH) {
   [database    :- i/DatabaseInstance
    db-metadata :- i/DatabaseMetadata]
   (log/infof &quot;Found new version for DB: %s&quot; (:version db-metadata))
-  (t2/update! Database (u/the-id database)
+  (t2/update! :model/Database (u/the-id database)
               {:details
                (assoc (:details database) :version (:version db-metadata))}))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- cruft-dependent-columns [table-name]
@@ -2959,7 +2957,7 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defn create-table!
   [database table]
   (t2/insert-returning-instance!
-   Table
+   :model/Table
    (merge (cruft-dependent-columns (:name table))
           {:active                  true
            :db_id                   (:id database)
@@ -2970,13 +2968,13 @@ net.brehaut.ClojureTools = (function (SH) {
            :name                    (:name table)})))</pre></td></tr><tr><td class="docs"><p>Create a single new table in the database, or mark it as active if it already exists.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn create-or-reactivate-table!
   [database {schema :schema table-name :name :as table}]
-  (if-let [existing-id (t2/select-one-pk Table
+  (if-let [existing-id (t2/select-one-pk :model/Table
                                          :db_id (u/the-id database)
                                          :schema schema
                                          :name table-name
                                          :active false)]
     ;; if the table already exists but is marked *inactive*, mark it as *active*
-    (t2/update! Table existing-id (assoc (cruft-dependent-columns (:name table)) :active true))
+    (t2/update! :model/Table existing-id (assoc (cruft-dependent-columns (:name table)) :active true))
     ;; otherwise create a new Table
     (create-table! database table)))</pre></td></tr><tr><td class="docs"><p>TODO - should we make this logic case-insensitive like it is for fields?</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Create <code>new-tables</code> for database, or if they already exist, mark them as active.</p>
@@ -2985,7 +2983,7 @@ net.brehaut.ClojureTools = (function (SH) {
    new-tables :- [:set i/DatabaseMetadataTable]]
   (doseq [table new-tables]
     (log/info &quot;Found new table:&quot;
-              (sync-util/name-for-logging (mi/instance Table table))))
+              (sync-util/name-for-logging (mi/instance :model/Table table))))
   (doseq [table new-tables]
     (create-or-reactivate-table! database table)))</pre></td></tr><tr><td class="docs"><p>Mark any <code>old-tables</code> belonging to <code>database</code> as inactive.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn- retire-tables!
@@ -2995,12 +2993,12 @@ net.brehaut.ClojureTools = (function (SH) {
                         [:schema [:maybe ::lib.schema.common/non-blank-string]]]]]
   (log/info &quot;Marking tables as inactive:&quot;
             (for [table old-tables]
-              (sync-util/name-for-logging (mi/instance Table table))))
+              (sync-util/name-for-logging (mi/instance :model/Table table))))
   (doseq [{schema :schema table-name :name :as _table} old-tables]
-    (t2/update! Table {:db_id  (u/the-id database)
-                       :schema schema
-                       :name   table-name
-                       :active true}
+    (t2/update! :model/Table {:db_id  (u/the-id database)
+                              :schema schema
+                              :name   table-name
+                              :active true}
                 {:active false})))</pre></td></tr><tr><td class="docs"><p>Update the table metadata if it has changed.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn- update-table-metadata-if-needed!
   [table-metadata :- i/DatabaseMetadataTable

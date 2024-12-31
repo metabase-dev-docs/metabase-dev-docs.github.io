@@ -2877,8 +2877,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.lib.metadata.jvm :as lib.metadata.jvm]
    [metabase.models.data-permissions :as data-perms]
    [metabase.models.database :as database]
-   [metabase.models.dimension :refer [Dimension]]
-   [metabase.models.field-values :as field-values :refer [FieldValues]]
+   [metabase.models.field-values :as field-values]
    [metabase.models.humanization :as humanization]
    [metabase.models.interface :as mi]
    [metabase.models.serialization :as serdes]
@@ -2900,10 +2899,7 @@ net.brehaut.ClojureTools = (function (SH) {
     :hidden         ; Lightweight hiding which removes field as a choice in most of the UI.  should still be returned in queries.
     :sensitive      ; Strict removal of field from all places except data model listing.  queries should error if someone attempts to access.
     :retired})      ; For fields that no longer exist in the physical db.  automatically set by Metabase.  QP should error if encountered in a query.</pre></td></tr><tr><td class="docs"><p>----------------------------------------------- Entity &amp; Lifecycle -----------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Used to be the toucan1 model name defined using [[toucan.models/defmodel]]; now it's a reference to the toucan2 model name.
-We'll keep this till we replace all the Field symbol in our codebase.</p>
-</td><td class="codes"><pre class="brush: clojure">(def Field
-  :model/Field)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/table-name :model/Field [_model] :metabase_field)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/model-for-automagic-hydration [:default :destination]          [_model _k]  :model/Field)
 (methodical/defmethod t2/model-for-automagic-hydration [:default :field]                [_model _k]  :model/Field)
@@ -3024,7 +3020,7 @@ yields a string, not a value double. This function will attempt to coerce any of
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Return the <code>FieldValues</code> associated with this <code>field</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn values
   [{:keys [id]}]
-  (t2/select [FieldValues :field_id :values], :field_id id :type :full))</pre></td></tr><tr><td class="docs">
+  (t2/select [:model/FieldValues :field_id :values], :field_id id :type :full))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn nested-field-names-&gt;field-id :- [:maybe ms/PositiveInt]
   &quot;Recusively find the field id for a nested field name, return nil if not found.
   Nested field here refer to a field that has another field as its parent_id, like nested field in Mongo DB.
@@ -3060,7 +3056,7 @@ instance. This only returns a single instance for each Field! Duplicates are dis
   ;; with Field. See the doc in [[metabase.models.field-values]] for more.
   ;; We filter down to only :type =:full values, as they contain configured labels which must be preserved. The Advanced
   ;; FieldValues can then be regenerated without loss given these Full entities.
-  (let [id-&gt;field-values (select-field-id-&gt;instance fields FieldValues :type :full)]
+  (let [id-&gt;field-values (select-field-id-&gt;instance fields :model/FieldValues :type :full)]
     (for [field fields]
       (assoc field :values (get id-&gt;field-values (:id field) [])))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mi/define-batched-hydration-method with-normal-values
@@ -3068,7 +3064,7 @@ instance. This only returns a single instance for each Field! Duplicates are dis
   &quot;Efficiently hydrate the `FieldValues` for visibility_type normal `fields`.&quot;
   [fields]
   (let [id-&gt;field-values (select-field-id-&gt;instance (filter field-values/field-should-have-field-values? fields)
-                                                    [FieldValues :id :human_readable_values :values :field_id]
+                                                    [:model/FieldValues :id :human_readable_values :values :field_id]
                                                     :type :full)]
     (for [field fields]
       (assoc field :values (get id-&gt;field-values (:id field) [])))))</pre></td></tr><tr><td class="docs">
@@ -3082,7 +3078,7 @@ instance. This only returns a single instance for each Field! Duplicates are dis
   vector with the matching Dimension, or an empty vector. At least the response shape is consistent now. Maybe in the
   future we can change this key to `:dimension` and return it that way. -- Cam&quot;
   [fields]
-  (let [id-&gt;dimensions (select-field-id-&gt;instance fields Dimension)]
+  (let [id-&gt;dimensions (select-field-id-&gt;instance fields :model/Dimension)]
     (for [field fields
           :let  [dimension (get id-&gt;dimensions (:id field))]]
       (assoc field :dimensions (if dimension [dimension] [])))))</pre></td></tr><tr><td class="docs">
@@ -3116,7 +3112,7 @@ instance. This only returns a single instance for each Field! Duplicates are dis
                                                (:fk_target_field_id field))]
                                 (:fk_target_field_id field)))
         id-&gt;target-field (m/index-by :id (when (seq target-field-ids)
-                                           (readable-fields-only (t2/select Field :id [:in target-field-ids]))))]
+                                           (readable-fields-only (t2/select :model/Field :id [:in target-field-ids]))))]
     (for [field fields
           :let  [target-id (:fk_target_field_id field)]]
       (assoc field :target (id-&gt;target-field target-id)))))</pre></td></tr><tr><td class="docs"><p>Hydrates :target on field, but if the <code>:fk_target_field_id</code> field is not writable, <code>:target</code> will be nil.</p>
@@ -3124,13 +3120,13 @@ instance. This only returns a single instance for each Field! Duplicates are dis
   [field]
   (let [target-field-id (when (isa? (:semantic_type field) :type/FK)
                           (:fk_target_field_id field))
-        target-field    (when-let [target-field (and target-field-id (t2/select-one Field :id target-field-id))]
+        target-field    (when-let [target-field (and target-field-id (t2/select-one :model/Field :id target-field-id))]
                           (when (mi/can-write? (t2/hydrate target-field :table))
                             target-field))]
     (assoc field :target target-field)))</pre></td></tr><tr><td class="docs"><p>Return the pieces that represent a path to <code>field</code>, of the form <code>[table-name parent-fields-name* field-name]</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn qualified-name-components
   [{field-name :name, table-id :table_id, parent-id :parent_id}]
-  (conj (vec (if-let [parent (t2/select-one Field :id parent-id)]
+  (conj (vec (if-let [parent (t2/select-one :model/Field :id parent-id)]
                (qualified-name-components parent)
                (let [{table-name :name, schema :schema} (t2/select-one ['Table :name :schema], :id table-id)]
                  (conj (when schema
@@ -3144,7 +3140,7 @@ instance. This only returns a single instance for each Field! Duplicates are dis
   (mdb/memoize-for-application-db
    (fn [field-id]
      {:pre [(integer? field-id)]}
-     (t2/select-one-fn :table_id Field, :id field-id))))</pre></td></tr><tr><td class="docs"><p>Return the ID of the Database this Field belongs to.</p>
+     (t2/select-one-fn :table_id :model/Field, :id field-id))))</pre></td></tr><tr><td class="docs"><p>Return the ID of the Database this Field belongs to.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn field-id-&gt;database-id
   [field-id]
   {:pre [(integer? field-id)]}
