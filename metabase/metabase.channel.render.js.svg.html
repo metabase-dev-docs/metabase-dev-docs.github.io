@@ -2876,10 +2876,12 @@ strange, as the jvm datastructures, not just serialized versions are used. This 
    [metabase.channel.render.style :as style]
    [metabase.config :as config]
    [metabase.public-settings :as public-settings]
+   [metabase.util.delay :as delay]
    [metabase.util.json :as json])
   (:import
    (java.io ByteArrayInputStream ByteArrayOutputStream)
    (java.nio.charset StandardCharsets)
+   (java.util.concurrent TimeUnit)
    (org.apache.batik.anim.dom SAXSVGDocumentFactory SVGOMDocument)
    (org.apache.batik.transcoder TranscoderInput TranscoderOutput)
    (org.apache.batik.transcoder.image PNGTranscoder)
@@ -2900,10 +2902,14 @@ namespace to redef the <code>context</code>.</p>
     ((requiring-resolve 'mb.hawk.init/assert-tests-are-not-initializing) &quot;(mt/id ...) or (data/id ...)&quot;))
   (doto context
     (js.engine/load-resource bundle-path)
-    (js.engine/load-resource interface-path)))</pre></td></tr><tr><td class="docs"><p>Delay containing a graal js context. It has the chart bundle and the above <code>src-api</code> in its environment suitable
-for creating charts.</p>
+    (js.engine/load-resource interface-path)))</pre></td></tr><tr><td class="docs"><p>Delay containing a graal js context. It has the chart bundle and the above <code>src-api</code> in its environment suitable for
+creating charts. However, under some circumstances, the Truffle JS engine tends to leak memory, so we don't want to
+keep the reference to the engine forever. Ideally, we would like to make the engine lifetime bound to a single
+request or something like that, but that would introduce a lot of changes and noise to the system. Hence, with this
+bandaid, we keep the JS engine for some reasonable time (10 minutes) before recreating it.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private static-viz-context-delay
-  (delay (load-viz-bundle (js.engine/context))))</pre></td></tr><tr><td class="docs"><p>Returns a static viz context. In dev mode, this will be a new context each time. In prod or test modes, it will
+  (delay/delay-with-ttl (.toMillis TimeUnit/MINUTES 10)
+                        #(load-viz-bundle (js.engine/context))))</pre></td></tr><tr><td class="docs"><p>Returns a static viz context. In dev mode, this will be a new context each time. In prod or test modes, it will
 return the derefed contents of <code>static-viz-context-delay</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- context
   ^Context []
