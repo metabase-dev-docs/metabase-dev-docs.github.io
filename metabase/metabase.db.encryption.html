@@ -2865,296 +2865,59 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.cmd" name="metabase.cmd"><h1 class="project-name">metabase.cmd</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Functions for commands that can be ran from the command-line with the Clojure CLI or the Metabase JAR. These are ran
-as follows:</p>
-
-<p>  <metabase> <command> <options></p>
-
-<p>for example, running the <code>migrate</code> command and passing it <code>force</code> can be done using one of the following ways:</p>
-
-<p>  clojure -M:run migrate force
-  java --add-opens java.base/java.nio=ALL-UNNAMED -jar metabase.jar migrate force</p>
-
-<p>Logic below translates resolves the command itself to a function marked with <code>^:command</code> metadata and calls the
-function with arguments as appropriate.</p>
-
-<p>You can see what commands are available by running the command <code>help</code>. This command uses the docstrings and arglists
-associated with each command's entrypoint function to generate descriptions for each command.</p>
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.cmd
-  (:refer-clojure :exclude [load import])
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.db.encryption" name="metabase.db.encryption"><h1 class="project-name">metabase.db.encryption</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.db.encryption
   (:require
-   [clojure.string :as str]
-   [clojure.tools.cli :as cli]
-   [environ.core :as env]
-   [metabase.config :as config]
-   [metabase.legacy-mbql.util :as mbql.u]
-   [metabase.plugins.classloader :as classloader]
-   [metabase.util :as u]
    [metabase.util.encryption :as encryption]
+   [metabase.util.honey-sql-2 :as h2x]
    [metabase.util.i18n :refer [trs]]
-   [metabase.util.log :as log]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Command processing and option parsing utilities, etc.</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Proxy function to System/exit to enable the use of <code>with-redefs</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- system-exit!
-  [return-code]
-  (System/exit return-code))</pre></td></tr><tr><td class="docs"><p>Looks up a command var by name</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- cmd-&gt;var
-  [command-name]
-  (ns-resolve 'metabase.cmd (symbol command-name)))</pre></td></tr><tr><td class="docs"><p>Resolves enterprise command by symbol and calls with args, or else throws error if not EE</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- call-enterprise
-  [symb &amp; args]
-  (let [f (try
-            (classloader/require (symbol (namespace symb)))
-            (or (resolve symb)
-                (throw (ex-info (trs &quot;{0} does not exist&quot; symb) {})))
-            (catch Throwable e
-              (throw (ex-info (trs &quot;The ''{0}'' command is only available in Metabase Enterprise Edition.&quot; (name symb))
-                              {:command symb}
-                              e))))]
-    (apply f args)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- get-parsed-options
-  [iref options]
-  (:options (cli/parse-opts options (:arg-spec (meta iref)))))</pre></td></tr><tr><td class="docs"><p>Command implementations</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Run database migrations. Valid options for <code>direction</code> are <code>up</code>, <code>force</code>, <code>down</code>, <code>print</code>, or <code>release-locks</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ^:command migrate
-  [direction]
-  (classloader/require 'metabase.cmd.migrate)
-  ((resolve 'metabase.cmd.migrate/migrate!) direction))</pre></td></tr><tr><td class="docs"><p>Transfer data from existing H2 database to the newly created MySQL or Postgres DB specified by env vars.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ^:command load-from-h2
-  ([]
-   (load-from-h2 nil))
-  ([h2-connection-string]
-   (classloader/require 'metabase.cmd.load-from-h2)
-   ((resolve 'metabase.cmd.load-from-h2/load-from-h2!) h2-connection-string)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn ^:command dump-to-h2
-  {:doc &quot;Transfer data from existing database to newly created H2 DB with specified filename.
-         Target H2 file is deleted before dump, unless the --keep-existing flag is given.&quot;
-   :arg-spec [[&quot;-k&quot; &quot;--keep-existing&quot; &quot;Do not delete target H2 file if it exists.&quot;
-               :id :keep-existing?]
-              [&quot;-p&quot; &quot;--dump-plaintext&quot; &quot;Do not encrypt dumped contents.&quot;
-               :id :dump-plaintext?]]}
-  [h2-filename &amp; opts]
-  (classloader/require 'metabase.cmd.dump-to-h2)
-  (try
-    (let [options (get-parsed-options #'dump-to-h2 opts)]
-      ((resolve 'metabase.cmd.dump-to-h2/dump-to-h2!) h2-filename options)
-      (println &quot;Dump complete&quot;)
-      (system-exit! 0))
-    (catch Throwable e
-      (log/error e &quot;Failed to dump application database to H2 file&quot;)
-      (system-exit! 1))))</pre></td></tr><tr><td class="docs"><p>Start Metabase the usual way and exit. Useful for profiling Metabase launch time.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ^:command profile
-  []
-  ;; override env var that would normally make Jetty block forever
-  (alter-var-root #'env/env assoc :mb-jetty-join &quot;false&quot;)
-  (u/profile &quot;start-normally&quot; ((resolve 'metabase.core/start-normally))))</pre></td></tr><tr><td class="docs"><p>Reset the password for a user with <code>email-address</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ^:command reset-password
-  [email-address]
-  (classloader/require 'metabase.cmd.reset-password)
-  ((resolve 'metabase.cmd.reset-password/reset-password!) email-address))</pre></td></tr><tr><td class="docs"><p>Show this help message listing valid Metabase commands.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ^:command help
-  ([command-name]
-   (let [{:keys [doc arg-spec arglists]} (meta (cmd-&gt;var command-name))]
-     (doseq [arglist arglists]
-       (apply println command-name arglist))
-     (when doc
-       (doseq [doc-line (str/split doc #&quot;\n\s+&quot;)]
-         (println &quot;\t&quot; doc-line)))
-     (when (seq arg-spec)
-       (println &quot;\t&quot; &quot;Options:&quot;)
-       (doseq [opt-line (str/split (:summary (cli/parse-opts [] arg-spec)) #&quot;\n&quot;)]
-         (println &quot;\t&quot; opt-line)))))
-  ([]
-   (println &quot;Valid commands are:&quot;)
-   (doseq [[symb varr] (sort (ns-interns 'metabase.cmd))
-           :when       (:command (meta varr))]
-     (help symb)
-     (println))
-   (println &quot;\nSome other commands you might find useful:\n&quot;)
-   (println &quot;java -cp metabase.jar org.h2.tools.Shell -url jdbc:h2:/path/to/metabase.db&quot;)
-   (println &quot;\tOpen an SQL shell for the Metabase H2 DB&quot;)))</pre></td></tr><tr><td class="docs"><p>Print version information about Metabase and the current system.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ^:command version
-  []
-  (println &quot;Metabase version:&quot; config/mb-version-info)
-  (println &quot;\nOS:&quot;
-           (System/getProperty &quot;os.name&quot;)
-           (System/getProperty &quot;os.version&quot;)
-           (System/getProperty &quot;os.arch&quot;))
-  (println &quot;\nJava version:&quot;
-           (System/getProperty &quot;java.vm.name&quot;)
-           (System/getProperty &quot;java.version&quot;))
-  (println &quot;\nCountry:&quot;       (System/getProperty &quot;user.country&quot;))
-  (println &quot;System timezone:&quot; (System/getProperty &quot;user.timezone&quot;))
-  (println &quot;Language:&quot;        (System/getProperty &quot;user.language&quot;))
-  (println &quot;File encoding:&quot;   (System/getProperty &quot;file.encoding&quot;)))</pre></td></tr><tr><td class="docs"><p>Generate a markdown file containing documentation for all API endpoints. This is written to a file called
-<code>docs/api-documentation.md</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ^:command api-documentation
-  []
-  (classloader/require 'metabase.cmd.endpoint-dox)
-  ((resolve 'metabase.cmd.endpoint-dox/generate-dox!)))</pre></td></tr><tr><td class="docs"><p>Generates a markdown file containing documentation for environment variables relevant to configuring Metabase.
-The command only includes environment variables registered as defsettings.
-For a full list of environment variables, see https://www.metabase.com/docs/latest/configuring-metabase/environment-variables.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ^:command environment-variables-documentation
-  []
-  (classloader/require 'metabase.cmd.env-var-dox)
-  ((resolve 'metabase.cmd.env-var-dox/generate-dox!)))</pre></td></tr><tr><td class="docs"><p>Generates a markdown file with some documentation and an example configuration file in YAML. The YAML template includes Metabase settings and their defaults.
- Metabase will save the template as <code>docs/configuring-metabase/config-template.md</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ^:command config-template
-  []
-  (classloader/require 'metabase.cmd.config-file-gen)
-  ((resolve 'metabase.cmd.config-file-gen/generate-config-file-doc!)))</pre></td></tr><tr><td class="docs"><p>Print a list of all multimethods available for a driver to implement, optionally with their docstrings.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ^:command driver-methods
-  ([]
-   (classloader/require 'metabase.cmd.driver-methods)
-   ((resolve 'metabase.cmd.driver-methods/print-available-multimethods) false))
-  ([_docs]
-   (classloader/require 'metabase.cmd.driver-methods)
-   ((resolve 'metabase.cmd.driver-methods/print-available-multimethods) true)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn ^:command load
-  {:doc &quot;Note: this command is deprecated. Use `import` instead.
-         Load serialized Metabase instance as created by [[dump]] command from directory `path`.&quot;
-   :arg-spec [[&quot;-m&quot; &quot;--mode (skip|update)&quot; &quot;Update or skip on conflicts.&quot;
-               :default      :skip
-               :default-desc &quot;skip&quot;
-               :parse-fn     mbql.u/normalize-token
-               :validate     [#{:skip :update} &quot;Must be 'skip' or 'update'&quot;]]
-              [&quot;-e&quot; &quot;--on-error (continue|abort)&quot;  &quot;Abort or continue on error.&quot;
-               :default      :continue
-               :default-desc &quot;continue&quot;
-               :parse-fn     mbql.u/normalize-token
-               :validate     [#{:continue :abort} &quot;Must be 'continue' or 'abort'&quot;]]]}
-  [path &amp; options]
-  (log/warn (u/colorize :red &quot;'load' is deprecated and will be removed in a future release. Please migrate to 'import'.&quot;))
-  (call-enterprise 'metabase-enterprise.serialization.cmd/v1-load! path (get-parsed-options #'load options)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn ^:command ^:requires-init import
-  {:doc &quot;Load serialized Metabase instance as created by the [[export]] command from directory `path`.&quot;
-   :arg-spec [[&quot;-e&quot; &quot;--continue-on-error&quot; &quot;Do not break execution on errors.&quot;]
-              [   &quot;--full-stacktrace&quot;   &quot;Output full stacktraces on errors.&quot;]]}
-  [path &amp; options]
-  (call-enterprise 'metabase-enterprise.serialization.cmd/v2-load! path (get-parsed-options #'import options)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn ^:command dump
-  {:doc &quot;Note: this command is deprecated. Use `export` instead.
-         Serializes Metabase instance into directory `path`.&quot;
-   :arg-spec [[&quot;-u&quot; &quot;--user EMAIL&quot;         &quot;Export collections owned by the specified user&quot;]
-              [&quot;-s&quot; &quot;--state (active|all)&quot; &quot;When set to `active`, do not dump archived entities. Default behavior is `all`.&quot;
-               :default      :all
-               :default-desc &quot;all&quot;
-               :parse-fn     mbql.u/normalize-token
-               :validate     [#{:active :all} &quot;Must be 'active' or 'all'&quot;]]
-              [nil &quot;--include-entity-id&quot;   &quot;Include entity_id property in all dumped entities. Default: false.&quot;]]}
-  [path &amp; options]
-  (log/warn (u/colorize :red &quot;'dump' is deprecated and will be removed in a future release. Please migrate to 'export'.&quot;))
-  (call-enterprise 'metabase-enterprise.serialization.cmd/v1-dump! path (get-parsed-options #'dump options)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn ^:command export
-  {:doc      &quot;Serialize Metabase instance into directory at `path`.&quot;
-   :arg-spec [[&quot;-c&quot; &quot;--collection ID&quot;            &quot;Export only specified ID(s). Use commas to separate multiple IDs. Pass either PKs or entity IDs.&quot;
-               :id        :collection-ids
-               :parse-fn  (fn [raw-string] (-&gt;&gt; (str/split raw-string #&quot;\s*,\s*&quot;)
-                                                (map (fn [v]
-                                                       (cond
-                                                         (str/starts-with? v &quot;eid:&quot;) v
-                                                         (= (count v) 21)            v
-                                                         :else                       (parse-long v))))))]
-              [&quot;-C&quot; &quot;--no-collections&quot;           &quot;Do not export any content in collections.&quot;]
-              [&quot;-S&quot; &quot;--no-settings&quot;              &quot;Do not export settings.yaml&quot;]
-              [&quot;-D&quot; &quot;--no-data-model&quot;            &quot;Do not export any data model entities; useful for subsequent exports.&quot;]
-              [&quot;-f&quot; &quot;--include-field-values&quot;     &quot;Include field values along with field metadata.&quot;]
-              [&quot;-s&quot; &quot;--include-database-secrets&quot; &quot;Include database connection details (in plain text; use caution).&quot;]
-              [&quot;-e&quot; &quot;--continue-on-error&quot;        &quot;Do not break execution on errors.&quot;]
-              [   &quot;--full-stacktrace&quot;          &quot;Output full stacktraces on errors.&quot;]]}
-  [path &amp; options]
-  (call-enterprise 'metabase-enterprise.serialization.cmd/v2-dump! path (get-parsed-options #'export options)))</pre></td></tr><tr><td class="docs"><p>Add entity IDs for instances of serializable models that don't already have them.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ^:command seed-entity-ids
-  []
-  (when-not (call-enterprise 'metabase-enterprise.serialization.cmd/seed-entity-ids!)
-    (throw (Exception. &quot;Error encountered while seeding entity IDs&quot;))))</pre></td></tr><tr><td class="docs"><p>Drop entity IDs for instances of serializable models. Useful for migrating from v1 serialization (x.46 and earlier)
-to v2 (x.47+).</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ^:command drop-entity-ids
-  []
-  (when-not (call-enterprise 'metabase-enterprise.serialization.cmd/drop-entity-ids!)
-    (throw (Exception. &quot;Error encountered while dropping entity IDs&quot;))))</pre></td></tr><tr><td class="docs"><p>Rotate the encryption key of a metabase database. The MB<em>ENCRYPTION</em>SECRET_KEY environment variable has to be set to
-the current key, and the parameter <code>new-key</code> has to be the new key. <code>new-key</code> has to be at least 16 chars.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ^:command rotate-encryption-key
-  [new-key]
-  (classloader/require 'metabase.cmd.rotate-encryption-key)
-  (try
-    ((resolve 'metabase.cmd.rotate-encryption-key/rotate-encryption-key!) new-key)
-    (log/info &quot;Encryption key rotation OK.&quot;)
-    (system-exit! 0)
-    (catch Throwable e
-      (log/error e &quot;ERROR ROTATING KEY.&quot;)
-      (system-exit! 1))))</pre></td></tr><tr><td class="docs"><p>Decrypts data in the metabase database. The MB<em>ENCRYPTION</em>SECRET_KEY environment variable has to be set to
-the current key</p>
-</td><td class="codes"><pre class="brush: clojure">(defn ^:command remove-encryption
-  []
-  (classloader/require 'metabase.cmd.remove-encryption)
-  (when-not (encryption/default-encryption-enabled?)
-    (log/error &quot;MB_ENCRYPTION_SECRET_KEY environment variable has not been set&quot;)
-    (system-exit! 1))
-  (try
-    ((resolve 'metabase.cmd.remove-encryption/remove-encryption!))
-    (log/info &quot;Encryption removed OK.&quot;)
-    (system-exit! 0)
-    (catch Throwable e
-      (log/error e &quot;ERROR REMOVING ENCRYPTION.&quot;)
-      (system-exit! 1))))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------ Validate Commands ----------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- arg-list-count-ok? [arg-list arg-count]
-  (if (some #{'&amp;} arg-list)
-    ;; subtract 1 for the &amp; and 1 for the symbol after &amp;
-    ;; e.g. [a b &amp; c] =&gt; 2
-    (&gt;= arg-count (- (count arg-list) 2))
-    (= arg-count (count arg-list))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- arg-count-errors
-  [command-name args]
-  (let [arg-lists (-&gt; command-name cmd-&gt;var meta :arglists)]
-    (when-not (some #(arg-list-count-ok? % (count args)) arg-lists)
-      (str &quot;The '&quot; command-name &quot;' command requires &quot;
-           (when (&gt; 1 (count arg-lists)) &quot;one of &quot;)
-           &quot;the following arguments: &quot;
-           (str/join &quot; | &quot; (map pr-str arg-lists))
-           &quot;, but received: &quot; (pr-str (vec args)) &quot;.&quot;))))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------ Running Commands ------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Returns [error-message] if there is an error, otherwise [nil command-fn]</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- validate
-  [command-name args]
-  (let [varr (cmd-&gt;var command-name)
-        {:keys [command arg-spec]} (meta varr)
-        err  (arg-count-errors command-name args)]
-    (cond
-      (not command)
-      [(str &quot;Unrecognized command: '&quot; command-name &quot;'&quot;)
-       (str &quot;Valid commands: &quot; (str/join &quot;, &quot; (map key (filter (comp :command meta val) (ns-interns 'metabase.cmd)))))]
-      err
-      [err]
-      arg-spec
-      (:errors (cli/parse-opts args arg-spec)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- requires-init?
-  [command-name]
-  (-&gt; command-name cmd-&gt;var meta :requires-init))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- fail!
-  [&amp; messages]
-  (doseq [msg messages]
-    (println (u/format-color 'red msg)))
-  (System/exit 1))</pre></td></tr><tr><td class="docs"><p>Run <code>cmd</code> with <code>args</code>. This is a function above. e.g. <code>clojure -M:run metabase migrate force</code> becomes
-<code>(migrate "force")</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn run-cmd
-  [command-name init-fn args]
-  (if-let [errors (validate command-name args)]
-    (do
-      (when (cmd-&gt;var command-name)
-        (println &quot;Usage:&quot;)
-        (help command-name))
-      (apply fail! errors))
-    (try
-      (when (requires-init? command-name)
-        (init-fn))
-      (apply @(cmd-&gt;var command-name) args)
-      (catch Throwable e
-        (when (:cmd/exit (ex-data e)) ;; fast-track for commands that have their own error handling
-          (System/exit 1))
-        (.printStackTrace e)
-        (fail! (str &quot;Command failed with exception: &quot; (.getMessage e))))))
-  (System/exit 0))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+   [metabase.util.json :as json]
+   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Encrypt or decrypts the db using the current <code>MB_ENCRYPTION_SECRET_KEY</code> to read data.</p>
+
+<p>The passed make-encrypt-fn is used to generate the encryption/decryption function to use by passing versions of encryption/maybe-encrypt to it.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- do-encryption
+  [db-type data-source encrypting? make-encrypt-fn]
+  (let [encrypt-str-fn (make-encrypt-fn encryption/maybe-encrypt)
+        encrypt-bytes-fn (make-encrypt-fn encryption/maybe-encrypt-bytes)]
+    (t2/with-transaction [conn {:datasource data-source}]
+      (doseq [[id details] (t2/select-pk-&gt;fn :details :model/Database)]
+        (when (encryption/possibly-encrypted-string? details)
+          (throw (ex-info (trs &quot;Can''t decrypt app db with MB_ENCRYPTION_SECRET_KEY&quot;) {:database-id id})))
+        (t2/update! :conn conn :metabase_database
+                    {:id id}
+                    {:details (encrypt-str-fn (json/encode details))}))
+      (doseq [[key value] (t2/select-fn-&gt;fn :key :value :model/Setting)]
+        (case key
+          &quot;settings-last-updated&quot; (let [current-timestamp-as-string-honeysql (h2x/cast (if (= db-type :mysql) :char :text)
+                                                                                       [:raw &quot;current_timestamp&quot;])]
+                                    (t2/update! :conn conn :setting {:key key} {:value current-timestamp-as-string-honeysql}))
+          &quot;encryption-check&quot; (t2/update! :conn conn :setting {:key key} {:value (if encrypting? (encrypt-str-fn (str (random-uuid))) &quot;unencrypted&quot;)})
+          (t2/update! :conn conn :setting
+                      {:key key}
+                      {:value (encrypt-str-fn value)})))
+      ;; update all secret values according to the new encryption key
+      ;; fortunately, we don't need to fetch the latest secret instance per ID, as we would need to in order to update
+      ;; a secret value through the regular database save API path; instead, ALL secret values in the app DB (regardless
+      ;; of whether they are the &quot;current version&quot; or not), should be updated with the new key
+      (doseq [[id value] (t2/select-pk-&gt;fn :value :model/Secret)]
+        (when (encryption/possibly-encrypted-string? value)
+          (throw (ex-info (trs &quot;Can''t decrypt secret value with MB_ENCRYPTION_SECRET_KEY&quot;) {:secret-id id})))
+        (t2/update! :conn conn :secret
+                    {:id id}
+                    {:value (encrypt-bytes-fn value)})))))</pre></td></tr><tr><td class="docs"><p>Encrypt the db using the current <code>MB_ENCRYPTION_SECRET_KEY</code> to read existing data, and the passed <code>to-key</code> to re-encrypt.
+If passed to-key is nil, it encrypts with the current MB<em>ENCRYPTION</em>SECRET_KEY value.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn encrypt-db
+  [db-type data-source to-key]
+  (when (and (not (nil? to-key)) (empty? to-key))
+    (throw (ex-info &quot;Cannot encrypt database with an empty key&quot; {})))
+  (do-encryption db-type data-source true (fn [maybe-encrypt-fn]
+                                            (if
+                                             (nil? to-key) maybe-encrypt-fn
+                                             (partial maybe-encrypt-fn (encryption/validate-and-hash-secret-key to-key))))))</pre></td></tr><tr><td class="docs"><p>Decrypts the database usign the current <code>MB_ENCRYPTION_SECRET_KEY</code> to read existing data</p>
+</td><td class="codes"><pre class="brush: clojure">(defn decrypt-db
+  [db-type data-source]
+  (do-encryption db-type data-source false (constantly identity)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
