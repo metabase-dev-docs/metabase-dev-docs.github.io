@@ -2868,6 +2868,7 @@ net.brehaut.ClojureTools = (function (SH) {
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.lib.metadata" name="metabase.lib.metadata"><h1 class="project-name">metabase.lib.metadata</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.lib.metadata
   (:require
+   [metabase.lib.metadata.ident :as lib.metadata.ident]
    [metabase.lib.metadata.protocols :as lib.metadata.protocols]
    [metabase.lib.schema :as lib.schema]
    [metabase.lib.schema.common :as lib.schema.common]
@@ -2907,7 +2908,10 @@ application database.</p>
   &quot;Get metadata about all the Fields belonging to a specific Table.&quot;
   [metadata-providerable :- ::lib.schema.metadata/metadata-providerable
    table-id              :- ::lib.schema.id/table]
-  (lib.metadata.protocols/fields (-&gt;metadata-provider metadata-providerable) table-id))</pre></td></tr><tr><td class="docs">
+  (let [prefix (lib.metadata.ident/table-prefix (:name (database metadata-providerable))
+                                                (table metadata-providerable table-id))]
+    (-&gt;&gt; (lib.metadata.protocols/fields (-&gt;metadata-provider metadata-providerable) table-id)
+         (lib.metadata.ident/attach-idents (constantly prefix)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn metadatas-for-table :- [:sequential [:or
                                               ::lib.schema.metadata/column
                                               ::lib.schema.metadata/metric
@@ -2917,19 +2921,33 @@ application database.</p>
   [metadata-providerable :- ::lib.schema.metadata/metadata-providerable
    metadata-type         :- [:enum :metadata/column :metadata/metric :metadata/segment]
    table-id              :- ::lib.schema.id/table]
-  (lib.metadata.protocols/metadatas-for-table (-&gt;metadata-provider metadata-providerable) metadata-type table-id))</pre></td></tr><tr><td class="docs">
+  (case metadata-type
+    :metadata/column (fields metadata-providerable table-id)
+    (lib.metadata.protocols/metadatas-for-table (-&gt;metadata-provider metadata-providerable) metadata-type table-id)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn metadatas-for-card :- [:sequential ::lib.schema.metadata/metric]
   &quot;Return active (non-archived) metadatas associated with a particular Card, currently only Metrics.
    `metadata-type` must be `:metadata/metric`.&quot;
   [metadata-providerable :- ::lib.schema.metadata/metadata-providerable
    metadata-type         :- [:enum :metadata/metric]
    card-id              :- ::lib.schema.id/card]
-  (lib.metadata.protocols/metadatas-for-card (-&gt;metadata-provider metadata-providerable) metadata-type card-id))</pre></td></tr><tr><td class="docs">
+  (lib.metadata.protocols/metadatas-for-card (-&gt;metadata-provider metadata-providerable) metadata-type card-id))</pre></td></tr><tr><td class="docs"><p>Dynamic variable to control whether errors are thrown when we return a <code>:metadata/column</code> with no ident.</p>
+
+<p>Generally that is an error and we should throw, but there are a few tests explicitly checking broken fields that
+don't want to get hung up on this error.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *enforce-idents*
+  true)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn field :- [:maybe ::lib.schema.metadata/column]
   &quot;Get metadata about a specific Field in the Database we're querying.&quot;
   [metadata-providerable :- ::lib.schema.metadata/metadata-providerable
    field-id              :- ::lib.schema.id/field]
-  (lib.metadata.protocols/field (-&gt;metadata-provider metadata-providerable) field-id))</pre></td></tr><tr><td class="docs">
+  (let [fieldd (lib.metadata.protocols/field (-&gt;metadata-provider metadata-providerable) field-id)]
+    (when (and fieldd
+               (not (:ident fieldd))
+               *enforce-idents*)
+      (throw (ex-info &quot;Returning a field with no :ident&quot; {:metadata-providerable (pr-str metadata-providerable)
+                                                          :id                    field-id
+                                                          :field                 fieldd})))
+    fieldd))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn setting :- any?
   &quot;Get the value of a Metabase setting for the instance we're querying.&quot;
   ([metadata-providerable :- ::lib.schema.metadata/metadata-providerable
@@ -3040,6 +3058,14 @@ this (like QP middleware). Maybe we should only have a throwing version.</p>
     (let [provider   (-&gt;metadata-provider metadata-providerable)
           results    (lib.metadata.protocols/metadatas provider metadata-type ids)
           id-&gt;result (into {} (map (juxt :id identity)) results)]
+      (when (= metadata-type :metadata/column)
+        (when-let [missing (and *enforce-idents*
+                                (not-empty (remove :ident results)))]
+          (throw (ex-info &quot;Bulk metadata request returned some columns without idents&quot;
+                          {:provider      metadata-providerable
+                           :type          metadata-type
+                           :ids           ids
+                           :missing-ident missing}))))
       (into []
             (comp (map id-&gt;result)
                   (filter some?))
