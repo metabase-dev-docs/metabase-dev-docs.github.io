@@ -2874,7 +2874,24 @@ net.brehaut.ClojureTools = (function (SH) {
    [malli.registry]
    [malli.util :as mut])
   #?(:cljs (:require-macros [metabase.util.malli.registry])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defonce ^:private cache (atom {}))</pre></td></tr><tr><td class="docs"><p>Get a cached value for <code>k</code> + <code>schema</code>. Cache is cleared whenever a schema is (re)defined
+</td><td class="codes"><pre class="brush: clojure">(defonce ^:private cache (atom {}))</pre></td></tr><tr><td class="docs"><p>Make schemas that aren't <code>=</code> to identical ones e.g.</p>
+
+<p>  [:re #"\d{4}"]</p>
+
+<p>work correctly as cache keys instead of creating new entries every time the code is evaluated.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- schema-cache-key
+  &quot;Make schemas that aren't `=` to identical ones e.g.
+    [:re #\&quot;\\d{4}\&quot;]
+  work correctly as cache keys instead of creating new entries every time the code is evaluated.&quot;
+  [x]
+  (if (and (vector? x)
+           (= (first x) :re))
+    (into (empty x)
+          (map (fn [child]
+                 (cond-&gt; child
+                   (instance? #?(:clj java.util.regex.Pattern :cljs js/RegExp) child) str)))
+          x)
+    x))</pre></td></tr><tr><td class="docs"><p>Get a cached value for <code>k</code> + <code>schema</code>. Cache is cleared whenever a schema is (re)defined
 with [[metabase.util.malli.registry/def]]. If value doesn't exist, <code>value-thunk</code> is used to calculate (and cache)
 it.</p>
 
@@ -2882,14 +2899,15 @@ it.</p>
 you used namespaced keys if you are using it elsewhere.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn cached
   [k schema value-thunk]
-  (or (get (get @cache k) schema) ; get-in is terribly inefficient
-      (let [v (value-thunk)]
-        (swap! cache assoc-in [k schema] v)
-        v)))</pre></td></tr><tr><td class="docs"><p>Fetch a cached [[mc/validator]] for <code>schema</code>, creating one if needed. The cache is flushed whenever the registry
+  (let [schema-key (schema-cache-key schema)]
+    (or (get (get @cache k) schema-key)     ; get-in is terribly inefficient
+        (let [v (value-thunk)]
+          (swap! cache assoc-in [k schema-key] v)
+          v))))</pre></td></tr><tr><td class="docs"><p>Fetch a cached [[mc/validator]] for <code>schema</code>, creating one if needed. The cache is flushed whenever the registry
 changes.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn validator
   [schema]
-  (cached :validator schema #(mc/validator schema)))</pre></td></tr><tr><td class="docs"><p>[[mc/validate]], but uses a cached validator from [[validator]].</p>
+  (cached :validator schema #_{:clj-kondo/ignore [:discouraged-var]} #(mc/validator schema)))</pre></td></tr><tr><td class="docs"><p>[[mc/validate]], but uses a cached validator from [[validator]].</p>
 </td><td class="codes"><pre class="brush: clojure">(defn validate
   [schema value]
   ((validator schema) value))</pre></td></tr><tr><td class="docs"><p>Fetch a cached [[mc/explainer]] for <code>schema</code>, creating one if needed. The cache is flushed whenever the registry

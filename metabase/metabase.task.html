@@ -2884,6 +2884,7 @@ task to the scheduler as usual via <code>schedule-task!</code>.</p>
    [environ.core :as env]
    [metabase.db :as mdb]
    [metabase.plugins.classloader :as classloader]
+   [metabase.task.bootstrap]
    [metabase.util :as u]
    [metabase.util.log :as log]
    [metabase.util.malli :as mu]
@@ -2934,53 +2935,11 @@ CamelCased.</p>
       (f k)
       (catch Throwable e
         (log/errorf e &quot;Error initializing task %s&quot; k)))))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
-|                                      Quartz Scheduler Connection Provider                                      |
-+----------------------------------------------------------------------------------------------------------------+</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Custom <code>ConnectionProvider</code> implementation that uses our application DB connection pool to provide connections.</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defrecord ^:private ConnectionProvider []
-  org.quartz.utils.ConnectionProvider
-  (initialize [_])
-  (getConnection [_]
-    ;; get a connection from our application DB connection pool. Quartz will close it (i.e., return it to the pool)
-    ;; when it's done
-    ;;
-    ;; very important! Fetch a new connection from the connection pool rather than using currently bound Connection if
-    ;; one already exists -- because Quartz will close this connection when done, we don't want to screw up the
-    ;; calling block
-    ;;
-    ;; in a perfect world we could just check whether we're creating a new Connection or not, and if using an existing
-    ;; Connection, wrap it in a delegating proxy wrapper that makes `.close()` a no-op but forwards all other methods.
-    ;; Now that would be a useful macro!
-    (.getConnection (mdb/app-db)))
-  (shutdown [_]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(when-not *compile-files*
-  (System/setProperty &quot;org.quartz.dataSource.db.connectionProvider.class&quot; (.getName ConnectionProvider)))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
-|                                       Quartz Scheduler Class Load Helper                                       |
-+----------------------------------------------------------------------------------------------------------------+</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- load-class ^Class [^String class-name]
-  (Class/forName class-name true (classloader/the-classloader)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defrecord ^:private ClassLoadHelper []
-  org.quartz.spi.ClassLoadHelper
-  (initialize [_])
-  (getClassLoader [_]
-    (classloader/the-classloader))
-  (loadClass [_ class-name]
-    (load-class class-name))
-  (loadClass [_ class-name _]
-    (load-class class-name)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(when-not *compile-files*
-  (System/setProperty &quot;org.quartz.scheduler.classLoadHelper.class&quot; (.getName ClassLoadHelper)))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
 |                                          STARTING/STOPPING SCHEDULER                                           |
 +----------------------------------------------------------------------------------------------------------------+</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Set the appropriate system properties needed so Quartz can connect to the JDBC backend. (Since we don't know our DB
-connection properties ahead of time, we'll need to set these at runtime rather than setting them in the
-<code>quartz.properties</code> file.)</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- set-jdbc-backend-properties!
-  []
-  (when (= (mdb/db-type) :postgres)
-    (System/setProperty &quot;org.quartz.jobStore.driverDelegateClass&quot; &quot;org.quartz.impl.jdbcjobstore.PostgreSQLDelegate&quot;)))</pre></td></tr><tr><td class="docs"><p>Delete any jobs that have been scheduled but whose class is no longer available.</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- set-jdbc-backend-properties! []
+  (metabase.task.bootstrap/set-jdbc-backend-properties! (mdb/db-type)))</pre></td></tr><tr><td class="docs"><p>Delete any jobs that have been scheduled but whose class is no longer available.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- delete-jobs-with-no-class!
   []
   (when-let [scheduler (scheduler)]

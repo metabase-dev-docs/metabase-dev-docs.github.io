@@ -2884,9 +2884,10 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.models.permissions-group :as perms-group]
    [metabase.models.setting :refer [defsetting]]
    [metabase.models.user :as user]
+   [metabase.permissions.util :as perms-util]
    [metabase.plugins.classloader :as classloader]
+   [metabase.premium-features.core :as premium-features]
    [metabase.public-settings :as public-settings]
-   [metabase.public-settings.premium-features :as premium-features]
    [metabase.request.core :as request]
    [metabase.util :as u]
    [metabase.util.i18n :refer [deferred-tru tru]]
@@ -2988,22 +2989,23 @@ we get a fiddly status and include_deactivated query.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- user-clauses
   [status query group_ids include_deactivated]
   (cond-&gt; {}
-    true                                               (sql.helpers/where [:= :core_user.type &quot;personal&quot;])
-    true                                               (sql.helpers/where (status-clause status include_deactivated))
+    true                                         (sql.helpers/where [:= :core_user.type &quot;personal&quot;])
+    true                                         (sql.helpers/where (status-clause status include_deactivated))
     ;; don't send the internal user
-    (premium-features/sandboxed-or-impersonated-user?) (sql.helpers/where [:= :core_user.id api/*current-user-id*])
-    (some? query)                                      (sql.helpers/where (query-clause query))
-    (some? group_ids)                                  (sql.helpers/right-join
-                                                        :permissions_group_membership
-                                                        [:= :core_user.id :permissions_group_membership.user_id])
-    (some? group_ids)                                  (sql.helpers/where
-                                                        [:in :permissions_group_membership.group_id group_ids])
-    (some? (request/limit))                            (sql.helpers/limit (request/limit))
-    (some? (request/offset))                           (sql.helpers/offset (request/offset))))</pre></td></tr><tr><td class="docs"><p>Given a where clause, return a clause that can be used to count.</p>
+    (perms-util/sandboxed-or-impersonated-user?) (sql.helpers/where [:= :core_user.id api/*current-user-id*])
+    (some? query)                                (sql.helpers/where (query-clause query))
+    (some? group_ids)                            (sql.helpers/right-join
+                                                  :permissions_group_membership
+                                                  [:= :core_user.id :permissions_group_membership.user_id])
+    (some? group_ids)                            (sql.helpers/where
+                                                  [:in :permissions_group_membership.group_id group_ids])
+    (some? (request/limit))                      (sql.helpers/limit (request/limit))
+    (some? (request/offset))                     (sql.helpers/offset (request/offset))))</pre></td></tr><tr><td class="docs"><p>Given a where clause, return a clause that can be used to count.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- filter-clauses-without-paging
   [clauses]
   (dissoc clauses :order-by :limit :offset))</pre></td></tr><tr><td class="docs"><p>/</p>
-</td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
+</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
+(api/defendpoint GET 
   &quot;Fetch a list of `Users` for admins or group managers.
   By default returns only active users for admins and only active users within groups that the group manager is managing for group managers.
    - If `status` is `deactivated`, include deactivated users only.
@@ -3065,7 +3067,8 @@ Ignore the All-user groups.</p>
                            :from  [:permissions_group_membership]
                            :where [:and [:= :permissions_group_membership.user_id user-id]
                                    [:not= :permissions_group_membership.group_id (:id (perms-group/all-users))]]}]})))</pre></td></tr><tr><td class="docs"><p>/recipients</p>
-</td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
+</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
+(api/defendpoint GET 
   &quot;Fetch a list of `Users`. Returns only active users. Meant for non-admins unlike GET /api/user.
    - If user-visibility is :all or the user is an admin, include all users.
    - If user-visibility is :group, include only users in the same group (excluding the all users group).
@@ -3093,7 +3096,7 @@ Ignore the All-user groups.</p>
     (cond
       ;; if they're sandboxed OR if they're a superuser, ignore the setting and just give them nothing or everything,
       ;; respectively.
-      (premium-features/sandboxed-user?)
+      (perms-util/sandboxed-user?)
       (just-me)
       api/*is-superuser?*
       (all)
@@ -3145,7 +3148,8 @@ internal/automatically-loaded content.</p>
         valid?   (and enabled? id (some? dash) (not (:archived dash)) (mi/can-read? dash))]
     (assoc user
            :custom_homepage (when valid? {:dashboard_id id}))))</pre></td></tr><tr><td class="docs"><p>/current</p>
-</td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
+</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
+(api/defendpoint GET 
   &quot;Fetch the current `User`.&quot;
   []
   (-&gt; (api/check-404 @api/*current-user*)
@@ -3155,7 +3159,8 @@ internal/automatically-loaded content.</p>
       maybe-add-advanced-permissions
       maybe-add-sso-source
       add-custom-homepage-info))</pre></td></tr><tr><td class="docs"><p>/:id</p>
-</td><td class="codes"><pre class="brush: clojure">(api/defendpoint GET 
+</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
+(api/defendpoint GET 
   &quot;Fetch a `User`. You must be fetching yourself *or* be a superuser *or* a Group Manager.&quot;
   [id]
   {id ms/PositiveInt}
@@ -3168,7 +3173,8 @@ internal/automatically-loaded content.</p>
 |                                     Creating a new User -- POST /api/user                                      |
 +----------------------------------------------------------------------------------------------------------------+</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>/</p>
-</td><td class="codes"><pre class="brush: clojure">(api/defendpoint POST 
+</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
+(api/defendpoint POST 
   &quot;Create a new `User`, return a 400 if the email address is already taken&quot;
   [:as {{:keys [first_name last_name email user_group_memberships login_attributes] :as body} :body}]
   {first_name             [:maybe ms/NonBlankString]
@@ -3212,7 +3218,8 @@ If the user is an SSO user, no name edits are allowed, but we accept if the new 
   (or
    (= (get user name-key) new-name)
    (not sso_source)))</pre></td></tr><tr><td class="docs"><p>/:id</p>
-</td><td class="codes"><pre class="brush: clojure">(api/defendpoint PUT 
+</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
+(api/defendpoint PUT 
   &quot;Update an existing, active `User`.
   Self or superusers can update user info and groups.
   Group Managers can only add/remove users from groups they are manager of.&quot;
@@ -3280,7 +3287,8 @@ If the user is an SSO user, no name edits are allowed, but we accept if the new 
                                (:sso_source existing-user))})
   ;; now return the existing user whether they were originally active or not
   (fetch-user :id (u/the-id existing-user)))</pre></td></tr><tr><td class="docs"><p>/:id/reactivate</p>
-</td><td class="codes"><pre class="brush: clojure">(api/defendpoint PUT 
+</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
+(api/defendpoint PUT 
   &quot;Reactivate user at `:id`&quot;
   [id]
   {id ms/PositiveInt}
@@ -3298,7 +3306,8 @@ If the user is an SSO user, no name edits are allowed, but we accept if the new 
 |                               Updating a Password -- PUT /api/user/:id/password                                |
 +----------------------------------------------------------------------------------------------------------------+</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>/:id/password</p>
-</td><td class="codes"><pre class="brush: clojure">(api/defendpoint PUT 
+</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
+(api/defendpoint PUT 
   &quot;Update a user's password.&quot;
   [id :as {{:keys [password old_password]} :body, :as request}]
   {id       ms/PositiveInt
@@ -3324,7 +3333,8 @@ If the user is an SSO user, no name edits are allowed, but we accept if the new 
 |                             Deleting (Deactivating) a User -- DELETE /api/user/:id                             |
 +----------------------------------------------------------------------------------------------------------------+</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>/:id</p>
-</td><td class="codes"><pre class="brush: clojure">(api/defendpoint DELETE 
+</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
+(api/defendpoint DELETE 
   &quot;Disable a `User`.  This does not remove the `User` from the DB, but instead disables their account.&quot;
   [id]
   {id ms/PositiveInt}
@@ -3340,7 +3350,8 @@ If the user is an SSO user, no name edits are allowed, but we accept if the new 
 </td><td class="codes"></td></tr><tr><td class="docs"><p>/:id/modal/:modal</p>
 
 <p>TODO - This could be handled by PUT /api/user/:id, we don't need a separate endpoint</p>
-</td><td class="codes"><pre class="brush: clojure">(api/defendpoint PUT 
+</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
+(api/defendpoint PUT 
   &quot;Indicate that a user has been informed about the vast intricacies of 'the' Query Builder.&quot;
   [id modal]
   {id ms/PositiveInt}
