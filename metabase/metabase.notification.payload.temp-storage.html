@@ -2865,101 +2865,72 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.channel.impl.http" name="metabase.channel.impl.http"><h1 class="project-name">metabase.channel.impl.http</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.channel.impl.http
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.notification.payload.temp-storage" name="metabase.notification.payload.temp-storage"><h1 class="project-name">metabase.notification.payload.temp-storage</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Util to put data into a temporary file and schedule it for deletion after a specified time period.</p>
+
+<p>Currently used to store card's rows data when sending notification since it can be large and we don't want to keep it in memory.</p>
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.notification.payload.temp-storage
   (:require
-   [clj-http.client :as http]
-   [java-time.api :as t]
-   [metabase.channel.core :as channel]
-   [metabase.channel.render.core :as channel.render]
-   [metabase.channel.shared :as channel.shared]
-   [metabase.util.i18n :refer [tru]]
-   [metabase.util.json :as json]
-   [metabase.util.malli :as mu]
-   [metabase.util.malli.schema :as ms]
-   [metabase.util.urls :as urls]))</pre></td></tr><tr><td class="docs"><p>Maximum width of the rendered PNG of HTML to be sent to HTTP Content that exceeds this width (e.g. a table with
-many columns) is truncated.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private image-width
-  1200)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private string-or-keyword
-  [:or :string :keyword])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private HTTPDetails
-  [:map {:closed true}
-   [:url                           ms/Url]
-   [:auth-method                   [:enum &quot;none&quot; &quot;header&quot; &quot;query-param&quot; &quot;request-body&quot;]]
-   [:auth-info    {:optional true} [:map-of string-or-keyword :any]]
-   ;; used by the frontend to display the auth info properly
-   [:fe-form-type {:optional true} [:enum &quot;api-key&quot; &quot;bearer&quot; &quot;basic&quot; &quot;none&quot;]]
-   ;; request method
-   [:method       {:optional true} [:enum &quot;get&quot; &quot;post&quot; &quot;put&quot;]]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private HTTPChannel
-  [:map
-   [:type    [:= :channel/http]]
-   [:details HTTPDetails]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defmethod channel/send! :channel/http
-  [{{:keys [url method auth-method auth-info]} :details} :- HTTPChannel
-   request]
-  (let [req (merge
-             {:accept       :json
-              :content-type :json
-              :method       :post
-              :url          url}
-             (when method
-               {:method (keyword method)})
-             (cond-&gt; request
-               (= &quot;request-body&quot; auth-method) (update :body merge auth-info)
-               (= &quot;header&quot; auth-method)       (update :headers merge auth-info)
-               (= &quot;query-param&quot; auth-method)  (update :query-params merge auth-info)))]
-    (http/request (cond-&gt; req
-                    (or (map? (:body req))
-                        (sequential? (:body req))) (update :body json/encode)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- maybe-parse-json
-  [x]
-  (if (string? x)
-    (try
-      (json/decode x)
-      (catch Exception _e
-        x))
-    x))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod channel/can-connect? :channel/http
-  [_channel-type details]
-  (channel.shared/validate-channel-details HTTPDetails details)
-  (try
-    (channel/send! {:type :channel/http :details details} {})
-    true
-    (catch Exception e
-      (let [data (ex-data e)]
-        ;; throw an appriopriate error if it's a connection error
-        (if (= ::http/unexceptional-status (:type data))
-          (throw (ex-info (tru &quot;Failed to connect to channel&quot;) {:request-status (:status data)
-                                                                :request-body   (maybe-parse-json (:body data))}))
-          (throw e))))))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------------------------------------------------------;;
-                                          Alerts                                                ;;
+   [clojure.java.io :as io]
+   [metabase.util.random :as random]
+   [taoensso.nippy :as nippy])
+  (:import
+   (java.io File)
+   (java.util.concurrent Executors ScheduledThreadPoolExecutor TimeUnit)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private temp-file-lifetime-seconds (* 5 60))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private temp-dir
+  (delay
+    (let [dir (io/file (System/getProperty &quot;java.io.tmpdir&quot;)
+                       (str &quot;metabase-notification-&quot; (random/random-name)))]
+      (.mkdirs dir)
+      (.deleteOnExit dir)
+      dir)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private deletion-scheduler
+  (delay
+    (Executors/newScheduledThreadPool 1)))</pre></td></tr><tr><td class="docs"><p>Schedule file for deletion after specified seconds.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- schedule-deletion!
+  [^File file seconds]
+  (.schedule ^ScheduledThreadPoolExecutor @deletion-scheduler
+             ^Callable (fn []
+                         (when (.exists file)
+                           (io/delete-file file true)))
+             ^Long seconds
+             TimeUnit/SECONDS))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- temp-file
+  []
+  (doto (File/createTempFile &quot;notification-&quot; &quot;.npy&quot; @temp-dir)
+    (.deleteOnExit)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- write-to-file
+  [^File file data]
+  (nippy/freeze-to-file file data))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- read-from-file
+  [^File file]
+  (when (.exists file)
+    (nippy/thaw-from-file file)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(.addShutdownHook
+ (Runtime/getRuntime)
+ (Thread. ^Runnable (fn []
+                      (when @deletion-scheduler
+                        (.shutdown ^ScheduledThreadPoolExecutor @deletion-scheduler)))))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------------------------------------------------------;;
+                                          Public APIs                                           ;;
 ------------------------------------------------------------------------------------------------;;</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- qp-result-&gt;raw-data
-  [qp-result]
-  (let [data (:data qp-result)]
-    {:cols (map :name (:cols data))
-     :rows (:rows data)}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defmethod channel/render-notification [:channel/http :notification/card]
-  [_channel-type {:keys [payload creator]} _template _recipients]
-  (let [{:keys [card alert card_part]} payload
-        card_part                         (channel.shared/realize-data-rows card_part)
-        request-body {:type               &quot;alert&quot;
-                      :alert_id           (:id alert)
-                      :alert_creator_id   (:id creator)
-                      :alert_creator_name (:common_name creator)
-                      :data               {:type          &quot;question&quot;
-                                           :question_id   (:id card)
-                                           :question_name (:name card)
-                                           :question_url  (urls/card-url (:id card))
-                                           :visualization (let [{:keys [card dashcard result]} card_part]
-                                                            (channel.render/render-pulse-card-to-base64
-                                                             (channel.render/defaulted-timezone card) card dashcard result image-width))
-                                           :raw_data      (qp-result-&gt;raw-data (:result card_part))}
-                      :sent_at            (t/offset-date-time)}]
-    [{:body request-body}]))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Write data to a temporary file and schedule it for deletion after a specified time period.
+The file will be automatically deleted after the given number of seconds.
+Returns a derefable object that, when dereferenced, reads and returns the data from the temporary file.</p>
+
+<p>Arguments:
+  data    - The data to write to the temporary file
+  seconds - Optional. Number of seconds before file deletion (default: is [[temp-file-lifetime-seconds]])</p>
+</td><td class="codes"><pre class="brush: clojure">(defn to-temp-file!
+  ([data]
+   (to-temp-file! data temp-file-lifetime-seconds))
+  ([data seconds]
+   (let [f (temp-file)]
+     (schedule-deletion! f seconds)
+     (write-to-file f data)
+     (reify
+       clojure.lang.IDeref
+       (deref [_] (read-from-file f))))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

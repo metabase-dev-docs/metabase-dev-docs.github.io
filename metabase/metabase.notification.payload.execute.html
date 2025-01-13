@@ -2869,11 +2869,13 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.notification.payload.execute
   (:require
    [malli.core :as mc]
+   [medley.core :as m]
    [metabase.api.common :as api]
    [metabase.models.dashboard-card :as dashboard-card]
    [metabase.models.interface :as mi]
    [metabase.models.params.shared :as shared.params]
    [metabase.models.serialization :as serdes]
+   [metabase.notification.payload.temp-storage :as notification.temp-storage]
    [metabase.public-settings :as public-settings]
    [metabase.query-processor :as qp]
    [metabase.query-processor.dashboard :as qp.dashboard]
@@ -2979,7 +2981,10 @@ substituted into connected variables in the text.</p>
                                        (assoc m tag-name (get param-id-&gt;param param-id))))
                                    {}
                                    tag-names)]
-    (update-in dashcard [:visualization_settings :text] shared.params/substitute-tags tag-&gt;param (public-settings/site-locale) (escape-markdown-chars? dashcard))))</pre></td></tr><tr><td class="docs"><p>Returns subscription result for a card.</p>
+    (update-in dashcard [:visualization_settings :text] shared.params/substitute-tags tag-&gt;param (public-settings/site-locale) (escape-markdown-chars? dashcard))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- data-rows-to-disk!
+  [qp-result]
+  (update-in qp-result [:data :rows] notification.temp-storage/to-temp-file!))</pre></td></tr><tr><td class="docs"><p>Returns subscription result for a card.</p>
 
 <p>This function should be executed under pulse's creator permissions.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn execute-dashboard-subscription-card
@@ -3025,7 +3030,9 @@ substituted into connected variables in the text.</p>
   (cond
     (:card_id dashcard)
     (let [parameters (merge-default-values parameters)]
-      (execute-dashboard-subscription-card dashcard parameters))
+      ;; only do this for dashboard subscriptions but not alerts since alerts has only one card, which doesn't eat much
+      ;; memory
+      (m/update-existing (execute-dashboard-subscription-card dashcard parameters) :result data-rows-to-disk!))
     (virtual-card-of-type? dashcard &quot;iframe&quot;)
     nil
     (virtual-card-of-type? dashcard &quot;action&quot;)
