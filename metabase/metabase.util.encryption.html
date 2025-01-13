@@ -2869,6 +2869,7 @@ net.brehaut.ClojureTools = (function (SH) {
 <code>MB_ENCRYPTION_SECRET_KEY</code> env var.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.util.encryption
   (:require
+   [buddy.core.bytes :as bytes]
    [buddy.core.codecs :as codecs]
    [buddy.core.crypto :as crypto]
    [buddy.core.kdf :as kdf]
@@ -2878,8 +2879,12 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.util :as u]
    [metabase.util.i18n :refer [trs]]
    [metabase.util.log :as log]
-   [ring.util.codec :as codec]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Generate a 64-byte byte array hash of <code>secret-key</code> using 100,000 iterations of PBKDF2+SHA512.</p>
+   [ring.util.codec :as codec])
+  (:import (java.io ByteArrayInputStream InputStream SequenceInputStream)
+           (javax.crypto Cipher CipherInputStream)
+           (javax.crypto.spec SecretKeySpec IvParameterSpec)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^:const aes-streaming-spec &quot;AES/CBC/PKCS5Padding&quot;)</pre></td></tr><tr><td class="docs"><p>Generate a 64-byte byte array hash of <code>secret-key</code> using 100,000 iterations of PBKDF2+SHA512.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn secret-key-&gt;hash
   ^bytes [^String secret-key]
   (kdf/get-bytes (kdf/engine {:alg        :pbkdf2+sha512
@@ -2938,7 +2943,47 @@ so you have to do <code>^{:tag 'bytes}</code> instead</p>
      (crypto/decrypt (byte-array message)
                      secret-key
                      (byte-array initialization-vector)
-                     {:algorithm :aes256-cbc-hmac-sha512}))))</pre></td></tr><tr><td class="docs"><p>Decrypt string <code>s</code> using a <code>secret-key</code> (a 64-byte byte array), by default the hashed value of
+                     {:algorithm :aes256-cbc-hmac-sha512}))))</pre></td></tr><tr><td class="docs"><p>Wraps a plaintext input stream into an input stream that encrypts it using AES256 CBC.
+The encryption format is slightly different for streams vs. fixed length data</p>
+</td><td class="codes"><pre class="brush: clojure">(defn encrypt-stream
+  {:added &quot;0.53.0&quot;}
+  (^InputStream [^InputStream input-stream]
+   (encrypt-stream default-secret-key input-stream))
+  (^InputStream [secret-key ^InputStream input-stream]
+   (let [spec aes-streaming-spec
+         spec-header (codecs/to-bytes (format &quot;%-32s&quot; spec))
+         cipher (Cipher/getInstance spec)
+         iv (nonce/random-bytes 16)]
+     (.init cipher Cipher/ENCRYPT_MODE (SecretKeySpec. (bytes/slice secret-key 32 64) &quot;AES&quot;) (IvParameterSpec. iv))
+     (SequenceInputStream. (ByteArrayInputStream. (bytes/concat spec-header iv)) (CipherInputStream. input-stream cipher)))))</pre></td></tr><tr><td class="docs"><p>Encrypts a byte-array in a way that can be used to read it with decrypt-stream instead of decrypt.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn encrypt-for-stream
+  {:added &quot;0.53.0&quot;}
+  (^bytes [^bytes input]
+   (encrypt-for-stream default-secret-key input))
+  (^bytes [secret-key ^bytes input]
+   (with-open [encrypted (encrypt-stream secret-key (ByteArrayInputStream. input))]
+     (.readAllBytes encrypted))))</pre></td></tr><tr><td class="docs"><p>Wraps a possibly-encrypted input stream into a new input stream that decrypts it if necessary.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn maybe-decrypt-stream
+  {:added &quot;0.53.0&quot;}
+  (^InputStream [^InputStream input-stream]
+   (maybe-decrypt-stream default-secret-key input-stream))
+  (^InputStream [secret-key ^InputStream input-stream]
+   (let [spec-array (byte-array 32)
+         spec-array-length (.read input-stream spec-array)
+         spec (str/trim (codecs/bytes-&gt;str spec-array))]
+     (cond
+       (= spec-array-length -1)
+       input-stream
+       (and (= spec-array-length 32) (= spec aes-streaming-spec))
+       (let [cipher (Cipher/getInstance spec)
+             iv (byte-array 16)
+             _ (.read input-stream iv)]
+         (.init cipher Cipher/DECRYPT_MODE (SecretKeySpec. (bytes/slice secret-key 32 64) &quot;AES&quot;) (IvParameterSpec. iv))
+         (CipherInputStream. input-stream cipher))
+       :else
+       (SequenceInputStream.
+        (ByteArrayInputStream. (bytes/slice spec-array 0 spec-array-length))
+        input-stream)))))</pre></td></tr><tr><td class="docs"><p>Decrypt string <code>s</code> using a <code>secret-key</code> (a 64-byte byte array), by default the hashed value of
 <code>MB_ENCRYPTION_SECRET_KEY</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn decrypt
   (^String [^String s]
@@ -2962,7 +3007,14 @@ as-is.</p>
    (if secret-key
      (when (seq b)
        (encrypt-bytes secret-key b))
-     b)))</pre></td></tr><tr><td class="docs">
+     b)))</pre></td></tr><tr><td class="docs"><p>If <code>MB_ENCRYPTION_SECRET_KEY</code> is set, return an encrypted version of <code>s</code> that can be used to stream the data; otherwise return <code>s</code> as-is.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn maybe-encrypt-for-stream
+  (^bytes [^bytes s]
+   (maybe-encrypt-for-stream default-secret-key s))
+  (^bytes [secret-key, ^bytes s]
+   (if secret-key
+     (encrypt-for-stream secret-key s)
+     s)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private ^:const aes256-tag-length 32)
 (def ^:private ^:const aes256-block-size 16)</pre></td></tr><tr><td class="docs"><p>Returns true if it's likely that <code>b</code> is an encrypted byte array.  To compute this, we need the number of bytes in
 the input, subtract the bytes used by the cipher type tag (<code>aes256-tag-length</code>) and what is left should be divisible
