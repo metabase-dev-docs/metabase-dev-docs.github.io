@@ -2979,10 +2979,14 @@ update if desired.</p>
           (let [{:keys [additions deletions]} (find-changes {:current-index current-index-values
                                                              :source-values values-to-index})]
             (when (seq deletions)
-              (doseq [deletions-part (partition-all 10000 deletions)]
+              (doseq [deletions-part (partition-all 10000 deletions)
+                      :let [search-model-ids (map (fn [[pk]]
+                                                    (str (:id model-index) &quot;:&quot; pk))
+                                                  deletions-part)]]
                 (t2/delete! :model/ModelIndexValue
                             :model_index_id (:id model-index)
-                            :model_pk [:in (-&gt;&gt; deletions-part (map first))])))
+                            :model_pk [:in (-&gt;&gt; deletions-part (map first))])
+                (search/delete! :model/ModelIndexValue search-model-ids)))
             (when (seq additions)
               (doseq [additions-part (partition-all 10000 additions)]
                 (t2/insert! :model/ModelIndexValue
@@ -2997,6 +3001,7 @@ update if desired.</p>
                        :state      (if (&gt; (count values-to-index) max-indexed-values)
                                      &quot;overflow&quot;
                                      &quot;indexed&quot;)}))
+        (run! search/update! (t2/reducible-select :model/ModelIndexValue :model_index_id (:id model-index)))
         (catch Exception e
           (log/errorf e &quot;Error saving model-index values for model-index: %d, model: %d&quot;
                       (:id model-index) (:model_id model-index))
@@ -3022,7 +3027,7 @@ update if desired.</p>
 </td><td class="codes"><pre class="brush: clojure">(search/define-spec &quot;indexed-entity&quot;
   {:model        :model/ModelIndexValue
    :visibility   :app-user
-   :attrs        {:id            :model_pk
+   :attrs        {:id            [:concat_ws &quot;:&quot; :model_index_id :model_pk]
                   :collection-id :collection.id
                   :creator-id    false
                   ;; this seems wrong, I'd expect it to track whether the model is archived.

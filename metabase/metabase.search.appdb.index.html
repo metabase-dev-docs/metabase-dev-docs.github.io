@@ -3051,13 +3051,7 @@ net.brehaut.ClojureTools = (function (SH) {
        :model_id         (:id entity)
        :model_created_at (:created_at entity)
        :model_updated_at (:updated_at entity))
-      (merge (specialization/extra-entry-fields entity))))</pre></td></tr><tr><td class="docs"><p>Remove any entries corresponding directly to a given model instance.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn delete!
-  [id search-models]
-  ;; In practice, we expect this to be 1-1, but the data model does not preclude it.
-  (when (seq search-models)
-    (doseq [table-name [(active-table) (pending-table)] :when table-name]
-      (t2/delete! table-name :model_id id :model [:in search-models]))))</pre></td></tr><tr><td class="docs">
+      (merge (specialization/extra-entry-fields entity))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- safe-batch-upsert! [table-name entries]
   ;; For convenience, no-op if we are not tracking any table.
   (when table-name
@@ -3088,12 +3082,16 @@ net.brehaut.ClojureTools = (function (SH) {
         active-updated?  (safe-batch-upsert! (active-table) entries)
         pending-updated? (safe-batch-upsert! (pending-table) entries)]
     (when (or active-updated? pending-updated?)
-      (-&gt;&gt; entries (map :model) frequencies))))</pre></td></tr><tr><td class="docs">
+      (u/prog1 (-&gt;&gt; entries (map :model) frequencies)
+        (log/trace &quot;indexed documents&quot; &lt;&gt;)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod search.engine/consume! :search.engine/appdb [_engine document-reducible]
   (transduce (comp (partition-all insert-batch-size)
                    (map batch-update!))
              (partial merge-with +)
-             document-reducible))</pre></td></tr><tr><td class="docs"><p>Query fragment for all models corresponding to a query parameter <code>:search-term</code>.</p>
+             document-reducible))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod search.engine/delete! :search.engine/appdb [_engine search-model ids]
+  (doseq [table-name [(active-table) (pending-table)] :when table-name]
+    (t2/delete! table-name :model search-model :model_id [:in ids])))</pre></td></tr><tr><td class="docs"><p>Query fragment for all models corresponding to a query parameter <code>:search-term</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn search-query
   ([search-term search-ctx]
    (search-query search-term search-ctx [:model_id :model]))
