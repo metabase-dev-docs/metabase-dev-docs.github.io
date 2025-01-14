@@ -2878,14 +2878,12 @@ by [[initialize-events!]].</p>
    [clojure.spec.alpha :as s]
    [metabase.events.schema :as events.schema]
    [metabase.models.interface :as mi]
-   [metabase.plugins.classloader :as classloader]
    [metabase.util :as u]
    [metabase.util.i18n :as i18n]
    [metabase.util.log :as log]
    [metabase.util.malli :as mu]
    [metabase.util.methodical.null-cache :as u.methodical.null-cache]
-   [metabase.util.methodical.unsorted-dispatcher
-    :as u.methodical.unsorted-dispatcher]
+   [metabase.util.methodical.unsorted-dispatcher :as u.methodical.unsorted-dispatcher]
    [methodical.core :as methodical]
    [potemkin :as p]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(p/import-vars
@@ -2898,21 +2896,6 @@ by [[initialize-events!]].</p>
    [:fn
     {:error/message &quot;Events should derive from :metabase/event&quot;}
     #(isa? % :metabase/event)]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defonce ^:private events-initialized?
-  (atom nil))</pre></td></tr><tr><td class="docs"><p>Look for namespaces that start with <code>metabase.events.</code>, and call their <code>events-init</code> function if it exists.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- find-and-load-event-handlers!
-  []
-  (doseq [ns-symb u/metabase-namespace-symbols
-          :when   (.startsWith (name ns-symb) &quot;metabase.events.&quot;)]
-    (log/info &quot;Loading events namespace:&quot; (u/format-color :blue ns-symb) (u/emoji &quot;👂&quot;))
-    (classloader/require ns-symb)))</pre></td></tr><tr><td class="docs"><p>Initialize the asynchronous internal events system.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- initialize-events!
-  []
-  (when-not @events-initialized?
-    (locking events-initialized?
-      (when-not @events-initialized?
-        (find-and-load-event-handlers!)
-        (reset! events-initialized? true)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(s/def ::publish-event-dispatch-value
   (s/and
    (some-fn qualified-keyword? #(= % :default))
@@ -2963,33 +2946,27 @@ if you're working on a new event topic or updating an existing one.</p>
 </td><td class="codes"><pre class="brush: clojure">(methodical/defmethod publish-event! :around :default
   [topic event]
   (assert (not *compile-files*) &quot;Calls to publish-event! are not allowed in the top level.&quot;)
-  (if-not @events-initialized?
-    ;; if the event namespaces aren't initialized yet, make sure they're all loaded up before trying to do dispatch.
-    (do
-      (initialize-events!)
-      (publish-event! topic event))
-    (do
-      (let [{:keys [object]} event]
-        (log/debugf &quot;Publishing %s event (name and id):\n\n%s&quot;
-                    (u/colorize :yellow (pr-str topic))
-                    (u/pprint-to-str (let [model (mi/model object)]
-                                       (cond-&gt; (select-keys object [:name :id])
-                                         model
-                                         (assoc :model model))))))
-      (assert (and (qualified-keyword? topic)
-                   (isa? topic :metabase/event))
-              (format &quot;Invalid event topic %s: events must derive from :metabase/event&quot; (pr-str topic)))
-      (assert (map? event)
-              (format &quot;Invalid event %s: event must be a map.&quot; (pr-str event)))
-      (try
-        (when-let [schema (and (mu/instrument-ns? *ns*) (events.schema/topic-&gt;schema topic))]
-          (mu/validate-throw schema event))
-        (next-method topic event)
-        (catch Throwable e
-          (throw (ex-info (i18n/tru &quot;Error publishing {0} event: {1}&quot; topic (ex-message e))
-                          {:topic topic, :event event}
-                          e))))
-      event)))</pre></td></tr><tr><td class="docs"><p>Determine metadata, if there is any, for given <code>object</code>.
+  (let [{:keys [object]} event]
+    (log/debugf &quot;Publishing %s event (name and id):\n\n%s&quot;
+                (u/colorize :yellow (pr-str topic))
+                (u/pprint-to-str (let [model (mi/model object)]
+                                   (cond-&gt; (select-keys object [:name :id])
+                                     model
+                                     (assoc :model model))))))
+  (assert (and (qualified-keyword? topic)
+               (isa? topic :metabase/event))
+          (format &quot;Invalid event topic %s: events must derive from :metabase/event&quot; (pr-str topic)))
+  (assert (map? event)
+          (format &quot;Invalid event %s: event must be a map.&quot; (pr-str event)))
+  (try
+    (when-let [schema (and (mu/instrument-ns? *ns*) (events.schema/topic-&gt;schema topic))]
+      (mu/validate-throw schema event))
+    (next-method topic event)
+    (catch Throwable e
+      (throw (ex-info (i18n/tru &quot;Error publishing {0} event: {1}&quot; topic (ex-message e))
+                      {:topic topic, :event event}
+                      e))))
+  event)</pre></td></tr><tr><td class="docs"><p>Determine metadata, if there is any, for given <code>object</code>.
 Expand the object when we need more metadata.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn object-&gt;metadata
   [object]

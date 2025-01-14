@@ -2922,6 +2922,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.lib.schema.drill-thru :as lib.schema.drill-thru]
    [metabase.lib.schema.metadata :as lib.schema.metadata]
    [metabase.lib.types.isa :as lib.types.isa]
+   [metabase.lib.underlying :as lib.underlying]
    [metabase.util.malli :as mu]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn- pivot-drill-pred :- [:sequential ::lib.schema.metadata/column]
   &quot;Implementation for pivoting on various kinds of fields.
@@ -2933,7 +2934,7 @@ net.brehaut.ClojureTools = (function (SH) {
   (when (and (lib.drill-thru.common/mbql-stage? query stage-number)
              column
              (some? value)
-             (= (:lib/source column) :source/aggregations))
+             (lib.drill-thru.common/aggregation-sourced? query column))
     (-&gt;&gt; (lib.breakout/breakoutable-columns query stage-number)
          (filter field-pred))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private pivot-type-predicates
@@ -2980,24 +2981,25 @@ net.brehaut.ClojureTools = (function (SH) {
   See `:pivots` key, which holds a map `{t [breakouts...]}` where `t` is `:category`, `:location`, or `:time`.
   If a key is missing, there are no breakouts of that kind.&quot;
   [query                                         :- ::lib.schema/query
-   stage-number                                  :- :int
+   _stage-number                                 :- :int
    {:keys [column dimensions value] :as context} :- ::lib.schema.drill-thru/context]
-  (when (and (lib.drill-thru.common/mbql-stage? query stage-number)
-             column
-             (some? value)
-             (= (:lib/source column) :source/aggregations)
-             (-&gt; (lib.aggregation/aggregations query stage-number) count pos?))
-    (let [breakout-pivot-types (permitted-pivot-types query stage-number)
-          pivots               (into {} (for [pivot-type breakout-pivot-types
-                                              :let [pred    (get pivot-type-predicates pivot-type)
-                                                    columns (pivot-drill-pred query stage-number context pred)]
-                                              :when (not-empty columns)]
-                                          [pivot-type columns]))]
-      (when-not (empty? pivots)
-        {:lib/type   :metabase.lib.drill-thru/drill-thru
-         :type       :drill-thru/pivot
-         :dimensions dimensions
-         :pivots     pivots}))))</pre></td></tr><tr><td class="docs">
+  (let [stage-number (lib.underlying/top-level-stage-number query)]
+    (when (and (lib.drill-thru.common/mbql-stage? query stage-number)
+               column
+               (some? value)
+               (lib.drill-thru.common/aggregation-sourced? query column)
+               (-&gt; (lib.aggregation/aggregations query stage-number) count pos?))
+      (let [breakout-pivot-types (permitted-pivot-types query stage-number)
+            pivots               (into {} (for [pivot-type breakout-pivot-types
+                                                :let [pred    (get pivot-type-predicates pivot-type)
+                                                      columns (pivot-drill-pred query stage-number context pred)]
+                                                :when (not-empty columns)]
+                                            [pivot-type columns]))]
+        (when-not (empty? pivots)
+          {:lib/type   :metabase.lib.drill-thru/drill-thru
+           :type       :drill-thru/pivot
+           :dimensions dimensions
+           :pivots     pivots})))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod lib.drill-thru.common/drill-thru-info-method :drill-thru/pivot
   [_query _stage-number drill-thru]
   (select-keys drill-thru [:many-pks? :object-id :type]))</pre></td></tr><tr><td class="docs"><p>Note that pivot drills have specific public functions for accessing the nested pivoting options.
@@ -3023,8 +3025,9 @@ Therefore the [[drill-thru-info-method]] is just the default <code>{:type :drill
     b. Go through the breakouts, and remove any that match this dimension from the query.
 2. Add a new breakout for the selected column.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmethod lib.drill-thru.common/drill-thru-method :drill-thru/pivot
-  [query stage-number drill-thru &amp; [column]]
-  (let [filtered (reduce #(breakouts-&gt;filters %1 stage-number %2) query (:dimensions drill-thru))]
+  [query _stage-number drill-thru &amp; [column]]
+  (let [stage-number (lib.underlying/top-level-stage-number query)
+        filtered (reduce #(breakouts-&gt;filters %1 stage-number %2) query (:dimensions drill-thru))]
     (lib.breakout/breakout filtered stage-number column)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
