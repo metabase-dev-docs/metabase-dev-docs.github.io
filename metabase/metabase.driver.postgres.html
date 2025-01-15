@@ -2877,6 +2877,7 @@ for JDBC-based drivers.</p>
    [honey.sql.helpers :as sql.helpers]
    [honey.sql.pg-ops :as sql.pg-ops]
    [java-time.api :as t]
+   [medley.core :as m]
    [metabase.db :as mdb]
    [metabase.driver :as driver]
    [metabase.driver.common :as driver.common]
@@ -2886,7 +2887,8 @@ for JDBC-based drivers.</p>
    [metabase.driver.sql-jdbc.common :as sql-jdbc.common]
    [metabase.driver.sql-jdbc.connection :as sql-jdbc.conn]
    [metabase.driver.sql-jdbc.execute :as sql-jdbc.execute]
-   [metabase.driver.sql-jdbc.quoting :refer [with-quoting quote-columns quote-identifier]]
+   [metabase.driver.sql-jdbc.quoting :refer [quote-columns quote-identifier
+                                             with-quoting]]
    [metabase.driver.sql-jdbc.sync :as sql-jdbc.sync]
    [metabase.driver.sql-jdbc.sync.describe-database :as sql-jdbc.describe-database]
    [metabase.driver.sql.query-processor :as sql.qp]
@@ -2909,7 +2911,11 @@ for JDBC-based drivers.</p>
    [metabase.util.malli :as mu])
   (:import
    (java.io StringReader)
-   (java.sql Connection ResultSet ResultSetMetaData Types)
+   (java.sql
+    Connection
+    ResultSet
+    ResultSetMetaData
+    Types)
    (java.time LocalDateTime OffsetDateTime OffsetTime)
    (org.postgresql.copy CopyManager)
    (org.postgresql.jdbc PgConnection)))</pre></td></tr><tr><td class="docs">
@@ -3632,34 +3638,18 @@ The alias names in JSON fields are unique wrt nfc path</p>
        &quot;x-pkcs12&quot;)))</pre></td></tr><tr><td class="docs"><p>Builds the params to include in the JDBC connection spec for an SSL connection.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- ssl-params
   [{:keys [ssl-key-value] :as db-details}]
-  (let [ssl-root-cert   (when (contains? #{&quot;verify-ca&quot; &quot;verify-full&quot;} (:ssl-mode db-details))
-                          (secret/db-details-prop-&gt;secret-map db-details &quot;ssl-root-cert&quot;))
-        ssl-client-key  (when (:ssl-use-client-auth db-details)
-                          (secret/db-details-prop-&gt;secret-map db-details &quot;ssl-key&quot;))
-        ssl-client-cert (when (:ssl-use-client-auth db-details)
-                          (secret/db-details-prop-&gt;secret-map db-details &quot;ssl-client-cert&quot;))
-        ssl-key-pw      (when (:ssl-use-client-auth db-details)
-                          (secret/db-details-prop-&gt;secret-map db-details &quot;ssl-key-password&quot;))
-        all-subprops    (apply concat (map :subprops [ssl-root-cert ssl-client-key ssl-client-cert ssl-key-pw]))
-        has-value?      (comp some? :value)]
-    (cond-&gt; (set/rename-keys db-details {:ssl-mode :sslmode})
+  (-&gt; (set/rename-keys db-details {:ssl-mode :sslmode})
       ;; if somehow there was no ssl-mode set, just make it required (preserves existing behavior)
-      (nil? (:ssl-mode db-details))
-      (assoc :sslmode &quot;require&quot;)
-      (has-value? ssl-root-cert)
-      (assoc :sslrootcert (secret/value-&gt;file! ssl-root-cert :postgres))
-      (has-value? ssl-client-key)
-      (assoc :sslkey (secret/value-&gt;file! ssl-client-key :postgres (when (pkcs-12-key-value? ssl-key-value) &quot;.p12&quot;)))
-      (has-value? ssl-client-cert)
-      (assoc :sslcert (secret/value-&gt;file! ssl-client-cert :postgres))
+      (cond-&gt; (nil? (:ssl-mode db-details)) (assoc :sslmode &quot;require&quot;))
+      (m/assoc-some :sslrootcert (secret/value-as-file! :postgres db-details &quot;ssl-root-cert&quot;))
+      (m/assoc-some :sslkey (secret/value-as-file! :postgres db-details &quot;ssl-key&quot; (when (pkcs-12-key-value? ssl-key-value) &quot;.p12&quot;)))
+      (m/assoc-some :sslcert (secret/value-as-file! :postgres db-details &quot;ssl-client-cert&quot;))
       ;; Pass an empty string as password if none is provided; otherwise the driver will prompt for one
-      true
-      (assoc :sslpassword (or (secret/value-&gt;string ssl-key-pw) &quot;&quot;))
-      true
+      (assoc :sslpassword (or (secret/value-as-string :postgres db-details &quot;ssl-key-password&quot;) &quot;&quot;))
       (as-&gt; params ;; from outer cond-&gt;
             (dissoc params :ssl-root-cert :ssl-root-cert-options :ssl-client-key :ssl-client-cert :ssl-key-password
                     :ssl-use-client-auth)
-        (apply dissoc params all-subprops)))))</pre></td></tr><tr><td class="docs"><p>Params to include in the JDBC connection spec to disable SSL.</p>
+        (secret/clean-secret-properties-from-details params :postgres))))</pre></td></tr><tr><td class="docs"><p>Params to include in the JDBC connection spec to disable SSL.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private disable-ssl-params
   {:sslmode &quot;disable&quot;})</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod sql-jdbc.conn/connection-details-&gt;spec :postgres

@@ -3175,7 +3175,6 @@ consumption.</p>
       true                         add-can-upload
       include-editable-data-model? check-db-data-model-perms
       (mi/can-write? database)     (-&gt;
-                                    secret/expand-db-details-inferred-secret-values
                                     (assoc :can-manage true)))))</pre></td></tr><tr><td class="docs"><p>/:id</p>
 </td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
 (api/defendpoint GET 
@@ -3628,7 +3627,7 @@ causes too many problems.</p>
     (merge (:details database)
            (reduce
             (fn [details k]
-              (if (= database/protected-password (get details k))
+              (if (= secret/protected-password (get details k))
                 (m/update-existing details k (constantly (get-in database [:details k])))
                 details))
             details
@@ -3691,8 +3690,8 @@ causes too many problems.</p>
    settings           [:maybe ms/Map]}
   ;; TODO - ensure that custom schedules and let-user-control-scheduling go in lockstep
   (let [existing-database (api/write-check (t2/select-one :model/Database :id id))
+        incoming-details  details
         details           (some-&gt;&gt; details
-                                   (driver.u/db-details-client-&gt;server (or engine (:engine existing-database)))
                                    (upsert-sensitive-fields existing-database))
         ;; verify that we can connect to the database if `:details` OR `:engine` have changed.
         details-changed?  (some-&gt; details (not= (:details existing-database)))
@@ -3742,8 +3741,11 @@ causes too many problems.</p>
           (events/publish-event! :event/database-update {:object db
                                                          :user-id api/*current-user-id*
                                                          :previous-object existing-database})
-         ;; return the DB with the expanded schedules back in place
-          (add-expanded-schedules db))))))</pre></td></tr><tr><td class="docs"><p>-------------------------------------------- DELETE /api/database/:id --------------------------------------------</p>
+          (-&gt; db
+              ;; return the DB with the expanded schedules back in place
+              add-expanded-schedules
+              ;; return the DB with the passed in details in place
+              (m/update-existing :details #(merge incoming-details %))))))))</pre></td></tr><tr><td class="docs"><p>-------------------------------------------- DELETE /api/database/:id --------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>/:id</p>
 </td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
 (api/defendpoint DELETE 
