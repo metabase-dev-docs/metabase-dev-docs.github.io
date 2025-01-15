@@ -2865,1007 +2865,291 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.driver" name="metabase.driver"><h1 class="project-name">metabase.driver</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Metabase Drivers handle various things we need to do with connected data warehouse databases, including things like
-introspecting their schemas and processing and running MBQL queries. Drivers must implement some or all of the
-multimethods defined below, and register themselves with a call to [[metabase.driver/register!]].</p>
-
-<p>SQL-based drivers can use the <code>:sql</code> driver as a parent, and JDBC-based SQL drivers can use <code>:sql-jdbc</code>. Both of
-these drivers define additional multimethods that child drivers should implement; see [[metabase.driver.sql]] and
-[[metabase.driver.sql-jdbc]] for more details.</p>
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.driver
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.actions.actions" name="metabase.actions.actions"><h1 class="project-name">metabase.actions.actions</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Code related to the new writeback Actions.</p>
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.actions.actions
   (:require
-   [clojure.set :as set]
-   [clojure.string :as str]
-   [java-time.api :as t]
-   [metabase.auth-provider :as auth-provider]
-   [metabase.driver.impl :as driver.impl]
-   [metabase.models.setting :as setting :refer [defsetting]]
-   [metabase.plugins.classloader :as classloader]
-   [metabase.query-processor.error-type :as qp.error-type]
+   [clojure.spec.alpha :as s]
+   [metabase.api.common :as api]
+   [metabase.driver :as driver]
+   [metabase.driver.util :as driver.u]
+   [metabase.legacy-mbql.normalize :as mbql.normalize]
+   [metabase.lib.metadata :as lib.metadata]
+   [metabase.lib.schema.actions :as lib.schema.actions]
+   [metabase.models.setting :as setting]
+   [metabase.query-processor.middleware.permissions :as qp.perms]
+   [metabase.query-processor.store :as qp.store]
    [metabase.util :as u]
-   [metabase.util.i18n :refer [deferred-tru tru]]
-   [metabase.util.log :as log]
+   [metabase.util.i18n :as i18n]
    [metabase.util.malli :as mu]
-   [potemkin :as p]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(declare notify-database-updated)</pre></td></tr><tr><td class="docs"><p>Send notification that all Databases should immediately release cached resources (i.e., connection pools).</p>
+</td><td class="codes"><pre class="brush: clojure">(setting/defsetting database-enable-actions
+  (i18n/deferred-tru &quot;Whether to enable Actions for a specific Database.&quot;)
+  :default false
+  :type :boolean
+  :visibility :public
+  :database-local :only)</pre></td></tr><tr><td class="docs"><p>Normalize the <code>arg-map</code> passed to [[perform-action!]] for a specific <code>action</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmulti normalize-action-arg-map
+  {:arglists '([action arg-map]), :added &quot;0.44.0&quot;}
+  (fn [action _arg-map]
+    (keyword action)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod normalize-action-arg-map :default
+  [_action arg-map]
+  arg-map)</pre></td></tr><tr><td class="docs"><p>Return the appropriate spec to use to validate the arg map passed to [[perform-action!*]].</p>
 
-<p>Currently only used below by [[report-timezone]] setter (i.e., only used when report timezone changes). Reusing
-pooled connections with the old session timezone can have weird effects, especially if report timezone is changed to
-<code>nil</code> (meaning subsequent queries will not attempt to change the session timezone) or something considered invalid
-by a given Database (meaning subsequent queries will fail to change the session timezone).</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- notify-all-databases-updated
+<p>  (action-arg-map-spec :row/create) => :actions.args.crud/row.create</p>
+</td><td class="codes"><pre class="brush: clojure">(defmulti action-arg-map-spec
+  {:arglists '([action]), :added &quot;0.44.0&quot;}
+  keyword)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod action-arg-map-spec :default
+  [_action]
+  any?)</pre></td></tr><tr><td class="docs"><p>Multimethod for doing an Action. The specific <code>action</code> is a keyword like <code>:row/create</code> or <code>:bulk/create</code>; the shape
+of <code>arg-map</code> depends on the action being performed. [[action-arg-map-spec]] returns the appropriate spec to use to
+validate the args for a given action. When implementing a new action type, be sure to implement both this method
+and [[action-arg-map-spec]].</p>
+
+<p>At the time of this writing Actions are performed with either <code>POST /api/action/:action-namespace/:action-name</code>,
+which passes in the request body as <code>args-map</code> directly, or `POST
+/api/action/:action-namespace/:action-name/:table-id<code>, which passes in an</code>args-map` like</p>
+
+<p>  {:table-id <table-id>, :arg <request-body>}</p>
+
+<p>The former endpoint is currently used for the various <code>:row/*</code> Actions while the version with <code>:table-id</code> as part of
+the route is currently used for <code>:bulk/*</code> Actions.</p>
+
+<p>DON'T CALL THIS METHOD DIRECTLY TO PERFORM ACTIONS -- use [[perform-action!]] instead which does normalization,
+validation, and binds Database-local values.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmulti perform-action!*
+  {:arglists '([driver action database arg-map]), :added &quot;0.44.0&quot;}
+  (fn [driver action _database _arg-map]
+    [(driver/dispatch-on-initialized-driver driver)
+     (keyword action)])
+  :hierarchy #'driver/hierarchy)</pre></td></tr><tr><td class="docs"><p>Set of all known actions.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- known-actions
   []
-  (doseq [{driver :engine, id :id, :as database} (t2/select 'Database)]
-    (try
-      (notify-database-updated driver database)
-      (catch Throwable e
-        (log/errorf e &quot;Failed to notify %s Database %s updated&quot; driver id)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- short-timezone-name [timezone-id]
-  (let [^java.time.ZoneId zone (if (seq timezone-id)
-                                 (t/zone-id timezone-id)
-                                 (t/zone-id))]
-    (.getDisplayName
-     zone
-     java.time.format.TextStyle/SHORT
-     (java.util.Locale/getDefault))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- long-timezone-name [timezone-id]
-  (if (seq timezone-id)
-    timezone-id
-    (str (t/zone-id))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- update-send-pulse-triggers-timezone!
-  []
-  (classloader/require 'metabase.task.send-pulses)
-  ((resolve 'metabase.task.send-pulses/update-send-pulse-triggers-timezone!)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defsetting report-timezone
-  (deferred-tru &quot;Connection timezone to use when executing queries. Defaults to system timezone.&quot;)
-  :encryption :no
-  :visibility :settings-manager
-  :export?    true
-  :audit      :getter
-  :setter
-  (fn [new-value]
-    (setting/set-value-of-type! :string :report-timezone new-value)
-    (notify-all-databases-updated)
-    (update-send-pulse-triggers-timezone!)))</pre></td></tr><tr><td class="docs"><p>Current report timezone abbreviation</p>
-</td><td class="codes"><pre class="brush: clojure">(defsetting report-timezone-short
-  :visibility :public
-  :export?    true
-  :setter     :none
-  :getter     (fn [] (short-timezone-name (report-timezone)))
-  :doc        false)</pre></td></tr><tr><td class="docs"><p>Current report timezone string</p>
-</td><td class="codes"><pre class="brush: clojure">(defsetting report-timezone-long
-  :visibility :public
-  :export?    true
-  :setter     :none
-  :getter     (fn [] (long-timezone-name (report-timezone)))
-  :doc        false)</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
-|                                                 Current Driver                                                 |
-+----------------------------------------------------------------------------------------------------------------+</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Current driver (a keyword such as <code>:postgres</code>) in use by the Query Processor/tests/etc. Bind this with <code>with-driver</code>
-below. The QP binds the driver this way in the <code>bind-driver</code> middleware.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *driver*
+  (into #{}
+        (comp (filter sequential?)
+              (map second))
+        (keys (methods perform-action!*))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod perform-action!* :default
+  [driver action _database _arg-map]
+  (let [action        (keyword action)
+        known-actions (known-actions)]
+    ;; return 404 if the action doesn't exist.
+    (when-not (contains? known-actions action)
+      (throw (ex-info (i18n/tru &quot;Unknown Action {0}. Valid Actions are: {1}&quot;
+                                action
+                                (pr-str known-actions))
+                      {:status-code 404})))
+    ;; return 400 if the action does exist but is not supported by this DB
+    (throw (ex-info (i18n/tru &quot;Action {0} is not supported for {1} Databases.&quot;
+                              action
+                              (pr-str driver))
+                    {:status-code 400}))))</pre></td></tr><tr><td class="docs"><p>A cache that lives for the duration of the top-level Action invoked by [[perform-action!]]. You can use this to store
+miscellaneous values such as things that need to be fetched from the application database to avoid duplicate calls
+in bulk actions that repeatedly call code that would only be called once by single-row Actions. Bound to an atom
+containing a map by [[perform-action!]].</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *misc-value-cache*
+  nil)</pre></td></tr><tr><td class="docs"><p>Get a cached value from the [[<em>misc-value-cache</em>]] using a <code>unique-key</code> if it already exists. If it does not exist,
+calculate the value using <code>value-thunk</code>, cache it, then return it.</p>
+
+<p><code>unique-key</code> must be unique app-wide. Something like</p>
+
+<p>  [::cast-values table-id]</p>
+
+<p>is a good key.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn cached-value
+  [unique-key value-thunk]
+  (or (when *misc-value-cache*
+        (get @*misc-value-cache* unique-key))
+      (let [value (value-thunk)]
+        (when *misc-value-cache*
+          (swap! *misc-value-cache* assoc unique-key value))
+        value)))</pre></td></tr><tr><td class="docs"><p>Throws an appropriate error if actions are unsupported or disabled for a database, otherwise returns nil.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn check-actions-enabled-for-database!
+  [{db-settings :settings db-id :id driver :engine db-name :name :as db}]
+  (when-not (driver.u/supports? driver :actions db)
+    (throw (ex-info (i18n/tru &quot;{0} Database {1} does not support actions.&quot;
+                              (u/qualified-name driver)
+                              (format &quot;%d %s&quot; db-id (pr-str db-name)))
+                    {:status-code 400, :database-id db-id})))
+  (binding [setting/*database-local-values* db-settings]
+    (when-not (database-enable-actions)
+      (throw (ex-info (i18n/tru &quot;Actions are not enabled.&quot;)
+                      {:status-code 400, :database-id db-id}))))
   nil)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(declare the-driver)</pre></td></tr><tr><td class="docs"><p>Impl for <code>with-driver</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn do-with-driver
-  [driver f]
-  {:pre [(keyword? driver)]}
-  (binding [*driver* (the-driver driver)]
-    (f)))</pre></td></tr><tr><td class="docs"><p>Bind current driver to <code>driver</code> and execute <code>body</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- database-for-action [action-or-id]
+  (t2/select-one :model/Database {:select [:db.*]
+                                  :from   :action
+                                  :join   [[:report_card :card] [:= :card.id :action.model_id]
+                                           [:metabase_database :db] [:= :db.id :card.database_id]]
+                                  :where  [:= :action.id (u/the-id action-or-id)]}))</pre></td></tr><tr><td class="docs"><p>Throws an appropriate error if actions are unsupported or disabled for the database of the action's model,
+ otherwise returns nil.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn check-actions-enabled!
+  [action-or-id]
+  (check-actions-enabled-for-database! (api/check-404 (database-for-action action-or-id))))</pre></td></tr><tr><td class="docs"><p>Perform an <code>action</code>. Invoke this function for performing actions, e.g. in API endpoints;
+implement [[perform-action!*]] to add support for a new driver/action combo. The shape of <code>arg-map</code> depends on the
+<code>action</code> being performed. [[action-arg-map-spec]] returns the specific spec used to validate <code>arg-map</code> for a given
+<code>action</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn perform-action!
+  [action
+   arg-map :- [:map
+               [:create-row {:optional true} [:maybe ::lib.schema.actions/row]]
+               [:update-row {:optional true} [:maybe ::lib.schema.actions/row]]]]
+  (let [action  (keyword action)
+        spec    (action-arg-map-spec action)
+        arg-map (normalize-action-arg-map action arg-map)] ; is arg-map always just a regular query?
+    (when (s/invalid? (s/conform spec arg-map))
+      (throw (ex-info (format &quot;Invalid Action arg map for %s: %s&quot; action (s/explain-str spec arg-map))
+                      (s/explain-data spec arg-map))))
+    (let [{driver :engine :as db} (api/check-404 (qp.store/with-metadata-provider (:database arg-map)
+                                                   (lib.metadata/database (qp.store/metadata-provider))))]
+      (check-actions-enabled-for-database! db)
+      (binding [*misc-value-cache* (atom {})]
+        (qp.perms/check-query-action-permissions* arg-map)
+        (driver/with-driver driver
+          (perform-action!* driver action db arg-map))))))</pre></td></tr><tr><td class="docs"><p>Action definitions.</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Common base spec for <em>all</em> Actions. All Actions at least require</p>
 
-<p>  (driver/with-driver :postgres
-    ...)</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro with-driver
-  {:style/indent 1}
-  [driver &amp; body]
-  `(do-with-driver ~driver (fn [] ~@body)))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
-|                             Driver Registration / Hierarchy / Multimethod Dispatch                             |
-+----------------------------------------------------------------------------------------------------------------+</p>
+<p>   {:database <id>}</p>
+
+<p>Anything else required depends on the action type.</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(p/import-vars [driver.impl hierarchy register! initialized?])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(add-watch
- #'hierarchy
- nil
- (fn [_key _ref _old-state _new-state]
-   (when (not= hierarchy driver.impl/hierarchy)
-     ;; this is a dev-facing error so no need to i18n it.
-     (throw (Exception. (str &quot;Don't alter #'metabase.driver/hierarchy directly, since it is imported from &quot;
-                             &quot;metabase.driver.impl. Alter #'metabase.driver.impl/hierarchy instead if you need to &quot;
-                             &quot;alter the var directly.&quot;))))))</pre></td></tr><tr><td class="docs"><p>Is this driver available for use? (i.e. should we show it as an option when adding a new database?) This is <code>true</code>
-for all registered, non-abstract drivers and false everything else.</p>
+</td><td class="codes"><pre class="brush: clojure">(s/def :actions.args/id
+  (s/and integer? pos?))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(s/def :actions.args.common/database
+  :actions.args/id)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(s/def :actions.args/common
+  (s/keys :req-un [:actions.args.common/database]))</pre></td></tr><tr><td class="docs"><p>Common base spec for all CRUD row Actions. All CRUD row Actions at least require</p>
 
-<p>Note that an available driver is not necessarily initialized yet; for example lazy-loaded drivers are <em>registered</em>
-when Metabase starts up (meaning this will return <code>true</code> for them) and only initialized when first needed.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn available?
-  [driver]
-  ((every-pred driver.impl/registered? driver.impl/concrete?) driver))</pre></td></tr><tr><td class="docs"><p>Like [[clojure.core/the-ns]]. Converts argument to a keyword, then loads and registers the driver if not already done,
-throwing an Exception if it fails or is invalid. Returns keyword. Note that this does not neccessarily mean the
-driver is initialized (e.g., its full implementation and deps might not be loaded into memory) -- see also
-[[the-initialized-driver]].</p>
-
-<p>This is useful in several cases:</p>
-
-<p>  ;; Ensuring a driver is loaded &amp; registered
-  (isa? driver/hierarchy (the-driver :postgres) (the-driver :sql-jdbc)</p>
-
-<p>  ;; Accepting either strings or keywords (e.g., in API endpoints)
-  (the-driver "h2") ; -> :h2</p>
-
-<p>  ;; Ensuring a driver you are passed is valid
-  (t2/insert! Database :engine (name (the-driver driver)))</p>
-
-<p>  (the-driver :postgres) ; -> :postgres
-  (the-driver :baby)     ; -> Exception</p>
-</td><td class="codes"><pre class="brush: clojure">(defn the-driver
-  [driver]
-  {:pre [((some-fn keyword? string?) driver)]}
-  (classloader/the-classloader)
-  (let [driver (keyword driver)]
-    (driver.impl/load-driver-namespace-if-needed! driver)
-    driver))</pre></td></tr><tr><td class="docs"><p>Add a new parent to <code>driver</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn add-parent!
-  [driver new-parent]
-  (when-not *compile-files*
-    (driver.impl/load-driver-namespace-if-needed! driver)
-    (driver.impl/load-driver-namespace-if-needed! new-parent)
-    (alter-var-root #'driver.impl/hierarchy derive driver new-parent)))</pre></td></tr><tr><td class="docs"><p>Dispatch function to use for driver multimethods. Dispatches on first arg, a driver keyword; loads that driver's
-namespace if not already done. DOES NOT INITIALIZE THE DRIVER.</p>
-
-<p>Driver multimethods for abstract drivers like <code>:sql</code> or <code>:sql-jdbc</code> should use [[dispatch-on-initialized-driver]] to
-ensure the driver is initialized (i.e., its method implementations will be loaded).</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- dispatch-on-uninitialized-driver
-  [driver &amp; _]
-  (the-driver driver))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(declare initialize!)</pre></td></tr><tr><td class="docs"><p>Like [[the-driver]], but also initializes the driver if not already initialized.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn the-initialized-driver
-  [driver]
-  (let [driver (keyword driver)]
-    ;; Fastpath: an initialized driver `driver` is always already registered. Checking for `initialized?` is faster
-    ;; than doing the `registered?` check inside `load-driver-namespace-if-needed!`.
-    (when-not (driver.impl/initialized? driver)
-      (driver.impl/load-driver-namespace-if-needed! driver)
-      (driver.impl/initialize-if-needed! driver initialize!))
-    driver))</pre></td></tr><tr><td class="docs"><p>Like [[dispatch-on-uninitialized-driver]], but guarantees a driver is initialized before dispatch. Prefer
-[[the-driver]] for trivial methods that should do not require the driver to be initialized (e.g., ones that simply
-return information about the driver, but do not actually connect to any databases.)</p>
-</td><td class="codes"><pre class="brush: clojure">(defn dispatch-on-initialized-driver
-  [driver &amp; _]
-  (the-initialized-driver driver))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
-|                                       Interface (Multimethod Defintions)                                       |
-+----------------------------------------------------------------------------------------------------------------+</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Methods a driver can implement. Not all of these are required; some have default implementations immediately below
-them.</p>
-
-<p>SOME TIPS:</p>
-
-<p>To call the Clojure equivalent of the superclass implementation of a method, use <code>get-method</code> with the parent driver:</p>
-
-<p>   (driver/register-driver! :my-driver, :parent :sql-jdbc)</p>
-
-<p>   (defmethod driver/describe-table :my-driver [driver database table]
-     (-> ((get-method driver/describe-table :sql-jdbc) driver databse table)
-         (update :tables add-materialized-views)))</p>
-
-<p>Make sure to pass along the <code>driver</code> parameter-as when you call other methods, rather than hardcoding the name of
-the current driver (e.g. <code>:my-driver</code> in the example above). This way if other drivers use your driver as a parent
-in the future their implementations of any methods called by those methods will get used.</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>DO NOT CALL THIS METHOD DIRECTLY. Called automatically once and only once the first time a non-trivial driver method
-is called; implementers should do one-time initialization as needed (for example, registering JDBC drivers used
-internally by the driver.)</p>
-
-<p>'Trivial' methods include a tiny handful of ones like [[connection-properties]] that simply provide information
-about the driver, but do not connect to databases; these can be be supplied, for example, by a Metabase plugin
-manifest file (which is supplied for lazy-loaded drivers). Methods that require connecting to a database dispatch
-off of [[the-initialized-driver]], which will initialize a driver if not already done so.</p>
-
-<p>You will rarely need to write an implentation for this method yourself. A lazy-loaded driver (like most of the
-Metabase drivers in v1.0 and above) are automatiaclly given an implentation of this method that performs the
-<code>init-steps</code> specified in the plugin manifest (such as loading namespaces in question).</p>
-
-<p>If you do need to implement this method yourself, you do not need to call parent implementations. We'll take care of
-that for you.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti initialize!
-  {:added &quot;0.32.0&quot; :arglists '([driver])}
-  dispatch-on-uninitialized-driver)</pre></td></tr><tr><td class="docs"><p>VERY IMPORTANT: Unlike all other driver multimethods, we DO NOT use the driver hierarchy for dispatch here. Why?
-We do not want a driver to inherit parent drivers' implementations and have those implementations end up getting
-called multiple times. If a driver does not implement <code>initialize!</code>, <em>always</em> fall back to the default no-op
-implementation.</p>
-
-<p><code>initialize-if-needed!</code> takes care to make sure a driver's parent(s) are initialized before initializing a driver.</p>
+<p>   {:database <id>, :query {:source-table <id>}}</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod initialize! :default [_]) ; no-op</pre></td></tr><tr><td class="docs"><p>A nice name for the driver that we'll display to in the admin panel, e.g. "PostgreSQL" for <code>:postgres</code>. Default
-implementation capitializes the name of the driver, e.g. <code>:oracle</code> becomes "Oracle".</p>
+</td><td class="codes"><pre class="brush: clojure">(s/def :actions.args.crud.row.common.query/source-table
+  :actions.args/id)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(s/def :actions.args.crud.row.common/query
+  (s/keys :req-un [:actions.args.crud.row.common.query/source-table]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(s/def :actions.args.crud.row/common
+  (s/merge
+   :actions.args/common
+   (s/keys :req-un [:actions.args.crud.row.common/query])))</pre></td></tr><tr><td class="docs"><p><code>:row/create</code></p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>row/create requires at least</p>
 
-<p>When writing a driver that you plan to ship as a separate, lazy-loading plugin (including core drivers packaged this
-way, like SQLite), you do not need to implement this method; instead, specifiy it in your plugin manifest, and
-<code>lazy-loaded-driver</code> will create an implementation for you. Probably best if we only have one place where we set
-values for this.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti display-name
-  {:added &quot;0.32.0&quot; :arglists '([driver])}
-  dispatch-on-uninitialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod display-name :default [driver]
-  (str/capitalize (name driver)))</pre></td></tr><tr><td class="docs"><p>The contact information for the driver</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti contact-info
-  {:changelog-test/ignore true :added &quot;0.43.0&quot; :arglists '([driver])}
-  dispatch-on-uninitialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod contact-info :default
-  [_]
-  nil)</pre></td></tr><tr><td class="docs"><p>Dispatch on initialized driver, except checks for <code>classname</code>,
-<code>subprotocol</code>, <code>connection-uri</code> in the details map in order to
-prevent a mismatch in spec type vs driver.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn dispatch-on-initialized-driver-safe-keys
-  [driver details-map]
-  (let [invalid-keys #{&quot;classname&quot; &quot;subprotocol&quot; &quot;connection-uri&quot;}
-        ks           (-&gt;&gt; details-map keys
-                          (map name)
-                          (map u/lower-case-en) set)]
-    (when (seq (set/intersection ks invalid-keys))
-      (throw (ex-info &quot;Cannot specify subname, protocol, or connection-uri in details map&quot;
-                      {:invalid-keys (set/intersection ks invalid-keys)})))
-    (dispatch-on-initialized-driver driver)))</pre></td></tr><tr><td class="docs"><p>Check whether we can connect to a <code>Database</code> with <code>details-map</code> and perform a simple query. For example, a SQL
-database might try running a query like <code>SELECT 1;</code>. This function should return truthy if a connection to the DB
-can be made successfully, otherwise it should return falsey or throw an appropriate Exception. Exceptions if a
-connection cannot be made. Throw an <code>ex-info</code> containing a truthy <code>::can-connect-message?</code> in <code>ex-data</code>
-in order to suppress logging expected driver validation messages during setup.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti can-connect?
-  {:added &quot;0.32.0&quot; :arglists '([driver details])}
-  dispatch-on-initialized-driver-safe-keys
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Return a map containing information that describes the version of the DBMS. This typically includes a
-<code>:version</code> containing the (semantic) version of the DBMS as a string and potentially a <code>:flavor</code>
-specifying the flavor like <code>MySQL</code> or <code>MariaDB</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti dbms-version
-  {:changelog-test/ignore true :added &quot;0.46.0&quot; :arglists '([driver database])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Some drivers like BigQuery or Snowflake cannot provide a meaningful stable version.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmethod dbms-version :default
-  [_ _]
-  nil)</pre></td></tr><tr><td class="docs"><p>Return a map containing information that describes all of the tables in a <code>database</code>, an instance of the <code>Database</code>
-model. It is expected that this function will be peformant and avoid draining meaningful resources of the database.
-Results should match the [[metabase.sync.interface/DatabaseMetadata]] schema.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti describe-database
-  {:added &quot;0.32.0&quot; :arglists '([driver database])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Return a map containing a single field <code>:fields</code> that describes the fields in a <code>table</code>. <code>database</code> will be an
-instance of the <code>Database</code> model; and <code>table</code>, an instance of the <code>Table</code> model. It is expected that this function
-will be peformant and avoid draining meaningful resources of the database. The value of <code>:fields</code> should be a set of
-values matching the [[metabase.sync.interface/TableMetadataField]] schema.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti describe-table
-  {:added &quot;0.32.0&quot; :arglists '([driver database table])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Returns a reducible collection of maps, each containing information about fields. It includes which keys are
-primary keys, but not foreign keys. It does not include nested fields (e.g. fields within a JSON column).</p>
+<p>   {:database   <id>
+    :query      {:source-table <id>, :filter <mbql-filter-clause>}
+    :create-row <map>}</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod normalize-action-arg-map :row/create
+  [_action query]
+  (mbql.normalize/normalize-or-throw query))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(s/def :actions.args.crud.row.create/create-row
+  (s/map-of string? any?))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(s/def :actions.args.crud/row.create
+  (s/merge
+   :actions.args.crud.row/common
+   (s/keys :req-un [:actions.args.crud.row.create/create-row])))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod action-arg-map-spec :row/create
+  [_action]
+  :actions.args.crud/row.create)</pre></td></tr><tr><td class="docs"><p><code>:row/update</code></p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>row/update requires at least</p>
 
-<p>Takes keyword arguments to narrow down the results to a set of
-<code>schema-names</code> or <code>table-names</code>.</p>
+<p>   {:database   <id>
+    :query      {:source-table <id>, :filter <mbql-filter-clause>}
+    :update-row <map>}</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod normalize-action-arg-map :row/update
+  [_action query]
+  (mbql.normalize/normalize-or-throw query))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(s/def :actions.args.crud.row.update.query/filter
+  vector?) ; MBQL filter clause</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(s/def :actions.args.crud.row.update/query
+  (s/merge
+   :actions.args.crud.row.common/query
+   (s/keys :req-un [:actions.args.crud.row.update.query/filter])))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(s/def :actions.args.crud.row.update/update-row
+  (s/map-of string? any?))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(s/def :actions.args.crud/row.update
+  (s/merge
+   :actions.args.crud.row/common
+   (s/keys :req-un [:actions.args.crud.row.update/update-row
+                    :actions.args.crud.row.update/query])))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod action-arg-map-spec :row/update
+  [_action]
+  :actions.args.crud/row.update)</pre></td></tr><tr><td class="docs"><p><code>:row/delete</code></p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>row/delete requires at least</p>
 
-<p>Results match [[metabase.sync.interface/FieldMetadataEntry]].
-Results are optionally filtered by <code>schema-names</code> and <code>table-names</code> provided.
-Results are ordered by <code>table-schema</code>, <code>table-name</code>, and <code>database-position</code> in ascending order.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti describe-fields
-  {:added    &quot;0.49.1&quot;
-   :arglists '([driver database &amp; {:keys [schema-names table-names]}])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Returns a set of map containing information about the indexes of a table.
-Currently we only sync single column indexes or the first column of a composite index.
-Results should match the [[metabase.sync.interface/TableIndexMetadata]] schema.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti describe-table-indexes
-  {:added &quot;0.49.0&quot; :arglists '([driver database table])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Returns a reducible collection of maps, each containing information about the indexes of a database.
-Currently we only sync single column indexes or the first column of a composite index. We currently only support
- indexes on unnested fields (i.e., where parent_id is null).</p>
+<p>   {:database <id>
+    :query    {:source-table <id>, :filter <mbql-filter-clause>}}</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod normalize-action-arg-map :row/delete
+  [_action query]
+  (mbql.normalize/normalize-or-throw query))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(s/def :actions.args.crud.row.delete.query/filter
+  vector?) ; MBQL filter clause</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(s/def :actions.args.crud.row.delete/query
+  (s/merge
+   :actions.args.crud.row.common/query
+   (s/keys :req-un [:actions.args.crud.row.delete.query/filter])))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(s/def :actions.args.crud/row.delete
+  (s/merge
+   :actions.args.crud.row/common
+   (s/keys :req-un [:actions.args.crud.row.delete/query])))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod action-arg-map-spec :row/delete
+  [_action]
+  :actions.args.crud/row.delete)</pre></td></tr><tr><td class="docs"><p>Bulk actions</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>All bulk Actions require at least</p>
 
-<p>Takes keyword arguments to narrow down the results to a set of
-<code>schema-names</code> or <code>table-names</code>.</p>
+<p>   {:database <id>, :table-id <id>, :rows [{<key> <value>} ...]}</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(s/def :actions.args.crud.bulk.common/table-id
+  :actions.args/id)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(s/def :actions.args.crud.bulk/rows
+  (s/cat :rows (s/+ (s/map-of string? any?))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(s/def :actions.args.crud.bulk/common
+  (s/merge
+   :actions.args/common
+   (s/keys :req-un [:actions.args.crud.bulk.common/table-id
+                    :actions.args.crud.bulk/rows])))</pre></td></tr><tr><td class="docs"><p>The request bodies for the bulk CRUD actions are all the same. The body of a request to `POST
+/api/action/:action-namespace/:action-name/:table-id` is just a vector of rows but the API endpoint itself calls
+[[perform-action!]] with</p>
 
-<p>Results match [[metabase.sync.interface/FieldIndexMetadata]].
-Results are optionally filtered by <code>schema-names</code> and <code>table-names</code> provided.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti describe-indexes
-  {:added &quot;0.51.4&quot; :arglists '([driver database &amp; {:keys [schema-names table-names]}])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>escaping for when calling <code>.getColumns</code> or <code>.getTables</code> on table names or schema names. Useful for when a database
-driver has difference escaping rules for table or schema names when used from metadata.</p>
+<p>   {:database <database-id>, :table-id <table-id>, :arg <request-body>}</p>
 
-<p>For example, oracle treats slashes differently when querying versus when used with <code>.getTables</code> or <code>.getColumns</code></p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti escape-entity-name-for-metadata
-  {:arglists '([driver entity-name]), :added &quot;0.37.0&quot;}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod escape-entity-name-for-metadata :default [_driver table-name] table-name)</pre></td></tr><tr><td class="docs"><p>Return information about the foreign keys in a <code>table</code>. Required for drivers that support :metadata/key-constraints
-but not :describe-fks. Results should match the [[metabase.sync.interface/FKMetadata]] schema.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti describe-table-fks
-  {:added &quot;0.32.0&quot; :deprecated &quot;0.49.0&quot; :arglists '([driver database table])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(defmethod describe-table-fks ::driver [_ _ _]
-  nil)</pre></td></tr><tr><td class="docs"><p>Returns a reducible collection of maps, each containing information about foreign keys.
-Takes optional keyword arguments to narrow down the results to a set of <code>schema-names</code>
-and <code>table-names</code>.</p>
+<p>and we transform this to</p>
 
-<p>Results match [[metabase.sync.interface/FKMetadataEntry]].
-Results are optionally filtered by <code>schema-names</code> and <code>table-names</code> provided.
-Results are ordered by <code>fk-table-schema</code> and <code>fk-table-name</code> in ascending order.</p>
+<pre><code>{:database &lt;database-id&gt;, :table-id &lt;table-id&gt;, :rows &lt;request-body&gt;}
+</code></pre>
+</td><td class="codes"></td></tr><tr><td class="docs"><p><code>:bulk/create</code>, <code>:bulk/delete</code>, <code>:bulk/update</code> -- these all have the exact same shapes</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- normalize-bulk-crud-action-arg-map
+  [{:keys [database table-id], rows :arg, :as _arg-map}]
+  {:type :query, :query {:source-table table-id}
+   :database database, :table-id table-id, :rows (map #(update-keys % u/qualified-name) rows)})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod normalize-action-arg-map :bulk/create
+  [_action arg-map]
+  (normalize-bulk-crud-action-arg-map arg-map))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod action-arg-map-spec :bulk/create
+  [_action]
+  :actions.args.crud.bulk/common)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod normalize-action-arg-map :bulk/update
+  [_action arg-map]
+  (normalize-bulk-crud-action-arg-map arg-map))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod action-arg-map-spec :bulk/update
+  [_action]
+  :actions.args.crud.bulk/common)</pre></td></tr><tr><td class="docs"><p><code>:bulk/delete</code></p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Request-body should look like:</p>
 
-<p>Required for drivers that support <code>:describe-fks</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti describe-fks
-  {:added &quot;0.49.0&quot; :arglists '([driver database &amp; {:keys [schema-names table-names]}])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod describe-fks ::driver [_ _]
-  nil)</pre></td></tr><tr><td class="docs"><p>this is no longer used but we can leave it around for not for documentation purposes. Maybe we can actually do
-something useful with it like write a test that validates that drivers return correct connection details?</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Return information about the connection properties that should be exposed to the user for databases that will use
-this driver. This information is used to build the UI for editing a Database <code>details</code> map, and for validating it on
-the backend. It should include things like <code>host</code>, <code>port</code>, and other driver-specific parameters. Each property must
-conform to the [[ConnectionDetailsProperty]] schema above.</p>
+<p>   ;; single pk, two rows
+   [{"ID": 76},
+    {"ID": 77}]</p>
 
-<p>There are several definitions for common properties available in the [[metabase.driver.common]] namespace, such as
-<code>default-host-details</code> and <code>default-port-details</code>. Prefer using these if possible.</p>
-
-<p>Like <code>display-name</code>, lazy-loaded drivers should specify this in their plugin manifest; <code>lazy-loaded-driver</code> will
-automatically create an implementation for you.</p>
-</td><td class="codes"><pre class="brush: clojure">#_(def ConnectionDetailsProperty
-    &quot;Schema for a map containing information about a connection property we should ask the user to supply when setting up
-  a new database, as returned by an implementation of `connection-properties`.&quot;
-    (s/constrained
-     {;; The key that should be used to store this property in the `details` map.
-      :name su/NonBlankString
-      ;; Human-readable name that should be displayed to the User in UI for editing this field.
-      :display-name su/NonBlankString
-      ;; Human-readable text that gives context about a field's input.
-      (s/optional-key :helper-text) s/Str
-      ;; Type of this property. Defaults to `:string` if unspecified.
-      ;; `:select` is a `String` in the backend.
-      (s/optional-key :type) (s/enum :string :integer :boolean :password :select :text)
-      ;; A default value for this field if the user hasn't set an explicit value. This is shown in the UI as a
-      ;; placeholder.
-      (s/optional-key :default) s/Any
-      ;; Placeholder value to show in the UI if user hasn't set an explicit value. Similar to `:default`, but this value
-      ;; is *not* saved to `:details` if no explicit value is set. Since `:default` values are also shown as
-      ;; placeholders, you cannot specify both `:default` and `:placeholder`.
-      (s/optional-key :placeholder) s/Any
-      ;; Is this property required? Defaults to `false`.
-      (s/optional-key :required?) s/Bool
-      ;; Any options for `:select` types
-      (s/optional-key :options) {s/Keyword s/Str}}
-     (complement (every-pred #(contains? % :default) #(contains? % :placeholder)))
-     &quot;connection details that does not have both default and placeholder&quot;))
-(defmulti connection-properties
-  {:added &quot;0.32.0&quot; :arglists '([driver])}
-  dispatch-on-uninitialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Execute a native query against that database and return rows that can be reduced using <code>transduce</code>/<code>reduce</code>.</p>
-
-<p>Pass metadata about the columns and the reducible object to <code>respond</code>, which has the signature</p>
-
-<p>  (respond results-metadata rows)</p>
-
-<p>You can use [[metabase.query-processor.reducible/reducible-rows]] to create reducible, streaming results.</p>
-
-<p><code>respond</code> MUST BE CALLED SYNCHRONOUSLY!!!</p>
-
-<p>Example impl:</p>
-
-<p>  (defmethod reducible-query :my-driver
-    [_ query context respond]
-    (with-open [results (run-query! query)]
-      (respond
-       {:cols [{:name "my_col"}]}
-       (qp.reducible/reducible-rows (get-row results) (context/canceled-chan context)))))</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti execute-reducible-query
-  {:added &quot;0.35.0&quot;, :arglists '([driver query context respond])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Optional. Efficiently calculate metadata about the columns that would be returned if we were to run a
-<code>query</code> (hopefully without actually running), for example:</p>
-
-<p>  (query-results-metadata
-   :postgres
-   {:lib/type :mbql/query
-    :stages   [{:lib/type :mbql.stage/native
-                :native   "SELECT * FROM venues WHERE id = ?"
-                :args     [1]}]
-    ...})
-  =>
-  [{:lib/type      :metadata/column
-    :name          "ID"
-    :database-type "BIGINT"
-    :base-type     :type/BigInteger}
-   {:lib/type      :metadata/column
-    :name          "NAME"
-    :database-type "CHARACTER VARYING"
-    :base-type     :type/Text}
-    ...]</p>
-
-<p>Metadata should be returned as a sequence of column maps matching the <code>:metabase.lib.schema.metadata/column</code> shape.</p>
-
-<p>This is needed in certain circumstances such as saving native queries before they have been run; metadata for
-MBQL-only queries can usually be determined by looking at the query itself without any driver involvement.</p>
-
-<p>If this method does need to be invoked, ideally it can calculate this information without actually having to run the
-query in question; it that is not possible, ideally we'd run a faster version of the query with the equivalent of
-<code>LIMIT 0</code> or <code>LIMIT 1</code>.</p>
-
-<p>A naive default implementation of this method lives in [[metabase.query-processor.metadata]] that runs the query in
-question with a <code>LIMIT 1</code> added to it. Drivers that can infer result metadata in a more performant way (i.e.,
-without actually running the query) should implement this method.</p>
-
-<p>The <code>:sql-jdbc</code> parent driver provides a default implementation for JDBC-based drivers
-in [[metabase.driver.sql-jdbc.metadata/query-result-metadata]], so you shouldn't need to implement this yourself if
-your driver derives from <code>:sql-jdbc</code>. For other drivers, please use this implementation as a reference when working
-on your own one.</p>
-
-<p>There is no guarantee that <code>query</code> is already fully compiled from MBQL to the appropriate native query
-language (e.g. SQL), so you should call [[metabase.query-processor.compile/compile]] to get a fully-compiled native
-query.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti query-result-metadata
-  {:added &quot;0.51.0&quot;, :arglists '([driver query])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Set of all features a driver can support.</p>
-</td><td class="codes"><pre class="brush: clojure">(def features
-  #{;; Does this database track and enforce primary key and foreign key constraints in the schema?
-    ;; Is the database capable of reporting columns as PK or FK? (Relevant during sync.)
-    ;;
-    ;; Not to be confused with Metabase's notion of foreign key columns. Those are user definable and power eg.
-    ;; implicit joins.
-    :metadata/key-constraints
-    ;; Does this database support nested fields for any and every field except primary key (e.g. Mongo)?
-    :nested-fields
-    ;; Does this database support nested fields but only for certain field types (e.g. Postgres and JSON / JSONB columns)?
-    :nested-field-columns
-    ;; Does this driver support setting a timezone for the query?
-    :set-timezone
-    ;; Does the driver support *basic* aggregations like `:count` and `:sum`? (Currently, everything besides standard
-    ;; deviation is considered \&quot;basic\&quot;; only GA doesn't support this).
-    ;;
-    ;; DEFAULTS TO TRUE.
-    :basic-aggregations
-    ;; Does this driver support standard deviation and variance aggregations? Note that if variance is not supported
-    ;; directly, you can calculate it manually by taking the square of the standard deviation. See the MongoDB driver
-    ;; for example.
-    :standard-deviation-aggregations
-    ;; Does this driver support expressions (e.g. adding the values of 2 columns together)?
-    :expressions
-    ;; Does this driver support parameter substitution in native queries, where parameter expressions are replaced
-    ;; with a single value? e.g.
-    ;;
-    ;;    SELECT * FROM table WHERE field = {{param}}
-    ;;    -&gt;
-    ;;    SELECT * FROM table WHERE field = 1
-    :native-parameters
-    ;; Does the driver support using expressions inside aggregations? e.g. something like \&quot;sum(x) + count(y)\&quot; or
-    ;; \&quot;avg(x + y)\&quot;
-    :expression-aggregations
-    ;; Does the driver support using a query as the `:source-query` of another MBQL query? Examples are CTEs or
-    ;; subselects in SQL queries.
-    :nested-queries
-    ;; Does this driver support native template tag parameters of type `:card`, e.g. in a native query like
-    ;;
-    ;;    SELECT * FROM {{card}}
-    ;;
-    ;; do we support substituting `{{card}}` with another compiled (nested) query?
-    ;;
-    ;; By default, this is true for drivers that support `:native-parameters` and `:nested-queries`, but drivers can opt
-    ;; out if they do not support Card ID template tag parameters.
-    :native-parameter-card-reference
-    ;; Does the driver support persisting models
-    :persist-models
-    ;; Is persisting enabled?
-    :persist-models-enabled
-    ;; Does the driver support binning as specified by the `binning-strategy` clause?
-    :binning
-    ;; Does this driver not let you specify whether or not our string search filter clauses (`:contains`,
-    ;; `:starts-with`, and `:ends-with`, collectively the equivalent of SQL `LIKE`) are case-senstive or not? This
-    ;; informs whether we should present you with the 'Case Sensitive' checkbox in the UI. At the time of this writing
-    ;; SQLite, SQLServer, and MySQL do not support this -- `LIKE` clauses are always case-insensitive.
-    ;;
-    ;; DEFAULTS TO TRUE.
-    :case-sensitivity-string-filter-options
-    ;; Implicit joins require :left-join (only) to work.
-    :left-join
-    :right-join
-    :inner-join
-    :full-join
-    :regex
-    ;; Does the driver support advanced math expressions such as log, power, ...
-    :advanced-math-expressions
-    ;; Does the driver support percentile calculations (including median)
-    :percentile-aggregations
-    ;; Does the driver support date extraction functions? (i.e get year component of a datetime column)
-    ;; DEFAULTS TO TRUE
-    :temporal-extract
-    ;; Does the driver support doing math with datetime? (i.e Adding 1 year to a datetime column)
-    ;; DEFAULTS TO TRUE
-    :date-arithmetics
-    ;; Does the driver support the :now function
-    :now
-    ;; Does the driver support converting timezone?
-    ;; DEFAULTS TO FALSE
-    :convert-timezone
-    ;; Does the driver support :datetime-diff functions
-    :datetime-diff
-    ;; Does the driver support experimental &quot;writeback&quot; actions like &quot;delete this row&quot; or &quot;insert a new row&quot; from 44+?
-    :actions
-    ;; Does the driver support storing table privileges in the application database for the current user?
-    :table-privileges
-    ;; Does the driver support uploading files
-    :uploads
-    ;; Does the driver support schemas (aka namespaces) for tables
-    ;; DEFAULTS TO TRUE
-    :schemas
-    ;; Does the driver support custom writeback actions. Drivers that support this must
-    ;; implement [[execute-write-query!]]
-    :actions/custom
-    ;; Does changing the JVM timezone allow producing correct results? (See #27876 for details.)
-    :test/jvm-timezone-setting
-    ;; Does the driver support connection impersonation (i.e. overriding the role used for individual queries)?
-    :connection-impersonation
-    ;; Does the driver require specifying the default connection role for connection impersonation to work?
-    :connection-impersonation-requires-role
-    ;; Does the driver require specifying a collection (table) for native queries? (mongo)
-    :native-requires-specified-collection
-    ;; Does the driver support column(s) support storing index info
-    :index-info
-    ;; Does the driver support a faster `sync-fks` step by fetching all FK metadata in a single collection?
-    ;; if so, `metabase.driver/describe-fks` must be implemented instead of `metabase.driver/describe-table-fks`
-    :describe-fks
-    ;; Does the driver support a faster `sync-fields` step by fetching all FK metadata in a single collection?
-    ;; if so, `metabase.driver/describe-fields` must be implemented instead of `metabase.driver/describe-table`
-    :describe-fields
-    ;; Does the driver support a faster `sync-indexes` step by fetching all index metadata in a single collection?
-    ;; If true, `metabase.driver/describe-indexes` must be implemented instead of `metabase.driver/describe-table-indexes`
-    :describe-indexes
-    ;; Does the driver support automatically adding a primary key column to a table for uploads?
-    ;; If so, Metabase will add an auto-incrementing primary key column called `_mb_row_id` for any table created or
-    ;; updated with CSV uploads, and ignore any `_mb_row_id` column in the CSV file.
-    ;; DEFAULTS TO TRUE
-    :upload-with-auto-pk
-    ;; Does the driver support fingerprint the fields. Default is true
-    :fingerprint
-    ;; Does a connection to this driver correspond to a single database (false), or to multiple databases (true)?
-    ;; Default is false; ie. a single database. This is common for classic relational DBs and some cloud databases.
-    ;; Some have access to many databases from one connection; eg. Athena connects to an S3 bucket which might have
-    ;; many databases in it.
-    :connection/multiple-databases
-    ;; Does the driver support identifiers for tables and columns that contain spaces. Defaults to `false`.
-    :identifiers-with-spaces
-    ;; Does this driver support UUID type
-    :uuid-type
-    ;; True if this driver requires `:temporal-unit :default` on all temporal field refs, even if no temporal
-    ;; bucketing was specified in the query.
-    ;; Generally false, but a few time-series based analytics databases (eg. Druid) require it.
-    :temporal/requires-default-unit
-    ;; Does this driver support window functions like cumulative count and cumulative sum? (default: false)
-    :window-functions/cumulative
-    ;; Does this driver support the new `:offset` MBQL clause added in 50? (i.e. SQL `lag` and `lead` or equivalent
-    ;; functions)
-    :window-functions/offset
-    ;; Does this driver support parameterized sql, eg. in prepared statements?
-    :parameterized-sql
-    ;; Whether the driver supports loading dynamic test datasets on each test run. Eg. datasets with names like
-    ;; `checkins:4-per-minute` are created dynamically in each test run. This should be truthy for every driver we test
-    ;; against except for Athena and Databricks which currently require test data to be loaded separately.
-    :test/dynamic-dataset-loading})</pre></td></tr><tr><td class="docs"><p>Does this driver and specific instance of a database support a certain <code>feature</code>?
-(A feature is a keyword, and can be any of the ones listed above in <code>driver-features</code>.
-Note that it's the same set of <code>driver-features</code> with respect to
-both database-supports? and [[supports?]])</p>
-
-<p>Database is guaranteed to be a Database instance.</p>
-
-<p>Most drivers can always return true or always return false for a given feature
-(e.g., :left-join is not supported by any version of Mongo DB).</p>
-
-<p>In some cases, a feature may only be supported by certain versions of the database engine.
-In this case, after implementing <code>[[dbms-version]]</code> for your driver
-you can determine whether a feature is supported for this particular database.</p>
-
-<p>  (database-supports? :mongo :set-timezone mongo-db) ; -> true</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti database-supports?
-  {:arglists '([driver feature database]), :added &quot;0.41.0&quot;}
-  (fn [driver feature _database]
-    ;; only make sure unqualified keywords are explicitly defined in [[features]].
-    (when (simple-keyword? feature)
-      (when-not (features feature)
-        (throw (ex-info (tru &quot;Invalid driver feature: {0}&quot; feature)
-                        {:feature feature}))))
-    [(dispatch-on-initialized-driver driver) feature])
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod database-supports?
-  :default [_driver _feature _] false)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(doseq [[feature supported?] {:convert-timezone                       false
-                              :basic-aggregations                     true
-                              :case-sensitivity-string-filter-options true
-                              :date-arithmetics                       true
-                              :parameterized-sql                      false
-                              :temporal-extract                       true
-                              :schemas                                true
-                              :test/jvm-timezone-setting              true
-                              :fingerprint                            true
-                              :upload-with-auto-pk                    true
-                              :test/dynamic-dataset-loading           true}]
-  (defmethod database-supports? [::driver feature] [_driver _feature _db] supported?))</pre></td></tr><tr><td class="docs"><p>By default a driver supports <code>:native-parameter-card-reference</code> if it supports <code>:native-parameters</code> AND
-<code>:nested-queries</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmethod database-supports? [::driver :native-parameter-card-reference]
-  [driver _feature database]
-  (and (database-supports? driver :native-parameters database)
-       (database-supports? driver :nested-queries database)))</pre></td></tr><tr><td class="docs"><p>Escape a <code>column-or-table-alias</code> string in a way that makes it valid for your database. This method is used for
-existing columns; aggregate functions and other expressions; joined tables; and joined subqueries; be sure to return
-the lowest common denominator amongst if your database has different requirements for different identifier types.</p>
-
-<p>These aliases can be dynamically generated in [[metabase.query-processor.util.add-alias-info]] or elsewhere
-(usually based on underlying table or column names) but can also be specified in the MBQL query itself for explicit
-joins. For <code>:sql</code> drivers, the aliases generated here will be quoted in the resulting SQL.</p>
-
-<p>The default impl of [[escape-alias]] calls [[metabase.driver.impl/truncate-alias]] and truncates the alias
-to [[metabase.driver.impl/default-alias-max-length-bytes]]. You can call this function with a different max length
-if you need to generate shorter aliases.</p>
-
-<p>That method is currently only used drivers that derive from <code>:sql</code> and for drivers that support joins. If your
-driver is/does neither, you do not need to implement this method at this time.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti ^String escape-alias
-  {:added &quot;0.42.0&quot;, :arglists '([driver column-or-table-alias])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defmethod escape-alias ::driver :- :string
-  [_driver alias-name :- :string]
-  (driver.impl/truncate-alias alias-name))</pre></td></tr><tr><td class="docs"><p>Return a humanized (user-facing) version of an connection error message.
-Generic error messages provided in [[metabase.driver.util/connection-error-messages]]; should be returned
-as keywords whenever possible. This provides for both unified error messages and categories which let us point
-users to the erroneous input fields.
-Error messages can also be strings, or localized strings, as returned by [[metabase.util.i18n/trs]] and
-<code>metabase.util.i18n/tru</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti humanize-connection-error-message
-  {:added &quot;0.32.0&quot; :arglists '([this message])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod humanize-connection-error-message ::driver [_ message]
-  message)</pre></td></tr><tr><td class="docs"><p>Transpile an MBQL query into the appropriate native query form. <code>query</code> will match the schema for an MBQL query in
-[[metabase.legacy-mbql.schema/Query]]; this function should return a native query that conforms to that schema.</p>
-
-<p>If the underlying query language supports remarks or comments, the driver should
-use [[metabase.query-processor.util/query->remark]] to generate an appropriate message and include that in an
-appropriate place; alternatively a driver might directly include the query's <code>:info</code> dictionary if the underlying
-language is JSON-based.</p>
-
-<p>The result of this function will be passed directly into calls to [[execute-reducible-query]].</p>
-
-<p>For example, a driver like Postgres would build a valid SQL expression and return a map such as:</p>
-
-<p>  {:query "-- Metabase card: 10 user: 5
-            SELECT * FROM my_table"}</p>
-
-<p>In 0.51.0 and above, drivers should look the value of [[<em>compile-with-inline-parameters</em>]] and output a query with
-all parameters inline when it is truthy.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti mbql-&gt;native
-  {:added &quot;0.32.0&quot;, :arglists '([driver query])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Pretty-format native form presumably coming from compiled query.
-Used eg. in the API endpoint <code>/dataset/native</code>, to present the user with a nicely formatted query.</p>
-
-<h1>How to use and extend this method?</h1>
-
-<p>At the time of writing, this method acts as identity for nosql drivers. However, story with sql drivers is a bit
-different. To extend it for sql drivers, developers could use [[metabase.driver.sql.util/format-sql]]. Function
-in question is implemented in a way, that developers, implemnting this multimethod can:
-- Avoid implementing it completely, if their driver keyword representation corresponds to key in
-  [[metabase.driver.sql.util/dialects]] (eg. <code>:postgres</code>).
-- Ignore implementing it, if it is sufficient to format their drivers native form with dialect corresponding
-  to <code>:standardsql</code>'s value from the dialects map (eg <code>:h2</code>).
-- Use [[metabase.driver.sql.util/format-sql]] in this method's implementation, providing dialect keyword
-  representation that corresponds to to their driver's formatting (eg. <code>:sqlserver</code> uses <code>:tsql</code>).
-- Completly reimplement this method with their special formatting code.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti prettify-native-form
-  {:added &quot;0.47.0&quot;, :arglists '([driver native-form])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod prettify-native-form ::driver
-  [_ native-form]
-  native-form)</pre></td></tr><tr><td class="docs"><p>Whether to compile an MBQL query to native with parameters spliced inline (as opposed to using placeholders like <code>?</code>
-and passing the parameters separately.) Normally we want to pass parameters separately to protect against SQL
-injection and whatnot, but when converting an MBQL query to SQL it's nicer for people to see</p>
-
-<p>  WHERE bird_type = 'cockatiel'</p>
-
-<p>instead of</p>
-
-<p>  WHERE bird_type = ?</p>
-
-<p>so we bind this to <code>true</code>.</p>
-
-<p>Drivers that have some notion of parameterized queries (e.g. <code>:sql-jdbc</code>-based drivers) should look at the value of
-this dynamic variable in their implementation of [[metabase.driver/mbql->native]] and adjust query compilation
-behavior accordingly.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic ^{:added &quot;0.51.0&quot;} *compile-with-inline-parameters*
-  false)</pre></td></tr><tr><td class="docs"><p>Deprecated and unused in 0.51.0+; multimethod declaration left here so drivers implementing it can still compile
-until we remove this method completely in 0.54.0 or later.</p>
-
-<p>Instead of implementing this method, you should instead look at the value
-of [[metabase.driver/<em>compile-with-inline-parameters</em>]] in your implementation of [[metabase.driver/mbql->native]]
-and adjust behavior accordingly.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti splice-parameters-into-native-query
-  {:added &quot;0.32.0&quot;, :arglists '([driver inner-query]), :deprecated &quot;0.51.0&quot;}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(defmethod splice-parameters-into-native-query ::driver
-  [_driver _query]
-  (throw (ex-info (str &quot;metabase.driver/splice-parameters-into-native-query is deprecated, bind&quot;
-                       &quot; metabase.driver/*compile-with-inline-parameters* during query compilation instead.&quot;)
-                  {:type ::qp.error-type/driver})))</pre></td></tr><tr><td class="docs"><p>Notify the driver that the attributes of a <code>database</code> have changed, or that `database was deleted. This is
-specifically relevant in the event that the driver was doing some caching or connection pooling; the driver should
-release ALL related resources when this is called.</p>
-
-<p>TODO -- shouldn't this be called <code>notify-database-updated!</code>, since the expectation is that it is done for side
-effects? issue: https://github.com/metabase/metabase/issues/39367</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti notify-database-updated
-  {:added &quot;0.32.0&quot; :arglists '([driver database])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod notify-database-updated ::driver [_ _]
-  nil) ; no-op</pre></td></tr><tr><td class="docs"><p>Drivers may provide this function if they need to do special setup before a sync operation such as
-<code>sync-database!</code>. The sync operation itself is encapsulated as the lambda <code>f</code>, which must be called with no arguments.</p>
-
-<p>  (defn sync-in-context [driver database f]
-    (with-connection [_ database]
-      (f)))</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti sync-in-context
-  {:added &quot;0.32.0&quot;, :arglists '([driver database f])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod sync-in-context ::driver [_ _ f] (f))</pre></td></tr><tr><td class="docs"><p>Return a sequence of <em>all</em> the rows in a given <code>table</code>, which is guaranteed to have at least <code>:name</code> and <code>:schema</code>
-keys. (It is guaranteed to satisfy the <code>DatabaseMetadataTable</code> schema in <code>metabase.sync.interface</code>.) Currently, this
-is only used for iterating over the values in a <code>_metabase_metadata</code> table. As such, the results are not expected to
-be returned lazily. There is no expectation that the results be returned in any given order.</p>
-
-<p>This method is currently only used by the H2 driver to load the Sample Database, so it is not neccesary for any other
-drivers to implement it at this time.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti table-rows-seq
-  {:added &quot;0.32.0&quot; :arglists '([driver database table])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Return the <em>system</em> timezone ID name of this database, i.e. the timezone that local dates/times/datetimes are
-considered to be in by default. Ideally, this method should return a timezone ID like <code>America/Los_Angeles</code>, but an
-offset formatted like <code>-08:00</code> is acceptable in cases where the actual ID cannot be provided.</p>
-
-<p>This is currently used only when syncing the
-Database (see [[metabase.sync.sync-metadata.sync-timezone/sync-timezone!]]) -- the result of this method is stored
-in the <code>timezone</code> column of Database.</p>
-
-<p><em>In theory</em> this method should probably not return <code>nil</code>, since every Database presumably assumes some timezone for
-LocalDate(Time)s types, but <em>in practice</em> implementations of this method return <code>nil</code> for some drivers. For example
-the default implementation for <code>:sql-jdbc</code> returns <code>nil</code> unless the driver in question
-implements [[metabase.driver.sql-jdbc.sync/db-default-timezone]]; the <code>:h2</code> driver does not for example. Why is
-this? Who knows, but it's something you should keep in mind.</p>
-
-<p>This method should return a [[String]], a [[java.time.ZoneId]], or a [[java.time.ZoneOffset]].</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti db-default-timezone
-  {:added &quot;0.34.0&quot;, :arglists '([driver database])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod db-default-timezone ::driver
-  [_driver _database]
-  nil)</pre></td></tr><tr><td class="docs"><p>For drivers that support <code>:native-parameters</code>. Substitute parameters in a normalized 'inner' native query.</p>
-
-<p>  {:query "SELECT count(*) FROM table WHERE id = {{param}}"
-   :template-tags {:param {:name "param", :display-name "Param", :type :number}}
-   :parameters    [{:type   :number
-                    :target [:variable [:template-tag "param"]]
-                    :value  2}]}
-  ->
-  {:query "SELECT count(*) FROM table WHERE id = 2"}</p>
-
-<p>Much of the implementation for this method is shared across drivers and lives in the
-<code>metabase.driver.common.parameters.*</code> namespaces. See the <code>:sql</code> and <code>:mongo</code> drivers for sample implementations of
-this method.`Driver-agnostic end-to-end native parameter tests live in
-[[metabase.query-processor-test.parameters-test]] and other namespaces.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti substitute-native-parameters
-  {:added &quot;0.34.0&quot; :arglists '([driver inner-query])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Return how fields should be sorted by default for this database.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti default-field-order
-  {:added &quot;0.36.0&quot; :arglists '([driver])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod default-field-order ::driver [_] :database)</pre></td></tr><tr><td class="docs"><p>Return the day that is considered to be the start of week by <code>driver</code>. Should return a keyword such as <code>:sunday</code>.</p>
-
-<p>TODO -- this can vary based on session variables or connection options
-Issue: https://github.com/metabase/metabase/pull/39386</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti db-start-of-week
-  {:added &quot;0.37.0&quot; :arglists '([driver])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>A multimethod for driver-specific behavior required to incorporate details for an opened SSH tunnel into the DB
-details. In most cases, this will simply involve updating the :host and :port (to point to the tunnel entry point,
-instead of the backing database server), but some drivers may have more specific behavior.</p>
-
-<p>WARNING! Implementations of this method may create new SSH tunnels, which need to be cleaned up. DO NOT USE THIS
-METHOD DIRECTLY UNLESS YOU ARE GOING TO BE CLEANING UP ANY CREATED TUNNELS! Instead, you probably want to
-use [[metabase.util.ssh/with-ssh-tunnel]]. See #24445 for more information.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti incorporate-ssh-tunnel-details
-  {:added &quot;0.39.0&quot; :arglists '([driver db-details])}
-  dispatch-on-uninitialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>A multimethod for driver specific behavior required to incorporate response of an auth-provider into the DB details.
- In most cases this means setting the :password and/or :username based on the auth-provider and its response.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti incorporate-auth-provider-details
-  {:added &quot;0.50.17&quot; :arglists '([driver auth-provider auth-provider-response details])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod incorporate-auth-provider-details :default
-  [_driver _auth-provider _auth-provider-response details]
-  details)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod incorporate-auth-provider-details :sql-jdbc
-  [_driver auth-provider auth-provider-response details]
-  (case auth-provider
-    (:oauth :azure-managed-identity)
-    (let [{:keys [access_token expires_in]} auth-provider-response]
-      (cond-&gt; (assoc details :password access_token)
-        expires_in (assoc :password-expiry-timestamp (+ (System/currentTimeMillis)
-                                                        (* (- (parse-long expires_in)
-                                                              auth-provider/azure-auth-token-renew-slack-seconds)
-                                                           1000)))))
-
-    (merge details auth-provider-response)))</pre></td></tr><tr><td class="docs"><p>Normalizes db-details for the given driver. This is to handle migrations that are too difficult to perform via
-regular Liquibase queries. This multimethod will be called from a <code>:post-select</code> handler within the database model.
-The full <code>database</code> model object is passed as the 2nd parameter, and the multimethod implementation is expected to
-update the value for <code>:details</code>. The default implementation is essentially <code>identity</code> (i.e returns <code>database</code>
-unchanged). This multimethod will only be called if <code>:details</code> is actually present in the <code>database</code> map.</p>
-
-<p>TODO:</p>
-
-<ol>
-<li>We definitely should not be asking drivers to "update the value for <code>:details</code>". Drivers shouldn't touch the
-application database.</li>
-<li>Something that is done for side effects like updating the application DB NEEDS TO END IN AN EXCLAMATION MARK!
-Issue: https://github.com/metabase/metabase/issues/39392</li>
-</ol>
-</td><td class="codes"><pre class="brush: clojure">(defmulti normalize-db-details
-  {:added &quot;0.41.0&quot; :arglists '([driver database])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod normalize-db-details ::driver
-  [_ database]
-  ;; no normalization by default
-  database)</pre></td></tr><tr><td class="docs"><p>Returns the driver that supersedes the given <code>driver</code>.  A non-nil return value means that the given <code>driver</code> is
-deprecated in Metabase and will eventually be replaced by the returned driver, in some future version (at which point
-any databases using it will be migrated to the new one).</p>
-
-<p>This is currently only used on the frontend for the purpose of showing/hiding deprecated drivers. A driver can make
-use of this facility by adding a top-level <code>superseded-by</code> key to its plugin manifest YAML file, or (less preferred)
-overriding this multimethod directly.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti superseded-by
-  {:added &quot;0.41.0&quot; :arglists '([driver])}
-  dispatch-on-uninitialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod superseded-by :default
-  [_]
-  nil)</pre></td></tr><tr><td class="docs"><p>Execute a writeback query e.g. one powering a custom <code>QueryAction</code> (see [[metabase.models.action]]).
-Drivers that support <code>:actions/custom</code> must implement this method.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti execute-write-query!
-  {:changelog-test/ignore true, :added &quot;0.44.0&quot;, :arglists '([driver query])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Processes a sample of rows produced by <code>driver</code>, from the <code>table</code>'s <code>fields</code>
-using the query result processing function <code>rff</code>.
-The default implementation defined in [[metabase.db.metadata-queries]] runs a
-row sampling MBQL query using the regular query processor to produce the
-sample rows. This is good enough in most cases so this multimethod should not
-be implemented unless really necessary.
-<code>opts</code> is a map that may contain additional parameters:
-<code>:truncation-size</code>: size to truncate text fields to if the driver supports
-expressions.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti table-rows-sample
-  {:arglists '([driver table fields rff opts]), :added &quot;0.46.0&quot;}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Sets the database role used on a connection. Called prior to query execution for drivers that support connection
-impersonation (an EE-only feature).</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti set-role!
-  {:added &quot;0.47.0&quot; :arglists '([driver conn role])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
-|                                                    Upload                                                      |
-+----------------------------------------------------------------------------------------------------------------+</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>The number of rows to insert at a time when uploading data to a database. This can be bound for testing purposes.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *insert-chunk-rows*
-  nil)</pre></td></tr><tr><td class="docs"><p>Return the maximum number of bytes allowed in a table name, or <code>nil</code> if there is no limit.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti table-name-length-limit
-  {:changelog-test/ignore true, :added &quot;0.47.0&quot;, :arglists '([driver])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Return the maximum number of bytes allowed in a column name, or <code>nil</code> if there is no limit.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti column-name-length-limit
-  {:changelog-test/ignore true, :added &quot;0.49.19&quot;, :arglists '([driver])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod column-name-length-limit :default [driver]
-  ;; For most databases, the same limit is used for all identifier types.
-  (table-name-length-limit driver))</pre></td></tr><tr><td class="docs"><p>Create a table named <code>table-name</code>. If the table already exists it will throw an error.
-<code>args</code> is an optional map with an optional entry <code>primary-key</code>. The <code>primary-key</code> value is a vector of column names
-that make up the primary key.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti create-table!
-  {:added &quot;0.47.0&quot;, :arglists '([driver database-id table-name column-definitions &amp; args])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Drop a table named <code>table-name</code>. If the table doesn't exist it will not be dropped. <code>table-name</code> may be qualified
-by schema e.g.</p>
-
-<p>  schema.table</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti drop-table!
-  {:added &quot;0.47.0&quot;, :arglists '([driver db-id ^String table-name])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Delete the current contents of <code>table-name</code>.
-If something like a SQL TRUNCATE statement is supported, we use that, but may otherwise fall back to explicitly
-deleting rows, or dropping and recreating the table.
-Depending on the driver, the semantics can vary on whether triggers are fired, AUTO_INCREMENT is reset etc.
-The application assumes that the implementation can be rolled back if inside a transaction.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti truncate!
-  {:added &quot;0.50.0&quot;, :arglists '([driver db-id table-name])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Insert <code>values</code> into a table named <code>table-name</code>. <code>values</code> is a lazy sequence of rows, where each row's order matches
- <code>column-names</code>.</p>
-
-<p>The types in <code>values</code> may include:
-- java.lang.String
-- java.lang.Double
-- java.math.BigInteger
-- java.lang.Boolean
-- java.time.LocalDate
-- java.time.LocalDateTime
-- java.time.OffsetDateTime</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti insert-into!
-  {:added &quot;0.47.0&quot;, :arglists '([driver db-id table-name column-names values])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Add columns given by <code>column-definitions</code> to a table named <code>table-name</code>. If the table doesn't exist it will throw an error.
-<code>args</code> is an optional map with an optional key <code>primary-key</code>. The <code>primary-key</code> value is a vector of column names
-that make up the primary key. Currently only a single primary key is supported.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti add-columns!
-  {:added &quot;0.49.0&quot;, :arglists '([driver db-id table-name column-definitions &amp; args])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Alter columns given by <code>column-definitions</code> to a table named <code>table-name</code>. If the table doesn't exist it will throw an error.
-Currently we do not currently support changing the the primary key, or take any guidance on how to coerce values.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti alter-columns!
-  {:added &quot;0.49.0&quot;, :arglists '([driver db-id table-name column-definitions])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Returns the set of syncable schemas in the database (as strings).</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti syncable-schemas
-  {:added &quot;0.47.0&quot;, :arglists '([driver database])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod syncable-schemas ::driver [_ _] #{})</pre></td></tr><tr><td class="docs"><p>Returns the database type for a given <code>metabase.upload</code> type as a HoneySQL spec. This will be a vector, which allows
-for additional options. Sample values:</p>
-
-<ul>
-<li>[:bigint]</li>
-<li>[[:varchar 255]]</li>
-<li>[:generated-always :as :identity]</li>
-</ul>
-</td><td class="codes"><pre class="brush: clojure">(defmulti upload-type-&gt;database-type
-  {:changelog-test/ignore true, :added &quot;0.47.0&quot;, :arglists '([driver upload-type])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Returns true if the driver should create an auto-incrementing primary key column when appending CSV data to an existing
-upload table. This is because we want to add auto-pk columns for drivers that supported uploads before auto-pk columns
-were introduced by metabase#36249. It should return false if the driver supported the uploads feature in version 48 or later.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti create-auto-pk-with-append-csv?
-  {:added &quot;0.49.0&quot; :arglists '([driver])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod create-auto-pk-with-append-csv? ::driver [_] false)</pre></td></tr><tr><td class="docs"><p>Returns the rows of data as arrays needed to populate the table_privileges table
- with the DB connection's current user privileges.
- The data contains the privileges that the user has on the given <code>database</code>.
- The privileges include select, insert, update, and delete.</p>
-
-<p> The rows have the following keys and value types:
-   - role            :- [:maybe :string]
-   - schema          :- [:maybe :string]
-   - table           :- :string
-   - select          :- :boolean
-   - update          :- :boolean
-   - insert          :- :boolean
-   - delete          :- :boolean</p>
-
-<p> Either:
- (1) role is null, corresponding to the privileges of the DB connection's current user
- (2) role is not null, corresponding to the privileges of the role</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti current-user-table-privileges
-  {:added &quot;0.48.0&quot;, :arglists '([driver database &amp; args])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+<p>   ;; multiple pks, one row
+   [{"PK1": 1, "PK2": "john"}]</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod normalize-action-arg-map :bulk/delete
+  [_action arg-map]
+  (normalize-bulk-crud-action-arg-map arg-map))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod action-arg-map-spec :bulk/delete
+  [_action]
+  :actions.args.crud.bulk/common)</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
