@@ -2865,274 +2865,288 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.xrays.automagic-dashboards.comparison" name="metabase.xrays.automagic-dashboards.comparison"><h1 class="project-name">metabase.xrays.automagic-dashboards.comparison</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.xrays.automagic-dashboards.comparison
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.xrays.related" name="metabase.xrays.related"><h1 class="project-name">metabase.xrays.related</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Related entities recommendations.</p>
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.xrays.related
   (:require
+   [clojure.set :as set]
    [medley.core :as m]
    [metabase.api.common :as api]
    [metabase.legacy-mbql.normalize :as mbql.normalize]
+   [metabase.legacy-mbql.util :as mbql.u]
    [metabase.models.interface :as mi]
    [metabase.query-processor.util :as qp.util]
-   [metabase.util :as u]
-   [metabase.util.i18n :refer [tru]]
-   [metabase.xrays.automagic-dashboards.core
-    :refer [-&gt;related-entity
-            -&gt;root
-            automagic-analysis
-            capitalize-first]]
-   [metabase.xrays.automagic-dashboards.filters :as filters]
-   [metabase.xrays.automagic-dashboards.names :as names]
-   [metabase.xrays.automagic-dashboards.populate :as populate]
-   [metabase.xrays.automagic-dashboards.util :as magic.util]
-   [metabase.xrays.related :as related]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([root])} comparison-name
-  (comp capitalize-first (some-fn :comparison-name :full-name)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- dashboard-&gt;cards
-  [dashboard]
-  (-&gt;&gt; dashboard
-       :dashcards
-       (map (fn [{:keys [size_y card col row series] :as dashcard}]
-              (assoc card
-                     :text     (-&gt; dashcard :visualization_settings :text)
-                     :series   series
-                     :height   size_y
-                     :position (+ (* row populate/grid-width) col))))
-       (sort-by :position)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- clone-card
+   [metabase.util.malli.registry :as mr]
+   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^Long max-best-matches        3)
+(def ^:private ^Long max-serendipity-matches 2)
+(def ^:private ^Long max-matches             (+ max-best-matches
+                                                max-serendipity-matches))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ContextBearingForm
+  [:cat
+   [:and
+    [:or :string :keyword]
+    [:fn
+     {:error/message &quot;field, metric, or segment&quot;}
+     (comp #{:field :metric :segment}
+           qp.util/normalize-token)]]
+   [:* :any]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- strip-idents [clause]
+  (cond-&gt; clause
+    (mbql.u/is-clause? :field clause) (update 2 dissoc :ident)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- collect-context-bearing-forms
+  [form]
+  (let [form (mbql.normalize/normalize-fragment [:query :filter] form)]
+    (into #{}
+          (comp (filter (mr/validator ContextBearingForm))
+                (map #(update % 0 qp.util/normalize-token))
+                (map strip-idents))
+          (tree-seq sequential? identity form))))</pre></td></tr><tr><td class="docs"><p>Return the relevant parts of a given entity's definition. Relevant parts are those that carry semantic meaning, and
+especially context-bearing forms.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmulti definition
+  {:arglists '([instance])}
+  mi/model)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod definition :model/LegacyMetric
+  [metric]
+  (-&gt; metric :definition ((juxt :aggregation :filter))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod definition :model/Card
   [card]
   (-&gt; card
-      (select-keys [:dataset_query :description :display :name :result_metadata
-                    :visualization_settings])
-      (assoc :creator_id    api/*current-user-id*
-             :collection_id nil
-             :id            (gensym))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([card])} display-type
-  (comp qp.util/normalize-token :display))</pre></td></tr><tr><td class="docs"><p>Add <code>new-filter-clauses</code> to a query. There is actually an <code>mbql.u/add-filter-clause</code> function we should be using
-instead, but that validates its input and output, and the queries that come in here aren't always valid (for
-example, missing <code>:database</code>). If we can, it would be nice to use that instead of reinventing the wheel here.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- add-filter-clauses
-  [{{existing-filter-clause :filter} :query, :as query}, new-filter-clauses]
-  (let [clauses           (filter identity (cons existing-filter-clause new-filter-clauses))
-        new-filter-clause (when (seq clauses)
-                            (mbql.normalize/normalize-fragment [:query :filter] (cons :and clauses)))]
-    (cond-&gt; query
-      (seq new-filter-clause) (assoc-in [:query :filter] new-filter-clause))))</pre></td></tr><tr><td class="docs"><p>Inject filter clause into card.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- inject-filter
-  [{:keys [query-filter cell-query] :as root} card]
-  (-&gt; card
-      (update :dataset_query #(add-filter-clauses % [query-filter cell-query]))
-      (update :series (partial map (partial inject-filter root)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- multiseries?
-  [card]
-  (or (-&gt; card :series not-empty)
-      (-&gt; card (get-in [:dataset_query :query :aggregation]) count (&gt; 1))
-      (-&gt; card (get-in [:dataset_query :query :breakout]) count (&gt; 1))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- overlay-comparison?
-  [card]
-  (and (-&gt; card display-type (#{:bar :line}))
-       (not (multiseries? card))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- comparison-row
-  [dashboard row left right card]
-  (if (:display card)
-    (let [height                   (:height card)
-          card-left                (-&gt;&gt; card (inject-filter left) clone-card)
-          card-right               (-&gt;&gt; card (inject-filter right) clone-card)
-          [color-left color-right] (-&gt;&gt; [left right]
-                                        (map #(get-in % [:dataset_query :query :filter]))
-                                        populate/map-to-colors)]
-      (if (overlay-comparison? card)
-        (let [card   (-&gt; card-left
-                         (assoc-in [:visualization_settings :graph.colors] [color-left color-right])
-                         (update :name #(format &quot;%s (%s)&quot; % (comparison-name left))))
-              series (-&gt; card-right
-                         (update :name #(format &quot;%s (%s)&quot; % (comparison-name right)))
-                         vector)]
-          (update dashboard :dashcards conj (merge (populate/card-defaults)
-                                                   {:col                    0
-                                                    :row                    row
-                                                    :size_x                 populate/grid-width
-                                                    :size_y                 height
-                                                    :card                   card
-                                                    :card_id                (:id card)
-                                                    :series                 series
-                                                    :visualization_settings {:graph.y_axis.auto_split false
-                                                                             :graph.series_labels     [(:name card) (:name (first series))]}})))
-        (let [width        (/ populate/grid-width 2)
-              series-left  (map clone-card (:series card-left))
-              series-right (map clone-card (:series card-right))
-              card-left    (cond-&gt; card-left
-                             (not (multiseries? card-left))
-                             (assoc-in [:visualization_settings :graph.colors] [color-left]))
-              card-right   (cond-&gt; card-right
-                             (not (multiseries? card-right))
-                             (assoc-in [:visualization_settings :graph.colors] [color-right]))]
-          (-&gt; dashboard
-              (update :dashcards conj (merge (populate/card-defaults)
-                                             {:col                    0
-                                              :row                    row
-                                              :size_x                 width
-                                              :size_y                 height
-                                              :card                   card-left
-                                              :card_id                (:id card-left)
-                                              :series                 series-left
-                                              :visualization_settings {}}))
-              (update :dashcards conj (merge (populate/card-defaults)
-                                             {:col                    width
-                                              :row                    row
-                                              :size_x                 width
-                                              :size_y                 height
-                                              :card                   card-right
-                                              :card_id                (:id card-right)
-                                              :series                 series-right
-                                              :visualization_settings {}}))))))
-    (populate/add-text-card dashboard {:text                   (:text card)
-                                       :width                  (/ populate/grid-width 2)
-                                       :height                 (:height card)
-                                       :visualization-settings {:dashcard.background false
-                                                                :text.align_vertical :bottom}}
-                            [row 0])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^Long ^:const title-height 2)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- add-col-title
-  [dashboard title description col]
-  (let [height (cond-&gt; title-height
-                 description inc)]
-    [(populate/add-text-card dashboard
-                             {:text                   (if description
-                                                        (format &quot;# %s\n\n%s&quot; title description)
-                                                        (format &quot;# %s&quot; title))
-                              :width                  (/ populate/grid-width 2)
-                              :height                 height
-                              :visualization-settings {:dashcard.background false
-                                                       :text.align_vertical :top}}
-                             [0 col])
-     height]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- add-title-row
-  [dashboard left right]
-  (let [[dashboard height-left]  (add-col-title dashboard
-                                                (comparison-name left)
-                                                (-&gt; left :entity :description) 0)
-        [dashboard height-right] (add-col-title dashboard
-                                                (comparison-name right)
-                                                (-&gt; right :entity :description)
-                                                (/ populate/grid-width 2))]
-    [dashboard (max height-left height-right)]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- series-labels
-  [card]
-  (get-in card [:visualization_settings :graph.series_labels]
-          (map (comp capitalize-first names/metric-name)
-               (get-in card [:dataset_query :query :aggregation]))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- unroll-multiseries
-  [card]
-  (if (and (multiseries? card)
-           (-&gt; card :display (= :line)))
-    (for [[aggregation label] (map vector
-                                   (get-in card [:dataset_query :query :aggregation])
-                                   (series-labels card))]
-      (-&gt; card
-          (assoc-in [:dataset_query :query :aggregation] [aggregation])
-          (assoc :name label)
-          (m/dissoc-in [:visualization_settings :graph.series_labels])))
-    [card]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- segment-constituents
+      :dataset_query
+      :query
+      ((juxt :breakout :aggregation :expressions :fields))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod definition :model/Segment
   [segment]
-  (-&gt;&gt; (filters/inject-refinement (:query-filter segment) (:cell-query segment))
-       magic.util/collect-field-references
-       (map magic.util/field-reference-&gt;id)
+  (-&gt; segment :definition :filter))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod definition :model/Field
+  [field]
+  [[:field-id (:id field)]])</pre></td></tr><tr><td class="docs"><p>How similar are entities <code>a</code> and <code>b</code> based on a structural comparison of their
+ definition (MBQL).
+ For the purposes of finding related entites we are only interested in
+ context-bearing subforms (field, segment, and metric references). We also
+ don't care about generalizations (less context-bearing forms) and refinements
+ (more context-bearing forms), so we just check if the less specifc form is a
+ subset of the more specific one.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- similarity
+  [a b]
+  (let [context-a (-&gt; a definition collect-context-bearing-forms)
+        context-b (-&gt; b definition collect-context-bearing-forms)
+        overlap (set/intersection context-a context-b)
+        min-overlap (min (count context-a) (count context-b))]
+    (/ (count overlap)
+       (max min-overlap 1))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- rank-by-similarity
+  [reference entities]
+  (-&gt;&gt; entities
+       (remove #{reference})
+       (map #(assoc % :similarity (similarity reference %)))
+       (sort-by :similarity &gt;)))</pre></td></tr><tr><td class="docs"><p>Create an interesting mix of matches. The idea is to have a balanced mix
+ between close (best) matches and more diverse matches to cover a wider field
+ of intents.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- interesting-mix
+  [matches]
+  (let [[best rest] (split-at max-best-matches matches)]
+    (concat best (-&gt;&gt; rest shuffle (take max-serendipity-matches)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([instances])} filter-visible
+  (partial filter (fn [{:keys [archived visibility_type active] :as instance}]
+                    (and (some? instance)
+                         (or (nil? visibility_type)
+                             (= (qp.util/normalize-token visibility_type) :normal))
+                         (not archived)
+                         (not= active false)
+                         (mi/can-read? instance)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- metrics-for-table
+  [table]
+  (filter-visible (t2/select :model/Card
+                             :table_id (:id table)
+                             :type :metric
+                             :archived false)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- legacy-metrics-for-table
+  [table]
+  (filter-visible (t2/select :model/LegacyMetric
+                             :table_id (:id table)
+                             :archived false)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- segments-for-table
+  [table]
+  (filter-visible (t2/select :model/Segment
+                             :table_id (:id table)
+                             :archived false)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- linking-to
+  [table]
+  (-&gt;&gt; (t2/select-fn-set :fk_target_field_id :model/Field
+                         :table_id           (:id table)
+                         :fk_target_field_id [:not= nil]
+                         :active             true)
+       (map (comp (partial t2/select-one :model/Table :id)
+                  :table_id
+                  (partial t2/select-one :model/Field :id)))
        distinct
-       (map (partial magic.util/-&gt;field segment))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- update-related
-  [related left right]
-  (-&gt; related
-      (update :related (comp distinct conj) (-&gt; right :entity -&gt;related-entity))
-      (assoc :compare (concat
-                       (for [segment (-&gt;&gt; left :entity related/related :segments (map -&gt;root))
-                             :when (not= segment right)]
-                         {:url         (str (:url left) &quot;/compare/segment/&quot;
-                                            (-&gt; segment :entity u/the-id))
-                          :title       (tru &quot;Compare with {0}&quot; (:comparison-name segment))
-                          :description })
-                       (when (and ((some-fn :query-filter :cell-query) left)
-                                  (not= (:source left) (:entity right)))
-                         [{:url         (if (-&gt;&gt; left :source (mi/instance-of? :model/Table))
-                                          (str (:url left) &quot;/compare/table/&quot;
-                                               (-&gt; left :source u/the-id))
-                                          (str (:url left) &quot;/compare/adhoc/&quot;
-                                               (magic.util/encode-base64-json
-                                                {:database (:database left)
-                                                 :type     :query
-                                                 :query    {:source-table (-&gt;&gt; left
-                                                                               :source
-                                                                               u/the-id
-                                                                               (str &quot;card__&quot;))}})))
-                           :title       (tru &quot;Compare with entire dataset&quot;)
-                           :description }])))
-      (as-&gt; related
-            (if (-&gt; related :compare empty?)
-              (dissoc related :compare)
-              related))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- part-vs-whole-comparison?
-  [left right]
-  (and ((some-fn :cell-query :query-filter) left)
-       (not ((some-fn :cell-query :query-filter) right))))</pre></td></tr><tr><td class="docs"><p>Create a comparison dashboard based on dashboard <code>dashboard</code> comparing subsets of
- the dataset defined by segments <code>left</code> and <code>right</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn comparison-dashboard
-  [dashboard left right opts]
-  (let [left               (-&gt; left
-                               -&gt;root
-                               (merge (:left opts)))
-        right              (-&gt; right
-                               -&gt;root
-                               (merge (:right opts)))
-        left               (cond-&gt; left
-                             (-&gt; opts :left :cell-query)
-                             (assoc :comparison-name (-&gt;&gt; opts
-                                                          :left
-                                                          :cell-query
-                                                          (names/cell-title left))))
-        right              (cond-&gt; right
-                             (part-vs-whole-comparison? left right)
-                             (assoc :comparison-name (condp mi/instance-of? (:entity right)
-                                                       :model/Table
-                                                       (tru &quot;All {0}&quot; (:short-name right))
-                                                       (tru &quot;{0}, all {1}&quot;
-                                                            (comparison-name right)
-                                                            (names/source-name right)))))
-        segment-dashboards (-&gt;&gt; (concat (segment-constituents left)
-                                        (segment-constituents right))
-                                distinct
-                                (map #(automagic-analysis % {:source       (:source left)
-                                                             :rules-prefix [&quot;comparison&quot;]})))]
-    (assert (or (= (:source left) (:source right))
-                (= (-&gt; left :source :table_id) (-&gt; right :source u/the-id))))
-    (-&gt;&gt; (concat segment-dashboards [dashboard])
-         (reduce (fn [dashboard-1 dashboard-2]
-                   (if dashboard-1
-                     (populate/merge-dashboards dashboard-1 dashboard-2 {:skip-titles? true})
-                     dashboard-2))
-                 nil)
-         dashboard-&gt;cards
-         (m/distinct-by (some-fn :dataset_query hash))
-         (transduce (mapcat unroll-multiseries)
-                    (fn
-                      ([]
-                       (let [title (tru &quot;Comparison of {0} and {1}&quot;
-                                        (comparison-name left)
-                                        (comparison-name right))]
-                         (-&gt; {:name              title
-                              :transient_name    title
-                              :transient_filters nil
-                              :param_fields      nil
-                              :description       (tru &quot;Automatically generated comparison dashboard comparing {0} and {1}&quot;
-                                                      (comparison-name left)
-                                                      (comparison-name right))
-                              :creator_id        api/*current-user-id*
-                              :parameters        []
-                              :related           (update-related (:related dashboard) left right)}
-                             (add-title-row left right))))
-                      ([[dashboard _row]] dashboard)
-                      ([[dashboard row] card]
-                       [(comparison-row dashboard row left right card)
-                        (+ row (:height card))]))))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+       filter-visible
+       (take max-matches)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- linked-from
+  [table]
+  (if-let [fields (not-empty (t2/select-fn-set :id :model/Field
+                                               :table_id (:id table)
+                                               :active   true))]
+    (-&gt;&gt; (t2/select-fn-set :table_id :model/Field
+                           :fk_target_field_id [:in fields]
+                           :active             true)
+         (map (partial t2/select-one :model/Table :id))
+         filter-visible
+         (take max-matches))
+    []))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- cards-sharing-dashboard
+  [card]
+  (if-let [dashboards (not-empty (t2/select-fn-set :dashboard_id :model/DashboardCard
+                                                   :card_id (:id card)))]
+    (-&gt;&gt; (t2/select-fn-set :card_id :model/DashboardCard
+                           :dashboard_id [:in dashboards]
+                           :card_id      [:not= (:id card)])
+         (map (partial t2/select-one :model/Card :id))
+         filter-visible
+         (take max-matches))
+    []))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- similar-questions
+  [card]
+  (-&gt;&gt; (t2/select :model/Card
+                  :table_id (:table_id card)
+                  :type [:in [:model :question]]
+                  :archived false)
+       filter-visible
+       (rank-by-similarity card)
+       (filter (comp pos? :similarity))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- similar-metrics
+  [card]
+  (-&gt;&gt; (t2/select :model/Card
+                  :table_id (:table_id card)
+                  :type :metric
+                  :archived false)
+       filter-visible
+       (rank-by-similarity card)
+       (filter (comp pos? :similarity))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- recently-modified-dashboards
+  []
+  (when-let [dashboard-ids (not-empty (t2/select-fn-set :model_id :model/Revision
+                                                        :model     &quot;Dashboard&quot;
+                                                        :user_id   api/*current-user-id*
+                                                        {:order-by [[:timestamp :desc]]}))]
+    (-&gt;&gt; (t2/select :model/Dashboard :id [:in dashboard-ids])
+         filter-visible
+         (take max-serendipity-matches))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- recommended-dashboards
+  [cards]
+  (let [recent                   (recently-modified-dashboards)
+        card-id-&gt;dashboard-cards (-&gt;&gt; (apply t2/select [:model/DashboardCard :card_id :dashboard_id]
+                                             (cond-&gt; []
+                                               (seq cards)
+                                               (concat [:card_id [:in (map :id cards)]])
+                                               (seq recent)
+                                               (concat [:dashboard_id [:not-in (map :id recent)]])))
+                                      (group-by :card_id))
+        dashboard-ids (-&gt;&gt; (map :id cards)
+                           (mapcat card-id-&gt;dashboard-cards)
+                           (map :dashboard_id)
+                           distinct)
+        best          (when (seq dashboard-ids)
+                        (-&gt;&gt; (t2/select :model/Dashboard :id [:in dashboard-ids])
+                             filter-visible
+                             (take max-best-matches)))]
+    (concat best recent)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- recommended-collections
+  [cards]
+  (-&gt;&gt; cards
+       (m/distinct-by :collection_id)
+       interesting-mix
+       (keep (comp (partial t2/select-one :model/Collection :id) :collection_id))
+       filter-visible))</pre></td></tr><tr><td class="docs"><p>Return related entities.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmulti related
+  {:arglists '([entity])}
+  mi/model)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod related :model/Card
+  [card]
+  (let [table             (t2/select-one :model/Table :id (:table_id card))
+        similar-questions (similar-questions card)
+        similar-metrics   (similar-metrics card)]
+    {:table             table
+     :metrics           (interesting-mix similar-metrics)
+     :segments          (-&gt;&gt; table
+                             segments-for-table
+                             (rank-by-similarity card)
+                             interesting-mix)
+     :dashboard-mates   (cards-sharing-dashboard card)
+     :dashboards        (recommended-dashboards similar-questions)
+     :collections       (recommended-collections similar-questions)}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod related :model/Query
+  [query]
+  (related (mi/instance :model/Card query)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod related :model/LegacyMetric
+  [metric]
+  (let [table (t2/select-one :model/Table :id (:table_id metric))]
+    {:table    table
+     :metrics  (-&gt;&gt; table
+                    legacy-metrics-for-table
+                    (rank-by-similarity metric)
+                    interesting-mix)
+     :segments (-&gt;&gt; table
+                    segments-for-table
+                    (rank-by-similarity metric)
+                    interesting-mix)}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod related :model/Segment
+  [segment]
+  (let [table (t2/select-one :model/Table :id (:table_id segment))]
+    {:table       table
+     :metrics     (metrics-for-table table)
+     :segments    (-&gt;&gt; table
+                       segments-for-table
+                       (rank-by-similarity segment)
+                       interesting-mix)
+     :linked-from (linked-from table)}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod related :model/Table
+  [table]
+  (let [linking-to  (linking-to table)
+        linked-from (linked-from table)]
+    {:segments    (segments-for-table table)
+     :metrics     (metrics-for-table table)
+     :linking-to  linking-to
+     :linked-from linked-from
+     :tables      (-&gt;&gt; (t2/select :model/Table
+                                  :db_id           (:db_id table)
+                                  :schema          (:schema table)
+                                  :id              [:not= (:id table)]
+                                  :visibility_type nil
+                                  :active          true)
+                       (remove (set (concat linking-to linked-from)))
+                       filter-visible
+                       interesting-mix)}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod related :model/Field
+  [field]
+  (let [table (t2/select-one :model/Table :id (:table_id field))]
+    {:table    table
+     :segments (-&gt;&gt; table
+                    segments-for-table
+                    (rank-by-similarity field)
+                    interesting-mix)
+     :metrics  (-&gt;&gt; table
+                    metrics-for-table
+                    (rank-by-similarity field)
+                    (filter (comp pos? :similarity))
+                    interesting-mix)
+     :fields   (-&gt;&gt; (t2/select :model/Field
+                               :table_id        (:id table)
+                               :id              [:not= (:id field)]
+                               :visibility_type &quot;normal&quot;
+                               :active          true)
+                    filter-visible
+                    interesting-mix)}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod related :model/Dashboard
+  [dashboard]
+  (let [cards (map (partial t2/select-one :model/Card :id) (t2/select-fn-set :card_id :model/DashboardCard
+                                                                             :dashboard_id (:id dashboard)))]
+    {:cards (-&gt;&gt; cards
+                 (mapcat similar-questions)
+                 (remove (set cards))
+                 distinct
+                 filter-visible
+                 interesting-mix)}))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
