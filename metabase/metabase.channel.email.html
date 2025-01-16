@@ -2868,148 +2868,297 @@ net.brehaut.ClojureTools = (function (SH) {
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.channel.email" name="metabase.channel.email"><h1 class="project-name">metabase.channel.email</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.channel.email
   (:require
-   [metabase.channel.core :as channel]
-   [metabase.channel.params :as channel.params]
-   [metabase.channel.shared :as channel.shared]
-   [metabase.email :as email]
-   [metabase.email.messages :as messages]
-   [metabase.models.channel :as models.channel]
-   [metabase.models.notification :as models.notification]
-   [metabase.notification.core :as notification]
-   [metabase.util :as u]
-   [metabase.util.i18n :refer [trs]]
+   [metabase.analytics.prometheus :as prometheus]
+   [metabase.models.setting :as setting :refer [defsetting]]
+   [metabase.util.i18n :refer [deferred-tru tru]]
+   [metabase.util.log :as log]
    [metabase.util.malli :as mu]
+   [metabase.util.malli.registry :as mr]
    [metabase.util.malli.schema :as ms]
-   [stencil.core :as stencil]))</pre></td></tr><tr><td class="docs">
+   [metabase.util.retry :as retry]
+   [postal.core :as postal]
+   [postal.support :refer [make-props]]
+   [throttle.core :as throttle])
+  (:import
+   (javax.mail Session)
+   (throttle.core Throttler)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>https://github.com/metabase/metabase/issues/11879#issuecomment-713816386</p>
+</td><td class="codes"><pre class="brush: clojure">(when-not *compile-files*
+  (System/setProperty &quot;mail.mime.splitlongparameters&quot; &quot;false&quot;))</pre></td></tr><tr><td class="docs"><p>CONFIG</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defsetting email-from-address
+  (deferred-tru &quot;The email address you want to use for the sender of emails.&quot;)
+  :encryption :no
+  :default    &quot;notifications@metabase.com&quot;
+  :visibility :settings-manager
+  :audit      :getter)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defsetting email-from-name
+  (deferred-tru &quot;The name you want to use for the sender of emails.&quot;)
+  :encryption :no
+  :visibility :settings-manager
+  :audit      :getter)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defsetting bcc-enabled?
+  (deferred-tru &quot;Whether or not bcc emails are enabled, default behavior is that it is&quot;)
+  :visibility :settings-manager
+  :type       :boolean
+  :default    true)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ReplyToAddresses
+  [:maybe [:sequential ms/Email]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([reply-to-addresses])} validate-reply-to-addresses
+  (mr/validator ReplyToAddresses))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defsetting email-reply-to
+  (deferred-tru &quot;The email address you want the replies to go to, if different from the from address.&quot;)
+  :encryption :no
+  :type       :json
+  :visibility :settings-manager
+  :audit      :getter
+  :setter     (fn [new-value]
+                (if (validate-reply-to-addresses new-value)
+                  (setting/set-value-of-type! :json :email-reply-to new-value)
+                  (throw (ex-info &quot;Invalid reply-to address&quot; {:value new-value})))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defsetting email-smtp-host
+  (deferred-tru &quot;The address of the SMTP server that handles your emails.&quot;)
+  :encryption :when-encryption-key-set
+  :visibility :settings-manager
+  :audit      :getter)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defsetting email-smtp-username
+  (deferred-tru &quot;SMTP username.&quot;)
+  :encryption :when-encryption-key-set
+  :visibility :settings-manager
+  :audit      :getter)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defsetting email-smtp-password
+  (deferred-tru &quot;SMTP password.&quot;)
+  :encryption :when-encryption-key-set
+  :visibility :settings-manager
+  :sensitive? true
+  :audit      :getter)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defsetting email-smtp-port
+  (deferred-tru &quot;The port your SMTP server uses for outgoing emails.&quot;)
+  :encryption :when-encryption-key-set
+  :type       :integer
+  :visibility :settings-manager
+  :audit      :getter)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defsetting email-smtp-security
+  (deferred-tru &quot;SMTP secure connection protocol. (tls, ssl, starttls, or none)&quot;)
+  :encryption :when-encryption-key-set
+  :type       :keyword
+  :default    :none
+  :visibility :settings-manager
+  :audit      :raw-value
+  :setter     (fn [new-value]
+                (when (some? new-value)
+                  (assert (#{:tls :ssl :none :starttls} (keyword new-value))))
+                (setting/set-value-of-type! :keyword :email-smtp-security new-value)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defsetting email-max-recipients-per-second
+  (deferred-tru &quot;The maximum number of recipients, summed across emails, that can be sent per second.
+                Note that the final email sent before reaching the limit is able to exceed it, if it has multiple recipients.&quot;)
+  :export?    true
+  :type       :integer
+  :visibility :settings-manager
+  :audit      :getter)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- make-email-throttler
+  [rate-limit]
+  (throttle/make-throttler
+   :email
+   :attempt-ttl-ms     1000
+   :initial-delay-ms   1000
+   :attempts-threshold rate-limit))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defonce ^:private email-throttler (when-let [rate-limit (email-max-recipients-per-second)]
+                                     (make-email-throttler rate-limit)))</pre></td></tr><tr><td class="docs"><p>Check if the email throttler is enabled and if so, throttle the email sending based on the total number of recipients.</p>
+
+<p>We will allow multi-recipient emails to broach the limit, as long as the limit has not been reached yet.</p>
+
+<p>We want two properties:
+  1. All emails eventually get sent.
+  2. Lowering the threshold must never cause more overflow.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn check-email-throttle
+  [email]
+  (when email-throttler
+    (when-let [recipients (not-empty (into #{} (mapcat email) [:to :bcc]))]
+      (let [throttle-threshold (.attempts-threshold ^Throttler email-throttler)
+            check-one!         #(throttle/check email-throttler true)]
+        (check-one!)
+        (try
+          (dotimes [_ (dec (count recipients))]
+            (throttle/check email-throttler true))
+          (catch Exception _e
+            (log/warn &quot;Email throttling is enabled and the number of recipients exceeds the rate limit per second. Skip throttling.&quot;
+                      {:email-subject  (:subject email)
+                       :recipients     (count recipients)
+                       :max-recipients throttle-threshold})))))))</pre></td></tr><tr><td class="docs"><h2>PUBLIC INTERFACE</h2>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Internal function used to send messages. Should take 2 args - a map of SMTP credentials, and a map of email details.
+Provided so you can swap this out with an "inbox" for test purposes.</p>
+
+<p>If email-rate-limit-per-second is set, this function will throttle the email sending based on the total number of recipients.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn send-email!
+  [smtp-credentials email-details]
+  (check-email-throttle email-details)
+  (postal/send-message smtp-credentials email-details))</pre></td></tr><tr><td class="docs"><p>Check if email is enabled and that the mandatory settings are configured.</p>
+</td><td class="codes"><pre class="brush: clojure">(defsetting email-configured?
+  :type       :boolean
+  :visibility :public
+  :setter     :none
+  :getter     #(boolean (email-smtp-host))
+  :doc        false)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(setting/defsetting surveys-enabled
+  (deferred-tru &quot;Enable or disable surveys&quot;)
+  :type       :boolean
+  :default    true
+  :export?    false
+  :visibility :internal
+  :audit      :getter)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- add-ssl-settings [m ssl-setting]
+  (merge
+   m
+   (case (keyword ssl-setting)
+     :tls      {:tls true}
+     :ssl      {:ssl true}
+     :starttls {:starttls.enable   true
+                :starttls.required true}
+     {})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- smtp-settings []
+  (-&gt; {:host (email-smtp-host)
+       :user (email-smtp-username)
+       :pass (email-smtp-password)
+       :port (email-smtp-port)}
+      (add-ssl-settings (email-smtp-security))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private EmailMessage
-  [:map
-   [:subject                         :string]
-   [:recipients                      [:sequential ms/Email]]
-   [:message-type                    [:enum :attachments :html :text]]
-   [:message                         :any]
-   [:recipient-type {:optional true} [:maybe (ms/enum-keywords-and-strings :cc :bcc)]]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- construct-email
-  ([subject recipients message]
-   (construct-email subject recipients message nil))
-  ([subject recipients message recipient-type]
-   {:subject        subject
-    :recipients     recipients
-    :message-type   :attachments
-    :message        message
-    :recipient-type recipient-type}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- recipients-&gt;emails
-  [recipients]
-  (update-vals
-   {:user-emails     (mapv (comp :email :user) (filter #(= :user (:kind %)) recipients))
-    :non-user-emails (mapv :email (filter #(= :external-email (:kind %)) recipients))}
-   #(filter u/email? %)))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------------------------------------------------------;;
-                                          Alerts                                                ;;
-------------------------------------------------------------------------------------------------;;</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>The goal value can come from a progress goal or a graph goal_value depending on it's type</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- find-goal-value
-  [card]
-  (case (:display card)
-    (:area :bar :line)
-    (get-in card [:visualization_settings :graph.goal_value])
-    :progress
-    (get-in card [:visualization_settings :progress.goal])
-    nil))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defmethod channel/send! :channel/email
-  [_channel {:keys [subject recipients message-type message recipient-type]} :- EmailMessage]
-  (email/send-message-or-throw! {:subject      subject
-                                 :recipients   recipients
-                                 :message-type message-type
-                                 :message      message
-                                 :bcc?         (if recipient-type
-                                                 (= :bcc recipient-type)
-                                                 (email/bcc-enabled?))}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defmethod channel/render-notification [:channel/email :notification/alert] :- [:sequential EmailMessage]
-  [_channel-type {:keys [card pulse payload pulse-channel]} _template recipients]
-  (let [condition-kwd             (messages/pulse-&gt;alert-condition-kwd pulse)
-        email-subject             (case condition-kwd
-                                    :meets (trs &quot;Alert: {0} has reached its goal&quot; (:name card))
-                                    :below (trs &quot;Alert: {0} has gone below its goal&quot; (:name card))
-                                    :rows  (trs &quot;Alert: {0} has results&quot; (:name card)))
-        {:keys [user-emails
-                non-user-emails]} (recipients-&gt;emails recipients)
-        timezone                  (channel.shared/defaulted-timezone card)
-        goal                      (find-goal-value card)
-        email-to-users            (when (&gt; (count user-emails) 0)
-                                    (construct-email
-                                     email-subject user-emails
-                                     (messages/render-alert-email timezone pulse pulse-channel
-                                                                  [payload]
-                                                                  goal
-                                                                  nil)))
-        email-to-nonusers         (for [non-user-email non-user-emails]
-                                    (construct-email
-                                     email-subject [non-user-email]
-                                     (messages/render-alert-email timezone pulse pulse-channel
-                                                                  [payload]
-                                                                  goal
-                                                                  non-user-email)))]
-    (filter some? (conj email-to-nonusers email-to-users))))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------------------------------------------------------;;
-                                   Dashboard Subscriptions                                      ;;
-------------------------------------------------------------------------------------------------;;</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defmethod channel/render-notification [:channel/email :notification/dashboard-subscription] :- [:sequential EmailMessage]
-  [_channel-type {:keys [dashboard payload pulse]} _template recipients]
-  (let [{:keys [user-emails
-                non-user-emails]} (recipients-&gt;emails recipients)
-        timezone                  (some-&gt;&gt; payload (some :card) channel.shared/defaulted-timezone)
-        email-subject             (:name dashboard)
-        email-to-users            (when (seq user-emails)
-                                    (construct-email
-                                     email-subject
-                                     user-emails
-                                     (messages/render-pulse-email timezone pulse dashboard payload nil)))
-        email-to-nonusers         (for [non-user-email non-user-emails]
-                                    (construct-email
-                                     email-subject
-                                     [non-user-email]
-                                     (messages/render-pulse-email timezone pulse dashboard payload non-user-email)))]
-    (filter some? (conj email-to-nonusers email-to-users))))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------------------------------------------------------;;
-                                        System Events                                           ;;
-------------------------------------------------------------------------------------------------;;</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- notification-recipients-&gt;emails
-  [recipients payload]
-  (into [] cat (for [recipient recipients
-                     :let [details (:details recipient)
-                           emails (case (:type recipient)
-                                    :notification-recipient/user
-                                    [(-&gt; recipient :user :email)]
-                                    :notification-recipient/group
-                                    (-&gt;&gt; recipient :permissions_group :members (map :email))
-                                    :notification-recipient/external-email
-                                    [(:email details)]
-                                    :notification-recipient/template
-                                    [(not-empty (channel.params/substitute-params (:pattern details) payload :ignore-missing? (:is_optional details)))]
-                                    nil)]
-                     :let  [emails (filter some? emails)]
-                     :when (seq emails)]
-                 emails)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- render-body
-  [{:keys [details] :as _template} payload]
-  (case (keyword (:type details))
-    :email/mustache-resource
-    (stencil/render-file (:path details) payload)
-    :email/mustache-text
-    (stencil/render-string (:body details) payload)
-    nil))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defmethod channel/render-notification
-  [:channel/email :notification/system-event]
-  [_channel-type
-   notification-info :- notification/NotificationInfo
-   template          :- models.channel/ChannelTemplate
-   recipients        :- [:sequential models.notification/NotificationRecipient]]
-  (assert (some? template) &quot;Template is required for system event notifications&quot;)
-  (let [payload (:payload notification-info)]
-    [(construct-email (channel.params/substitute-params (-&gt; template :details :subject) payload)
-                      (notification-recipients-&gt;emails recipients payload)
-                      [{:type    &quot;text/html; charset=utf-8&quot;
-                        :content (render-body template payload)}]
-                      (-&gt; template :details :recipient-type keyword))]))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+  [:and
+   [:map {:closed true}
+    [:subject      :string]
+    [:recipients   [:sequential ms/Email]]
+    [:message-type [:enum :text :html :attachments]]
+    [:message      [:or :string [:sequential :map]]]
+    [:bcc?         {:optional true} [:maybe :boolean]]]
+   [:fn {:error/message (str &quot;Bad message-type/message combo: message-type `:attachments` should have a sequence of maps as its message; &quot;
+                             &quot;other types should have a String message.&quot;)}
+    (fn [{:keys [message-type message]}]
+      (if (= message-type :attachments)
+        (and (sequential? message) (every? map? message))
+        (string? message)))]])</pre></td></tr><tr><td class="docs"><p>Send an email to one or more <code>recipients</code>. Upon success, this returns the <code>message</code> that was just sent. This function
+does not catch and swallow thrown exceptions, it will bubble up. Should prefer to use [[send-email-retrying!]] unless
+the caller has its own retry logic.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn send-message-or-throw!
+  [{:keys [subject recipients message-type message] :as email}]
+  (try
+    (when-not (email-smtp-host)
+      (throw (ex-info (tru &quot;SMTP host is not set.&quot;) {:cause :smtp-host-not-set})))
+    ;; Now send the email
+    (let [to-type (if (:bcc? email) :bcc :to)]
+      (send-email! (smtp-settings)
+                   (merge
+                    {:from    (if-let [from-name (email-from-name)]
+                                (str from-name &quot; &lt;&quot; (email-from-address) &quot;&gt;&quot;)
+                                (email-from-address))
+                     to-type  recipients
+                     :subject subject
+                     :body    (case message-type
+                                :attachments message
+                                :text        message
+                                :html        [{:type    &quot;text/html; charset=utf-8&quot;
+                                               :content message}])}
+                    (when-let [reply-to (email-reply-to)]
+                      {:reply-to reply-to}))))
+    (catch Throwable e
+      (prometheus/inc! :metabase-email/message-errors)
+      (when (not= :smtp-host-not-set (:cause (ex-data e)))
+        (throw e)))
+    (finally
+      (prometheus/inc! :metabase-email/messages))))</pre></td></tr><tr><td class="docs"><p>Like [[send-message-or-throw!]] but retries sending on errors according to the retry settings.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn send-email-retrying!
+  [email :- EmailMessage]
+  ((retry/decorate send-message-or-throw!) email))</pre></td></tr><tr><td class="docs"><p>Schema for the response returned by various functions in [[metabase.channel.email]]. Response will be a map with the key
+<code>:metabase.channel.email/error</code>, which will either be <code>nil</code> (indicating no error) or an instance of [[java.lang.Throwable]]
+with the error.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private SMTPStatus
+  [:map {:closed true}
+   [::error [:maybe (ms/InstanceOfClass Throwable)]]])</pre></td></tr><tr><td class="docs"><p>Send an email to one or more <code>:recipients</code>. <code>:recipients</code> is a sequence of email addresses; <code>:message-type</code> must be
+either <code>:text</code> or <code>:html</code> or <code>:attachments</code>.</p>
+
+<p>  (email/send-message!
+   {:subject      "[Metabase] Password Reset Request"
+    :recipients   ["cam@metabase.com"]
+    :message-type :text
+    :message      "How are you today?")}</p>
+
+<p>Upon success, this returns the <code>:message</code> that was just sent. (TODO -- confirm this.) This function will catch and
+log any exception, returning a [[SMTPStatus]].</p>
+</td><td class="codes"><pre class="brush: clojure">(defn send-message!
+  [&amp; {:as msg-args}]
+  (try
+    (send-email-retrying! msg-args)
+    (catch Throwable e
+      (log/warn e &quot;Failed to send email&quot;)
+      {::error e})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private SMTPSettings
+  [:map {:closed true}
+   [:host                         ms/NonBlankString]
+   [:port                         ms/PositiveInt]
+   ;; TODO -- not sure which of these other ones are actually required or not, and which are optional.
+   [:user        {:optional true} [:maybe :string]]
+   [:security    {:optional true} [:maybe [:enum :tls :ssl :none :starttls]]]
+   [:pass        {:optional true} [:maybe :string]]
+   [:sender      {:optional true} [:maybe :string]]
+   [:sender-name {:optional true} [:maybe :string]]
+   [:reply-to    {:optional true} [:maybe [:sequential ms/Email]]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- test-smtp-settings :- SMTPStatus
+  &quot;Tests an SMTP configuration by attempting to connect and authenticate if an authenticated method is passed
+  in `:security`.&quot;
+  [{:keys [host port user pass sender security], :as details} :- SMTPSettings]
+  (try
+    (let [ssl?    (= (keyword security) :ssl)
+          proto   (if ssl? &quot;smtps&quot; &quot;smtp&quot;)
+          details (-&gt; details
+                      (assoc :proto proto
+                             :connectiontimeout &quot;1000&quot;
+                             :timeout &quot;4000&quot;)
+                      (add-ssl-settings security))
+          session (doto (Session/getInstance (make-props sender details))
+                    (.setDebug false))]
+      (with-open [transport (.getTransport session proto)]
+        (.connect transport host port user pass)))
+    {::error nil}
+    (catch Throwable e
+      (log/error e &quot;Error testing SMTP connection&quot;)
+      {::error e})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private email-security-order [:tls :starttls :ssl])</pre></td></tr><tr><td class="docs"><p>Amount of time to wait between retrying SMTP connections with different security options. This delay exists to keep
+us from getting banned on Outlook.com.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^Long retry-delay-ms
+  500)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- guess-smtp-security :- [:maybe [:enum :tls :starttls :ssl]]
+  &quot;Attempts to use each of the security methods in security order with the same set of credentials. This is used only
+  when the initial connection attempt fails, so it won't overwrite a functioning configuration. If this uses something
+  other than the provided method, a warning gets printed on the config page.
+  If unable to connect with any security method, returns `nil`. Otherwise returns the security method that we were
+  able to connect successfully with.&quot;
+  [details :- SMTPSettings]
+  ;; make sure this is not lazy, or chunking can cause some servers to block requests
+  (some
+   (fn [security-type]
+     (if-not (::error (test-smtp-settings (assoc details :security security-type)))
+       security-type
+       (do
+         (Thread/sleep retry-delay-ms) ; Try not to get banned from outlook.com
+         nil)))
+   email-security-order))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn test-smtp-connection :- [:or SMTPStatus SMTPSettings]
+  &quot;Test the connection to an SMTP server to determine if we can send emails. Takes in a dictionary of properties such
+  as:
+    {:host     \&quot;localhost\&quot;
+     :port     587
+     :user     \&quot;bigbird\&quot;
+     :pass     \&quot;luckyme\&quot;
+     :sender   \&quot;foo@mycompany.com\&quot;
+     :security :tls}
+  Attempts to connect with different `:security` options. If able to connect successfully, returns working
+  [[SMTPSettings]]. If unable to connect with any `:security` options, returns an [[SMTPStatus]] with the `::error`.&quot;
+  [details :- SMTPSettings]
+  (let [initial-attempt (test-smtp-settings details)]
+    (if-not (::error initial-attempt)
+      details
+      (if-let [working-security-type (guess-smtp-security details)]
+        (assoc details :security working-security-type)
+        initial-attempt))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
