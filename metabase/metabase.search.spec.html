@@ -2872,14 +2872,22 @@ net.brehaut.ClojureTools = (function (SH) {
    [clojure.string :as str]
    [clojure.walk :as walk]
    [malli.error :as me]
+   [metabase.api.common :as api]
    [metabase.config :as config]
    [metabase.search.config :as search.config]
    [metabase.util :as u]
    [metabase.util.malli.registry :as mr]
    [toucan2.core :as t2]
-   [toucan2.tools.transformed :as t2.transformed]))</pre></td></tr><tr><td class="docs">
+   [toucan2.tools.transformed :as t2.transformed]))</pre></td></tr><tr><td class="docs"><p>Set of search model string names.</p>
+</td><td class="codes"><pre class="brush: clojure">(def search-models
+  #{&quot;dashboard&quot; &quot;table&quot; &quot;dataset&quot; &quot;segment&quot; &quot;collection&quot; &quot;database&quot; &quot;action&quot; &quot;indexed-entity&quot; &quot;metric&quot; &quot;card&quot;})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private search-model-&gt;toucan-model
+  (into {}
+        (map (fn [search-model]
+               [search-model (-&gt; search-model api/model-&gt;db-model :db-model)]))
+        search-models))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private SearchModel
-  [:enum &quot;dashboard&quot; &quot;table&quot; &quot;dataset&quot; &quot;segment&quot; &quot;collection&quot; &quot;database&quot; &quot;action&quot; &quot;indexed-entity&quot; &quot;metric&quot; &quot;card&quot;])</pre></td></tr><tr><td class="docs"><p>Key must be present, to show it's been explicitly considered.</p>
+  (into [:enum] search-models))</pre></td></tr><tr><td class="docs"><p>Key must be present, to show it's been explicitly considered.</p>
 
 <ul>
 <li>false: not present [note: consider making the nil instead, since it implies writing NULL to the column]</li>
@@ -3078,14 +3086,25 @@ net.brehaut.ClojureTools = (function (SH) {
   (for [column select-item
         :when (and column (or (not (vector? column))
                               (some? (first column))))]
-    (qualify-column table column)))</pre></td></tr><tr><td class="docs"><p>Register a metabase model as a search-model.
+    (qualify-column table column)))</pre></td></tr><tr><td class="docs"><p>Impl for [[spec]].</p>
+</td><td class="codes"><pre class="brush: clojure">(defmulti spec*
+  {:arglists '([search-model])}
+  identity)</pre></td></tr><tr><td class="docs"><p>Register a metabase model as a search-model.
 Once we're trying up the fulltext search project, we can inline a detailed explanation.
 For now, see its schema, and the existing definitions that use it.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti spec
-  (fn [search-model] search-model))</pre></td></tr><tr><td class="docs"><p>A mapping from each search-model to its specification.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn spec
+  [search-model]
+  ;; make sure the model namespace is loaded.
+  (t2/resolve-model (search-model-&gt;toucan-model search-model))
+  (spec* search-model))</pre></td></tr><tr><td class="docs"><p>A mapping from each search-model to its specification.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn specifications
   []
-  (into {} (for [[s spec-fn] (methods spec)] [s (spec-fn s)])))</pre></td></tr><tr><td class="docs"><p>Check whether a given specification is valid</p>
+  (into {}
+        (map (fn [[search-model toucan-model]]
+               ;; make sure the model namespace is loaded.
+               (t2/resolve-model toucan-model)
+               [search-model (spec search-model)]))
+        search-model-&gt;toucan-model))</pre></td></tr><tr><td class="docs"><p>Check whether a given specification is valid</p>
 </td><td class="codes"><pre class="brush: clojure">(defn validate-spec!
   [spec]
   (when-let [info (mr/explain Specification spec)]
@@ -3101,14 +3120,15 @@ For now, see its schema, and the existing definitions that use it.</p>
                    (update :attrs #(merge ~default-attrs %)))]
      (validate-spec! spec#)
      (derive (:model spec#) :hook/search-index)
-     (defmethod spec ~search-model [~'_] spec#)))</pre></td></tr><tr><td class="docs"><p>Return an inverted map of data dependencies to search models, used for updating them based on underlying models.</p>
+     (defmethod spec* ~search-model [~'_] spec#)))</pre></td></tr><tr><td class="docs"><p>Return an inverted map of data dependencies to search models, used for updating them based on underlying models.</p>
 
 <p>TODO we should memoize this for production (based on spec values)</p>
 </td><td class="codes"><pre class="brush: clojure">(defn model-hooks
   []
-  (merge-hooks
-   (for [[search-model spec-fn] (methods spec)]
-     (search-model-hooks (spec-fn search-model)))))</pre></td></tr><tr><td class="docs"><p>Given a transformed toucan map, get back a mapping to the raw db values that we can use in a query.</p>
+  (-&gt;&gt; (specifications)
+       vals
+       (map search-model-hooks)
+       merge-hooks))</pre></td></tr><tr><td class="docs"><p>Given a transformed toucan map, get back a mapping to the raw db values that we can use in a query.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- instance-&gt;db-values
   [instance]
   (let [xforms (try

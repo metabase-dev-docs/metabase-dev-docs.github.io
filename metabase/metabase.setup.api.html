@@ -2865,198 +2865,309 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.query-processor.streaming" name="metabase.query-processor.streaming"><h1 class="project-name">metabase.query-processor.streaming</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.query-processor.streaming
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.setup.api" name="metabase.setup.api"><h1 class="project-name">metabase.setup.api</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.setup.api
   (:require
-   [metabase.legacy-mbql.util :as mbql.u]
-   [metabase.lib.schema.common :as lib.schema.common]
-   [metabase.models.visualization-settings :as mb.viz]
-   [metabase.query-processor.pipeline :as qp.pipeline]
-   [metabase.query-processor.schema :as qp.schema]
-   [metabase.query-processor.streaming.csv :as qp.csv]
-   [metabase.query-processor.streaming.interface :as qp.si]
-   [metabase.query-processor.streaming.json :as qp.json]
-   [metabase.query-processor.streaming.xlsx :as qp.xlsx]
-   [metabase.server.streaming-response :as streaming-response]
+   [compojure.core :refer [GET POST]]
+   [java-time.api :as t]
+   [metabase.analytics.snowplow :as snowplow]
+   [metabase.api.common :as api]
+   [metabase.api.common.validation :as validation]
+   [metabase.config :as config]
+   [metabase.db :as mdb]
+   [metabase.email :as email]
+   [metabase.embed.settings :as embed.settings]
+   [metabase.events :as events]
+   [metabase.integrations.google :as google]
+   [metabase.integrations.slack :as slack]
+   [metabase.models.interface :as mi]
+   [metabase.models.permissions-group :as perms-group]
+   [metabase.models.setting.cache :as setting.cache]
+   [metabase.models.user :as user]
+   [metabase.premium-features.core :as premium-features]
+   [metabase.public-settings :as public-settings]
+   [metabase.request.core :as request]
+   [metabase.setup.core :as setup]
    [metabase.util :as u]
+   [metabase.util.i18n :as i18n :refer [tru]]
    [metabase.util.log :as log]
-   [metabase.util.malli :as mu])
-  (:import
-   (clojure.core.async.impl.channels ManyToManyChannel)
-   (java.io OutputStream)
-   (metabase.server.streaming_response StreamingResponse)
-   (org.eclipse.jetty.io EofException)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>these are loaded for side-effects so their impls of <code>qp.si/results-writer</code> will be available
-TODO - consider whether we should lazy-load these!</p>
-</td><td class="codes"><pre class="brush: clojure">(comment qp.csv/keep-me
-         qp.json/keep-me
-         qp.xlsx/keep-me)</pre></td></tr><tr><td class="docs"><p>Deduplicate column names that would otherwise conflict.</p>
-
-<p>TODO: This function includes logic that is normally is done by the annotate middleware, but hasn't been run yet
-at this point in the code. We should eventually refactor this (#17195)</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- deduplicate-col-names
-  [cols]
-  (map (fn [col unique-name]
-         (let [col-with-display-name (if (:display_name col)
-                                       col
-                                       (assoc col :display_name (:name col)))]
-           (assoc col-with-display-name :name unique-name)))
-       cols
-       (mbql.u/uniquify-names (map :name cols))))</pre></td></tr><tr><td class="docs"><p>Validate that all of the columns in <code>table-columns</code> correspond to actual columns in <code>cols</code>, correlating them by
-field ref or name. Returns <code>nil</code> if any do not, so that we fall back to using <code>cols</code> directly for the export (#19465).
-Otherwise returns <code>table-columns</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- validate-table-columms
-  [table-columns cols]
-  (let [col-field-refs (set (remove nil? (map :field_ref cols)))
-        col-names      (set (remove nil? (map :name cols)))]
-    (when (every? (fn [table-col] (or (col-field-refs (::mb.viz/table-column-field-ref table-col))
-                                      (col-names (::mb.viz/table-column-name table-col))))
-                  table-columns)
-      table-columns)))</pre></td></tr><tr><td class="docs"><p>Returns <code>true</code> if there's a column with the :name "pivot-grouping",
-which is an internal detail from the pivot qp.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- pivot-grouping-exists?
-  [cols]
-  (some #(= (:name %) &quot;pivot-grouping&quot;) cols))</pre></td></tr><tr><td class="docs"><p>For each entry in <code>table-columns</code> that is enabled, finds the index of the corresponding
-entry in <code>cols</code> by name or id. If a col has been remapped, uses the index of the new column.</p>
-
-<p>The resulting list of indices determines the order of column names and data in exports.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- export-column-order
-  [cols table-columns]
-  (if (pivot-grouping-exists? cols)
-    ;; If the columns contain a pivot-grouping, we're exporting a pivot and the cols order is not used,
-    ;; so we can just pass the indices in order.
-    (range (count cols))
-    (let [table-columns'     (or (validate-table-columms table-columns cols)
-                                 ;; If table-columns is not provided (e.g. for saved cards), we can construct a fake one
-                                 ;; that retains the original column ordering in `cols`
-                                 (for [col cols]
-                                   (let [col-name   (:name col)
-                                         id-or-name (or (:id col) col-name)
-                                         field-ref  (:field_ref col)]
-                                     {::mb.viz/table-column-field-ref (or field-ref [:field id-or-name nil])
-                                      ::mb.viz/table-column-enabled   true
-                                      ::mb.viz/table-column-name      col-name})))
-          enabled-table-cols (filter ::mb.viz/table-column-enabled table-columns')
-          cols-vector        (into [] cols)
-          ;; cols-index is a map from keys representing fields to their indices into `cols`
-          cols-index         (reduce-kv (fn [m i col]
-                                          ;; Always add col-name as a key, so that native queries and remapped fields work correctly
-                                          (let [m' (assoc m (:name col) i)]
-                                            (if-let [field-ref (:field_ref col)]
-                                              ;; Add a map key based on the column's field-ref, if available
-                                              (assoc m' field-ref i)
-                                              m')))
-                                        {}
-                                        cols-vector)]
-      (-&gt;&gt; (map
-            (fn [{field-ref ::mb.viz/table-column-field-ref, col-name ::mb.viz/table-column-name}]
-              (let [index              (or (get cols-index field-ref)
-                                           (get cols-index col-name))
-                    col                (get cols-vector index)
-                    remapped-to-name   (:remapped_to col)
-                    remapped-from-name (:remapped_from col)]
-                (cond
-                  remapped-to-name
-                  (get cols-index remapped-to-name)
-                  (not remapped-from-name)
-                  index)))
-            enabled-table-cols)
-           (remove nil?)))))</pre></td></tr><tr><td class="docs"><p>Dedups and orders <code>cols</code> based on the contents of table-columns in the provided viz settings. Also
-returns a list of indices which map the new order to the original order, and is used to reorder individual rows.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn order-cols
-  [cols viz-settings]
-  (let [deduped-cols  (deduplicate-col-names cols)
-        output-order  (export-column-order deduped-cols (::mb.viz/table-columns viz-settings))
-        ordered-cols  (if output-order
-                        (let [v (into [] deduped-cols)]
-                          (for [i output-order] (v i)))
-                        deduped-cols)]
-    [ordered-cols output-order]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- streaming-rff :- ::qp.schema/rff
-  [results-writer :- (lib.schema.common/instance-of-class metabase.query_processor.streaming.interface.StreamingResultsWriter)]
-  (fn [{:keys [cols viz-settings] :as initial-metadata}]
-    (let [[ordered-cols output-order] (order-cols cols viz-settings)
-          viz-settings'               (assoc viz-settings :output-order output-order)
-          row-count                   (volatile! 0)]
-      (fn
-        ([]
-         (log/trace &quot;Writing initial metadata to results writer.&quot;)
-         (qp.si/begin! results-writer
-                       {:data (assoc initial-metadata :ordered-cols ordered-cols)}
-                       viz-settings')
-         {:data initial-metadata})
-        ([result]
-         (assoc result
-                :row_count @row-count
-                :status :completed))
-        ([metadata row]
-         (log/trace &quot;Writing one row to results writer.&quot;)
-         (qp.si/write-row! results-writer row (dec (vswap! row-count inc)) ordered-cols viz-settings')
-         metadata)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- streaming-result-fn :- fn?
-  [results-writer   :- (lib.schema.common/instance-of-class metabase.query_processor.streaming.interface.StreamingResultsWriter)
-   ^OutputStream os :- (lib.schema.common/instance-of-class OutputStream)]
-  (fn result [result]
-    (when (= (:status result) :completed)
-      (log/debug &quot;Finished writing results; closing results writer.&quot;)
-      (try
-        (qp.si/finish! results-writer result)
-        (catch EofException _e
-          (log/warn &quot;Client closed connection prematurely&quot;)))
-      (u/ignore-exceptions
-        (.flush os)
-        (.close os)))
-    (qp.pipeline/default-result-handler result)))</pre></td></tr><tr><td class="docs"><p>Context to pass to the QP to streaming results as <code>export-format</code> to an output stream. Can be used independently of
-the normal <code>streaming-response</code> macro, which is geared toward Ring responses.</p>
-
-<p>  (with-open [os ...]
-    (qp.streaming/do-with-streaming-rff
-     :csv os
-     (fn [rff]
-       (qp/process-query query rff))))</p>
-</td><td class="codes"><pre class="brush: clojure">(defn do-with-streaming-rff
-  [export-format os f]
-  (let [results-writer (qp.si/streaming-results-writer export-format os)
-        rff            (streaming-rff results-writer)]
-    (binding [qp.pipeline/*result* (streaming-result-fn results-writer os)]
-      (f rff))))</pre></td></tr><tr><td class="docs"><p>Impl for [[streaming-response]].</p>
-</td><td class="codes"><pre class="brush: clojure">(defn -streaming-response
-  ^StreamingResponse [export-format filename-prefix f]
-  (streaming-response/streaming-response (qp.si/stream-options export-format filename-prefix) [os canceled-chan]
-    (do-with-streaming-rff
-     export-format os
-     (^:once fn* [rff]
-       (let [result (try
-                      (binding [qp.pipeline/*canceled-chan* canceled-chan]
-                        (f rff))
-                      (catch Throwable e
-                        e))]
-         (assert (some? result) &quot;QP unexpectedly returned nil.&quot;)
-        ;; if you see this, it's because it's old code written before the changes in #35465... rework the code in
-        ;; question to return a response directly instead of a core.async channel
-         (assert (not (instance? ManyToManyChannel result)) &quot;QP should not return a core.async channel.&quot;)
-         (when (or (instance? Throwable result)
-                   (= (:status result) :failed))
-           (streaming-response/write-error! os result export-format)))))))</pre></td></tr><tr><td class="docs"><p>Return results of processing a query as a streaming response. This response implements the appropriate Ring/Compojure
-protocols, so return or <code>respond</code> with it directly. <code>export-format</code> is one of <code>:api</code> (for normal JSON API
-responses), <code>:json</code>, <code>:csv</code>, or <code>:xlsx</code> (for downloads).</p>
-
-<p>Typical example:</p>
-
-<p>  (api/defendpoint-schema GET "/whatever" []
-    (qp.streaming/streaming-response [rff :json]
-      (qp/process-query (qp/userland-query-with-default-constraints query) rff)))</p>
-
-<p>Handles either async or sync QP results, but you should prefer returning sync results so we can handle query
-cancelations properly.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro streaming-response
-  {:style/indent 1}
-  [[map-binding export-format filename-prefix] &amp; body]
-  `(-streaming-response ~export-format ~filename-prefix (^:once fn* [~map-binding] ~@body)))</pre></td></tr><tr><td class="docs"><p>Set of valid streaming response formats. Currently, <code>:json</code>, <code>:csv</code>, <code>:xlsx</code>, and <code>:api</code> (normal JSON API results
-with extra metadata), but other types may be available if plugins are installed. (The interface is extensible.)</p>
-</td><td class="codes"><pre class="brush: clojure">(defn export-formats
+   [metabase.util.malli :as mu]
+   [metabase.util.malli.schema :as ms]
+   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Schema for a string that matches the instance setup token.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^:deprcated SetupToken
+  (mu/with-api-error-message
+   [:and
+    ms/NonBlankString
+    [:fn
+     {:error/message &quot;setup token&quot;}
+     (every-pred string? #'setup/token-match?)]]
+   (i18n/deferred-tru &quot;Token does not match the setup token.&quot;)))</pre></td></tr><tr><td class="docs"><p>We must not allow users to setup multiple super users after the first user is created. But tests still need to be able
+to. This var is redef'd to false by certain tests to allow that.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic ^:private *allow-api-setup-after-first-user-is-created*
+  false)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- setup-create-user! [{:keys [email first-name last-name password]}]
+  (when (and (setup/has-user-setup)
+             (not *allow-api-setup-after-first-user-is-created*))
+    ;; many tests use /api/setup to setup multiple users, so *allow-api-setup-after-first-user-is-created* is
+    ;; redefined by them
+    (throw (ex-info
+            (tru &quot;The /api/setup route can only be used to create the first user, however a user currently exists.&quot;)
+            {:status-code 403})))
+  (let [session-id (str (random-uuid))
+        new-user   (first (t2/insert-returning-instances! :model/User
+                                                          :email        email
+                                                          :first_name   first-name
+                                                          :last_name    last-name
+                                                          :password     (str (random-uuid))
+                                                          :is_superuser true))
+        user-id    (u/the-id new-user)]
+    ;; this results in a second db call, but it avoids redundant password code so figure it's worth it
+    (user/set-password! user-id password)
+    ;; then we create a session right away because we want our new user logged in to continue the setup process
+    (let [session (first (t2/insert-returning-instances! :model/Session
+                                                         :id      session-id
+                                                         :user_id user-id))]
+      ;; return user ID, session ID, and the Session object itself
+      {:session-id session-id, :user-id user-id, :session session})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- setup-maybe-create-and-invite-user! [{:keys [email] :as user}, invitor]
+  (when email
+    (if-not (email/email-configured?)
+      (log/error &quot;Could not invite user because email is not configured.&quot;)
+      (u/prog1 (user/insert-new-user! user)
+        (user/set-permissions-groups! &lt;&gt; [(perms-group/all-users) (perms-group/admin)])
+        (events/publish-event! :event/user-invited
+                               {:object
+                                (assoc &lt;&gt;
+                                       :is_from_setup true
+                                       :invite_method &quot;email&quot;
+                                       :sso_source    (:sso_source &lt;&gt;))
+                                :details {:invitor (select-keys invitor [:email :first_name])}})
+        (snowplow/track-event! ::snowplow/invite
+                               {:event           :invite-sent
+                                :invited-user-id (u/the-id &lt;&gt;)
+                                :source          &quot;setup&quot;})))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- setup-set-settings! [{:keys [email site-name site-locale]}]
+  ;; set a couple preferences
+  (public-settings/site-name! site-name)
+  (public-settings/admin-email! email)
+  (when site-locale
+    (public-settings/site-locale! site-locale))
+  ;; default to `true` the setting will set itself correctly whether a boolean or boolean string is specified
+  (public-settings/anon-tracking-enabled! true))</pre></td></tr><tr><td class="docs"><p>/</p>
+</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
+(api/defendpoint POST 
+  &quot;Special endpoint for creating the first user during setup. This endpoint both creates the user AND logs them in and
+  returns a session ID. This endpoint can also be used to add a database, create and invite a second admin, and/or
+  set specific settings from the setup flow.&quot;
+  [:as {{:keys                                          [token]
+         {:keys [first_name last_name email password]}  :user
+         {invited_first_name :first_name,
+          invited_last_name  :last_name,
+          invited_email      :email}                    :invite
+         {:keys [site_name site_locale]} :prefs}
+        :body,
+        :as request}]
+  {token              SetupToken
+   first_name         [:maybe ms/NonBlankString]
+   last_name          [:maybe ms/NonBlankString]
+   email              ms/Email
+   password           ms/ValidPassword
+   invited_first_name [:maybe ms/NonBlankString]
+   invited_last_name  [:maybe ms/NonBlankString]
+   invited_email      [:maybe ms/Email]
+   site_name          ms/NonBlankString
+   site_locale        [:maybe ms/ValidLocale]}
+  (letfn [(create! []
+            (try
+              (t2/with-transaction []
+                (let [user-info (setup-create-user! {:email email
+                                                     :first-name first_name
+                                                     :last-name last_name
+                                                     :password password})]
+                  (setup-maybe-create-and-invite-user! {:email invited_email,
+                                                        :first_name invited_first_name,
+                                                        :last_name invited_last_name}
+                                                       {:email email, :first_name first_name})
+                  (setup-set-settings! {:email email :site-name site_name :site-locale site_locale})
+                  user-info))
+              (catch Throwable e
+                ;; if the transaction fails, restore the Settings cache from the DB again so any changes made in this
+                ;; endpoint (such as clearing the setup token) are reverted. We can't use `dosync` here to accomplish
+                ;; this because there is `io!` in this block
+                (setting.cache/restore-cache!)
+                (throw e))))]
+    (let [{:keys [user-id session-id session]} (create!)
+          superuser (t2/select-one :model/User :id user-id)]
+      (events/publish-event! :event/user-login {:user-id user-id})
+      (when-not (:last_login superuser)
+        (events/publish-event! :event/user-joined {:user-id user-id}))
+      (snowplow/track-event! ::snowplow/account {:event :new-user-created} user-id)
+      ;; return response with session ID and set the cookie as well
+      (request/set-session-cookies request {:id session-id} session (t/zoned-date-time (t/zone-id &quot;GMT&quot;))))))</pre></td></tr><tr><td class="docs"><p>Admin Checklist</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Malli schema for the state to annotate the checklist.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ChecklistState
+  [:map {:closed true}
+   [:db-type [:enum :h2 :mysql :postgres]]
+   [:hosted? :boolean]
+   [:embedding [:map
+                [:interested? :boolean]
+                [:done? :boolean]
+                [:app-origin :boolean]]]
+   [:configured [:map
+                 [:email :boolean]
+                 [:slack :boolean]
+                 [:sso :boolean]]]
+   [:counts [:map
+             [:user :int]
+             [:card :int]
+             [:table :int]]]
+   [:exists [:map
+             [:model :boolean]
+             [:non-sample-db :boolean]
+             [:dashboard :boolean]
+             [:pulse :boolean]
+             [:hidden-table :boolean]
+             [:collection :boolean]
+             [:embedded-resource :boolean]]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- state-for-checklist :- ChecklistState
   []
-  (set (keys (methods qp.si/stream-options))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+  {:db-type    (mdb/db-type)
+   :hosted?    (premium-features/is-hosted?)
+   :embedding  {:interested? (not (= (embed.settings/embedding-homepage) :hidden))
+                :done?       (= (embed.settings/embedding-homepage) :dismissed-done)
+                :app-origin  (boolean (embed.settings/embedding-app-origins-interactive))}
+   :configured {:email (email/email-configured?)
+                :slack (slack/slack-configured?)
+                :sso   (google/google-auth-enabled)}
+   :counts     {:user  (t2/count :model/User {:where (mi/exclude-internal-content-hsql :model/User)})
+                :card  (t2/count :model/Card {:where (mi/exclude-internal-content-hsql :model/Card)})
+                :table (val (ffirst (t2/query {:select [:%count.*]
+                                               :from   [[(t2/table-name :model/Table) :t]]
+                                               :join   [[(t2/table-name :model/Database) :d] [:= :d.id :t.db_id]]
+                                               :where  (mi/exclude-internal-content-hsql :model/Database :table-alias :d)})))}
+   :exists     {:non-sample-db     (t2/exists? :model/Database {:where (mi/exclude-internal-content-hsql :model/Database)})
+                :dashboard         (t2/exists? :model/Dashboard {:where (mi/exclude-internal-content-hsql :model/Dashboard)})
+                :pulse             (t2/exists? :model/Pulse)
+                :hidden-table      (t2/exists? :model/Table {:where [:and
+                                                                     [:not= :visibility_type nil]
+                                                                     (mi/exclude-internal-content-hsql :model/Table)]})
+                :collection        (t2/exists? :model/Collection {:where (mi/exclude-internal-content-hsql :model/Collection)})
+                :model             (t2/exists? :model/Card {:where [:and
+                                                                    [:= :type &quot;model&quot;]
+                                                                    (mi/exclude-internal-content-hsql :model/Card)]})
+                :embedded-resource (or (t2/exists? :model/Card :enable_embedding true)
+                                       (t2/exists? :model/Dashboard :enable_embedding true))}})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- get-connected-tasks
+  [{:keys [configured counts exists embedding] :as _info}]
+  [{:title       (tru &quot;Add a database&quot;)
+    :group       (tru &quot;Get connected&quot;)
+    :description (tru &quot;Connect to your data so your whole team can start to explore.&quot;)
+    :link        &quot;/admin/databases/create&quot;
+    :completed   (exists :non-sample-db)
+    :triggered   :always}
+   {:title       (tru &quot;Set up email&quot;)
+    :group       (tru &quot;Get connected&quot;)
+    :description (tru &quot;Add email credentials so you can more easily invite team members and get updates via Pulses.&quot;)
+    :link        &quot;/admin/settings/email&quot;
+    :completed   (configured :email)
+    :triggered   :always}
+   {:title       (tru &quot;Set Slack credentials&quot;)
+    :group       (tru &quot;Get connected&quot;)
+    :description (tru &quot;Does your team use Slack? If so, you can send automated updates via dashboard subscriptions.&quot;)
+    :link        &quot;/admin/settings/notifications/slack&quot;
+    :completed   (configured :slack)
+    :triggered   :always}
+   {:title       (tru &quot;Setup embedding&quot;)
+    :group       (tru &quot;Get connected&quot;)
+    :description (tru &quot;Get customizable, flexible, and scalable customer-facing analytics in no time&quot;)
+    :link        &quot;/admin/settings/embedding-in-other-applications&quot;
+    :completed   (or (embedding :done?)
+                     (and (configured :sso) (embedding :app-origin))
+                     (exists :embedded-resource))
+    :triggered   (embedding :interested?)}
+   {:title       (tru &quot;Invite team members&quot;)
+    :group       (tru &quot;Get connected&quot;)
+    :description (tru &quot;Share answers and data with the rest of your team.&quot;)
+    :link        &quot;/admin/people/&quot;
+    :completed   (&gt; (counts :user) 1)
+    :triggered   (or (exists :dashboard)
+                     (exists :pulse)
+                     (&gt;= (counts :card) 5))}])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- productionize-tasks
+  [info]
+  [{:title       (tru &quot;Switch to a production-ready app database&quot;)
+    :group       (tru &quot;Productionize&quot;)
+    :description (tru &quot;Migrate off of the default H2 application database to PostgreSQL or MySQL&quot;)
+    :link        &quot;https://www.metabase.com/docs/latest/installation-and-operation/migrating-from-h2&quot;
+    :completed   (not= (:db-type info) :h2)
+    :triggered   (and (= (:db-type info) :h2) (not (:hosted? info)))}])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- curate-tasks
+  [{:keys [counts exists] :as _info}]
+  [{:title       (tru &quot;Hide irrelevant tables&quot;)
+    :group       (tru &quot;Curate your data&quot;)
+    :description (tru &quot;If your data contains technical or irrelevant info you can hide it.&quot;)
+    :link        &quot;/admin/datamodel/database&quot;
+    :completed   (exists :hidden-table)
+    :triggered   (&gt;= (counts :table) 20)}
+   {:title       (tru &quot;Organize questions&quot;)
+    :group       (tru &quot;Curate your data&quot;)
+    :description (tru &quot;Have a lot of saved questions in {0}? Create collections to help manage them and add context.&quot; (tru &quot;Metabase&quot;))
+    :link        &quot;/collection/root&quot;
+    :completed   (exists :collection)
+    :triggered   (&gt;= (counts :card) 30)}
+   {:title       (tru &quot;Create a model&quot;)
+    :group       (tru &quot;Curate your data&quot;)
+    :description (tru &quot;Set up friendly starting points for your team to explore data&quot;)
+    :link        &quot;/model/new&quot;
+    :completed   (exists :model)
+    :triggered   (not (exists :model))}])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- checklist-items
+  [info :- ChecklistState]
+  (remove nil?
+          [{:name  (tru &quot;Get connected&quot;)
+            :tasks (get-connected-tasks info)}
+           (when-not (:hosted? info)
+             {:name  (tru &quot;Productionize&quot;)
+              :tasks (productionize-tasks info)})
+           {:name  (tru &quot;Curate your data&quot;)
+            :tasks (curate-tasks info)}]))</pre></td></tr><tr><td class="docs"><p>Add <code>is_next_step</code> key to all the <code>steps</code> from <code>admin-checklist</code>, and ensure <code>triggered</code> is a boolean.
+The next step is the <em>first</em> step where <code>:triggered</code> is <code>true</code> and <code>:completed</code> is <code>false</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- annotate
+  [checklist]
+  (let [next-step        (-&gt;&gt; checklist
+                              (mapcat :tasks)
+                              (filter (every-pred :triggered (complement :completed)))
+                              first
+                              :title)
+        mark-next-step   (fn identity-task-by-name [task]
+                           (assoc task :is_next_step (= (:title task) next-step)))
+        update-triggered (fn [task]
+                           (update task :triggered boolean))]
+    (for [group checklist]
+      (update group :tasks
+              (partial map (comp update-triggered mark-next-step))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- admin-checklist
+  ([] (admin-checklist (state-for-checklist)))
+  ([checklist-info]
+   (annotate (checklist-items checklist-info))))</pre></td></tr><tr><td class="docs"><p>/admin_checklist</p>
+</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
+(api/defendpoint GET 
+  &quot;Return various \&quot;admin checklist\&quot; steps and whether they've been completed. You must be a superuser to see this!&quot;
+  []
+  (validation/check-has-application-permission :setting)
+  (admin-checklist))</pre></td></tr><tr><td class="docs"><p>User defaults endpoint</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>/user_defaults</p>
+</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
+(api/defendpoint GET 
+  &quot;Returns object containing default user details for initial setup, if configured,
+   and if the provided token value matches the token in the configuration value.&quot;
+  [token]
+  (let [{config-token :token :as defaults} (config/mb-user-defaults)]
+    (api/check-404 config-token)
+    (api/check-403 (= token config-token))
+    (dissoc defaults :token)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api/define-routes)</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

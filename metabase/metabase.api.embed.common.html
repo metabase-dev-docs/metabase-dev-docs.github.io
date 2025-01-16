@@ -2880,9 +2880,9 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.api.public :as api.public]
    [metabase.driver.common.parameters.operators :as params.ops]
    [metabase.eid-translation :as eid-translation]
-   [metabase.models :as models]
    [metabase.models.card :as card]
    [metabase.models.params :as params]
+   [metabase.models.resolution :as models.resolution]
    [metabase.models.setting :refer [defsetting]]
    [metabase.notification.payload.core :as notification.payload]
    [metabase.query-processor.card :as qp.card]
@@ -2896,9 +2896,11 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.util.malli.registry :as mr]
    [metabase.util.malli.schema :as ms]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(comment
-  models/keep-me)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Is V a valid param value? (If it is a String, is it non-blank?)</p>
+  ;; load dynamic model resolution code... should already be loaded by [[metabase.core.init]] so this is mostly here for
+  ;; the benefit of tests
+  models.resolution/keep-me)</pre></td></tr><tr><td class="docs"><p>Is V a valid param value? (If it is a String, is it non-blank?)</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- valid-param-value?
   [v]
   (or (not (string? v))
@@ -3109,25 +3111,34 @@ make these parameters visible at all to the frontend.</p>
           :when (contains? slug-&gt;value slug)]
       (assoc (select-keys param [:type :target :slug])
              :value value))))</pre></td></tr><tr><td class="docs"><p>-------------------------------------- Entity ID transformation functions ------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>The models that we will service for entity-id transformations.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private api-models
-  (-&gt;&gt; (descendants :metabase/model)
-       (filter #(= (namespace %) &quot;model&quot;))
-       (filter (fn has-entity-id?
-                 [model] (or ;; toucan1 models
-                          (isa? model :metabase.models.interface/entity-id)
-                          ;; toucan2 models
-                          (isa? model :hook/entity-id))))
-       (map keyword)
-       set))</pre></td></tr><tr><td class="docs"><p>Map of model names used on the API to their corresponding model.</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- api-model?
+  [model]
+  (isa? (t2/resolve-model model) :hook/entity-id))</pre></td></tr><tr><td class="docs"><p>Map of model names used on the API to their corresponding model. A test makes sure this map stays in sync.</p>
+
+<p>This is no longer calculated dynamically so we don't have to load ~20 model namespaces just to figure out which ones
+derive from <code>:hook/entity-id</code> just to generate Malli schemas. -- Cam</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private api-name-&gt;model
-  (-&gt;&gt; api/model-&gt;db-model
-       (map (fn [[k v]] [(keyword k) (:db-model v)]))
-       (filter (fn [[_ v]] (contains? api-models v)))
-       (into {})))</pre></td></tr><tr><td class="docs"><p>Takes a model keyword or an api-name and returns the corresponding model keyword.</p>
+  {:action            :model/Action
+   :card              :model/Card
+   :collection        :model/Collection
+   :dashboard         :model/Dashboard
+   :dashboard-card    :model/DashboardCard
+   :dashboard-tab     :model/DashboardTab
+   :dataset           :model/Card
+   :dimension         :model/Dimension
+   :metric            :model/Card
+   :permissions-group :model/PermissionsGroup
+   :pulse             :model/Pulse
+   :pulse-card        :model/PulseCard
+   :pulse-channel     :model/PulseChannel
+   :segment           :model/Segment
+   :snippet           :model/NativeQuerySnippet
+   :timeline          :model/Timeline
+   :user              :model/User})</pre></td></tr><tr><td class="docs"><p>Takes a model keyword or an api-name and returns the corresponding model keyword.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- -&gt;model
   [model-or-api-name]
-  (if (contains? api-models model-or-api-name)
+  (if (api-model? model-or-api-name)
     model-or-api-name
     (api-name-&gt;model model-or-api-name)))</pre></td></tr><tr><td class="docs"><p>Sorted vec of api models that have an entity_id column</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private eid-api-names
