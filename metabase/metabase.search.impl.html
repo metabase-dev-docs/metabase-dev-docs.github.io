@@ -2869,9 +2869,6 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.search.impl
   (:require
    [clojure.string :as str]
-   [metabase.config :as config]
-   [metabase.legacy-mbql.normalize :as mbql.normalize]
-   [metabase.lib.core :as lib]
    [metabase.models.collection :as collection]
    [metabase.models.collection.root :as collection.root]
    [metabase.models.data-permissions :as data-perms]
@@ -3030,13 +3027,9 @@ endpoint itself, not in the search impl.</p>
                                   (when collection_effective_ancestors
                                     {:effective_ancestors collection_effective_ancestors})))
          :scores          (remove-thunks all-scores))
-        (update :dataset_query (fn [dataset-query]
-                                 (when-let [query (some-&gt; dataset-query json/decode)]
-                                   (if (get query &quot;type&quot;)
-                                     (mbql.normalize/normalize query)
-                                     (not-empty (lib/normalize query))))))
         (dissoc
          :all-scores
+         :dataset_query
          :relevant-scores
          :collection_effective_ancestors
          :collection_id
@@ -3053,13 +3046,15 @@ endpoint itself, not in the search impl.</p>
     v))</pre></td></tr><tr><td class="docs"><p>In the absence of an explicit engine argument in a request, which engine should be used?</p>
 </td><td class="codes"><pre class="brush: clojure">(defn default-engine
   []
-  (if config/is-test?
-    ;; TODO The API tests have not yet been ported to reflect the new search's results.
-    :search.engine/in-place
-    (if-let [s (public-settings/search-engine)]
-      (u/prog1 (keyword &quot;search.engine&quot; (name s))
-        (assert (search.engine/supported-engine? &lt;&gt;)))
-      :search.engine/in-place)))</pre></td></tr><tr><td class="docs">
+  (if-let [s (public-settings/search-engine)]
+    (let [engine (keyword &quot;search.engine&quot; (name s))]
+      (if (search.engine/supported-engine? engine)
+        engine
+        ;; It would be good to have a warning on start up for this.
+        :search.engine/in-place))
+    (first (filter search.engine/supported-engine?
+                   [:search.engine/appdb
+                    :search.engine/in-place]))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- parse-engine [value]
   (or (when-not (str/blank? value)
         (let [engine (keyword &quot;search.engine&quot; value)]
@@ -3229,7 +3224,8 @@ endpoint itself, not in the search impl.</p>
       (assoc :available_models (model-set-fn search-ctx)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- hydrate-dashboards [results]
   (-&gt;&gt; (t2/hydrate results [:dashboard :moderation_status])
-       (map (fn [row] (update row :dashboard #(when % (select-keys % [:id :name :moderation_status])))))))</pre></td></tr><tr><td class="docs"><p>Builds a search query that includes all the searchable entities, and runs it.</p>
+       (map #(u/update-some % :dashboard select-keys [:id :name :moderation_status]))
+       (map #(dissoc % :dashboard_id))))</pre></td></tr><tr><td class="docs"><p>Builds a search query that includes all the searchable entities, and runs it.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn search
   [search-ctx :- search.config/SearchContext]
   (let [reducible-results (search.engine/results search-ctx)
