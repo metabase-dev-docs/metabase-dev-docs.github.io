@@ -3819,31 +3819,65 @@ Works for either a normal Collection or the Root Collection.</p>
    [:data [:sequential ::DashboardQuestionCandidate]]
    [:count integer?]])</pre></td></tr><tr><td class="docs"><p>Implementation for the <code>dashboard-question-candidates</code> endpoints.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn- dashboard-question-candidates
-  [collection-id :- [:maybe ms/PositiveInt]
-   sort-direction :- [:enum :asc :desc]]
+  [collection-id :- [:maybe ms/PositiveInt]]
   (api/check-403 api/*is-superuser?*)
-  (let [cards-in-collection (t2/hydrate (t2/select :model/Card {:where [:= :collection_id collection-id]
-                                                                :order-by [[:%lower.name sort-direction]]}) :in_dashboards)
-        dashboard-question-candidates (filter card/sole-dashboard-id cards-in-collection)
-        present-card (fn [{:keys [in_dashboards] :as card}]
-                       (-&gt; card
-                           (select-keys [:id :name :description])
-                           (assoc :sole_dashboard_info (-&gt; in_dashboards first (select-keys [:id :name :description])))))]
-    {:data (map present-card dashboard-question-candidates)
-     :count (count dashboard-question-candidates)}))</pre></td></tr><tr><td class="docs">
+  (let [cards-in-collection (t2/hydrate (t2/select :model/Card {:where [:= :collection_id collection-id]}) :in_dashboards)]
+    (filter card/sole-dashboard-id cards-in-collection)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- present-dashboard-question-candidate
+  [{:keys [in_dashboards] :as card}]
+  (-&gt; card
+      (select-keys [:id :name :description])
+      (assoc :sole_dashboard_info (-&gt; in_dashboards first (select-keys [:id :name :description])))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- present-dashboard-question-candidates
+  [cards]
+  {:data (map present-dashboard-question-candidate cards)
+   :count (count cards)})</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:id/dashboard-question-candidates&quot; :- ::DashboardQuestionCandidatesResponse
   &quot;Find cards in this collection that can be moved into dashboards in this collection.
 
   To be eligible, a card must only appear in one dashboard (which is also in this collection), and must not already be a dashboard question.&quot;
-  [{:keys [id]} :- [:map [:id ms/PositiveInt]]
-   {:keys [sort_direction]} :- [:map [:sort_direction {:default :asc} [:enum :asc :desc]]]]
+  [{:keys [id]} :- [:map [:id ms/PositiveInt]]]
   (api/read-check :model/Collection id)
-  (dashboard-question-candidates id sort_direction))</pre></td></tr><tr><td class="docs">
+  (present-dashboard-question-candidates
+   (dashboard-question-candidates id)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/root/dashboard-question-candidates&quot; :- ::DashboardQuestionCandidatesResponse
   &quot;Find cards in the root collection that can be moved into dashboards in the root collection. (Same as the above endpoint, but for the root collection)&quot;
+  []
+  (present-dashboard-question-candidates
+   (dashboard-question-candidates nil)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::MoveDashboardQuestionCandidatesResponse
+  [:map
+   [:moved [:sequential ms/PositiveInt]]])</pre></td></tr><tr><td class="docs"><p>Move dash</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- move-dashboard-question-candidates
+  [id card-ids]
+  (let [cards (cond-&gt;&gt; (dashboard-question-candidates id)
+                (some? card-ids) (filter #(contains? card-ids (:id %))))]
+    (t2/with-transaction [_conn]
+      (doall
+       (for [{:as card :keys [in_dashboards]} cards]
+         (do
+           (card/update-card! {:card-before-update card
+                               :card-updates {:dashboard_id (-&gt; in_dashboards first :id)}
+                               :actor @api/*current-user*
+                               :delete-old-dashcards? false})
+           (:id card)))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/:id/move-dashboard-question-candidates&quot; :- ::MoveDashboardQuestionCandidatesResponse
+  &quot;Move candidate cards to the dashboards they appear in.&quot;
+  [{:keys [id]} :- [:map [:id ms/PositiveInt]]
+   _query-params
+   {:keys [card_ids]} :- [:maybe
+                          [:map [:card_ids {:optional true}
+                                 [:set ms/PositiveInt]]]]]
+  (api/read-check :model/Collection id)
+  {:moved (move-dashboard-question-candidates id card_ids)})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/root/move-dashboard-question-candidates&quot; :- ::MoveDashboardQuestionCandidatesResponse
+  &quot;Move candidate cards to the dashboards they appear in (for the root collection)&quot;
   [_route-params
-   {:keys [sort_direction]} :- [:map [:sort_direction {:default :asc} [:enum :asc :desc]]]]
-  (dashboard-question-candidates nil sort_direction))</pre></td></tr><tr><td class="docs"><p>-------------------------------------------- GET /api/collection/root --------------------------------------------</p>
+   _query-params
+   {:keys [card_ids]} :- [:maybe
+                          [:map [:card_ids {:optional true}
+                                 [:set ms/PositiveInt]]]]]
+  {:moved (move-dashboard-question-candidates nil card_ids)})</pre></td></tr><tr><td class="docs"><p>-------------------------------------------- GET /api/collection/root --------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- root-collection [collection-namespace]
   (collection-detail (collection/root-collection-with-ui-details collection-namespace)))</pre></td></tr><tr><td class="docs"><p>/root</p>
