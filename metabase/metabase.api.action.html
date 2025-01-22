@@ -2868,11 +2868,11 @@ net.brehaut.ClojureTools = (function (SH) {
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.api.action" name="metabase.api.action"><h1 class="project-name">metabase.api.action</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p><code>/api/action/</code> endpoints.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.api.action
   (:require
-   [compojure.core :refer [POST]]
    [metabase.actions.core :as actions]
    [metabase.analytics.snowplow :as snowplow]
    [metabase.api.common :as api]
    [metabase.api.common.validation :as validation]
+   [metabase.api.macros :as api.macros]
    [metabase.models.action :as action]
    [metabase.models.card :as card]
    [metabase.models.collection :as collection]
@@ -2882,7 +2882,8 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.util.malli :as mu]
    [metabase.util.malli.schema :as ms]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>TODO -- by convention these should either have class-like names e.g. <code>JSONQuery</code> and <code>SupportedActionType</code> or we
+should use [[metabase.util.malli.registry/def]] and register them and make them namespaced keywords</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private json-query-schema
   [:and
    string?
@@ -2907,13 +2908,13 @@ net.brehaut.ClojureTools = (function (SH) {
    [:body               {:optional true} [:maybe string?]]
    [:headers            {:optional true} [:maybe string?]]
    [:parameters         {:optional true} [:maybe [:sequential map?]]]
-   [:parameter_mappings {:optional true} [:maybe map?]]])</pre></td></tr><tr><td class="docs"><p>/</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+   [:parameter_mappings {:optional true} [:maybe map?]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/&quot;
   &quot;Returns actions that can be used for QueryActions. By default lists all viewable actions. Pass optional
   `?model-id=&lt;model-id&gt;` to limit to actions on a particular model.&quot;
-  [model-id]
-  {model-id [:maybe ms/PositiveInt]}
+  [_route-params
+   {:keys [model-id]} :- [:map
+                          [:model-id {:optional true} [:maybe ms/PositiveInt]]]]
   (letfn [(actions-for [models]
             (if (seq models)
               (t2/hydrate (action/select-actions models
@@ -2930,54 +2931,50 @@ net.brehaut.ClojureTools = (function (SH) {
                                             [:= :archived false]
                                              ;; action permission keyed off of model permission
                                             (collection/visible-collection-filter-clause)]}))]
-      (actions-for models))))</pre></td></tr><tr><td class="docs"><p>/public</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+      (actions-for models))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/public&quot;
   &quot;Fetch a list of Actions with public UUIDs. These actions are publicly-accessible *if* public sharing is enabled.&quot;
   []
   (validation/check-has-application-permission :setting)
   (validation/check-public-sharing-enabled)
-  (t2/select [:model/Action :name :id :public_uuid :model_id], :public_uuid [:not= nil], :archived false))</pre></td></tr><tr><td class="docs"><p>/:action-id</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+  (t2/select [:model/Action :name :id :public_uuid :model_id], :public_uuid [:not= nil], :archived false))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:action-id&quot;
   &quot;Fetch an Action.&quot;
-  [action-id]
-  {action-id ms/PositiveInt}
+  [{:keys [action-id]} :- [:map
+                           [:action-id ms/PositiveInt]]]
   (-&gt; (action/select-action :id action-id :archived false)
       (t2/hydrate :creator)
-      api/read-check))</pre></td></tr><tr><td class="docs"><p>/:action-id</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint DELETE 
+      api/read-check))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :delete &quot;/:action-id&quot;
   &quot;Delete an Action.&quot;
-  [action-id]
-  {action-id ms/PositiveInt}
+  [{:keys [action-id]} :- [:map
+                           [:action-id ms/PositiveInt]]]
   (let [action (api/write-check :model/Action action-id)]
     (snowplow/track-event! ::snowplow/action
                            {:event     :action-deleted
                             :type      (:type action)
                             :action_id action-id}))
   (t2/delete! :model/Action :id action-id)
-  api/generic-204-no-content)</pre></td></tr><tr><td class="docs"><p>/</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+  api/generic-204-no-content)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/&quot;
   &quot;Create a new action.&quot;
-  [:as {{:keys [type name description model_id parameters parameter_mappings visualization_settings
-                kind
-                database_id dataset_query
-                template response_handle error_handle] :as action} :body}]
-  {name                   :string
-   model_id               ms/PositiveInt
-   type                   [:maybe supported-action-type]
-   description            [:maybe :string]
-   parameters             [:maybe [:sequential map?]]
-   parameter_mappings     [:maybe map?]
-   visualization_settings [:maybe map?]
-   kind                   [:maybe implicit-action-kind]
-   database_id            [:maybe ms/PositiveInt]
-   dataset_query          [:maybe map?]
-   template               [:maybe http-action-template]
-   response_handle        [:maybe json-query-schema]
-   error_handle           [:maybe json-query-schema]}
+  [_route-params
+   _query-params
+   {:keys [type model_id parameters database_id]
+    :as action} :- [:map
+                    [:name                   :string]
+                    [:model_id               ms/PositiveInt]
+                    [:type                   {:optional true} [:maybe supported-action-type]]
+                    [:description            {:optional true} [:maybe :string]]
+                    [:parameters             {:optional true} [:maybe [:sequential map?]]]
+                    [:parameter_mappings     {:optional true} [:maybe map?]]
+                    [:visualization_settings {:optional true} [:maybe map?]]
+                    [:kind                   {:optional true} [:maybe implicit-action-kind]]
+                    [:database_id            {:optional true} [:maybe ms/PositiveInt]]
+                    [:dataset_query          {:optional true} [:maybe map?]]
+                    [:template               {:optional true} [:maybe http-action-template]]
+                    [:response_handle        {:optional true} [:maybe json-query-schema]]
+                    [:error_handle           {:optional true} [:maybe json-query-schema]]]]
   (when (and (nil? database_id)
              (= &quot;query&quot; type))
     (throw (ex-info (tru &quot;Must provide a database_id for query actions&quot;)
@@ -3001,27 +2998,27 @@ net.brehaut.ClojureTools = (function (SH) {
       (action/select-action :id action-id)
       ;; t2/insert! does not return a value when used with h2
       ;; so we return the most recently updated http action.
-      (last (action/select-actions nil :type type)))))</pre></td></tr><tr><td class="docs"><p>/:id</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint PUT 
+      (last (action/select-actions nil :type type)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :put &quot;/:id&quot;
   &quot;Update an Action.&quot;
-  [id :as {action :body}]
-  {id     ms/PositiveInt
-   action [:map
-           [:archived               {:optional true} [:maybe :boolean]]
-           [:database_id            {:optional true} [:maybe ms/PositiveInt]]
-           [:dataset_query          {:optional true} [:maybe :map]]
-           [:description            {:optional true} [:maybe :string]]
-           [:error_handle           {:optional true} [:maybe json-query-schema]]
-           [:kind                   {:optional true} [:maybe implicit-action-kind]]
-           [:model_id               {:optional true} [:maybe ms/PositiveInt]]
-           [:name                   {:optional true} [:maybe :string]]
-           [:parameter_mappings     {:optional true} [:maybe :map]]
-           [:parameters             {:optional true} [:maybe [:sequential :map]]]
-           [:response_handle        {:optional true} [:maybe json-query-schema]]
-           [:template               {:optional true} [:maybe http-action-template]]
-           [:type                   {:optional true} [:maybe supported-action-type]]
-           [:visualization_settings {:optional true} [:maybe :map]]]}
+  [{:keys [id]} :- [:map
+                    [:id ms/PositiveInt]]
+   _query-params
+   action :- [:map
+              [:archived               {:optional true} [:maybe :boolean]]
+              [:database_id            {:optional true} [:maybe ms/PositiveInt]]
+              [:dataset_query          {:optional true} [:maybe :map]]
+              [:description            {:optional true} [:maybe :string]]
+              [:error_handle           {:optional true} [:maybe json-query-schema]]
+              [:kind                   {:optional true} [:maybe implicit-action-kind]]
+              [:model_id               {:optional true} [:maybe ms/PositiveInt]]
+              [:name                   {:optional true} [:maybe :string]]
+              [:parameter_mappings     {:optional true} [:maybe :map]]
+              [:parameters             {:optional true} [:maybe [:sequential :map]]]
+              [:response_handle        {:optional true} [:maybe json-query-schema]]
+              [:template               {:optional true} [:maybe http-action-template]]
+              [:type                   {:optional true} [:maybe supported-action-type]]
+              [:visualization_settings {:optional true} [:maybe :map]]]]
   (actions/check-actions-enabled! id)
   (let [existing-action (api/write-check :model/Action id)]
     (action/update! (assoc action :id id) existing-action))
@@ -3031,14 +3028,13 @@ net.brehaut.ClojureTools = (function (SH) {
                             :type           type
                             :action_id      id
                             :num_parameters (count parameters)})
-    action))</pre></td></tr><tr><td class="docs"><p>/:id/public_link</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+    action))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/:id/public_link&quot;
   &quot;Generate publicly-accessible links for this Action. Returns UUID to be used in public links. (If this
   Action has already been shared, it will return the existing public link rather than creating a new one.) Public
   sharing must be enabled.&quot;
-  [id]
-  {id ms/PositiveInt}
+  [{:keys [id]} :- [:map
+                    [:id ms/PositiveInt]]]
   (api/check-superuser)
   (validation/check-public-sharing-enabled)
   (let [action (api/read-check :model/Action id :archived false)]
@@ -3047,36 +3043,37 @@ net.brehaut.ClojureTools = (function (SH) {
                (u/prog1 (str (random-uuid))
                  (t2/update! :model/Action id
                              {:public_uuid &lt;&gt;
-                              :made_public_by_id api/*current-user-id*})))}))</pre></td></tr><tr><td class="docs"><p>/:id/public_link</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint DELETE 
+                              :made_public_by_id api/*current-user-id*})))}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :delete &quot;/:id/public_link&quot;
   &quot;Delete the publicly-accessible link to this Dashboard.&quot;
-  [id]
-  {id ms/PositiveInt}
+  [{:keys [id]} :- [:map
+                    [:id ms/PositiveInt]]]
   ;; check the /application/setting permission, not superuser because removing a public link is possible from /admin/settings
   (validation/check-has-application-permission :setting)
   (validation/check-public-sharing-enabled)
   (api/check-exists? :model/Action :id id, :public_uuid [:not= nil], :archived false)
   (actions/check-actions-enabled! id)
   (t2/update! :model/Action id {:public_uuid nil, :made_public_by_id nil})
-  {:status 204, :body nil})</pre></td></tr><tr><td class="docs"><p>/:action-id/execute</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+  {:status 204, :body nil})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:action-id/execute&quot;
   &quot;Fetches the values for filling in execution parameters. Pass PK parameters and values to select.&quot;
-  [action-id parameters]
-  {action-id  ms/PositiveInt
-   parameters ms/JSONString}
+  [{:keys [action-id]} :- [:map
+                           [:action-id ms/PositiveInt]]
+   {:keys [parameters]} :- [:map
+                            [:parameters ms/JSONString]]]
   (actions/check-actions-enabled! action-id)
   (-&gt; (action/select-action :id action-id :archived false)
       api/read-check
-      (actions/fetch-values (json/decode parameters))))</pre></td></tr><tr><td class="docs"><p>/:id/execute</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+      (actions/fetch-values (json/decode parameters))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/:id/execute&quot;
   &quot;Execute the Action.
+
    `parameters` should be the mapped dashboard parameters with values.&quot;
-  [id :as {{:keys [parameters], :as _body} :body}]
-  {id         ms/PositiveInt
-   parameters [:maybe [:map-of :keyword any?]]}
+  [{:keys [id]} :- [:map
+                    [:id ms/PositiveInt]]
+   _query-params
+   {:keys [parameters], :as _body} :- [:maybe [:map
+                                               [:parameters {:optional true} [:maybe [:map-of :keyword any?]]]]]]
   (let [{:keys [type] :as action} (api/check-404 (action/select-action :id id :archived false))]
     (snowplow/track-event! ::snowplow/action
                            {:event     :action-executed

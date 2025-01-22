@@ -2872,7 +2872,6 @@ endpoints for other Collections namespaces, you can pass the <code>?namespace=</
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.api.collection
   (:require
    [clojure.string :as str]
-   [compojure.core :refer [GET POST PUT]]
    [honey.sql.helpers :as sql.helpers]
    [malli.core :as mc]
    [malli.transform :as mtx]
@@ -2976,21 +2975,24 @@ This will select only collections where <code>personal_owner_id</code> is not <c
                              :else 2]] :asc]
                           [:%lower.name :asc]]})
     exclude-other-user-collections
-    (remove-other-users-personal-subcollections api/*current-user-id*)))</pre></td></tr><tr><td class="docs"><p>/</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+    (remove-other-users-personal-subcollections api/*current-user-id*)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/&quot;
   &quot;Fetch a list of all Collections that the current user has read permissions for (`:can_write` is returned as an
   additional property of each Collection so you can tell which of these you have write permissions for.)
+
   By default, this returns non-archived Collections, but instead you can show archived ones by passing
   `?archived=true`.
+
   By default, admin users will see all collections. To hide other user's collections pass in
   `?exclude-other-user-collections=true`.
+
   If personal-only is `true`, then return only personal collections where `personal_owner_id` is not `nil`.&quot;
-  [archived exclude-other-user-collections namespace personal-only]
-  {archived                       [:maybe ms/BooleanValue]
-   exclude-other-user-collections [:maybe ms/BooleanValue]
-   namespace                      [:maybe ms/NonBlankString]
-   personal-only                  [:maybe ms/BooleanValue]}
+  [_route-params
+   {:keys [archived exclude-other-user-collections namespace personal-only]} :- [:map
+                                                                                 [:archived                       {:default false} [:maybe ms/BooleanValue]]
+                                                                                 [:exclude-other-user-collections {:default false} [:maybe ms/BooleanValue]]
+                                                                                 [:namespace                      {:optional true} [:maybe ms/NonBlankString]]
+                                                                                 [:personal-only                  {:default false} [:maybe ms/BooleanValue]]]]
   (as-&gt;
    (select-collections {:archived                       (boolean archived)
                         :exclude-other-user-collections exclude-other-user-collections
@@ -3028,10 +3030,10 @@ This will select only collections where <code>personal_owner_id</code> is not <c
   (-&gt;&gt; colls
        (map collection/personal-collection-with-ui-details)
        (collection/collections-&gt;tree nil)
-       (map (fn [coll] (update coll :children #(boolean (seq %)))))))</pre></td></tr><tr><td class="docs"><p>/tree</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+       (map (fn [coll] (update coll :children #(boolean (seq %)))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/tree&quot;
   &quot;Similar to `GET /`, but returns Collections in a tree structure, e.g.
+
   ```
   [{:name     \&quot;A\&quot;
   :below    #{:card :dataset}
@@ -3047,16 +3049,20 @@ This will select only collections where <code>personal_owner_id</code> is not <c
                           :children [{:name \&quot;G\&quot;}]}]}]}
   {:name \&quot;H\&quot;}]
   ```
+
   The here and below keys indicate the types of items at this particular level of the tree (here) and in its
   subtree (below).
+
   TODO: for historical reasons this returns Saved Questions AS 'card' AND Models as 'dataset'; we should fix this at
   some point in the future.&quot;
-  [exclude-archived exclude-other-user-collections namespace shallow collection-id]
-  {exclude-archived               [:maybe :boolean]
-   exclude-other-user-collections [:maybe :boolean]
-   namespace                      [:maybe ms/NonBlankString]
-   shallow                        [:maybe :boolean]
-   collection-id                  [:maybe ms/PositiveInt]}
+  [_route-params
+   {:keys [exclude-archived exclude-other-user-collections
+           namespace shallow collection-id]} :- [:map
+                                                 [:exclude-archived               {:default false} [:maybe :boolean]]
+                                                 [:exclude-other-user-collections {:default false} [:maybe :boolean]]
+                                                 [:namespace                      {:optional true} [:maybe ms/NonBlankString]]
+                                                 [:shallow                        {:default false} [:maybe :boolean]]
+                                                 [:collection-id                  {:optional true} [:maybe ms/PositiveInt]]]]
   (let [archived    (if exclude-archived false nil)
         collections (select-collections {:archived                       archived
                                          :exclude-other-user-collections exclude-other-user-collections
@@ -3091,7 +3097,7 @@ This will select only collections where <code>personal_owner_id</code> is not <c
     &quot;no_models&quot;
     &quot;timeline&quot;})</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private ModelString
-  (into [:enum] valid-model-param-values))</pre></td></tr><tr><td class="docs"><p>This is basically a union type. [[api/defendpoint]] splits the string if it only gets one.</p>
+  (into [:enum] valid-model-param-values))</pre></td></tr><tr><td class="docs"><p>This is basically a union type. [[api.macros/defendpoint]] splits the string if it only gets one.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private Models
   [:vector {:decode/string (fn [x] (cond (vector? x) x x [x]))} ModelString])</pre></td></tr><tr><td class="docs"><p>Valid values for the <code>?pinned_state</code> param accepted by endpoints in this namespace.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private valid-pinned-state-values
@@ -3738,57 +3744,57 @@ Works for either a normal Collection or the Root Collection.</p>
                   :can_write
                   :is_personal
                   :can_restore
-                  :can_delete)))</pre></td></tr><tr><td class="docs"><p>/:id</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+                  :can_delete)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:id&quot;
   &quot;Fetch a specific Collection with standard details added&quot;
-  [id]
-  {id ms/PositiveInt}
-  (collection-detail (api/read-check :model/Collection id)))</pre></td></tr><tr><td class="docs"><p>/trash</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+  [{:keys [id]} :- [:map
+                    [:id ms/PositiveInt]]]
+  (collection-detail (api/read-check :model/Collection id)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/trash&quot;
   &quot;Fetch the trash collection, as in `/api/collection/:trash-id`&quot;
   []
-  {}
-  (collection-detail (api/read-check (collection/trash-collection))))</pre></td></tr><tr><td class="docs"><p>/root/timelines</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+  (collection-detail (api/read-check (collection/trash-collection))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/root/timelines&quot;
   &quot;Fetch the root Collection's timelines.&quot;
-  [include archived]
-  {include  [:maybe [:= &quot;events&quot;]]
-   archived [:maybe :boolean]}
+  [_route-params
+   {:keys [include archived]} :- [:map
+                                  [:include  {:optional true} [:maybe [:= &quot;events&quot;]]]
+                                  [:archived {:default false} [:maybe :boolean]]]]
   (api/read-check collection/root-collection)
   (timeline/timelines-for-collection nil {:timeline/events?   (= include &quot;events&quot;)
-                                          :timeline/archived? archived}))</pre></td></tr><tr><td class="docs"><p>/:id/timelines</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+                                          :timeline/archived? archived}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:id/timelines&quot;
   &quot;Fetch a specific Collection's timelines.&quot;
-  [id include archived]
-  {id       ms/PositiveInt
-   include  [:maybe [:= &quot;events&quot;]]
-   archived [:maybe :boolean]}
+  [{:keys [id]} :- [:map
+                    [:id ms/PositiveInt]]
+   {:keys [include archived]} :- [:map
+                                  [:include  {:optional true} [:maybe [:= &quot;events&quot;]]]
+                                  [:archived {:default false} [:maybe :boolean]]]]
   (api/read-check (t2/select-one :model/Collection :id id))
   (timeline/timelines-for-collection id {:timeline/events?   (= include &quot;events&quot;)
-                                         :timeline/archived? archived}))</pre></td></tr><tr><td class="docs"><p>/:id/items</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+                                         :timeline/archived? archived}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:id/items&quot;
   &quot;Fetch a specific Collection's items with the following options:
+
   *  `models` - only include objects of a specific set of `models`. If unspecified, returns objects of all models
   *  `archived` - when `true`, return archived objects *instead* of unarchived ones. Defaults to `false`.
   *  `pinned_state` - when `is_pinned`, return pinned objects only.
                    when `is_not_pinned`, return non pinned objects only.
                    when `all`, return everything. By default returns everything.
+
   Note that this endpoint should return results in a similar shape to `/api/dashboard/:id/items`, so if this is
   changed, that should too.&quot;
-  [id models archived pinned_state sort_column sort_direction official_collections_first show_dashboard_questions]
-  {id                         ms/PositiveInt
-   models                     [:maybe Models]
-   archived                   [:maybe ms/BooleanValue]
-   pinned_state               [:maybe (into [:enum] valid-pinned-state-values)]
-   sort_column                [:maybe (into [:enum] valid-sort-columns)]
-   sort_direction             [:maybe (into [:enum] valid-sort-directions)]
-   official_collections_first [:maybe ms/MaybeBooleanValue]
-   show_dashboard_questions   [:maybe ms/BooleanValue]}
+  [{:keys [id]} :- [:map
+                    [:id ms/PositiveInt]]
+   {:keys [models archived pinned_state sort_column sort_direction official_collections_first
+           show_dashboard_questions]} :- [:map
+                                          [:models                     {:optional true} [:maybe Models]]
+                                          [:archived                   {:default false} [:maybe ms/BooleanValue]]
+                                          [:pinned_state               {:optional true} [:maybe (into [:enum] valid-pinned-state-values)]]
+                                          [:sort_column                {:optional true} [:maybe (into [:enum] valid-sort-columns)]]
+                                          [:sort_direction             {:optional true} [:maybe (into [:enum] valid-sort-directions)]]
+                                          [:official_collections_first {:optional true} [:maybe ms/MaybeBooleanValue]]
+                                          [:show_dashboard_questions   {:default false} [:maybe ms/BooleanValue]]]]
   (let [model-kwds (set (map keyword (u/one-or-many models)))
         collection (api/read-check :model/Collection id)]
     (u/prog1 (collection-children collection
@@ -3835,13 +3841,15 @@ Works for either a normal Collection or the Root Collection.</p>
 </td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:id/dashboard-question-candidates&quot; :- ::DashboardQuestionCandidatesResponse
   &quot;Find cards in this collection that can be moved into dashboards in this collection.
 
-  To be eligible, a card must only appear in one dashboard (which is also in this collection), and must not already be a dashboard question.&quot;
+  To be eligible, a card must only appear in one dashboard (which is also in this collection), and must not already be a
+  dashboard question.&quot;
   [{:keys [id]} :- [:map [:id ms/PositiveInt]]]
   (api/read-check :model/Collection id)
   (present-dashboard-question-candidates
    (dashboard-question-candidates id)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/root/dashboard-question-candidates&quot; :- ::DashboardQuestionCandidatesResponse
-  &quot;Find cards in the root collection that can be moved into dashboards in the root collection. (Same as the above endpoint, but for the root collection)&quot;
+  &quot;Find cards in the root collection that can be moved into dashboards in the root collection. (Same as the above
+  endpoint, but for the root collection)&quot;
   []
   (present-dashboard-question-candidates
    (dashboard-question-candidates nil)))</pre></td></tr><tr><td class="docs">
@@ -3880,12 +3888,12 @@ Works for either a normal Collection or the Root Collection.</p>
   {:moved (move-dashboard-question-candidates nil card_ids)})</pre></td></tr><tr><td class="docs"><p>-------------------------------------------- GET /api/collection/root --------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- root-collection [collection-namespace]
-  (collection-detail (collection/root-collection-with-ui-details collection-namespace)))</pre></td></tr><tr><td class="docs"><p>/root</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+  (collection-detail (collection/root-collection-with-ui-details collection-namespace)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/root&quot;
   &quot;Return the 'Root' Collection object with standard details added&quot;
-  [namespace]
-  {namespace [:maybe ms/NonBlankString]}
+  [_route-params
+   {:keys [namespace]} :- [:map
+                           [:namespace {:optional true} [:maybe ms/NonBlankString]]]]
   (-&gt; (root-collection namespace)
       (api/read-check)
       (dissoc ::collection.root/is-root?)))</pre></td></tr><tr><td class="docs"><p>If you pass in explicitly keywords that you can't see, you can't see them.
@@ -3898,30 +3906,35 @@ but be able to see, children of those invisible top-level collections.</p>
     model-set
     (if (or (empty? model-set) (contains? model-set :collection))
       #{:collection}
-      #{:no_models})))</pre></td></tr><tr><td class="docs"><p>/root/items</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+      #{:no_models})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/root/items&quot;
   &quot;Fetch objects that the current user should see at their root level. As mentioned elsewhere, the 'Root' Collection
   doesn't actually exist as a row in the application DB: it's simply a virtual Collection where things with no
   `collection_id` exist. It does, however, have its own set of Permissions.
+
   This endpoint will actually show objects with no `collection_id` for Users that have Root Collection
   permissions, but for people without Root Collection perms, we'll just show the objects that have an effective
   location of `/`.
+
   This endpoint is intended to power a 'Root Folder View' for the Current User, so regardless you'll see all the
   top-level objects you're allowed to access.
+
   By default, this will show the 'normal' Collections namespace; to view a different Collections namespace, such as
   `snippets`, you can pass the `?namespace=` parameter.
+
   Note that this endpoint should return results in a similar shape to `/api/dashboard/:id/items`, so if this is
   changed, that should too.&quot;
-  [models archived namespace pinned_state sort_column sort_direction official_collections_first show_dashboard_questions]
-  {models                     [:maybe Models]
-   archived                   [:maybe ms/BooleanValue]
-   namespace                  [:maybe ms/NonBlankString]
-   pinned_state               [:maybe (into [:enum] valid-pinned-state-values)]
-   sort_column                [:maybe (into [:enum] valid-sort-columns)]
-   sort_direction             [:maybe (into [:enum] valid-sort-directions)]
-   official_collections_first [:maybe ms/MaybeBooleanValue]
-   show_dashboard_questions   [:maybe ms/MaybeBooleanValue]}
+  [_route-params
+   {:keys [models archived namespace pinned_state sort_column sort_direction official_collections_first
+           show_dashboard_questions]} :- [:map
+                                          [:models                     {:optional true} [:maybe Models]]
+                                          [:archived                   {:default false} [:maybe ms/BooleanValue]]
+                                          [:namespace                  {:optional true} [:maybe ms/NonBlankString]]
+                                          [:pinned_state               {:optional true} [:maybe (into [:enum] valid-pinned-state-values)]]
+                                          [:sort_column                {:optional true} [:maybe (into [:enum] valid-sort-columns)]]
+                                          [:sort_direction             {:optional true} [:maybe (into [:enum] valid-sort-directions)]]
+                                          [:official_collections_first {:optional true} [:maybe ms/MaybeBooleanValue]]
+                                          [:show_dashboard_questions   {:optional true} [:maybe ms/MaybeBooleanValue]]]]
   ;; Return collection contents, including Collections that have an effective location of being in the Root
   ;; Collection for the Current User.
   (let [root-collection (assoc collection/root-collection :namespace namespace)
@@ -3967,16 +3980,17 @@ Root Collection perms.</p>
               :namespace       namespace}
              (when parent_id
                {:location (collection/children-location (t2/select-one [:model/Collection :location :id] :id parent_id))})))
-    (events/publish-event! :event/collection-touch {:collection-id (:id &lt;&gt;) :user-id api/*current-user-id*})))</pre></td></tr><tr><td class="docs"><p>/</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+    (events/publish-event! :event/collection-touch {:collection-id (:id &lt;&gt;) :user-id api/*current-user-id*})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/&quot;
   &quot;Create a new Collection.&quot;
-  [:as {{:keys [name description parent_id namespace authority_level] :as body} :body}]
-  {name            ms/NonBlankString
-   description     [:maybe ms/NonBlankString]
-   parent_id       [:maybe ms/PositiveInt]
-   namespace       [:maybe ms/NonBlankString]
-   authority_level [:maybe collection/AuthorityLevel]}
+  [_route-params
+   _query-params
+   body :- [:map
+            [:name            ms/NonBlankString]
+            [:description     {:optional true} [:maybe ms/NonBlankString]]
+            [:parent_id       {:optional true} [:maybe ms/PositiveInt]]
+            [:namespace       {:optional true} [:maybe ms/NonBlankString]]
+            [:authority_level {:optional true} [:maybe collection/AuthorityLevel]]]]
   (create-collection! body))</pre></td></tr><tr><td class="docs"><p>When a collection is archived, all of it's cards are also marked as archived, but this is down in the model layer
 which will not cause the archive notification code to fire. This will delete the relevant alerts and notify the
 users just as if they had be archived individually via the card API.</p>
@@ -4028,22 +4042,23 @@ appropriate permissions checks and changes.</p>
   (condp #(api/column-will-change? %1 collection-before-update %2) collection-updates
     :archived (archive-collection! collection-before-update collection-updates)
     :parent_id (move-collection! collection-before-update collection-updates)
-    :no-op))</pre></td></tr><tr><td class="docs"><p>/:id</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint PUT 
+    :no-op))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :put &quot;/:id&quot;
   &quot;Modify an existing Collection, including archiving or unarchiving it, or moving it.&quot;
-  [id, :as {{:keys [name description archived parent_id authority_level], :as collection-updates} :body}]
-  {id              ms/PositiveInt
-   name            [:maybe ms/NonBlankString]
-   description     [:maybe ms/NonBlankString]
-   archived        [:maybe ms/BooleanValue]
-   parent_id       [:maybe ms/PositiveInt]
-   authority_level [:maybe collection/AuthorityLevel]}
+  [{:keys [id]} :- [:map
+                    [:id ms/PositiveInt]]
+   _query-params
+   {authority-level :authority_level, :as collection-updates} :- [:map
+                                                                  [:name            {:optional true} [:maybe ms/NonBlankString]]
+                                                                  [:description     {:optional true} [:maybe ms/NonBlankString]]
+                                                                  [:archived        {:default false} [:maybe ms/BooleanValue]]
+                                                                  [:parent_id       {:optional true} [:maybe ms/PositiveInt]]
+                                                                  [:authority_level {:optional true} [:maybe collection/AuthorityLevel]]]]
   ;; do we have perms to edit this Collection?
   (let [collection-before-update (t2/hydrate (api/write-check :model/Collection id) :parent_id)]
     ;; if authority_level is changing, make sure we're allowed to do that
     (when (and (contains? collection-updates :authority_level)
-               (not= (keyword authority_level) (:authority_level collection-before-update)))
+               (not= (keyword authority-level) (:authority_level collection-before-update)))
       (premium-features/assert-has-feature :official-collections (tru &quot;Official Collections&quot;))
       (api/check-403 api/*is-superuser?*))
     ;; ok, go ahead and update it! Only update keys that were specified in the `body`. But not `parent_id` since
@@ -4056,12 +4071,12 @@ appropriate permissions checks and changes.</p>
     (events/publish-event! :event/collection-touch {:collection-id id :user-id api/*current-user-id*}))
   ;; finally, return the updated object
   (collection-detail (t2/select-one :model/Collection :id id)))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------ GRAPH ENDPOINTS -------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>/graph</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/graph&quot;
   &quot;Fetch a graph of all Collection Permissions.&quot;
-  [namespace]
-  {namespace [:maybe ms/NonBlankString]}
+  [_route-params
+   {:keys [namespace]} :- [:map
+                           [:namespace {:optional true} [:maybe ms/NonBlankString]]]]
   (api/check-superuser)
   (graph/graph namespace))</pre></td></tr><tr><td class="docs"><p>an id for a [[Collection]].</p>
 </td><td class="codes"><pre class="brush: clojure">(def CollectionID 
@@ -4093,22 +4108,24 @@ Revision # is used for consistency</p>
   (graph/update-graph! namespace graph force?)
   (if skip-graph
     {:revision (c-perm-revision/latest-id)}
-    (graph/graph namespace)))</pre></td></tr><tr><td class="docs"><p>/graph</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint PUT 
+    (graph/graph namespace)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :put &quot;/graph&quot;
   &quot;Do a batch update of Collections Permissions by passing in a modified graph. Will overwrite parts of the graph that
   are present in the request, and leave the rest unchanged.
+
   If the `force` query parameter is `true`, a `revision` number is not required. The provided graph will be persisted
   as-is, and has the potential to clobber other writes that happened since the last read.
+
   If the `skip_graph` query parameter is `true`, it will only return the current revision, not the entire permissions
   graph.&quot;
-  [:as {{:keys [namespace revision groups]} :body
-        {:keys [skip-graph force]} :params}]
-  {namespace  [:maybe ms/NonBlankString]
-   revision   [:maybe ms/Int]
-   groups     :map
-   force      [:maybe ms/BooleanValue]
-   skip-graph [:maybe ms/BooleanValue]}
+  [_route-params
+   {:keys [skip-graph force]} :- [:map
+                                  [:force      {:default false} [:maybe ms/BooleanValue]]
+                                  [:skip-graph {:default false} [:maybe ms/BooleanValue]]]
+   {:keys [namespace revision groups]} :- [:map
+                                           [:namespace {:optional true} [:maybe ms/NonBlankString]]
+                                           [:revision  {:optional true} [:maybe ms/Int]]
+                                           [:groups    :map]]]
   (api/check-superuser)
   (update-graph! namespace
                  (decode-graph {:revision revision :groups groups})
