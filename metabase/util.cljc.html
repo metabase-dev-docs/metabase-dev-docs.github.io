@@ -2865,830 +2865,1028 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#util.cljc" name="util.cljc"><h1 class="project-name">util.cljc</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Utilitiy functions for working with MBQL queries.</p>
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.legacy-mbql.util
-  (:refer-clojure :exclude [replace])
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#util.cljc" name="util.cljc"><h1 class="project-name">util.cljc</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Common utility functions useful throughout the codebase.</p>
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.util
+  (:refer-clojure :exclude [group-by])
   (:require
-   #?@(:clj
-       [[metabase.legacy-mbql.jvm-util :as mbql.jvm-u]
-        [metabase.models.dispatch :as models.dispatch]])
+   #?@(:clj ([clojure.core.protocols]
+             [clojure.math.numeric-tower :as math]
+             [me.flowthing.pp :as pp]
+             [metabase.config :as config]
+             #_{:clj-kondo/ignore [:discouraged-namespace]}
+             [metabase.util.jvm :as u.jvm]
+             [metabase.util.string :as u.str]
+             [potemkin :as p]
+             [ring.util.codec :as codec]))
+   [camel-snake-kebab.internals.macros :as csk.macros]
+   [clojure.data :refer [diff]]
+   [clojure.pprint :as pprint]
+   [clojure.set :as set]
    [clojure.string :as str]
+   [clojure.walk :as walk]
+   [flatland.ordered.map :refer [ordered-map]]
    [medley.core :as m]
-   [metabase.legacy-mbql.predicates :as mbql.preds]
-   [metabase.legacy-mbql.schema :as mbql.s]
-   [metabase.legacy-mbql.schema.helpers :as schema.helpers]
-   [metabase.lib.schema.common :as lib.schema.common]
-   [metabase.lib.util.match :as lib.util.match]
-   [metabase.util :as u]
-   [metabase.util.i18n :as i18n]
+   [metabase.util.format :as u.format]
+   [metabase.util.i18n :refer [tru]]
    [metabase.util.log :as log]
-   [metabase.util.malli :as mu]
-   [metabase.util.namespaces :as shared.ns]
-   [metabase.util.time :as u.time]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(shared.ns/import-fns
- [schema.helpers
-  mbql-clause?
-  is-clause?
-  check-clause])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn normalize-token :- :keyword
-  &quot;Convert a string or keyword in various cases (`lisp-case`, `snake_case`, or `SCREAMING_SNAKE_CASE`) to a lisp-cased
-  keyword.&quot;
-  [token :- schema.helpers/KeywordOrString]
-  #_{:clj-kondo/ignore [:discouraged-var]}
-  (-&gt; (u/qualified-name token)
-      str/lower-case
-      (str/replace #&quot;_&quot; &quot;-&quot;)
-      keyword))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
-|                                       Functions for manipulating queries                                       |
-+----------------------------------------------------------------------------------------------------------------+</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- combine-compound-filters-of-type [compound-type subclauses]
-  (mapcat #(lib.util.match/match-one %
-             [(_ :guard (partial = compound-type)) &amp; args]
-             args
-             _
-             [&amp;match])
-          subclauses))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(declare simplify-compound-filter)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- simplify-and-or-filter
-  [op args]
-  (let [args (distinct (filter some? args))]
-    (case (count args)
-      ;; an empty filter, toss it
-      0 nil
-      ;; single arg, unwrap it
-      1 (simplify-compound-filter (first args))
-      (if (some (partial is-clause? op) args)
-        ;; clause of the same type embedded, faltten it
-        (recur op (combine-compound-filters-of-type op args))
-        ;; simplify the arguments
-        (let [simplified (map simplify-compound-filter args)]
-          (if (= simplified args)
-            ;; no change, we can stop
-            (into [op] args)
-            ;; there is a change, we might be able to simplify even further
-            (recur op simplified)))))))</pre></td></tr><tr><td class="docs"><p>Simplify compound <code>:and</code>, <code>:or</code>, and <code>:not</code> compound filters, combining or eliminating them where possible. This
-also fixes theoretically disallowed compound filters like <code>:and</code> with only a single subclause, and eliminates <code>nils</code>
-and duplicate subclauses from the clauses.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn simplify-compound-filter
+   [metabase.util.memoize :as memoize]
+   [metabase.util.namespaces :as u.ns]
+   [metabase.util.polyfills]
+   [nano-id.core :as nano-id]
+   [net.cgrand.macrovich :as macros]
+   [weavejester.dependency :as dep])
+  #?(:clj (:import
+           (clojure.core.protocols CollReduce)
+           (clojure.lang Reflector)
+           (java.text Normalizer Normalizer$Form)
+           (java.util Locale Random)
+           (org.apache.commons.validator.routines RegexValidator UrlValidator)))
+  #?(:cljs (:require-macros [camel-snake-kebab.internals.macros :as csk.macros]
+                            [metabase.util])))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">#?(:clj (set! *warn-on-reflection* true))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">#?(:clj (comment clojure.core.protocols/keep-me))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(u.ns/import-fns
+ [u.format
+  colorize
+  format-bytes
+  format-color
+  format-milliseconds
+  format-nanoseconds
+  format-seconds
+  format-plural])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">#?(:clj (p/import-vars [u.jvm
+                        all-ex-data
+                        auto-retry
+                        string-to-bytes
+                        bytes-to-string
+                        decode-base64
+                        decode-base64-to-bytes
+                        deref-with-timeout
+                        encode-base64
+                        encode-base64-bytes
+                        filtered-stacktrace
+                        full-exception-chain
+                        host-port-up?
+                        parse-currency
+                        poll
+                        host-up?
+                        ip-address?
+                        sorted-take
+                        varargs
+                        with-timeout
+                        with-us-locale]
+                       [u.str
+                        build-sentence]))</pre></td></tr><tr><td class="docs"><p>Like or, but determines truthiness with <code>pred</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro or-with
+  {:style/indent 1}
+  [pred &amp; more]
+  (reduce (fn [inner value]
+            `(let [value# ~value]
+               (if (~pred value#)
+                 value#
+                 ~inner)))
+          nil
+          (reverse more)))</pre></td></tr><tr><td class="docs"><p>Simple macro which wraps the given expression in a try/catch block and ignores the exception if caught.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro ignore-exceptions
+  {:style/indent 0}
+  [&amp; body]
+  `(try ~@body (catch ~(macros/case
+                         :cljs 'js/Error
+                         :clj  'Throwable)
+                      ~'_)))</pre></td></tr><tr><td class="docs"><p>Transforms the error in a list of strings to log</p>
+</td><td class="codes"><pre class="brush: clojure">(defn strip-error
+  ([e]
+   (strip-error e nil))
+  ([e prefix]
+   (-&gt;&gt; (for [[e prefix] (map vector
+                              (take-while some? (iterate #(.getCause ^Exception %) e))
+                              (cons prefix (repeat &quot;  caused by&quot;)))]
+          (str (when prefix (str prefix &quot;: &quot;))
+               (ex-message e)
+               (when-let [data (-&gt; (ex-data e)
+                                   (dissoc :toucan2/context-trace)
+                                   not-empty)]
+                 (str &quot; &quot; (pr-str data)))))
+        (str/join &quot;\n&quot;))))</pre></td></tr><tr><td class="docs"><p>Execute <code>first-form</code>, then any other expressions in <code>body</code>, presumably for side-effects; return the result of
+<code>first-form</code>.</p>
+
+<p>  (def numbers (atom []))</p>
+
+<p>  (defn find-or-add [n]
+    (or (first-index-satisfying (partial = n) @numbers)
+        (prog1 (count @numbers)
+          (swap! numbers conj n))))</p>
+
+<p>  (find-or-add 100) -> 0
+  (find-or-add 200) -> 1
+  (find-or-add 100) -> 0</p>
+
+<p> The result of <code>first-form</code> is bound to the anaphor <code>&lt;&gt;</code>, which is convenient for logging:</p>
+
+<p>   (prog1 (some-expression)
+     (println "RESULTS:" &lt;>))</p>
+
+<p><code>prog1</code> is an anaphoric version of the traditional macro of the same name in
+ <a href="http://www.gnu.org/software/emacs/manual/html_node/elisp/Sequencing.html#index-prog1">Emacs Lisp</a>
+ and <a href="http://www.lispworks.com/documentation/HyperSpec/Body/m_prog1c.htm#prog1">Common Lisp</a>.</p>
+
+<p>Style note: Prefer <code>doto</code> when appropriate, e.g. when dealing with Java objects.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro prog1
+  {:style/indent :defn}
+  [first-form &amp; body]
+  `(let [~'&lt;&gt; ~first-form]
+     ~@body
+     ~'&lt;&gt;))</pre></td></tr><tr><td class="docs"><p>Takes a message string and returns a basic exception: [[java.lang.Exception]] on JVM and [[Error]] in JS.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn error
+  [^String msg]
+  #?(:clj  (Exception. msg)
+     :cljs (js/Error. msg)))</pre></td></tr><tr><td class="docs"><p>Return <code>k</code> as a string, qualified by its namespace, if any (unlike <code>name</code>). Handles <code>nil</code> values gracefully as well
+(also unlike <code>name</code>).</p>
+
+<p>   (u/qualified-name :type/FK) -> "type/FK"</p>
+</td><td class="codes"><pre class="brush: clojure">(defn qualified-name
+  [k]
+  (cond
+    (nil? k)
+    nil
+    ;; optimization in Clojure: calling [[symbol]] on a keyword returns the underlying symbol, and [[str]] on a symbol
+    ;; is cached internally (see `clojure.lang.Symbol/toString()`). So we can avoid constructing a new string here.
+    ;; Not sure whether this is cached in ClojureScript as well.
+    (keyword? k)
+    (str (symbol k))
+    (symbol? k)
+    (str k)
+    :else
+    (if-let [namespac (when #?(:clj  (instance? clojure.lang.Named k)
+                               :cljs (satisfies? INamed k))
+                        (namespace k))]
+      (str namespac &quot;/&quot; (name k))
+      (name k))))</pre></td></tr><tr><td class="docs"><p>Given a map, returns a new map with all nil values removed.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn remove-nils
+  [m]
+  (m/filter-vals some? m))</pre></td></tr><tr><td class="docs"><p>Recursively replace the keys in a map with the value of <code>(f key)</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn recursive-map-keys
+  [f m]
+  (walk/postwalk
+   #(if (map? %)
+      (m/map-keys f %)
+      %)
+   m))</pre></td></tr><tr><td class="docs"><p>Fixes strings that don't terminate in a period; also accounts for strings
+that end in <code>:</code> and triple backticks (e.g., if a string ends in codeblock).
+ Used for formatting docs.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn add-period
+  [s]
+  (let [text (str s)]
+    (cond
+      (str/blank? text) text
+      (#{\. \? \!} (last text)) text
+      (str/ends-with? text &quot;```&quot;) text
+      (str/ends-with? text &quot;:&quot;) (str (subs text 0 (dec (count text))) &quot;.&quot;)
+      :else (str text &quot;.&quot;))))</pre></td></tr><tr><td class="docs"><p>Locale-agnostic version of [[clojure.string/lower-case]]. [[clojure.string/lower-case]] uses the default locale in
+conversions, turning <code>ID</code> into <code>ıd</code>, in the Turkish locale. This function always uses the <code>en-US</code> locale.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn lower-case-en
+  ^String [s]
+  (when s
+    #?(:clj  (.toLowerCase (str s) Locale/US)
+       :cljs (.toLowerCase (str s)))))</pre></td></tr><tr><td class="docs"><p>Locale-agnostic version of <code>clojure.string/upper-case</code>.
+<code>clojure.string/upper-case</code> uses the default locale in conversions, turning
+<code>id</code> into <code>İD</code>, in the Turkish locale. This function always uses the
+<code>en-US</code> locale.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn upper-case-en
+  ^String [s]
+  (when s
+    #?(:clj  (.toUpperCase (str s) Locale/US)
+       :cljs (.toUpperCase (str s)))))</pre></td></tr><tr><td class="docs"><p>Locale-agnostic version of [[clojure.string/capitalize]].</p>
+</td><td class="codes"><pre class="brush: clojure">(defn capitalize-en
+  ^String [^CharSequence s]
+  (when-let [s (some-&gt; s str)]
+    (if (&lt; (count s) 2)
+      (upper-case-en s)
+      (str (upper-case-en (subs s 0 1))
+           (lower-case-en (subs s 1))))))</pre></td></tr><tr><td class="docs"><p>Truncate a string to <code>n</code> characters.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn truncate
+  [s n]
+  (subs s 0 (min (count s) n)))</pre></td></tr><tr><td class="docs"><p>Returns the contents of a regex as a string.</p>
+
+<p>This is simply [[str]] in Clojure but needs to remove slashes (<code>"/regex contents/"</code>) in CLJS.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn regex-&gt;str
+  [regex]
+  #?(:clj  (str regex)
+     :cljs (let [s (str regex)]
+             (subs s 1 (dec (count s))))))</pre></td></tr><tr><td class="docs"><p>define custom CSK conversion functions so we don't run into problems if the system locale is Turkish</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>so Kondo doesn't complain</p>
+</td><td class="codes"><pre class="brush: clojure">(declare ^:private -&gt;kebab-case-en*)
+(declare ^:private -&gt;camelCaseEn*)
+(declare ^:private -&gt;snake_case_en*)
+(declare ^:private -&gt;SCREAMING_SNAKE_CASE_EN*)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(csk.macros/defconversion &quot;kebab-case-en*&quot;           lower-case-en lower-case-en &quot;-&quot;)
+(csk.macros/defconversion &quot;camelCaseEn*&quot;             lower-case-en capitalize-en &quot;&quot;)
+(csk.macros/defconversion &quot;snake_case_en*&quot;           lower-case-en lower-case-en &quot;_&quot;)
+(csk.macros/defconversion &quot;SCREAMING_SNAKE_CASE_EN*&quot; upper-case-en upper-case-en &quot;_&quot;)</pre></td></tr><tr><td class="docs"><p>Wrap a CSK defconversion function so that it handles nil and namespaced keywords, which it doesn't support out of the
+box for whatever reason.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- wrap-csk-conversion-fn-to-handle-nil-and-namespaced-keywords
+  [f]
+  (fn [x]
+    (when x
+      (if (qualified-keyword? x)
+        (keyword (f (namespace x)) (f (name x)))
+        (f x)))))</pre></td></tr><tr><td class="docs"><p>Like [[camel-snake-kebab.core/->kebab-case]], but always uses English for lower-casing, supports keywords with
+namespaces, and returns <code>nil</code> when passed <code>nil</code> (rather than throwing an exception).</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^{:arglists '([x])} -&gt;kebab-case-en
+  (memoize/fast-bounded (wrap-csk-conversion-fn-to-handle-nil-and-namespaced-keywords -&gt;kebab-case-en*)
+                        :bounded/threshold 10000))</pre></td></tr><tr><td class="docs"><p>Like [[camel-snake-kebab.core/->snake_case]], but always uses English for lower-casing, supports keywords with
+namespaces, and returns <code>nil</code> when passed <code>nil</code> (rather than throwing an exception).</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^{:arglists '([x])} -&gt;snake_case_en
+  (memoize/fast-bounded (wrap-csk-conversion-fn-to-handle-nil-and-namespaced-keywords -&gt;snake_case_en*)
+                        :bounded/threshold 10000))</pre></td></tr><tr><td class="docs"><p>Like [[camel-snake-kebab.core/->camelCase]], but always uses English for upper- and lower-casing, supports keywords
+with namespaces, and returns <code>nil</code> when passed <code>nil</code> (rather than throwing an exception).</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^{:arglists '([x])} -&gt;camelCaseEn
+  (memoize/fast-bounded (wrap-csk-conversion-fn-to-handle-nil-and-namespaced-keywords -&gt;camelCaseEn*)
+                        :bounded/threshold 10000))</pre></td></tr><tr><td class="docs"><p>Like [[camel-snake-kebab.core/->SCREAMING<em>SNAKE</em>CASE]], but always uses English for upper- and lower-casing, supports
+keywords with namespaces, and returns <code>nil</code> when passed <code>nil</code> (rather than throwing an exception).</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^{:arglists '([x])} -&gt;SCREAMING_SNAKE_CASE_EN
+  (memoize/fast-bounded (wrap-csk-conversion-fn-to-handle-nil-and-namespaced-keywords -&gt;SCREAMING_SNAKE_CASE_EN*)
+                        :bounded/threshold 10000))</pre></td></tr><tr><td class="docs"><p>Like string/capitalize, only it ignores the rest of the string
+to retain case-sensitive capitalization, e.g., PostgreSQL.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn capitalize-first-char
+  [s]
+  (if (&lt; (count s) 2)
+    (upper-case-en s)
+    (str (upper-case-en (subs s 0 1))
+         (subs s 1))))</pre></td></tr><tr><td class="docs"><p>Convert the top-level keys in a map to <code>snake_case</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn snake-keys
+  [m]
+  (update-keys m -&gt;snake_case_en))</pre></td></tr><tr><td class="docs"><p>Recursively convert the keys in a map to <code>snake_case</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn deep-snake-keys
+  [m]
+  (recursive-map-keys -&gt;snake_case_en m))</pre></td></tr><tr><td class="docs"><p>Given any map-like object, return it as a Clojure map with :kebab-case keyword keys.
+The input map can be a:
+- Clojure map with string or keyword keys,
+- JS object (with string keys)
+The keys are converted to <code>kebab-case</code> from <code>camelCase</code> or <code>snake_case</code> as necessary, and turned into keywords.</p>
+
+<p>Returns an empty map if nil is input (like [[update-keys]]).</p>
+</td><td class="codes"><pre class="brush: clojure">(defn normalize-map
+  [m]
+  (let [base #?(:clj  m
+                ;; If we're running in CLJS, convert to a ClojureScript map as needed.
+                :cljs (if (object? m)
+                        (js-&gt;clj m)
+                        m))]
+    (update-keys base (comp keyword -&gt;kebab-case-en))))</pre></td></tr><tr><td class="docs"><p>Log the maximum memory available to the JVM at launch time as well since it is very handy for debugging things</p>
+</td><td class="codes"><pre class="brush: clojure">#?(:clj
+   (when-not *compile-files*
+     (log/infof &quot;Maximum memory available to JVM: %s&quot; (u.format/format-bytes (.maxMemory (Runtime/getRuntime))))))</pre></td></tr><tr><td class="docs"><p>Set the default width for pprinting to 120 instead of 72. The default width is too narrow and wastes a lot of space</p>
+</td><td class="codes"><pre class="brush: clojure">#?(:clj  (alter-var-root #'pprint/*print-right-margin* (constantly 120))
+   :cljs (set! pprint/*print-right-margin* (constantly 120)))</pre></td></tr><tr><td class="docs"><p>Is <code>s</code> a valid email address string?</p>
+</td><td class="codes"><pre class="brush: clojure">(defn email?
+  ^Boolean [^String s]
+  (boolean (when (and (string? s) (str/includes? s &quot;@&quot;)) ;; early bail
+             (re-matches #&quot;[a-z0-9!#$%&amp;'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&amp;'*+/=?^_`{|}~-]+)*@(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?&quot;
+                         (lower-case-en s)))))</pre></td></tr><tr><td class="docs"><p>Is <code>s</code> a state string?</p>
+</td><td class="codes"><pre class="brush: clojure">(defn state?
+  ^Boolean [s]
+  (boolean
+   (when (string? s)
+     (contains? #{&quot;alabama&quot; &quot;alaska&quot; &quot;arizona&quot; &quot;arkansas&quot; &quot;california&quot; &quot;colorado&quot; &quot;connecticut&quot; &quot;delaware&quot;
+                  &quot;florida&quot; &quot;georgia&quot; &quot;hawaii&quot; &quot;idaho&quot; &quot;illinois&quot; &quot;indiana&quot; &quot;iowa&quot; &quot;kansas&quot; &quot;kentucky&quot; &quot;louisiana&quot;
+                  &quot;maine&quot; &quot;maryland&quot; &quot;massachusetts&quot; &quot;michigan&quot; &quot;minnesota&quot; &quot;mississippi&quot; &quot;missouri&quot; &quot;montana&quot;
+                  &quot;nebraska&quot; &quot;nevada&quot; &quot;new hampshire&quot; &quot;new jersey&quot; &quot;new mexico&quot; &quot;new york&quot; &quot;north carolina&quot;
+                  &quot;north dakota&quot; &quot;ohio&quot; &quot;oklahoma&quot; &quot;oregon&quot; &quot;pennsylvania&quot; &quot;rhode island&quot; &quot;south carolina&quot;
+                  &quot;south dakota&quot; &quot;tennessee&quot; &quot;texas&quot; &quot;utah&quot; &quot;vermont&quot; &quot;virginia&quot; &quot;washington&quot; &quot;west virginia&quot;
+                  &quot;wisconsin&quot; &quot;wyoming&quot;
+                  &quot;ak&quot; &quot;al&quot; &quot;ar&quot; &quot;az&quot; &quot;ca&quot; &quot;co&quot; &quot;ct&quot; &quot;de&quot; &quot;fl&quot; &quot;ga&quot; &quot;hi&quot; &quot;ia&quot; &quot;id&quot; &quot;il&quot; &quot;in&quot; &quot;ks&quot; &quot;ky&quot; &quot;la&quot;
+                  &quot;ma&quot; &quot;md&quot; &quot;me&quot; &quot;mi&quot; &quot;mn&quot; &quot;mo&quot; &quot;ms&quot; &quot;mt&quot; &quot;nc&quot; &quot;nd&quot; &quot;ne&quot; &quot;nh&quot; &quot;nj&quot; &quot;nm&quot; &quot;nv&quot; &quot;ny&quot; &quot;oh&quot; &quot;ok&quot;
+                  &quot;or&quot; &quot;pa&quot; &quot;ri&quot; &quot;sc&quot; &quot;sd&quot; &quot;tn&quot; &quot;tx&quot; &quot;ut&quot; &quot;va&quot; &quot;vt&quot; &quot;wa&quot; &quot;wi&quot; &quot;wv&quot; &quot;wy&quot;}
+                (lower-case-en s)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^String url-regex-pattern
+  (let [alpha #?(:clj &quot;IsAlphabetic&quot; :cljs &quot;Alphabetic&quot;)]
+    (str &quot;^[\\p{&quot; alpha &quot;}\\d_\\-]+(\\.[\\p{&quot; alpha &quot;}\\d_\\-]+)*(:\\d*)?&quot;)))</pre></td></tr><tr><td class="docs"><p>Is <code>s</code> a valid HTTP/HTTPS URL string?</p>
+</td><td class="codes"><pre class="brush: clojure">(defn url?
+  ^Boolean [s]
+  #?(:clj  (and s
+                ;; UrlValidator is very expensive when non-URLs are passed to it, so we verify if the string looks
+                ;; urlish before passing to UrlValidator.
+                (str/includes? s &quot;://&quot;)
+                (let [validator (UrlValidator. (u.jvm/varargs String [&quot;http&quot; &quot;https&quot;])
+                                               (RegexValidator. url-regex-pattern)
+                                               UrlValidator/ALLOW_LOCAL_URLS)]
+                  ;; (swap! -args conj s)
+                  (.isValid validator (str s))))
+     :cljs (try
+             (let [url (js/URL. (str s))]
+               (boolean (and (re-matches (js/RegExp. url-regex-pattern &quot;u&quot;)
+                                         (.-host url))
+                             (#{&quot;http:&quot; &quot;https:&quot;} (.-protocol url)))))
+             (catch js/Error _
+               false))))</pre></td></tr><tr><td class="docs"><p>Returns <code>true</code> if X is <code>nil</code>, otherwise calls (F X).
+ This can be used to see something is either <code>nil</code> or statisfies a predicate function:</p>
+
+<p>   (string? nil)          -> false
+   (string? "A")        -> true
+   (maybe? string? nil)   -> true
+   (maybe? string? "A") -> true</p>
+
+<p> It can also be used to make sure a given function won't throw a <code>NullPointerException</code>:</p>
+
+<p>   (str/lower-case nil)            -> NullPointerException
+   (str/lower-case "ABC")        -> "abc"
+   (maybe? str/lower-case nil)     -> true
+   (maybe? str/lower-case "ABC") -> "abc"</p>
+
+<p> The latter use-case can be useful for things like sorting where some values in a collection
+ might be <code>nil</code>:</p>
+
+<p>   (sort-by (partial maybe? s/lower-case) some-collection)</p>
+</td><td class="codes"><pre class="brush: clojure">(defn maybe?
+  [f x]
+  (or (nil? x)
+      (f x)))</pre></td></tr><tr><td class="docs"><p>Returns the <code>emoji-string</code> passed in if emoji in logs are enabled, otherwise always returns an empty string.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^String ^{:arglists '([emoji-string])} emoji
+  #?(:clj  (if (config/config-bool :mb-emoji-in-logs)
+             identity
+             (constantly &quot;&quot;))
+     :cljs (constantly &quot;&quot;)))</pre></td></tr><tr><td class="docs"><p>Round (presumabily floating-point) <code>number</code> to <code>decimal-place</code>. Returns a <code>Double</code>.</p>
+
+<p>Rounds by decimal places, no matter how many significant figures the number has. See [[round-to-precision]].</p>
+
+<p>  (round-to-decimals 2 35.5058998M) -> 35.51</p>
+</td><td class="codes"><pre class="brush: clojure">(defn round-to-decimals
+  ^Double [^Integer decimal-place, ^Number number]
+  {:pre [(integer? decimal-place) (number? number)]}
+  #?(:clj  (double (.setScale (bigdec number) decimal-place BigDecimal/ROUND_HALF_UP))
+     :cljs (parse-double (.toFixed number decimal-place))))</pre></td></tr><tr><td class="docs"><p>Is <code>x</code> a real number (i.e. not a <code>NaN</code> or an <code>Infinity</code>)?</p>
+</td><td class="codes"><pre class="brush: clojure">(defn real-number?
+  [x]
+  (and (number? x)
+       (not (NaN? x))
+       (not (infinite? x))))</pre></td></tr><tr><td class="docs"><p>Return a version of <code>s</code> with diacritical marks removed.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn remove-diacritical-marks
+  ^String [^String s]
+  (when (seq s)
+    #?(:clj  (str/replace
+               ;; First, &quot;decompose&quot; the characters. e.g. replace 'LATIN CAPITAL LETTER A WITH ACUTE' with
+               ;; 'LATIN CAPITAL LETTER A' + 'COMBINING ACUTE ACCENT'
+               ;; See http://docs.oracle.com/javase/8/docs/api/java/text/Normalizer.html
+              (Normalizer/normalize s Normalizer$Form/NFD)
+               ;; next, remove the combining diacritical marks -- this SO answer explains what's going on here best:
+               ;; http://stackoverflow.com/a/5697575/1198455 The closest thing to a relevant JavaDoc I could find was
+               ;; http://docs.oracle.com/javase/7/docs/api/java/lang/Character.UnicodeBlock.html#COMBINING_DIACRITICAL_MARKS
+              #&quot;\p{Block=CombiningDiacriticalMarks}+&quot;
+              &quot;&quot;)
+       :cljs (-&gt; s
+                 (.normalize &quot;NFKD&quot;)  ;; Renders accented characters as base + accent.
+                 (.replace (js/RegExp. &quot;[\u0300-\u036f]&quot; &quot;gu&quot;) &quot;&quot;))))) ;; Drops all the accents.</pre></td></tr><tr><td class="docs"><p>Drops all the accents.</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Valid <em>ASCII</em> characters for URL slugs generated by <code>slugify</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private slugify-valid-chars
+  #{\a \b \c \d \e \f \g \h \i \j \k \l \m \n \o \p \q \r \s \t \u \v \w \x \y \z
+    \0 \1 \2 \3 \4 \5 \6 \7 \8 \9
+    \_})</pre></td></tr><tr><td class="docs"><p>unfortunately it seems that this doesn't fully-support Emoji :(, they get encoded as "??"</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- slugify-char [^Character c url-encode?]
+  (if (&lt; #?(:clj (int c) :cljs (.charCodeAt c 0))
+         128)
+    ;; ASCII characters must be in the valid list, or they get replaced with underscores.
+    (if (contains? slugify-valid-chars c)
+      c
+      \_)
+    ;; Non-ASCII characters are URL-encoded or preserved, based on the option.
+    (if url-encode?
+      #?(:clj  (codec/url-encode c)
+         :cljs (js/encodeURIComponent c))
+      c)))</pre></td></tr><tr><td class="docs"><p>Return a version of String <code>s</code> appropriate for use as a URL slug.
+Downcase the name and remove diacritcal marks, and replace non-alphanumeric <em>ASCII</em> characters with underscores.</p>
+
+<p>If <code>unicode?</code> is falsy (the default), URL-encode non-ASCII characters. With <code>unicode?</code> truthy, non-ASCII characters
+are preserved.
+(Even when we want full ASCII output for eg. URL slugs, non-ASCII characters should be encoded rather than
+replaced with underscores in order to support languages that don't use the Latin alphabet; see metabase#3818).</p>
+
+<p>Optionally specify <code>:max-length</code> which will truncate the slug after that many characters.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn slugify
+  (^String [^String s]
+   (slugify s {}))
+  (^String [s {:keys [max-length unicode?]}]
+   (when (seq s)
+     (let [slug (str/join (for [c (remove-diacritical-marks (lower-case-en s))]
+                            (slugify-char c (not unicode?))))]
+       (if max-length
+         (str/join (take max-length slug))
+         slug)))))</pre></td></tr><tr><td class="docs"><p>If passed an integer ID, returns it. If passed a map containing an <code>:id</code> key, returns the value if it is an integer.
+Otherwise returns <code>nil</code>.</p>
+
+<p>Provided as a convenience to allow model-layer functions to easily accept either an object or raw ID. Use this in
+cases where the ID/object is allowed to be <code>nil</code>. Use <code>the-id</code> below in cases where you would also like to guarantee
+it is non-<code>nil</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn id
+  ^Integer [object-or-id]
+  (cond
+    (map? object-or-id)     (recur (:id object-or-id))
+    (integer? object-or-id) object-or-id))</pre></td></tr><tr><td class="docs"><p>If passed an integer ID, returns it. If passed a map containing an <code>:id</code> key, returns the value if it is an integer.
+Otherwise, throws an Exception.</p>
+
+<p>Provided to allow model-layer functions to easily accept either an object or raw ID, and to assert
+that you have a valid ID.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn the-id
+  ^Integer [object-or-id]
+  (or (id object-or-id)
+      (throw (error (tru &quot;Not something with an ID: {0}&quot; (pr-str object-or-id))))))</pre></td></tr><tr><td class="docs"><p>A regular expression for matching canonical string representations of UUIDs.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^java.util.regex.Pattern uuid-regex
+  #&quot;[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}&quot;)</pre></td></tr><tr><td class="docs"><p>Wraps a single element in a sequence; returns sequences as-is. In lots of situations we'd like to accept either a
+single value or a collection of values as an argument to a function, and then loop over them; rather than repeat
+logic to check whether something is a collection and wrap if not everywhere, this utility function is provided for
+your convenience.</p>
+
+<p>  (u/one-or-many 1)     ; -> [1]
+  (u/one-or-many [1 2]) ; -> [1 2]</p>
+</td><td class="codes"><pre class="brush: clojure">(defn one-or-many
+  [arg]
+  (if ((some-fn sequential? set? nil?) arg)
+    arg
+    [arg]))</pre></td></tr><tr><td class="docs"><p>Returns coll if it has multiple elements, or else returns its only element</p>
+</td><td class="codes"><pre class="brush: clojure">(defn many-or-one
+  [coll]
+  (if (next coll)
+    coll
+    (first coll)))</pre></td></tr><tr><td class="docs"><p>Like <code>select-keys</code>, but can also handle nested keypaths:</p>
+
+<p>   (select-nested-keys {:a 100, :b {:c 200, :d 300}} [:a [:b :d] :c])
+   ;; -> {:a 100, :b {:d 300}}</p>
+
+<p> The values of <code>keyseq</code> can be either regular keys, which work the same way as <code>select-keys</code>,
+ or vectors of the form <code>[k &amp; nested-keys]</code>, which call <code>select-nested-keys</code> recursively
+ on the value of <code>k</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn select-nested-keys
+  [m keyseq]
+  ;; TODO - use (empty m) once supported by model instances
+  (into {} (for [k     keyseq
+                 :let  [[k &amp; nested-keys] (one-or-many k)
+                        v                 (get m k)]
+                 :when (contains? m k)]
+             {k (if-not (seq nested-keys)
+                  v
+                  (select-nested-keys v nested-keys))})))</pre></td></tr><tr><td class="docs"><p>Is <code>s</code> a Base-64 encoded string?</p>
+</td><td class="codes"><pre class="brush: clojure">(defn base64-string?
+  ^Boolean [s]
+  (boolean (when (string? s)
+             (as-&gt; s s
+               (str/replace s #&quot;\s&quot; &quot;&quot;)
+               (re-matches #&quot;^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$&quot; s)))))</pre></td></tr><tr><td class="docs"><p>Returns coll split into seqs of up to n items</p>
+</td><td class="codes"><pre class="brush: clojure">(defn batches-of
+  [n coll]
+  (partition n n nil coll))</pre></td></tr><tr><td class="docs"><p>Increment <code>n</code> if it is non-<code>nil</code>, otherwise return <code>1</code> (e.g. as if incrementing <code>0</code>).</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^{:arglists '([n])} safe-inc
+  (fnil inc 0))</pre></td></tr><tr><td class="docs"><p>Like <code>select-keys</code>, but returns a map only containing keys in KS that are present <em>and non-nil</em> in M.</p>
+
+<p>   (select-non-nil-keys {:a 100, :b nil} #{:a :b :c})
+   ;; -> {:a 100}</p>
+</td><td class="codes"><pre class="brush: clojure">(defn select-non-nil-keys
+  [m ks]
+  (into {} (for [k     ks
+                 :when (some? (get m k))]
+             {k (get m k)})))</pre></td></tr><tr><td class="docs"><p>Returns a map that only contains keys that are either <code>:present</code> or <code>:non-nil</code>. Combines behavior of <code>select-keys</code>
+and <code>select-non-nil-keys</code>. This is useful for API endpoints that update a model, which often have complex rules
+about what gets updated (some keys are updated if <code>nil</code>, others only if non-nil).</p>
+
+<p>   (select-keys-when {:a 100, :b nil, :d 200, :e nil}
+     :present #{:a :b :c}
+     :non-nil #{:d :e :f})
+   ;; -> {:a 100, :b nil, :d 200}</p>
+</td><td class="codes"><pre class="brush: clojure">(defn select-keys-when
+  [m &amp; {:keys [present non-nil], :as options}]
+  {:pre [(every? #{:present :non-nil} (keys options))]}
+  (merge (select-keys m present)
+         (select-non-nil-keys m non-nil)))</pre></td></tr><tr><td class="docs"><p>Return the order of magnitude as a power of 10 of a given number.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn order-of-magnitude
+  [x]
+  (if (zero? x)
+    0
+    #?(:clj  (long (math/floor (/ (Math/log (math/abs x))
+                                  (Math/log 10))))
+       :cljs (js/Math.floor (/ (js/Math.log (abs x))
+                               (js/Math.log 10))))))</pre></td></tr><tr><td class="docs"><p>Like <code>clojure.core/update</code> but does not create a new key if it does not exist. Useful when you don't want to create
+cruft.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn update-if-exists
+  [m k f &amp; args]
+  (if (contains? m k)
+    (apply update m k f args)
+    m))</pre></td></tr><tr><td class="docs"><p>Like <code>clojure.core/update-in</code> but does not create new keys if they do not exist. Useful when you don't want to create
+cruft.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn update-in-if-exists
+  [m ks f &amp; args]
+  (if (not= ::not-found (get-in m ks ::not-found))
+    (apply update-in m ks f args)
+    m))</pre></td></tr><tr><td class="docs"><p>Return index of the first element in <code>coll</code> for which <code>pred</code> reutrns true.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn index-of
+  [pred coll]
+  (first (keep-indexed (fn [i x]
+                         (when (pred x) i))
+                       coll)))</pre></td></tr><tr><td class="docs"><p>Returns truthy if <code>new-value</code> is a hexadecimal-string</p>
+</td><td class="codes"><pre class="brush: clojure">(defn hexadecimal-string?
+  [new-value]
+  (and (string? new-value)
+       (re-matches #&quot;[0-9a-f]{64}&quot; new-value)))</pre></td></tr><tr><td class="docs"><p>Topologically sorts vertexs in graph g. Graph is a map of vertexs to edges. Optionally takes an
+ additional argument <code>edges-fn</code>, a function used to extract edges. Returns data in the same shape
+ (a graph), only sorted.</p>
+
+<p> Say you have a graph shaped like:</p>
+
+<p>   a     b
+   | \  |
+   c  |  |
+   \ | /
+      d
+      |
+      e</p>
+
+<p> (u/topological-sort identity {:b []
+                               :c [:a]
+                               :e [:d]
+                               :d [:a :b :c]
+                               :a []})</p>
+
+<p> => (ordered-map :a [] :b [] :c [:a] :d [:a :b :c] :e [:d])</p>
+
+<p> If the graph has cycles, throws an exception.</p>
+
+<p> https://en.wikipedia.org/wiki/Topological_sorting</p>
+</td><td class="codes"><pre class="brush: clojure">(defn topological-sort
+  &quot;Topologically sorts vertexs in graph g. Graph is a map of vertexs to edges. Optionally takes an
+   additional argument `edges-fn`, a function used to extract edges. Returns data in the same shape
+   (a graph), only sorted.
+   Say you have a graph shaped like:
+     a     b
+     | \\  |
+     c  |  |
+     \\ | /
+        d
+        |
+        e
+   (u/topological-sort identity {:b []
+                                 :c [:a]
+                                 :e [:d]
+                                 :d [:a :b :c]
+                                 :a []})
+   =&gt; (ordered-map :a [] :b [] :c [:a] :d [:a :b :c] :e [:d])
+   If the graph has cycles, throws an exception.
+   https://en.wikipedia.org/wiki/Topological_sorting&quot;
+  ([g] (topological-sort identity g))
+  ([edges-fn g]
+   (transduce (map (juxt key (comp edges-fn val)))
+              (fn
+                ([] (dep/graph))
+                ([acc [vertex edges]]
+                 (reduce (fn [acc edge]
+                           (dep/depend acc vertex edge))
+                         acc
+                         edges))
+                ([acc]
+                 (let [sorted      (filter g (dep/topo-sort acc))
+                       independent (set/difference (set (keys g)) (set sorted))]
+                   (not-empty
+                    (into (ordered-map)
+                          (map (fn [vertex]
+                                 [vertex (g vertex)]))
+                          (concat independent sorted))))))
+              g)))</pre></td></tr><tr><td class="docs"><p>Changes the keys of a given map to lower case.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn lower-case-map-keys
+  [m]
+  (update-keys m #(-&gt; % name lower-case-en keyword)))</pre></td></tr><tr><td class="docs"><p>Returns the output of pretty-printing <code>x</code> as a string.
+Optionally accepts <code>color-symb</code>, which colorizes the output (JVM only, it's ignored in CLJS).</p>
+
+<p>   (pprint-to-str 'green some-obj)</p>
+</td><td class="codes"><pre class="brush: clojure">(defn pprint-to-str
+  (^String [x]
+   (#?@
+     (:clj
+      (with-out-str
+        #_{:clj-kondo/ignore [:discouraged-var]}
+        (pp/pprint x {:max-width 120}))
+      :cljs
+     ;; we try to set this permanently above, but it doesn't seem to work in Cljs, so just bind it every time. The
+     ;; default value wastes too much space, 120 is a little easier to read actually.
+      (binding [pprint/*print-right-margin* 120]
+        (with-out-str
+          #_{:clj-kondo/ignore [:discouraged-var]}
+          (pprint/pprint x))))))
+  (^String [color-symb x]
+   (u.format/colorize color-symb (pprint-to-str x))))</pre></td></tr><tr><td class="docs"><p>Impl for <code>profile</code> macro -- don't use this directly. Nesting-level for the <code>profile</code> macro e.g. 0 for a top-level
+<code>profile</code> form or 1 for a form inside that.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *profile-level*
+  0)</pre></td></tr><tr><td class="docs"><p>Impl for [[profile]] macro -- don't use this directly. Prints the <code>___ took ___</code> message at the conclusion of a
+[[profile]]d form.</p>
+</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:clojure-lsp/unused-public-var]}
+(defn -profile-print-time
+  [message-thunk start-time]
+  ;; indent the message according to [[*profile-level*]] and add a little down-left arrow so it (hopefully) points to
+  ;; the parent form
+  (log/info (u.format/format-color
+             (case (int (mod *profile-level* 4))
+               0 :green
+               1 :cyan
+               2 :magenta
+               3 :yellow) &quot;%s%s took %s&quot;
+             (if (pos? *profile-level*)
+               (str (str/join (repeat (dec *profile-level*) &quot;  &quot;)) &quot; ⮦ &quot;)
+               &quot;&quot;)
+             (message-thunk)
+             (u.format/format-nanoseconds (- #?(:cljs (* 1000000 (js/performance.now))
+                                                :clj  (System/nanoTime))
+                                             start-time)))))</pre></td></tr><tr><td class="docs"><p>Like [[clojure.core/time]], but lets you specify a <code>message</code> that gets printed with the total time, formats the
+time nicely using <code>u/format-nanoseconds</code>, and indents nested calls to <code>profile</code>.</p>
+
+<p>  (profile "top-level"
+    (Thread/sleep 500)
+    (profile "nested"
+      (Thread/sleep 100)))
+  ;; ->
+   ↙ nested took 100.1 ms
+  top-level took 602.8 ms</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro profile
+  {:style/indent 1}
+  ([form]
+   `(profile ~(str form) ~form))
+  ([message &amp; body]
+   ;; message is wrapped in a thunk so we don't incur the overhead of calculating it if the log level does not include
+   ;; INFO
+   `(let [message#    (fn [] ~message)
+          start-time# ~(if (:ns &amp;env)
+                         `(* 1000000 (js/performance.now)) ;; CLJS
+                         `(System/nanoTime))               ;; CLJ
+          result#     (binding [*profile-level* (inc *profile-level*)]
+                        ~@body)]
+      (-profile-print-time message# start-time#)
+      result#)))</pre></td></tr><tr><td class="docs"><p>Convert <code>seconds</code> to milliseconds. More readable than doing this math inline.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn seconds-&gt;ms
+  [seconds]
+  (* seconds 1000))</pre></td></tr><tr><td class="docs"><p>Convert <code>minutes</code> to seconds. More readable than doing this math inline.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn minutes-&gt;seconds
+  [minutes]
+  (* 60 minutes))</pre></td></tr><tr><td class="docs"><p>Convert <code>minutes</code> to milliseconds. More readable than doing this math inline.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn minutes-&gt;ms
+  [minutes]
+  (-&gt; minutes minutes-&gt;seconds seconds-&gt;ms))</pre></td></tr><tr><td class="docs"><p>Convert <code>hours</code> to milliseconds. More readable than doing this math inline.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn hours-&gt;ms
+  [hours]
+  (-&gt; (* 60 hours) minutes-&gt;seconds seconds-&gt;ms))</pre></td></tr><tr><td class="docs"><p>Extract the domain portion of an <code>email-address</code>.</p>
+
+<p>  (email->domain "cam@toucan.farm") ; -> "toucan.farm"</p>
+</td><td class="codes"><pre class="brush: clojure">(defn email-&gt;domain
+  ^String [email-address]
+  (when (string? email-address)
+    (last (re-find #&quot;^.*@(.*$)&quot; email-address))))</pre></td></tr><tr><td class="docs"><p>Is <code>email-address</code> in <code>domain</code>?</p>
+
+<p>  (email-in-domain? "cam@toucan.farm" "toucan.farm")  ; -> true
+  (email-in-domain? "cam@toucan.farm" "metabase.com") ; -> false</p>
+</td><td class="codes"><pre class="brush: clojure">(defn email-in-domain?
+  [email-address domain]
+  {:pre [(email? email-address)]}
+  (= (email-&gt;domain email-address) domain))</pre></td></tr><tr><td class="docs"><p>Returns a pair [match others] where match is the first element of <code>coll</code> for which <code>pred</code> returns
+a truthy value and others is a sequence of the other elements of <code>coll</code> with the order preserved.
+Returns nil if no element satisfies <code>pred</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn pick-first
+  [pred coll]
+  (loop [xs (seq coll), prefix []]
+    (when-let [[x &amp; xs] xs]
+      (if (pred x)
+        [x (concat prefix xs)]
+        (recur xs (conj prefix x))))))</pre></td></tr><tr><td class="docs"><p>Clj doesn't have <code>regexp?</code>, but Cljs does</p>
+</td><td class="codes"><pre class="brush: clojure">#?(:clj (defn- regexp? [x]
+          (instance? java.util.regex.Pattern x)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(derive :dispatch-type/nil        :dispatch-type/*)
+(derive :dispatch-type/boolean    :dispatch-type/*)
+(derive :dispatch-type/string     :dispatch-type/*)
+(derive :dispatch-type/keyword    :dispatch-type/*)
+(derive :dispatch-type/number     :dispatch-type/*)
+(derive :dispatch-type/integer    :dispatch-type/number)
+(derive :dispatch-type/map        :dispatch-type/*)
+(derive :dispatch-type/sequential :dispatch-type/*)
+(derive :dispatch-type/set        :dispatch-type/*)
+(derive :dispatch-type/symbol     :dispatch-type/*)
+(derive :dispatch-type/fn         :dispatch-type/*)
+(derive :dispatch-type/regex      :dispatch-type/*)</pre></td></tr><tr><td class="docs"><p>In Cljs <code>(type 1) is</code>js/Number<code>, but</code>(isa? 1 js/Number)` isn't truthy, so dispatching off of [[clojure.core/type]]
+doesn't really work the way we'd want. Also, type names are different between Clojure and ClojureScript.</p>
+
+<p>This function exists as a workaround: use it as a multimethod dispatch function for Cljc multimethods that would
+have dispatched on <code>type</code> if they were written in pure Clojure.</p>
+
+<p>Returns <code>:dispatch-type/*</code> if there is no mapping for the current type, but you can add more as needed if
+appropriate. All type keywords returned by this method also derive from <code>:dispatch-type/*</code>, meaning you can write an
+implementation for <code>:dispatch-type/*</code> and use it as a fallback method.</p>
+
+<p>Think of <code>:dispatch-type/*</code> as similar to how you would use <code>Object</code> if you were dispatching
+off of <code>type</code> in pure Clojure.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn dispatch-type-keyword
   [x]
   (cond
-    ;; look for filters in the values
-    (map? x) (update-vals x simplify-compound-filter)
-    (seq? x) (recur (vec x))
-    ;; not a map and not vector, leave it as is
-    (not (vector? x)) x
-    ;; an empty filter, toss it
-    (not (some some? x)) nil
-    :else (let [[op &amp; [farg :as args]] x]
-            (case op
-              :not (if-not (seqable? farg)
-                     x
-                     (case (first farg)
-                       ;; double negation, eliminate both
-                       :not (recur (second farg))
-                       ;; use de Morgan's law to push the negation down
-                       :and (simplify-and-or-filter :or (map #(vector :not %) (rest farg)))
-                       :or  (simplify-and-or-filter :and (map #(vector :not %) (rest farg)))
-                       x))
-              :and (simplify-and-or-filter :and args)
-              :or  (simplify-and-or-filter :or args)
-              ;; simplify the elements of the vector
-              (mapv simplify-compound-filter x)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn combine-filter-clauses :- mbql.s/Filter
-  &quot;Combine two filter clauses into a single clause in a way that minimizes slapping a bunch of `:and`s together if
-  possible.&quot;
-  [filter-clause &amp; more-filter-clauses]
-  (simplify-compound-filter (cons :and (cons filter-clause more-filter-clauses))))</pre></td></tr><tr><td class="docs"><p>Returns the canonical stage number of the last stage of the legacy <code>inner-query</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn legacy-last-stage-number
-  [inner-query]
-  (loop [{:keys [source-query qp/stage-had-source-card]} inner-query, n 0]
-    (if (or (nil? source-query)
-            stage-had-source-card)
-      n
-      (recur source-query (inc n)))))</pre></td></tr><tr><td class="docs"><p>Returns a vector consisting of :source-query elements that address the stage of <code>inner-query</code>
-specified by <code>stage-number</code>.</p>
+    (nil? x)        :dispatch-type/nil
+    (boolean? x)    :dispatch-type/boolean
+    (string? x)     :dispatch-type/string
+    (keyword? x)    :dispatch-type/keyword
+    (integer? x)    :dispatch-type/integer
+    (number? x)     :dispatch-type/number
+    (map? x)        :dispatch-type/map
+    (sequential? x) :dispatch-type/sequential
+    (set? x)        :dispatch-type/set
+    (symbol? x)     :dispatch-type/symbol
+    (fn? x)         :dispatch-type/fn
+    (regexp? x)     :dispatch-type/regex
+    ;; we should add more mappings here as needed
+    :else           :dispatch-type/*))</pre></td></tr><tr><td class="docs"><p>Called like <code>(assoc m k v)</code>, this does [[assoc]] if <code>(some? v)</code>, and [[dissoc]] if not.</p>
 
-<p>Stage numbers are used as described in [[add-filter-clause]].</p>
-</td><td class="codes"><pre class="brush: clojure">(defn stage-path
-  [inner-query stage-number]
-  (if-not stage-number
-    []
-    (let [elements (if (neg? stage-number)
-                     (dec (- stage-number))
-                     (- (legacy-last-stage-number inner-query) stage-number))]
-      (into [] (repeat elements :source-query)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn add-filter-clause-to-inner-query :- mbql.s/MBQLQuery
-  &quot;Add a additional filter clause to an *inner* MBQL query, merging with the existing filter clause with `:and` if
-  needed.
-  Stage numbers work as in [[add-filter-clause]].&quot;
-  [inner-query  :- mbql.s/MBQLQuery
-   stage-number :- [:maybe number?]
-   new-clause   :- [:maybe mbql.s/Filter]]
-  (if (not new-clause)
-    inner-query
-    (let [path (stage-path inner-query stage-number)]
-      (update-in inner-query (conj path :filter) combine-filter-clauses new-clause))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn add-filter-clause :- mbql.s/Query
-  &quot;Add an additional filter clause to an `outer-query` at stage `stage-number`
-  or at the last stage if `stage-number` is `nil`. If `new-clause` is `nil` this is a no-op.
-  Stage numbers can be negative: `-1` refers to the last stage, `-2` to the penultimate stage, etc.&quot;
-  [outer-query  :- mbql.s/Query
-   stage-number :- [:maybe number?]
-   new-clause   :- [:maybe mbql.s/Filter]]
-  (update outer-query :query add-filter-clause-to-inner-query stage-number new-clause))</pre></td></tr><tr><td class="docs"><p>Helper for [[map-stages]]; call that instead.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- map-stages*
-  [f {:keys [source-query] :as inner-query}]
-  (if source-query
-    ;; Recursive case: Call `map-stages*` on the `:source-query`, then `f` on this stage. Increment the stage count.
-    (let [[new-source-query stage-count] (map-stages* f source-query)]
-      [(-&gt; (assoc inner-query :source-query new-source-query)
-           (f stage-count))
-       (inc stage-count)])
-    ;; Base case: No `:source-query`, so just call `f` and return a `stage-count` of 1.
-    [(f inner-query 0) 1]))</pre></td></tr><tr><td class="docs"><p>Given a function <code>(f inner-query stage-number)</code>, recursively calls it on the stages of this (legacy MBQL)
-<code>inner-query</code>.</p>
+<p>Put another way: <code>k</code> will either be set to <code>v</code>, or removed.</p>
 
-<p>The calls run postorder, that is the earliest/innermost stage first.</p>
+<p>Note that if <code>v</code> is <code>false</code>, it will be handled with [[assoc]]; only <code>nil</code> causes a [[dissoc]].</p>
+</td><td class="codes"><pre class="brush: clojure">(defn assoc-dissoc
+  [m k v]
+  (if (some? v)
+    (assoc m k v)
+    (dissoc m k)))</pre></td></tr><tr><td class="docs"><p>Called like <code>(assoc m k v)</code>, this does [[assoc]] iff <code>m</code> does not contain <code>k</code>
+and <code>v</code> is not nil. Can be called with multiple key value pairs. If a key occurs
+more than once, only the first occurrence with a non-nil value is used.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn assoc-default
+  ([m k v]
+   (if (or (nil? v) (contains? m k))
+     m
+     (assoc m k v)))
+  ([m k v &amp; kvs]
+   (let [ret (assoc-default m k v)]
+     (if kvs
+       (if (next kvs)
+         (recur ret (first kvs) (second kvs) (nnext kvs))
+         (throw (ex-info &quot;assoc-default expects an even number of key-values&quot;
+                         {:kvs kvs})))
+       ret))))</pre></td></tr><tr><td class="docs"><p>Given 2 lists of seq maps of changes, where each map an has an <code>id</code> key,
+return a map of 3 keys: <code>:to-create</code>, <code>:to-update</code>, <code>:to-delete</code>.</p>
 
-<p>Returns the updated <code>inner-query</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn map-stages
-  [f inner-query]
-  (let [[updated-inner-query _stage-count] (map-stages* f inner-query)]
-    updated-inner-query))</pre></td></tr><tr><td class="docs"><p>Rewrite <code>:inside</code> filter clauses as a pair of <code>:between</code> clauses.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn desugar-inside
-  [m]
-  (lib.util.match/replace m
-    [:inside lat-field lon-field lat-max lon-min lat-min lon-max]
-    [:and
-     [:between lat-field lat-min lat-max]
-     [:between lon-field lon-min lon-max]]))</pre></td></tr><tr><td class="docs"><p>Rewrite <code>:is-null</code> and <code>:not-null</code> filter clauses as simpler <code>:=</code> and <code>:!=</code>, respectively.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn desugar-is-null-and-not-null
-  [m]
-  (lib.util.match/replace m
-    [:is-null field]  [:=  field nil]
-    [:not-null field] [:!= field nil]))</pre></td></tr><tr><td class="docs"><p>Rewrite <code>:is-empty</code> and <code>:not-empty</code> filter clauses as simpler <code>:=</code> and <code>:!=</code>, respectively.</p>
+<p>Where:
+- <code>:to-create</code> is a list of maps that has ids only in <code>new-rows</code>
+- <code>:to-delete</code> is a list of maps that has ids only in <code>current-rows</code>
+- <code>:to-skip</code>   is a list of identical maps that has ids in both lists
+- <code>:to-update</code> is a list of different maps that has ids in both lists</p>
 
-<p> If <code>:not-empty</code> is called on <code>:metabase.lib.schema.expression/emptyable</code> type, expand check for empty string. For
- non-<code>emptyable</code> types act as <code>:is-null</code>. If field has nil base type it is considered not emptyable expansion wise.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn desugar-is-empty-and-not-empty
-  [m]
-  (lib.util.match/replace m
-    [:is-empty field]
-    (if (isa? (get-in field [2 :base-type]) :metabase.lib.schema.expression/emptyable)
-      [:or [:= field nil] [:= field &quot;&quot;]]
-      [:= field nil])
-    [:not-empty field]
-    (if (isa? (get-in field [2 :base-type]) :metabase.lib.schema.expression/emptyable)
-      [:and [:!= field nil] [:!= field &quot;&quot;]]
-      [:!= field nil])))</pre></td></tr><tr><td class="docs"><p>Replace a field or expression inside :time-interval</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- replace-field-or-expression
-  [m unit]
-  (lib.util.match/replace m
-    [:field id-or-name opts]
-    [:field id-or-name (assoc opts :temporal-unit unit)]
-    :expression
-    (let [[_expression expression-name opts] &amp;match]
-      [:expression expression-name (assoc opts :temporal-unit unit)])))</pre></td></tr><tr><td class="docs"><p>Rewrite <code>:time-interval</code> filter clauses as simpler ones like <code>:=</code> or <code>:between</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn desugar-time-interval
-  [m]
-  (lib.util.match/replace m
-    [:time-interval field-or-expression n unit] (recur [:time-interval field-or-expression n unit nil])
-    ;; replace current/last/next with corresponding value of n and recur
-    [:time-interval field-or-expression :current unit options] (recur [:time-interval field-or-expression  0 unit options])
-    [:time-interval field-or-expression :last    unit options] (recur [:time-interval field-or-expression -1 unit options])
-    [:time-interval field-or-expression :next    unit options] (recur [:time-interval field-or-expression  1 unit options])
-    [:time-interval field-or-expression (n :guard #{-1}) unit (_ :guard :include-current)]
-    [:between
-     (replace-field-or-expression field-or-expression unit)
-     [:relative-datetime n unit]
-     [:relative-datetime 0 unit]]
-    [:time-interval field-or-expression (n :guard #{1}) unit (_ :guard :include-current)]
-    [:between
-     (replace-field-or-expression field-or-expression unit)
-     [:relative-datetime 0 unit]
-     [:relative-datetime n unit]]
-    [:time-interval field-or-expression (n :guard #{-1 0 1}) unit _]
-    [:= (replace-field-or-expression field-or-expression unit) [:relative-datetime n unit]]
-    [:time-interval field-or-expression (n :guard neg?) unit (_ :guard :include-current)]
-    [:between
-     (replace-field-or-expression field-or-expression unit)
-     [:relative-datetime n unit]
-     [:relative-datetime 0 unit]]
-    [:time-interval field-or-expression (n :guard neg?) unit _]
-    [:between
-     (replace-field-or-expression field-or-expression unit)
-     [:relative-datetime n unit]
-     [:relative-datetime -1 unit]]
-    [:time-interval field-or-expression n unit (_ :guard :include-current)]
-    [:between
-     (replace-field-or-expression field-or-expression unit)
-     [:relative-datetime 0 unit]
-     [:relative-datetime n unit]]
-    [:time-interval field-or-expression n unit _]
-    [:between
-     (replace-field-or-expression field-or-expression unit)
-     [:relative-datetime 1 unit]
-     [:relative-datetime n unit]]))</pre></td></tr><tr><td class="docs"><p>Transform <code>:relative-time-interval</code> to <code>:and</code> expression.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn desugar-relative-time-interval
-  [m]
-  (lib.util.match/replace
-    m
-    [:relative-time-interval col value bucket offset-value offset-bucket]
-    (let [col-default-bucket (cond-&gt; col (and (vector? col) (= 3 (count col)))
-                                     (update 2 assoc :temporal-unit :default))
-          offset [:interval offset-value offset-bucket]
-          lower-bound (if (neg? value)
-                        [:relative-datetime value bucket]
-                        [:relative-datetime 1 bucket])
-          upper-bound (if (neg? value)
-                        [:relative-datetime 0 bucket]
-                        [:relative-datetime (inc value) bucket])
-          lower-with-offset [:+ lower-bound offset]
-          upper-with-offset [:+ upper-bound offset]]
-      [:and
-       [:&gt;= col-default-bucket lower-with-offset]
-       [:&lt;  col-default-bucket upper-with-offset]])))</pre></td></tr><tr><td class="docs"><p>Transform a <code>:during</code> expression to an <code>:and</code> expression.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn desugar-during
-  [m]
-  (lib.util.match/replace
-    m
-    [:during col value unit]
-    (let [col-default-bucket (cond-&gt; col
-                               (and (vector? col) (= 3 (count col)))
-                               (update 2 assoc :temporal-unit :default))
-          lower-bound (u.time/truncate value unit)
-          upper-bound (u.time/add lower-bound unit 1)]
-      [:and
-       [:&gt;= col-default-bucket lower-bound]
-       [:&lt;  col-default-bucket upper-bound]])))</pre></td></tr><tr><td class="docs"><p>Transform a <code>:if</code> expression to an <code>:case</code> expression.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn desugar-if
-  [m]
-  (lib.util.match/replace
-    m
-    [:if &amp; args]
-    (into [:case] args)))</pre></td></tr><tr><td class="docs"><p>Transform <code>:in</code> and <code>:not-in</code> expressions to <code>:=</code> and <code>:!=</code> expressions.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn desugar-in
-  [m]
-  (lib.util.match/replace m
-    [:in &amp; args]
-    (into [:=] args)
-    [:not-in &amp; args]
-    (into [:!=] args)))</pre></td></tr><tr><td class="docs"><p>Rewrite <code>:does-not-contain</code> filter clauses as simpler <code>[:not [:contains ...]]</code> clauses.</p>
+<p>Optional arguments:
+- <code>id-fn</code> - function to get row-matching identifiers
+- <code>to-compare</code> - function to get rows into a comparable state</p>
+</td><td class="codes"><pre class="brush: clojure">(defn row-diff
+  [current-rows new-rows &amp; {:keys [id-fn to-compare]
+                            :or   {id-fn      :id
+                                   to-compare identity}}]
+  (let [[delete-ids
+         create-ids
+         update-ids]     (diff (set (map id-fn current-rows))
+                               (set (map id-fn new-rows)))
+        known-map        (m/index-by id-fn current-rows)
+        {to-update false
+         to-skip   true} (when (seq update-ids)
+                           (clojure.core/group-by (fn [x]
+                                                    (let [y (get known-map (id-fn x))]
+                                                      (= (to-compare x) (to-compare y))))
+                                                  (filter #(update-ids (id-fn %)) new-rows)))]
+    {:to-create (when (seq create-ids) (filter #(create-ids (id-fn %)) new-rows))
+     :to-delete (when (seq delete-ids) (filter #(delete-ids (id-fn %)) current-rows))
+     :to-update to-update
+     :to-skip   to-skip}))</pre></td></tr><tr><td class="docs"><p>True if collection <code>xs</code> is either [[empty?]] or all values are [[distinct?]].</p>
+</td><td class="codes"><pre class="brush: clojure">(defn empty-or-distinct?
+  [xs]
+  (or (empty? xs)
+      (apply distinct? xs)))</pre></td></tr><tr><td class="docs"><p>Traverses a graph of nodes using a user-defined function.</p>
 
-<p>Note that [[desugar-multi-argument-comparisons]] will have already desugared any 3+ argument <code>:does-not-contain</code> to
-several <code>[:and [:does-not-contain ...] [:does-not-contain ...] ...]</code> clauses, which then get rewritten here into
-<code>[:and [:not [:contains ...]] [:not [:contains ...]]]</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn desugar-does-not-contain
-  [m]
-  (lib.util.match/replace m
-    [:does-not-contain &amp; args]
-    [:not (into [:contains] args)]))</pre></td></tr><tr><td class="docs"><p><code>:=</code>, <code>!=</code>, <code>:contains</code>, <code>:does-not-contain</code>, <code>:starts-with</code> and <code>:ends-with</code> clauses with more than 2 args
-automatically get rewritten as compound filters.</p>
+<p><code>nodes</code>: A collection of initial nodes to start the traversal from.
+<code>traverse-fn</code>: A function that, given a node, returns a map of connected nodes to source they are connected from.</p>
 
-<p>   [:= field x y]                -> [:or  [:=  field x] [:=  field y]]
-   [:!= field x y]               -> [:and [:!= field x] [:!= field y]]
-   [:does-not-contain field x y] -> [:and [:does-not-contain field x] [:does-not-contain field y]]</p>
-
-<p>Note that the optional options map is in different positions for <code>:contains</code>, <code>:does-not-contain</code>, <code>:starts-with</code> and
-<code>:ends-with</code> depending on the number of arguments. 2-argument forms use the legacy style <code>[:contains field x opts]</code>.
-Multi-argument forms use pMBQL style with the options at index 1, <strong>even if there are no options</strong>:
-<code>[:contains {} field x y z]</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn desugar-multi-argument-comparisons
-  [m]
-  (lib.util.match/replace m
-    [:= field x y &amp; more]
-    (apply vector :or (for [x (concat [x y] more)]
-                        [:= field x]))
-    [:!= field x y &amp; more]
-    (apply vector :and (for [x (concat [x y] more)]
-                         [:!= field x]))
-    [(op :guard #{:contains :does-not-contain :starts-with :ends-with})
-     (opts :guard map?)
-     field x y &amp; more]
-    (let [tail (when (seq opts) [opts])]
-      (apply vector
-             (if (= op :does-not-contain) :and :or)
-             (for [x (concat [x y] more)]
-               (into [op field x] tail))))))</pre></td></tr><tr><td class="docs"><p>Replace <code>relative-datetime</code> clauses like <code>[:relative-datetime :current]</code> with <code>[:relative-datetime 0 &lt;unit&gt;]</code>.
-<code>&lt;unit&gt;</code> is inferred from the <code>:field</code> the clause is being compared to (if any), otherwise falls back to <code>default.</code></p>
-</td><td class="codes"><pre class="brush: clojure">(defn desugar-current-relative-datetime
-  [m]
-  (lib.util.match/replace m
-    [clause field &amp; (args :guard (partial some (partial = [:relative-datetime :current])))]
-    (let [temporal-unit (or (lib.util.match/match-one field [:field _ {:temporal-unit temporal-unit}] temporal-unit)
-                            :default)]
-      (into [clause field] (lib.util.match/replace args
-                             [:relative-datetime :current]
-                             [:relative-datetime 0 temporal-unit])))))</pre></td></tr><tr><td class="docs"><p>Mapping from the sugar syntax to extract datetime to the unit.</p>
-</td><td class="codes"><pre class="brush: clojure">(def temporal-extract-ops-&gt;unit
-  {[:get-year        nil]       :year-of-era
-   [:get-quarter     nil]       :quarter-of-year
-   [:get-month       nil]       :month-of-year
-   ;; default get-week mode is iso
-   [:get-week        nil]       :week-of-year-iso
-   [:get-week        :iso]      :week-of-year-iso
-   [:get-week        :us]       :week-of-year-us
-   [:get-week        :instance] :week-of-year-instance
-   [:get-day         nil]       :day-of-month
-   [:get-day-of-week nil]       :day-of-week
-   [:get-day-of-week :iso]      :day-of-week-iso
-   [:get-hour        nil]       :hour-of-day
-   [:get-minute      nil]       :minute-of-hour
-   [:get-second      nil]       :second-of-minute})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private temporal-extract-ops
-  (-&gt;&gt; (keys temporal-extract-ops-&gt;unit)
-       (map first)
-       set))</pre></td></tr><tr><td class="docs"><p>Replace datetime extractions clauses like <code>[:get-year field]</code> with <code>[:temporal-extract field :year]</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn desugar-temporal-extract
-  [m]
-  (lib.util.match/replace m
-    [(op :guard temporal-extract-ops) field &amp; args]
-    [:temporal-extract field (temporal-extract-ops-&gt;unit [op (first args)])]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- desugar-divide-with-extra-args [expression]
-  (lib.util.match/replace expression
-    [:/ x y z &amp; more]
-    (recur (into [:/ [:/ x y]] (cons z more)))))</pre></td></tr><tr><td class="docs"><p>Creates a <code>:case</code> expression with a condition for each value of the given unit.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- temporal-case-expression
-  [column unit n]
-  (let [user-locale #?(:clj  (i18n/user-locale)
-                       :cljs nil)]
-    [:case
-     (vec (for [raw-value (range 1 (inc n))]
-            [[:= column raw-value] (u.time/format-unit raw-value unit user-locale)]))
-     {:default &quot;&quot;}]))</pre></td></tr><tr><td class="docs"><p>Given an expression like <code>[:month-name column]</code>, transforms this into a <code>:case</code> expression, which matches the input
-numbers and transforms them into names.</p>
-
-<p>Uses the user's locale rather than the site locale, so the results will depend on the runner of the query, not just
-the query itself. Filtering should be done based on the number, rather than the name.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- desugar-temporal-names
-  [expression]
-  (lib.util.match/replace expression
-    [:month-name column]
-    (recur (temporal-case-expression column :month-of-year 12))
-    [:quarter-name column]
-    (recur (temporal-case-expression column :quarter-of-year 4))
-    [:day-name column]
-    (recur (temporal-case-expression column :day-of-week 7))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn desugar-expression :- ::mbql.s/FieldOrExpressionDef
-  &quot;Rewrite various 'syntactic sugar' expressions like `:/` with more than two args into something simpler for drivers
-  to compile.&quot;
-  [expression :- ::mbql.s/FieldOrExpressionDef]
-  ;; The `mbql.jvm-u/desugar-host-and-domain` is implemented only for jvm because regexes are not compatible with
-  ;; Safari.
-  (let [desugar-host-and-domain* #?(:clj  mbql.jvm-u/desugar-host-and-domain
-                                    :cljs (fn [x]
-                                            (log/warn &quot;`desugar-host-and-domain` implemented only on JVM.&quot;)
-                                            x))]
-    (-&gt; expression
-        desugar-divide-with-extra-args
-        desugar-host-and-domain*
-        desugar-temporal-names)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- maybe-desugar-expression [clause]
-  (cond-&gt; clause
-    (mbql.preds/FieldOrExpressionDef? clause) desugar-expression))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn desugar-filter-clause :- mbql.s/Filter
-  &quot;Rewrite various 'syntatic sugar' filter clauses like `:time-interval` and `:inside` as simpler, logically
-  equivalent clauses. This can be used to simplify the number of filter clauses that need to be supported by anything
-  that needs to enumerate all the possible filter types (such as driver query processor implementations, or the
-  implementation [[negate-filter-clause]] below.)&quot;
-  [filter-clause :- mbql.s/Filter]
-  (-&gt; filter-clause
-      desugar-current-relative-datetime
-      desugar-in
-      desugar-multi-argument-comparisons
-      desugar-does-not-contain
-      desugar-time-interval
-      desugar-relative-time-interval
-      desugar-is-null-and-not-null
-      desugar-is-empty-and-not-empty
-      desugar-inside
-      simplify-compound-filter
-      desugar-temporal-extract
-      desugar-during
-      desugar-if
-      maybe-desugar-expression))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmulti ^:private negate*
-  {:arglists '([mbql-clause])}
-  first)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod negate* :not [[_ subclause]]    subclause)
-(defmethod negate* :and [[_ &amp; subclauses]] (into [:or]  (map negate* subclauses)))
-(defmethod negate* :or  [[_ &amp; subclauses]] (into [:and] (map negate* subclauses)))
-(defmethod negate* :=   [[_ field value]]  [:!= field value])
-(defmethod negate* :!=  [[_ field value]]  [:=  field value])
-(defmethod negate* :&gt;   [[_ field value]]  [:&lt;= field value])
-(defmethod negate* :&lt;   [[_ field value]]  [:&gt;= field value])
-(defmethod negate* :&gt;=  [[_ field value]]  [:&lt;  field value])
-(defmethod negate* :&lt;=  [[_ field value]]  [:&gt;  field value])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod negate* :between
-  [[_ field min-value max-value]]
-  [:or [:&lt; field min-value] [:&gt; field max-value]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod negate* :contains    [clause] [:not clause])
-(defmethod negate* :starts-with [clause] [:not clause])
-(defmethod negate* :ends-with   [clause] [:not clause])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn negate-filter-clause :- mbql.s/Filter
-  &quot;Return the logical compliment of an MBQL filter clause, generally without using `:not` (except for the string
-  filter clause types). Useful for generating highly optimized filter clauses and for drivers that do not support
-  top-level `:not` filter clauses.&quot;
-  [filter-clause :- mbql.s/Filter]
-  (-&gt; filter-clause desugar-filter-clause negate* simplify-compound-filter))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn query-&gt;source-table-id :- [:maybe pos-int?]
-  &quot;Return the source Table ID associated with `query`, if applicable; handles nested queries as well. If `query` is
-  `nil`, returns `nil`.
-  Throws an Exception when it encounters a unresolved source query (i.e., the `:source-table \&quot;card__id\&quot;`
-  form), because it cannot return an accurate result for a query that has not yet been preprocessed.&quot;
-  {:arglists '([outer-query])}
-  [{{source-table-id :source-table, source-query :source-query} :query, query-type :type, :as query} :- [:maybe :map]]
-  (cond
-    ;; for native queries, there's no source table to resolve
-    (not= query-type :query)
-    nil
-    ;; for MBQL queries with a *native* source query, it's the same story
-    (and (nil? source-table-id) source-query (:native source-query))
-    nil
-    ;; for MBQL queries with an MBQL source query, recurse on the source query and try again
-    (and (nil? source-table-id) source-query)
-    (recur (assoc query :query source-query))
-    ;; if ID is a `card__id` form that can only mean we haven't preprocessed the query and resolved the source query.
-    ;; This is almost certainly an accident, so throw an Exception so we can make the proper fixes
-    ((every-pred string? (partial re-matches mbql.s/source-table-card-id-regex)) source-table-id)
-    (throw
-     (ex-info
-      (i18n/tru &quot;Error: query''s source query has not been resolved. You probably need to `preprocess` the query first.&quot;)
-      {}))
-    ;; otherwise resolve the source Table
-    :else
-    source-table-id))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn join-&gt;source-table-id :- [:maybe pos-int?]
-  &quot;Like `query-&gt;source-table-id`, but for a join.&quot;
-  [join]
-  (query-&gt;source-table-id {:type :query, :query join}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn add-order-by-clause :- mbql.s/MBQLQuery
-  &quot;Add a new `:order-by` clause to an MBQL `inner-query`. If the new order-by clause references a Field that is
-  already being used in another order-by clause, this function does nothing.&quot;
-  [inner-query     :- mbql.s/MBQLQuery
-   [dir orderable] :- ::mbql.s/OrderBy]
-  (let [existing-orderables (into #{}
-                                  (map (fn [[_dir orderable]]
-                                         orderable))
-                                  (:order-by inner-query))
-        ;; Remove any :ident the orderable might have had. `:ident` in the options of a ref is for clauses that
-        ;; create columns, eg. breakouts; it's not referring to another clause by ident.
-        orderable           (m/update-existing orderable 2 #(not-empty (dissoc % :ident)))]
-    (if (existing-orderables orderable)
-      ;; Field already referenced, nothing to do
-      inner-query
-      ;; otherwise add new clause at the end
-      (update inner-query :order-by (comp vec distinct conj) [dir orderable]))))</pre></td></tr><tr><td class="docs"><p>Dispatch function perfect for use with multimethods that dispatch off elements of an MBQL query. If <code>x</code> is an MBQL
-clause, dispatches off the clause name; otherwise dispatches off <code>x</code>'s class.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn dispatch-by-clause-name-or-class
-  ([x]
-   (letfn [(clause-type [x]
-             (when (mbql-clause? x)
-               (first x)))
-           (mlv2-lib-type [x]
-             (when (map? x)
-               (:lib/type x)))
-           (model-type [#?(:clj x :cljs _x)]
-             #?(:clj (models.dispatch/model x)
-                :cljs nil))]
-     (or
-      (clause-type x)
-      (mlv2-lib-type x)
-      (model-type x)
-      (type x))))
-  ([x _]
-   (dispatch-by-clause-name-or-class x)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn expression-with-name :- ::mbql.s/FieldOrExpressionDef
-  &quot;Return the expression referenced by a given `expression-name`.&quot;
-  [inner-query expression-name :- [:or :keyword ::lib.schema.common/non-blank-string]]
-  (let [allowed-names [(u/qualified-name expression-name) (keyword expression-name)]]
-    (loop [{:keys [expressions source-query]} inner-query, found #{}]
-      (or
-       ;; look for either string or keyword version of `expression-name` in `expressions`
-       (some (partial get expressions) allowed-names)
-       ;; otherwise, if we have a source query recursively look in that (do we allow that??)
-       (let [found (into found (keys expressions))]
-         (if source-query
-           (recur source-query found)
-           ;; failing that throw an Exception with detailed info about what we tried and what the actual expressions
-           ;; were
-           (throw (ex-info (i18n/tru &quot;No expression named ''{0}''&quot; (u/qualified-name expression-name))
-                           {:type            :invalid-query
-                            :expression-name expression-name
-                            :tried           allowed-names
-                            :found           found}))))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn aggregation-at-index :- ::mbql.s/Aggregation
-  &quot;Fetch the aggregation at index. This is intended to power aggregate field references (e.g. [:aggregation 0]).
-   This also handles nested queries, which could be potentially ambiguous if multiple levels had aggregations. To
-   support nested queries, you'll need to keep tract of how many `:source-query`s deep you've traveled; pass in this
-   number to as optional arg `nesting-level` to make sure you reference aggregations at the right level of nesting.&quot;
-  ([query index]
-   (aggregation-at-index query index 0))
-  ([query         :- mbql.s/Query
-    index         :- ::lib.schema.common/int-greater-than-or-equal-to-zero
-    nesting-level :- ::lib.schema.common/int-greater-than-or-equal-to-zero]
-   (if (zero? nesting-level)
-     (or (nth (get-in query [:query :aggregation]) index)
-         (throw (ex-info (i18n/tru &quot;No aggregation at index: {0}&quot; index) {:index index})))
-     ;; keep recursing deeper into the query until we get to the same level the aggregation reference was defined at
-     (recur {:query (get-in query [:query :source-query])} index (dec nesting-level)))))</pre></td></tr><tr><td class="docs"><p>--------------------------------- Unique names &amp; transforming ags to have names ----------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Return a function that can be used to uniquify string names. Function maintains an internal counter that will suffix
-any names passed to it as needed so all results will be unique.</p>
-
-<p>  (let [unique-name (unique-name-generator)]
-    [(unique-name "A")
-     (unique-name "B")
-     (unique-name "A")])
-  ;; -> ["A" "B" "A_2"]</p>
-
-<p>By default, unique aliases are generated for each unique <code>[id original-name]</code> key pair. By default, a unique <code>id</code> is
-generated for every call, meaning repeated calls to [[unique-name-generator]] with the same <code>original-name</code> will
-return different unique aliases. If idempotence is desired, the function returned by the generator also has a 2
-airity version with the signature</p>
-
-<p>  (unique-name-fn id original-name)</p>
-
-<p>for example:</p>
-
-<p>  (let [unique-name (unique-name-generator)]
-    [(unique-name :x "A")
-     (unique-name :x "B")
-     (unique-name :x "A")
-     (unique-name :y "A")])
-  ;; -> ["A" "B" "A" "A_2"]</p>
-
-<p>Finally, [[unique-name-generator]] accepts the following options to further customize behavior:</p>
-
-<h3>`:name-key-fn`</h3>
-
-<p>Generated aliases are unique by the value of <code>[id (name-key-fn original-name)]</code>; the default is <code>identity</code>, so by
-default aliases are unique by <code>[id name-key-fn]</code>. Specify something custom here if you want to make the unique
-aliases unique by some other value, for example to make them unique without regards to case:</p>
-
-<p>  (let [f (unique-name-generator :name-key-fn str/lower-case)]
-    [(f "x")
-     (f "X")
-     (f "X")])
-  ;; -> ["x" "X<em>2" "X</em>3"]</p>
-
-<p>This is useful for databases that treat column aliases as case-insensitive (see #19618 for some examples of this).</p>
-
-<h3>`:unique-alias-fn`</h3>
-
-<p>The function used to generate a potentially-unique alias given an original alias and unique suffix with the signature</p>
-
-<p>  (unique-alias-fn original suffix)</p>
-
-<p>By default, combines them like <code>original_suffix</code>, but you can supply a custom function if you need to change this
-behavior:</p>
-
-<p>  (let [f (unique-name-generator :unique-alias-fn (fn [x y] (format "%s~~%s" y x)))]
-    [(f "x")
-     (f "x")])
-;; -> ["x" "2~~x"]</p>
-
-<p>This is useful if you need to constrain the generated suffix in some way, for example by limiting its length or
-escaping characters disallowed in a column alias.</p>
-
-<p>Values generated by this function are recursively checked for uniqueness, and will keep trying values a unique value
-is generated; for this reason the function <em>must</em> return a unique value for every unique input. Use caution when
-limiting the length of the identifier generated (consider appending a hash in cases like these).</p>
-</td><td class="codes"><pre class="brush: clojure">(defn unique-name-generator
-  [&amp; {:keys [name-key-fn unique-alias-fn]
-      :or   {name-key-fn     identity
-             unique-alias-fn (fn [original suffix]
-                               (str original \_ suffix))}}]
-  (let [id+original-&gt;unique (atom {})   ; map of [id original-alias] -&gt; unique-alias
-        original-&gt;count     (atom {})]  ; map of original-alias -&gt; count
-    (fn generate-name
-      ([an-alias]
-       (generate-name (gensym) an-alias))
-      ([id original]
-       (let [name-key (name-key-fn original)]
-         (or
-          ;; if we already have generated an alias for this key (e.g. `[id original]`), return it as-is.
-          (@id+original-&gt;unique [id name-key])
-          ;; otherwise generate a new unique alias.
-          ;; see if we're the first to try to use this candidate alias. Update the usage count in `original-&gt;count`
-          (let [total-count (get (swap! original-&gt;count update name-key (fnil inc 0)) name-key)]
-            (if (= total-count 1)
-              ;; if we are the first to do it, record it in `id+original-&gt;unique` and return it.
-              (do
-                (swap! id+original-&gt;unique assoc [id name-key] original)
-                original)
-              ;; otherwise prefix the alias by the current total count (e.g. `id` becomes `id_2`) and recur. If `id_2`
-              ;; is unused, it will get returned. Otherwise we'll recursively try `id_2_2`, and so forth.
-              (let [candidate (unique-alias-fn original (str total-count))]
-                ;; double-check that `unique-alias-fn` isn't doing something silly like truncating the generated alias
-                ;; to aggressively or forgetting to include the `suffix` -- otherwise we could end up with an infinite
-                ;; loop
-                (assert (not= candidate original)
-                        (str &quot;unique-alias-fn must return a different string than its input. Input: &quot;
-                             (pr-str candidate)))
-                (swap! id+original-&gt;unique assoc [id name-key] candidate)
-                (recur id candidate))))))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn uniquify-names :- [:and
-                            [:sequential :string]
-                            [:fn
-                             {:error/message &quot;sequence of unique strings&quot;}
-                             distinct?]]
-  &quot;Make the names in a sequence of string names unique by adding suffixes such as `_2`.
-     (uniquify-names [\&quot;count\&quot; \&quot;sum\&quot; \&quot;count\&quot; \&quot;count_2\&quot;])
-     ;; -&gt; [\&quot;count\&quot; \&quot;sum\&quot; \&quot;count_2\&quot; \&quot;count_2_2\&quot;]&quot;
-  [names :- [:sequential :string]]
-  (map (unique-name-generator) names))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private NamedAggregation
-  [:and
-   mbql.s/aggregation-options
-   [:fn
-    {:error/message &quot;`:aggregation-options` with a `:name`&quot;}
-    #(:name (nth % 2))]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private UniquelyNamedAggregations
-  [:and
-   [:sequential NamedAggregation]
-   [:fn
-    {:error/message &quot;sequence of named aggregations with unique names&quot;}
-    (fn [clauses]
-      (apply distinct? (for [[_tag _wrapped {ag-name :name}] clauses]
-                         ag-name)))]])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn uniquify-named-aggregations :- UniquelyNamedAggregations
-  &quot;Make the names of a sequence of named aggregations unique by adding suffixes such as `_2`.&quot;
-  [named-aggregations :- [:sequential NamedAggregation]]
-  (let [unique-names (uniquify-names
-                      (for [[_ _wrapped-ag {ag-name :name}] named-aggregations]
-                        ag-name))]
-    (map
-     (fn [[_ wrapped-ag options] unique-name]
-       [:aggregation-options wrapped-ag (assoc options :name unique-name)])
-     named-aggregations
-     unique-names)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn pre-alias-aggregations :- [:sequential NamedAggregation]
-  &quot;Wrap every aggregation clause in an `:aggregation-options` clause, using the name returned
-  by `(aggregation-&gt;name-fn ag-clause)` as names for any clauses that do not already have a `:name` in
-  `:aggregation-options`.
-    (pre-alias-aggregations annotate/aggregation-name
-     [[:count] [:count] [:aggregation-options [:sum [:field 1 nil] {:name \&quot;Sum-41\&quot;}]])
-    ;; -&gt; [[:aggregation-options [:count] {:name \&quot;count\&quot;}]
-           [:aggregation-options [:count] {:name \&quot;count\&quot;}]
-           [:aggregation-options [:sum [:field 1 nil]] {:name \&quot;Sum-41\&quot;}]]
-  Most often, `aggregation-&gt;name-fn` will be something like `annotate/aggregation-name`, but for purposes of keeping
-  the `metabase.legacy-mbql` module seperate from the `metabase.query-processor` code we'll let you pass that in yourself.&quot;
-  [aggregation-&gt;name-fn :- fn?
-   aggregations         :- [:sequential ::mbql.s/Aggregation]]
-  (lib.util.match/replace aggregations
-    [:aggregation-options _ (_ :guard :name)]
-    &amp;match
-    [:aggregation-options wrapped-ag options]
-    [:aggregation-options wrapped-ag (assoc options :name (aggregation-&gt;name-fn wrapped-ag))]
-    [(_ :guard keyword?) &amp; _]
-    [:aggregation-options &amp;match {:name (aggregation-&gt;name-fn &amp;match)}]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn pre-alias-and-uniquify-aggregations :- UniquelyNamedAggregations
-  &quot;Wrap every aggregation clause in a `:named` clause with a unique name. Combines `pre-alias-aggregations` with
-  `uniquify-named-aggregations`.&quot;
-  [aggregation-&gt;name-fn :- fn?
-   aggregations         :- [:sequential ::mbql.s/Aggregation]]
-  (-&gt; (pre-alias-aggregations aggregation-&gt;name-fn aggregations)
-      uniquify-named-aggregations))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- safe-min [&amp; args]
-  (transduce
-   (filter some?)
-   (completing
-    (fn [acc n]
-      (if acc
-        (min acc n)
-        n)))
+<p>The function performs a breadth-first traversal starting from the initial nodes, applying
+<code>traverse-fn</code> to each node to find connected nodes, and continues until all reachable nodes
+have been visited. Returns a set of all traversed nodes.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn traverse
+  [nodes traverse-fn]
+  (loop [to-traverse (zipmap nodes (repeat nil))
+         traversed   {}]
+    (let [item        (first to-traverse)
+          found       (traverse-fn (key item))
+          traversed   (conj traversed item)
+          to-traverse (into (dissoc to-traverse (key item))
+                            (apply dissoc found (keys traversed)))]
+      (if (empty? to-traverse)
+        traversed
+        (recur to-traverse traversed)))))</pre></td></tr><tr><td class="docs"><p>A reversed java.util.Comparator, useful for sorting elements in descending in order</p>
+</td><td class="codes"><pre class="brush: clojure">(defn reverse-compare
+  [x y]
+  (compare y x))</pre></td></tr><tr><td class="docs"><p>Given two maps, return a seq of the keys on which they disagree. We only consider keys that are present in both.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn conflicting-keys
+  [m1 m2]
+  (keep (fn [[k v]] (when (not= v (get m1 k v)) k)) m2))</pre></td></tr><tr><td class="docs"><p>Given two maps, are any keys on which they disagree? We only consider keys that are present in both.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn conflicting-keys?
+  [m1 m2]
+  (boolean (some identity (conflicting-keys m1 m2))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- map-all*
+  [f colls]
+  (lazy-seq
+   (if (some seq colls)
+     (cons (apply f (map first colls))
+           (map-all* f (map rest colls)))
+     ())))</pre></td></tr><tr><td class="docs"><p>Similar to [[clojure.core/map]], but instead of short-circuiting it continues until the end of the longest
+collection, using nil for collection(s) that have already been exhausted.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn map-all
+  ([f coll] (map f coll))
+  ([f c1 c2]
+   (lazy-seq
+    (let [s1 (seq c1) s2 (seq c2)]
+      (when (or s1 s2)
+        (cons (f (first s1) (first s2))
+              (map-all f (rest s1) (rest s2)))))))
+  ([f c1 c2 &amp; colls]
+   (map-all* f (list* c1 c2 colls))))</pre></td></tr><tr><td class="docs"><p>Like (first (filter ... )), but doesn't realize chunks of the sequence. Returns the first item in <code>coll</code> for which
+<code>pred</code> returns a truthy value, or <code>nil</code> if no such item is found.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn seek
+  [pred coll]
+  (reduce
+   (fn [acc x] (if (pred x) (reduced x) acc))
    nil
-   args))</pre></td></tr><tr><td class="docs"><p>Calculate the absolute maximum number of results that should be returned by this query (MBQL or native), useful for
-doing the equivalent of</p>
+   coll))</pre></td></tr><tr><td class="docs"><p>Like [[reduce]] but preserves the [[reduced]] wrapper around the result. This is important because we have some
+cases where we want to call [[reduce]] on some rf, but still be able to tell if it returned early.</p>
 
-<p>  java.sql.Statement statement = ...;
-  statement.setMaxRows(<max-rows-limit>).</p>
+<p>Returns a vanilla value if all the <code>xs</code> were consumed and <code>(reduced result)</code> on an early exit.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn reduce-preserving-reduced
+  [rf init xs]
+  (if (reduced? init)
+    init
+    (reduce
+     (fn [acc x]
+       ;; HACK: Wrap the reduced value in [[reduced]] again! [[reduce]] will unwrap the outer layer but we'll still
+       ;; see the inner one.
+       (let [acc' (rf acc x)]
+         (if (reduced? acc')
+           (reduced acc')
+           acc')))
+     init
+     xs)))</pre></td></tr><tr><td class="docs"><p>Like <code>case</code>, but explicitly dispatch on Java enum ordinals.</p>
 
-<p>to ensure the DB cursor or equivalent doesn't fetch more rows than will be consumed.</p>
+<pre><code> Passing the same enum type as the ones you're checking in is on you, this is not checked.
+</code></pre>
+</td><td class="codes"><pre class="brush: clojure">#?(:clj
+   (let [sym-&gt;enum (fn ^Enum [sym]
+                     (Reflector/invokeStaticMethod ^Class (resolve (symbol (namespace sym)))
+                                                   &quot;valueOf&quot;
+                                                   (to-array [(name sym)])))
+         ordinal (fn [^Enum e] (.ordinal e))]
+     (defmacro case-enum
+       [value &amp; clauses]
+       (let [types (map (comp type sym-&gt;enum first) (partition 2 clauses))]
+         ;; doesn't check for the value of `case`, but that's on user
+         (if-not (apply = types)
+           `(throw (ex-info (str &quot;`case-enum` only works if all supplied enums are of a same type: &quot; ~(vec types))
+                            {:types ~(vec types)}))
+           `(case (int (~ordinal ~value))
+              ~@(concat
+                 (mapcat (fn [[test result]]
+                           [(ordinal (sym-&gt;enum test)) result])
+                         (partition 2 clauses))
+                 (when (odd? (count clauses))
+                   (list (last clauses))))))))))</pre></td></tr><tr><td class="docs"><p>A combination of [[update-keys]] and [[update-vals]], which simultaneously re-maps keys and values.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn update-keys-vals
+  ([m f]
+   (update-keys-vals m f f))
+  ([m key-f val-f]
+   (let [ret (persistent!
+              (reduce-kv (fn [acc k v]
+                           (assoc! acc (key-f k) (val-f v)))
+                         (transient {})
+                         m))]
+     (with-meta ret (meta m)))))</pre></td></tr><tr><td class="docs"><p>Like <code>conj</code> but returns a vector instead of a list</p>
+</td><td class="codes"><pre class="brush: clojure">(def conjv
+  (fnil conj []))</pre></td></tr><tr><td class="docs"><p>Number of bytes in a string using UTF-8 encoding.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn string-byte-count
+  [s]
+  #?(:clj (count (.getBytes (str s) &quot;UTF-8&quot;))
+     :cljs (.. (js/TextEncoder.) (encode s) -length)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">#?(:clj
+   (defn ^:private string-character-at
+     [s i]
+     (str (.charAt ^String s i))))</pre></td></tr><tr><td class="docs"><p>Truncate string <code>s</code> to <code>max-length-bytes</code> UTF-8 bytes (as opposed to truncating to some number of <em>characters</em>).</p>
+</td><td class="codes"><pre class="brush: clojure">(defn truncate-string-to-byte-count
+  [s max-length-bytes]
+  #?(:clj
+     (loop [i 0, cumulative-byte-count 0]
+       (cond
+         (= cumulative-byte-count max-length-bytes) (subs s 0 i)
+         (&gt; cumulative-byte-count max-length-bytes) (subs s 0 (dec i))
+         (&gt;= i (count s))                           s
+         :else                                      (recur (inc i)
+                                                           (long (+
+                                                                  cumulative-byte-count
+                                                                  (string-byte-count (string-character-at s i)))))))
+     :cljs
+     (let [buf (js/Uint8Array. max-length-bytes)
+           result (.encodeInto (js/TextEncoder.) s buf)] ;; JS obj {read: chars_converted, write: bytes_written}
+       (subs s 0 (.-read result)))))</pre></td></tr><tr><td class="docs"><p>Start and return a timer. Treat the "timer" as an opaque object, the implementation may change.</p>
+</td><td class="codes"><pre class="brush: clojure">#?(:clj
+   (defn start-timer
+     []
+     (System/nanoTime)))</pre></td></tr><tr><td class="docs"><p>Return how many milliseconds have elapsed since the given timer was started.</p>
+</td><td class="codes"><pre class="brush: clojure">#?(:clj
+   (defn since-ms
+     [timer]
+     (/ (- (System/nanoTime) timer) 1e6)))</pre></td></tr><tr><td class="docs"><p>(group-by first                  [[1 3]   [1 4]   [2 5]])   => {1 [[1 3] [1 4]], 2 [[2 5]]}
+ (group-by first second           [[1 3]   [1 4]   [2 5]])   => {1 [3 4],         2 [5]}
+ (group-by first second +      0  [[1 3]   [1 4]   [2 5]])   => {1 7,             2 5}
+ (group-by first second           [[1 [3]] [1 [4]] [2 [5]]]) => {1 [[3] [4]],     2 [[5]]}
+ (group-by first second concat    [[1 [3]] [1 [4]] [2 [5]]]) => {1 (3 4),         2 (5)}
+ (group-by first second into      [[1 [3]] [1 [4]] [2 [5]]]) => {1 [3 4],         2 [5]}
+ (group-by first second into   [] [[1 [3]] [1 [4]] [2 [5]]]) => {1 [3 4],         2 [5]}
+ (group-by first second into   () [[1 [3]] [1 [4]] [2 [5]]]) => {1 (4 3),         2 (5)}
+ ;; as a filter:
+           kf    kpred  vf     vpred rf   init
+ (group-by first any?   second even? conj () [[1 3] [1 4] [2 5]])      => {1 (4)}
+ ;; as a reducer (see index-by below):
+           kf    kpred  vf     vpred rf   init
+ (group-by first any?   second even? max  0  [[1 3] [1 6] [1 4] [2 5]] => {1 6})</p>
+</td><td class="codes"><pre class="brush: clojure">(defn group-by
+  ([kf coll] (clojure.core/group-by kf coll))
+  ([kf vf coll] (group-by kf vf conj [] coll))
+  ([kf vf rf coll] (group-by kf vf rf [] coll))
+  ([kf vf rf init coll]
+   (-&gt;&gt; coll
+        (reduce
+         (fn [m x]
+           (let [k (kf x)]
+             (assoc! m k (rf (get m k init) (vf x)))))
+         (transient {}))
+        (persistent!)))
+  ([kf kpred vf vpred rf init coll]
+   (-&gt;&gt; coll
+        (reduce
+         (fn [m x]
+           (let [k (kf x)]
+             (if-not (kpred k)
+               m
+               (let [v (vf x)]
+                 ;; no empty collections as a 'side effect':
+                 (if-not (vpred v)
+                   m
+                   (assoc! m k (rf (get m k init) v)))))))
+         (transient {}))
+        (persistent!))))</pre></td></tr><tr><td class="docs"><p>(index-by first second [[1 3] [1 4] [2 5]]) => {1 4, 2 5}</p>
+</td><td class="codes"><pre class="brush: clojure">(defn index-by
+  ([kf coll]
+   (reduce (fn [acc v] (assoc acc (kf v) v)) {} coll))
+  ([kf vf coll]
+   (reduce (fn [acc v] (assoc acc (kf v) (vf v))) {} coll)))</pre></td></tr><tr><td class="docs"><p>Return first item from Reducible</p>
+</td><td class="codes"><pre class="brush: clojure">(defn rfirst
+  [reducible]
+  (reduce (fn [_ fst] (reduced fst)) nil reducible))</pre></td></tr><tr><td class="docs"><p>Concatenate two Reducibles</p>
+</td><td class="codes"><pre class="brush: clojure">(defn rconcat
+  [r1 r2]
+  #?(:clj
+     (reify CollReduce
+       (coll-reduce [_ f]
+         #_{:clj-kondo/ignore [:reduce-without-init]}
+         (let [acc1 (reduce f r1)
+               acc2 (reduce f acc1 r2)]
+           acc2))
+       (coll-reduce [_ f init]
+         (let [acc1 (reduce f init r1)
+               acc2 (reduce f acc1 r2)]
+           acc2)))
+     :cljs
+     (reify IReduce
+       (-reduce [_ f]
+         (let [acc1 (reduce f r1)
+               acc2 (reduce f acc1 r2)]
+           acc2))
+       (-reduce [_ f init]
+         (let [acc1 (reduce f init r1)
+               acc2 (reduce f acc1 r2)]
+           acc2)))))</pre></td></tr><tr><td class="docs"><p>Runs the supplied procedure (via reduce), for purposes of side effects, on successive items. See [clojure.core/run!]
+ Returns the number of items processed.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn run-count!
+  [proc reducible]
+  (let [cnt (volatile! 0)]
+    (reduce (fn [_ item] (vswap! cnt inc) (proc item)) nil reducible)
+    @cnt))</pre></td></tr><tr><td class="docs"><p>Generates a random NanoID string. Usually these are used for the entity_id field of various models.</p>
 
-<p>This is calculated as follows:</p>
-
-<ul>
-<li>If query is <code>MBQL</code> and has a <code>:limit</code> or <code>:page</code> clause, returns appropriate number</li>
-<li>If query has <code>:constraints</code> with <code>:max-results-bare-rows</code> or <code>:max-results</code>, returns the appropriate number
-<ul><li><code>:max-results-bare-rows</code> is returned if set and Query does not have any aggregations</li>
-<li><code>:max-results</code> is returned otherwise</li></ul></li>
-<li>If none of the above are set, returns <code>nil</code>. In this case, you should use something like the Metabase QP's
-<code>max-rows-limit</code></li>
-</ul>
-</td><td class="codes"><pre class="brush: clojure">(defn query-&gt;max-rows-limit
-  [{{:keys [max-results max-results-bare-rows]}                      :constraints
-    {limit :limit, aggregations :aggregation, {:keys [items]} :page} :query
-    query-type                                                       :type}]
-  (let [mbql-limit        (when (= query-type :query)
-                            (safe-min items limit))
-        constraints-limit (or
-                           (when-not aggregations
-                             max-results-bare-rows)
-                           max-results)]
-    (safe-min mbql-limit constraints-limit)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- remove-empty [x]
-  (cond
-    (map? x)
-    (not-empty (into {} (for [[k v] x
-                              :let  [v (remove-empty v)]
-                              :when (some? v)]
-                          [k v])))
-    (sequential? x)
-    (not-empty (into (empty x) (filter some? (map remove-empty x))))
-    :else
-    x))</pre></td></tr><tr><td class="docs"><p>Returns options in a <code>:field</code>, <code>:expression</code>, or <code>:aggregation</code> clause.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn field-options
-  [[_ _ opts]]
-  opts)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn update-field-options :- mbql.s/Reference
-  &quot;Like [[clojure.core/update]], but for the options in a `:field`, `:expression`, or `:aggregation` clause.&quot;
-  {:arglists '([field-or-ag-ref-or-expression-ref f &amp; args])}
-  [[clause-type id-or-name opts] :- mbql.s/Reference f &amp; args]
-  (let [opts (not-empty (remove-empty (apply f opts args)))]
-    ;; `:field` clauses should have a `nil` options map if there are no options. `:aggregation` and `:expression`
-    ;; should get the arg removed if it's `nil` or empty. (For now. In the future we may change this if we make the
-    ;; 3-arg versions the &quot;official&quot; normalized versions.)
-    (cond
-      opts                   [clause-type id-or-name opts]
-      (= clause-type :field) [clause-type id-or-name nil]
-      :else                  [clause-type id-or-name])))</pre></td></tr><tr><td class="docs"><p>Like [[clojure.core/assoc]], but for the options in a <code>:field</code>, <code>:expression</code>, or <code>:aggregation</code> clause.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn assoc-field-options
-  [clause &amp; kvs]
-  (apply update-field-options clause assoc kvs))</pre></td></tr><tr><td class="docs"><p>Set the <code>:temporal-unit</code> of a <code>:field</code> clause to <code>unit</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn with-temporal-unit
-  [[_ _ {:keys [base-type]} :as clause] unit]
-  ;; it doesn't make sense to call this on an `:expression` or `:aggregation`.
-  (assert (is-clause? :field clause))
-  (if (or (not base-type)
-          (mbql.s/valid-temporal-unit-for-base-type? base-type unit))
-    (assoc-field-options clause :temporal-unit unit)
-    (do
-      (log/warnf &quot;%s is not a valid temporal unit for %s; not adding to clause %s&quot; unit base-type (pr-str clause))
-      clause)))</pre></td></tr><tr><td class="docs"><p>Update a <code>:field</code>, <code>:expression</code> reference, or <code>:aggregation</code> reference clause by removing all namespaced keys in the
-options map. This is mainly for clause equality comparison purposes -- in current usage namespaced keys are used by
-individual pieces of middleware or driver implementations for tracking little bits of information that should not be
-considered relevant when comparing clauses for equality.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn remove-namespaced-options
-  [field-or-ref]
-  (update-field-options field-or-ref (partial into {} (remove (fn [[k _]]
-                                                                (qualified-keyword? k))))))</pre></td></tr><tr><td class="docs"><p>Find all the <code>:field</code> references with integer IDs in <code>coll</code>, which can be a full MBQL query, a snippet of MBQL, or a
-sequence of those things; return a set of Field IDs. Includes Fields referenced indirectly via <code>:source-field</code>.
-Returns <code>nil</code> if no IDs are found.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn referenced-field-ids
-  [coll]
-  (not-empty
-   (into #{}
-         (comp cat (filter some?))
-         (lib.util.match/match coll
-           [:field (id :guard integer?) opts]
-           [id (:source-field opts)]))))</pre></td></tr><tr><td class="docs"><p>Check if <code>form</code> or any of its children forms match <code>pred</code>. This function is used for validation; during normal
-operation it will never match, so calling this function before <code>matching-locations</code> is more efficient.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn pred-matches-form?
-  [form pred]
-  (cond
-    (pred form)        true
-    (map? form)        (reduce-kv (fn [b _ v] (or b (pred-matches-form? v pred))) false form)
-    (sequential? form) (reduce (fn [b x] (or b (pred-matches-form? x pred))) false form)
-    :else              false))</pre></td></tr><tr><td class="docs"><p>Find the forms matching pred, returns a list of tuples of location (as used in get-in) and the match.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn matching-locations
-  [form pred]
-  ;; Surprisingly enough, a list works better as a stack here than a vector.
-  (loop [stack (list [[] form]), matches []]
-    (if-let [[loc form :as top] (peek stack)]
-      (let [stack (pop stack)
-            map-onto-stack #(transduce (map (fn [[k v]] [(conj loc k) v])) conj stack %)
-            seq-onto-stack #(transduce (map-indexed (fn [i v] [(conj loc i) v])) conj stack %)]
-        (cond
-          (pred form)        (recur stack                 (conj matches top))
-          (map? form)        (recur (map-onto-stack form) matches)
-          (sequential? form) (recur (seq-onto-stack form) matches)
-          :else              (recur stack                 matches)))
-      matches)))</pre></td></tr><tr><td class="docs"><p>Wrap a raw Field ID in a <code>:field</code> clause if needed.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn wrap-field-id-if-needed
-  [field-id-or-form]
-  (cond
-    (mbql-clause? field-id-or-form)
-    field-id-or-form
-    (integer? field-id-or-form)
-    [:field field-id-or-form nil]
-    :else
-    field-id-or-form))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn unwrap-field-clause :- [:maybe mbql.s/field]
-  &quot;Unwrap something that contains a `:field` clause, such as a template tag.
-  Also handles unwrapped integers for legacy compatibility.
-    (unwrap-field-clause [:field 100 nil]) ; -&gt; [:field 100 nil]&quot;
-  [field-form]
-  (if (integer? field-form)
-    [:field field-form nil]
-    (lib.util.match/match-one field-form :field)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn unwrap-field-or-expression-clause :- mbql.s/Field
-  &quot;Unwrap a `:field` clause or expression clause, such as a template tag. Also handles unwrapped integers for
-  legacy compatibility.&quot;
-  [field-or-ref-form]
-  (or (unwrap-field-clause field-or-ref-form)
-      (lib.util.match/match-one field-or-ref-form :expression)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+<p>If an argument is provided, it's taken to be an identity-hash string and used to seed the RNG,
+producing the same value every time. This is only supported on the JVM!</p>
+</td><td class="codes"><pre class="brush: clojure">(defn generate-nano-id
+  ([] (nano-id/nano-id))
+  ([seed-str]
+   #?(:clj  (let [seed (Long/parseLong seed-str 16)
+                  rnd  (Random. seed)
+                  gen  (nano-id/custom
+                        &quot;_-0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ&quot;
+                        21
+                        (fn [len]
+                          (let [ba (byte-array len)]
+                            (.nextBytes rnd ba)
+                            ba)))]
+              (gen))
+      :cljs (throw (ex-info &quot;Seeded NanoIDs are not supported in CLJS&quot; {:seed-str seed-str})))))</pre></td></tr><tr><td class="docs"><p>Update a value by key in the <code>m</code>, if it's <code>some?</code>. If <code>nil</code> is returned, dissoc it instead</p>
+</td><td class="codes"><pre class="brush: clojure">(defn update-some
+  [m k f &amp; args]
+  (let [v (get m k)
+        res (when v (apply f v args))]
+    (if res
+      (assoc m k res)
+      (dissoc m k))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

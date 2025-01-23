@@ -2869,45 +2869,36 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(ns metabase-enterprise.cache.strategies
   (:require
    [java-time.api :as t]
+   [metabase.api.cache]
    [metabase.models.cache-config :as cache-config]
    [metabase.premium-features.core :refer [defenterprise defenterprise-schema]]
    [metabase.query-processor.middleware.cache-backend.db :as backend.db]
-   [metabase.util.cron :as u.cron]
    [metabase.util.log :as log]
-   [metabase.util.malli.schema :as ms]
+   [metabase.util.malli.registry :as mr]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Data shape</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Schema for a caching strategy</p>
-</td><td class="codes"><pre class="brush: clojure">(defenterprise CacheStrategy
-  :feature :cache-granular-controls
-  []
-  [:and
-   [:map
-    [:type [:enum :nocache :ttl :duration :schedule]]]
-   [:multi {:dispatch :type}
-    [:nocache  [:map ;; not closed due to a way it's used in tests for clarity
-                [:type [:= :nocache]]]]
-    [:ttl      [:map {:closed true}
-                [:type [:= :ttl]]
-                [:multiplier ms/PositiveInt]
-                [:min_duration_ms ms/IntGreaterThanOrEqualToZero]
-                ^:internal
-                [:invalidated-at {:optional true} some?]]]
-    [:duration [:map {:closed true}
-                [:type [:= :duration]]
-                [:duration ms/PositiveInt]
-                [:unit [:enum &quot;hours&quot; &quot;minutes&quot; &quot;seconds&quot; &quot;days&quot;]]
-                [:refresh_automatically {:optional true} [:maybe :boolean]]
-                ^:internal
-                [:invalidated-at {:optional true} some?]]]
-    [:schedule [:map {:closed true}
-                [:type [:= :schedule]]
-                [:schedule u.cron/CronScheduleString]
-                [:refresh_automatically {:optional true} [:maybe :boolean]]
-                ^:internal
-                [:invalidated-at {:optional true} some?]]]]])</pre></td></tr><tr><td class="docs"><p>Querying DB</p>
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(comment metabase.api.cache/keep-me)</pre></td></tr><tr><td class="docs"><p>Data shape</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defenterprise-schema cache-strategy :- [:maybe (CacheStrategy)]
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::cache-strategy
+  &quot;Schema for a caching strategy used internally&quot;
+  [:and
+   :metabase.api.cache/cache-strategy.base
+   [:multi {:dispatch :type}
+    [:nocache  :metabase.api.cache/cache-strategy.nocache]
+    [:ttl      [:merge
+                :metabase.api.cache/cache-strategy.ttl
+                [:map
+                 [:invalidated-at {:optional true} some?]]]]
+    [:duration [:merge
+                :metabase.api.cache/cache-strategy.ee.duration
+                [:map
+                 [:invalidated-at {:optional true} some?]]]]
+    [:schedule [:merge
+                :metabase.api.cache/cache-strategy.ee.schedule
+                [:map
+                 [:invalidated-at {:optional true} some?]]]]]])</pre></td></tr><tr><td class="docs"><p>Querying DB</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defenterprise-schema cache-strategy :- [:maybe ::cache-strategy]
   &quot;Returns the granular cache strategy for a card.&quot;
   :feature :cache-granular-controls
   [card dashboard-id]

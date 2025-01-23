@@ -2868,43 +2868,66 @@ net.brehaut.ClojureTools = (function (SH) {
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.api.cache" name="metabase.api.cache"><h1 class="project-name">metabase.api.cache</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.api.cache
   (:require
-   [clojure.walk :as walk]
-   [compojure.core :refer [GET]]
    [metabase.api.common :as api]
+   [metabase.api.macros :as api.macros]
+   [metabase.config :as config]
    [metabase.models.cache-config :as cache-config]
-   [metabase.premium-features.core :as premium-features :refer [defenterprise]]
+   [metabase.premium-features.core :as premium-features]
+   [metabase.util.cron :as u.cron]
    [metabase.util.i18n :refer [tru trun]]
    [metabase.util.malli :as mu]
+   [metabase.util.malli.registry :as mr]
    [metabase.util.malli.schema :as ms]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs"><p>Data shape</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>See <code>metabase-enterprise.cache.strategies/CacheStrategy</code></p>
-</td><td class="codes"><pre class="brush: clojure">(defn- drop-internal-fields
-  [schema]
-  (walk/prewalk
-   (fn [x]
-     (if (and (vector? x) (= (first x) :map))
-       (into [] (remove #(:internal (meta %))) x)
-       x))
-   schema))</pre></td></tr><tr><td class="docs"><p>Schema for a caching strategy</p>
-
-<p>TODO: figure out how to combine <code>defenterprise</code> and <code>defendpoint</code> - right now OpenAPI only "sees" OSS version of
-the schema, so docs for enterprise version won't be correct until we figure out the way to support this</p>
-</td><td class="codes"><pre class="brush: clojure">(defenterprise CacheStrategy
-  metabase-enterprise.cache.strategies
-  []
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::cache-strategy.base
+  [:map
+   [:type [:enum :nocache :ttl :duration :schedule]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::cache-strategy.nocache
+  [:map ; not closed due to a way it's used in tests for clarity
+   [:type [:= :nocache]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::cache-strategy.ttl
+  [:map {:closed true}
+   [:type            [:= :ttl]]
+   [:multiplier      ms/PositiveInt]
+   [:min_duration_ms ms/IntGreaterThanOrEqualToZero]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::cache-strategy.oss
+  &quot;Schema for a caching strategy (OSS)&quot;
   [:and
-   [:map
-    [:type [:enum :nocache :ttl]]]
+   ::cache-strategy.base
    [:multi {:dispatch :type}
-    [:nocache  [:map ;; not closed due to a way it's used in tests for clarity
-                [:type keyword?]]]
-    [:ttl      [:map {:closed true}
-                [:type [:= :ttl]]
-                [:multiplier ms/PositiveInt]
-                [:min_duration_ms ms/IntGreaterThanOrEqualToZero]]]]])</pre></td></tr><tr><td class="docs"><p>Schema for a caching strategy for the API</p>
-</td><td class="codes"><pre class="brush: clojure">(defn CacheStrategyAPI
-  []
-  (drop-internal-fields (CacheStrategy)))</pre></td></tr><tr><td class="docs">
+    [:nocache ::cache-strategy.nocache]
+    [:ttl     ::cache-strategy.ttl]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::cache-strategy.ee.duration
+  [:map {:closed true}
+   [:type                  [:= :duration]]
+   [:duration              ms/PositiveInt]
+   [:unit                  [:enum &quot;hours&quot; &quot;minutes&quot; &quot;seconds&quot; &quot;days&quot;]]
+   [:refresh_automatically {:optional true} [:maybe :boolean]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::cache-strategy.ee.schedule
+  [:map {:closed true}
+   [:type                  [:= :schedule]]
+   [:schedule              u.cron/CronScheduleString]
+   [:refresh_automatically {:optional true} [:maybe :boolean]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::cache-strategy.ee
+  &quot;Schema for a caching strategy in EE when we have an premium token with `:cache-granular-controls`.&quot;
+  [:and
+   ::cache-strategy.base
+   [:multi {:dispatch :type}
+    [:nocache  ::cache-strategy.nocache]
+    [:ttl      ::cache-strategy.ttl]
+    [:duration ::cache-strategy.ee.duration]
+    [:schedule ::cache-strategy.ee.schedule]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::cache-strategy
+  (if config/ee-available?
+    [:multi
+     {:dispatch (fn [_value]
+                  (if (premium-features/has-feature? :cache-granular-controls)
+                    :ee
+                    :oss))}
+     [:ee  ::cache-strategy.ee]
+     [:oss ::cache-strategy.oss]]
+    ::cache-strategy.oss))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- assert-valid-models [model ids premium?]
   (cond
     (= model &quot;root&quot;)
@@ -2930,61 +2953,71 @@ the schema, so docs for enterprise version won't be correct until we figure out 
                        &quot;database&quot; :model/Database
                        &quot;dashboard&quot; :model/Dashboard
                        &quot;question&quot; :model/Card)
-                     id)))</pre></td></tr><tr><td class="docs"><p>/</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+                     id)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/&quot;
   &quot;Return cache configuration.&quot;
-  [:as {{:strs [model collection id]
-         :or   {model &quot;root&quot;}}
-        :query-params}]
-  {model      (mu/with (ms/QueryVectorOf cache-config/CachingModel)
-                       {:description &quot;Type of model&quot;})
-   collection (mu/with [:maybe ms/PositiveInt]
-                       {:description &quot;Collection id to filter results. Returns everything if not supplied.&quot;})
-   id         (mu/with [:maybe ms/PositiveInt]
-                       {:description &quot;Model id to get configuration for.&quot;})}
+  [_route-params
+   {:keys [model collection id]}
+   :- [:map
+       [:model      {:default [&quot;root&quot;]} (mu/with (ms/QueryVectorOf cache-config/CachingModel)
+                                                 {:description &quot;Type of model&quot;})]
+       [:collection {:optional true} (mu/with [:maybe ms/PositiveInt]
+                                              {:description &quot;Collection id to filter results. Returns everything if not supplied.&quot;})]
+       [:id         {:optional true} (mu/with [:maybe ms/PositiveInt]
+                                              {:description &quot;Model id to get configuration for.&quot;})]]]
   (when (and (not (premium-features/enable-cache-granular-controls?))
              (not= model [&quot;root&quot;]))
     (throw (premium-features/ee-feature-error (tru &quot;Granular Caching&quot;))))
   (check-cache-access (first model) id)
-  {:data (cache-config/get-list model collection id)})</pre></td></tr><tr><td class="docs"><p>/</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint PUT 
+  {:data (cache-config/get-list model collection id)})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :put &quot;/&quot;
   &quot;Store cache configuration.&quot;
-  [:as {{:keys [model model_id strategy] :as config} :body}]
-  {model    cache-config/CachingModel
-   model_id ms/IntGreaterThanOrEqualToZero
-   strategy (CacheStrategyAPI)}
+  [_route-params
+   _query-params
+   {:keys [model model_id] :as config} :- [:map
+                                           [:model    cache-config/CachingModel]
+                                           [:model_id ms/IntGreaterThanOrEqualToZero]
+                                           [:strategy ::cache-strategy]]]
   (assert-valid-models model [model_id] (premium-features/enable-cache-granular-controls?))
   (check-cache-access model model_id)
-  {:id (cache-config/store! api/*current-user-id* config)})</pre></td></tr><tr><td class="docs"><p>/</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint DELETE 
+  {:id (cache-config/store! api/*current-user-id* config)})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :delete &quot;/&quot;
   &quot;Delete cache configurations.&quot;
-  [:as {{:keys [model model_id]} :body}]
-  {model    cache-config/CachingModel
-   model_id (ms/QueryVectorOf ms/IntGreaterThanOrEqualToZero)}
+  [_route-params
+   _query-params
+   {:keys [model model_id]} :- [:map
+                                [:model    cache-config/CachingModel]
+                                [:model_id (ms/QueryVectorOf ms/IntGreaterThanOrEqualToZero)]]]
   (assert-valid-models model model_id (premium-features/enable-cache-granular-controls?))
   (doseq [id model_id] (check-cache-access model id))
   (cache-config/delete! api/*current-user-id* model model_id)
-  nil)</pre></td></tr><tr><td class="docs"><p>/invalidate</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+  nil)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/invalidate&quot;
   &quot;Invalidate cache entries.
+
   Use it like `/api/cache/invalidate?database=1&amp;dashboard=15` (any number of database/dashboard/question can be
   supplied).
+
   `&amp;include=overrides` controls whenever you want to invalidate cache for a specific cache configuration without
   touching all nested configurations, or you want your invalidation to trickle down to every card.&quot;
-  [include database dashboard question]
-  {include   [:maybe {:description &quot;All cache configuration overrides should invalidate cache too&quot;} [:= :overrides]]
-   database  [:maybe {:description &quot;A list of database ids&quot;} (ms/QueryVectorOf ms/IntGreaterThanOrEqualToZero)]
-   dashboard [:maybe {:description &quot;A list of dashboard ids&quot;} (ms/QueryVectorOf ms/IntGreaterThanOrEqualToZero)]
-   question  [:maybe {:description &quot;A list of question ids&quot;} (ms/QueryVectorOf ms/IntGreaterThanOrEqualToZero)]}
+  [_route-params
+   {:keys [include database dashboard question]}
+   :- [:map
+       [:include   {:optional true} [:maybe {:description &quot;All cache configuration overrides should invalidate cache too&quot;}
+                                     [:= :overrides]]]
+       [:database  {:optional true} [:maybe {:description &quot;A list of database ids&quot;}
+                                     (ms/QueryVectorOf ms/IntGreaterThanOrEqualToZero)]]
+       [:dashboard {:optional true} [:maybe {:description &quot;A list of dashboard ids&quot;}
+                                     (ms/QueryVectorOf ms/IntGreaterThanOrEqualToZero)]]
+       [:question  {:optional true} [:maybe {:description &quot;A list of question ids&quot;}
+                                     (ms/QueryVectorOf ms/IntGreaterThanOrEqualToZero)]]]]
   (when-not (premium-features/enable-cache-granular-controls?)
     (throw (premium-features/ee-feature-error (tru &quot;Granular Caching&quot;))))
+
   (doseq [db-id database] (api/write-check :model/Database db-id))
   (doseq [dashboard-id dashboard] (api/write-check :model/Dashboard dashboard-id))
   (doseq [question-id question] (api/write-check :model/Card question-id))
+
   (let [cnt (cache-config/invalidate! {:databases       database
                                        :dashboards      dashboard
                                        :questions       question

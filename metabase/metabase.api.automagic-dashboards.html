@@ -2869,8 +2869,8 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.api.automagic-dashboards
   (:require
    [buddy.core.codecs :as codecs]
-   [compojure.core :refer [GET]]
    [metabase.api.common :as api]
+   [metabase.api.macros :as api.macros]
    [metabase.api.query-metadata :as api.query-metadata]
    [metabase.models.query :as query]
    [metabase.models.query.permissions :as query-perms]
@@ -2907,12 +2907,11 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(def ^:private Base64EncodedJSON
   (mu/with-api-error-message
    [:fn decode-base64-json]
-   (deferred-tru &quot;value couldn''t be parsed as base64 encoded JSON&quot;)))</pre></td></tr><tr><td class="docs"><p>/database/:id/candidates</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+   (deferred-tru &quot;value couldn''t be parsed as base64 encoded JSON&quot;)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/database/:id/candidates&quot;
   &quot;Return a list of candidates for automagic dashboards ordered by interestingness.&quot;
-  [id]
-  {id ms/PositiveInt}
+  [{:keys [id]} :- [:map
+                    [:id ms/PositiveInt]]]
   (-&gt; (t2/select-one :model/Database :id id)
       api/read-check
       xrays/candidate-tables))</pre></td></tr><tr><td class="docs"><p>----------------------------------------- API Endpoints for viewing a transient dashboard ----------------</p>
@@ -2984,23 +2983,22 @@ encoded query, or transform name.</p>
   (if (= entity &quot;transform&quot;)
     (xrays/dashboard (-&gt;entity entity entity-id-or-query))
     (-&gt; (-&gt;entity entity entity-id-or-query)
-        (xrays/automagic-analysis {:show (coerce-show show)}))))</pre></td></tr><tr><td class="docs"><p>/:entity/:entity-id-or-query</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+        (xrays/automagic-analysis {:show (coerce-show show)}))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:entity/:entity-id-or-query&quot;
   &quot;Return an automagic dashboard for entity `entity` with id `id`.&quot;
-  [entity entity-id-or-query show]
-  {show   [:maybe [:or [:= &quot;all&quot;] nat-int?]]
-   entity (mu/with-api-error-message
-           (into [:enum] entities)
-           (deferred-tru &quot;Invalid entity type&quot;))}
-  (get-automagic-dashboard entity entity-id-or-query show))</pre></td></tr><tr><td class="docs"><p>/:entity/:entity-id-or-query/query_metadata</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+  [{:keys [entity entity-id-or-query]} :- [:map
+                                           [:entity (mu/with-api-error-message
+                                                     (into [:enum] entities)
+                                                     (deferred-tru &quot;Invalid entity type&quot;))]]
+   {:keys [show]} :- [:map
+                      [:show {:optional true} [:maybe [:or [:= &quot;all&quot;] nat-int?]]]]]
+  (get-automagic-dashboard entity entity-id-or-query show))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:entity/:entity-id-or-query/query_metadata&quot;
   &quot;Return all metadata for an automagic dashboard for entity `entity` with id `id`.&quot;
-  [entity entity-id-or-query]
-  {entity (mu/with-api-error-message
-           (into [:enum] entities)
-           (deferred-tru &quot;Invalid entity type&quot;))}
+  [{:keys [entity entity-id-or-query]} :- [:map
+                                           [:entity (mu/with-api-error-message
+                                                     (into [:enum] entities)
+                                                     (deferred-tru &quot;Invalid entity type&quot;))]]]
   (api.query-metadata/batch-fetch-dashboard-metadata
    [(get-automagic-dashboard entity entity-id-or-query nil)]))</pre></td></tr><tr><td class="docs"><p>Identify the pk field of the model with <code>pk_ref</code>, and then find any fks that have that pk as a target.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn linked-entities
@@ -3082,14 +3080,13 @@ encoded query, or transform name.</p>
                    :visualization_settings {:text                &quot;# Unfortunately, there's not much else to show right now...&quot;
                                             :virtual_card        {:display :text}
                                             :dashcard.background false
-                                            :text.align_vertical :bottom}}])}))</pre></td></tr><tr><td class="docs"><p>/model<em>index/:model-index-id/primary</em>key/:pk-id</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+                                            :text.align_vertical :bottom}}])}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/model_index/:model-index-id/primary_key/:pk-id&quot;
   &quot;Return an automagic dashboard for an entity detail specified by `entity`
   with id `id` and a primary key of `indexed-value`.&quot;
-  [model-index-id pk-id]
-  {model-index-id :int
-   pk-id          :int}
+  [{:keys [model-index-id pk-id]} :- [:map
+                                      [:model-index-id :int]
+                                      [:pk-id          :int]]]
   (api/let-404 [model-index (t2/select-one :model/ModelIndex model-index-id)
                 model (t2/select-one :model/Card (:model_id model-index))
                 model-index-value (t2/select-one :model/ModelIndexValue
@@ -3103,110 +3100,114 @@ encoded query, or transform name.</p>
       (create-linked-dashboard {:model             model
                                 :linked-tables     linked
                                 :model-index       model-index
-                                :model-index-value model-index-value}))))</pre></td></tr><tr><td class="docs"><p>/:entity/:entity-id-or-query/rule/:prefix/:dashboard-template</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+                                :model-index-value model-index-value}))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:entity/:entity-id-or-query/rule/:prefix/:dashboard-template&quot;
   &quot;Return an automagic dashboard for entity `entity` with id `id` using dashboard-template `dashboard-template`.&quot;
-  [entity entity-id-or-query prefix dashboard-template show]
-  {entity             Entity
-   entity-id-or-query ms/NonBlankString
-   show               Show
-   prefix             Prefix
-   dashboard-template DashboardTemplate}
+  [{:keys [entity entity-id-or-query prefix dashboard-template]} :- [:map
+                                                                     [:entity             Entity]
+                                                                     [:entity-id-or-query ms/NonBlankString]
+                                                                     [:prefix             Prefix]
+                                                                     [:dashboard-template DashboardTemplate]]
+   {:keys [show]} :- [:map
+                      [:show {:optional true} Show]]]
   (-&gt; (-&gt;entity entity entity-id-or-query)
       (xrays/automagic-analysis {:show               (coerce-show show)
-                                 :dashboard-template [&quot;table&quot; prefix dashboard-template]})))</pre></td></tr><tr><td class="docs"><p>/:entity/:entity-id-or-query/cell/:cell-query</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+                                 :dashboard-template [&quot;table&quot; prefix dashboard-template]})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:entity/:entity-id-or-query/cell/:cell-query&quot;
   &quot;Return an automagic dashboard analyzing cell in  automagic dashboard for entity `entity`
    defined by
    query `cell-query`.&quot;
-  [entity entity-id-or-query cell-query show]
-  {entity             Entity
-   entity-id-or-query ms/NonBlankString
-   show               Show
-   cell-query         Base64EncodedJSON}
+  [{:keys [entity entity-id-or-query cell-query]} :- [:map
+                                                      [:entity             Entity]
+                                                      [:entity-id-or-query ms/NonBlankString]
+                                                      [:cell-query         Base64EncodedJSON]]
+   {:keys [show]} :- [:map
+                      [:show {:optional true} Show]]]
   (-&gt; (-&gt;entity entity entity-id-or-query)
       (xrays/automagic-analysis {:show       (coerce-show show)
-                                 :cell-query (decode-base64-json cell-query)})))</pre></td></tr><tr><td class="docs"><p>/:entity/:entity-id-or-query/cell/:cell-query/rule/:prefix/:dashboard-template</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+                                 :cell-query (decode-base64-json cell-query)})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:entity/:entity-id-or-query/cell/:cell-query/rule/:prefix/:dashboard-template&quot;
   &quot;Return an automagic dashboard analyzing cell in question  with id `id` defined by
    query `cell-query` using dashboard-template `dashboard-template`.&quot;
-  [entity entity-id-or-query cell-query prefix dashboard-template show]
-  {entity             Entity
-   entity-id-or-query ms/NonBlankString
-   show               Show
-   prefix             Prefix
-   dashboard-template DashboardTemplate
-   cell-query         Base64EncodedJSON}
+  [{:keys [entity entity-id-or-query cell-query prefix dashboard-template]} :- [:map
+                                                                                [:entity             Entity]
+                                                                                [:entity-id-or-query ms/NonBlankString]
+                                                                                [:prefix             Prefix]
+                                                                                [:dashboard-template DashboardTemplate]
+                                                                                [:cell-query         Base64EncodedJSON]]
+   {:keys [show]} :- [:map
+                      [:show {:optional true} Show]]]
   (-&gt; (-&gt;entity entity entity-id-or-query)
       (xrays/automagic-analysis {:show               (coerce-show show)
                                  :dashboard-template [&quot;table&quot; prefix dashboard-template]
-                                 :cell-query         (decode-base64-json cell-query)})))</pre></td></tr><tr><td class="docs"><p>/:entity/:entity-id-or-query/compare/:comparison-entity/:comparison-entity-id-or-query</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+                                 :cell-query         (decode-base64-json cell-query)})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:entity/:entity-id-or-query/compare/:comparison-entity/:comparison-entity-id-or-query&quot;
   &quot;Return an automagic comparison dashboard for entity `entity` with id `id` compared with entity
    `comparison-entity` with id `comparison-entity-id-or-query.`&quot;
-  [entity entity-id-or-query show comparison-entity comparison-entity-id-or-query]
-  {show               Show
-   entity-id-or-query ms/NonBlankString
-   entity             Entity
-   comparison-entity  ComparisonEntity}
+  [{:keys [entity entity-id-or-query comparison-entity
+           comparison-entity-id-or-query]} :- [:map
+                                               [:entity-id-or-query ms/NonBlankString]
+                                               [:entity             Entity]
+                                               [:comparison-entity  ComparisonEntity]]
+   {:keys [show]} :- [:map
+                      [:show {:optional true} Show]]]
   (let [left      (-&gt;entity entity entity-id-or-query)
         right     (-&gt;entity comparison-entity comparison-entity-id-or-query)
         dashboard (xrays/automagic-analysis left {:show         (coerce-show show)
                                                   :query-filter nil
                                                   :comparison?  true})]
-    (xrays/comparison-dashboard dashboard left right {})))</pre></td></tr><tr><td class="docs"><p>/:entity/:entity-id-or-query/rule/:prefix/:dashboard-template/compare/:comparison-entity/:comparison-entity-id-or-query</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+    (xrays/comparison-dashboard dashboard left right {})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:entity/:entity-id-or-query/rule/:prefix/:dashboard-template/compare/:comparison-entity/:comparison-entity-id-or-query&quot;
   &quot;Return an automagic comparison dashboard for entity `entity` with id `id` using dashboard-template `dashboard-template`;
    compared with entity `comparison-entity` with id `comparison-entity-id-or-query.`.&quot;
-  [entity entity-id-or-query prefix dashboard-template show comparison-entity comparison-entity-id-or-query]
-  {entity             Entity
-   entity-id-or-query ms/NonBlankString
-   show               Show
-   prefix             Prefix
-   dashboard-template DashboardTemplate
-   comparison-entity  ComparisonEntity}
+  [{:keys [entity entity-id-or-query prefix dashboard-template
+           comparison-entity comparison-entity-id-or-query]} :- [:map
+                                                                 [:entity             Entity]
+                                                                 [:entity-id-or-query ms/NonBlankString]
+                                                                 [:prefix             Prefix]
+                                                                 [:dashboard-template DashboardTemplate]
+                                                                 [:comparison-entity  ComparisonEntity]]
+   {:keys [show]} :- [:map
+                      [:show {:optional true} Show]]]
   (let [left      (-&gt;entity entity entity-id-or-query)
         right     (-&gt;entity comparison-entity comparison-entity-id-or-query)
         dashboard (xrays/automagic-analysis left {:show               (coerce-show show)
                                                   :dashboard-template [&quot;table&quot; prefix dashboard-template]
                                                   :query-filter       nil
                                                   :comparison?        true})]
-    (xrays/comparison-dashboard dashboard left right {})))</pre></td></tr><tr><td class="docs"><p>/:entity/:entity-id-or-query/cell/:cell-query/compare/:comparison-entity/:comparison-entity-id-or-query</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+    (xrays/comparison-dashboard dashboard left right {})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:entity/:entity-id-or-query/cell/:cell-query/compare/:comparison-entity/:comparison-entity-id-or-query&quot;
   &quot;Return an automagic comparison dashboard for cell in automagic dashboard for entity `entity`
    with id `id` defined by query `cell-query`; compared with entity `comparison-entity` with id
    `comparison-entity-id-or-query.`.&quot;
-  [entity entity-id-or-query cell-query show comparison-entity comparison-entity-id-or-query]
-  {entity             Entity
-   entity-id-or-query ms/NonBlankString
-   show               Show
-   cell-query         Base64EncodedJSON
-   comparison-entity  ComparisonEntity}
+  [{:keys [entity entity-id-or-query cell-query
+           comparison-entity comparison-entity-id-or-query]} :- [:map
+                                                                 [:entity             Entity]
+                                                                 [:entity-id-or-query ms/NonBlankString]
+                                                                 [:cell-query         Base64EncodedJSON]
+                                                                 [:comparison-entity  ComparisonEntity]]
+   {:keys [show]} :- [:map
+                      [:show {:optional true} Show]]]
   (let [left      (-&gt;entity entity entity-id-or-query)
         right     (-&gt;entity comparison-entity comparison-entity-id-or-query)
         dashboard (xrays/automagic-analysis left {:show         (coerce-show show)
                                                   :query-filter nil
                                                   :comparison?  true})]
-    (xrays/comparison-dashboard dashboard left right {:left {:cell-query (decode-base64-json cell-query)}})))</pre></td></tr><tr><td class="docs"><p>/:entity/:entity-id-or-query/cell/:cell-query/rule/:prefix/:dashboard-template/compare/:comparison-entity/:comparison-entity-id-or-query</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+    (xrays/comparison-dashboard dashboard left right {:left {:cell-query (decode-base64-json cell-query)}})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:entity/:entity-id-or-query/cell/:cell-query/rule/:prefix/:dashboard-template/compare/:comparison-entity/:comparison-entity-id-or-query&quot;
   &quot;Return an automagic comparison dashboard for cell in automagic dashboard for entity `entity`
    with id `id` defined by query `cell-query` using dashboard-template `dashboard-template`; compared with entity
    `comparison-entity` with id `comparison-entity-id-or-query.`.&quot;
-  [entity entity-id-or-query cell-query prefix dashboard-template show comparison-entity comparison-entity-id-or-query]
-  {entity             Entity
-   entity-id-or-query ms/NonBlankString
-   show               Show
-   prefix             Prefix
-   dashboard-template DashboardTemplate
-   cell-query         Base64EncodedJSON
-   comparison-entity  ComparisonEntity}
+  [{:keys [entity entity-id-or-query cell-query prefix dashboard-template
+           comparison-entity comparison-entity-id-or-query]} :- [:map
+                                                                 [:entity             Entity]
+                                                                 [:entity-id-or-query ms/NonBlankString]
+                                                                 [:prefix             Prefix]
+                                                                 [:dashboard-template DashboardTemplate]
+                                                                 [:cell-query         Base64EncodedJSON]
+                                                                 [:comparison-entity  ComparisonEntity]]
+   {:keys [show]} :- [:map
+                      [:show {:optional true} Show]]]
   (let [left      (-&gt;entity entity entity-id-or-query)
         right     (-&gt;entity comparison-entity comparison-entity-id-or-query)
         dashboard (xrays/automagic-analysis left {:show               (coerce-show show)
