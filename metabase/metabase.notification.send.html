@@ -2870,7 +2870,6 @@ net.brehaut.ClojureTools = (function (SH) {
   (:require
    [java-time.api :as t]
    [metabase.channel.core :as channel]
-   [metabase.events :as events]
    [metabase.models.setting :as setting]
    [metabase.models.task-history :as task-history]
    [metabase.notification.payload.core :as notification.payload]
@@ -2895,7 +2894,7 @@ net.brehaut.ClojureTools = (function (SH) {
     (str (u/qualified-name channel_type) &quot; &quot; channel_id)
     (u/qualified-name channel_type)))</pre></td></tr><tr><td class="docs"><p>The size of the thread pool used to send notifications.</p>
 </td><td class="codes"><pre class="brush: clojure">(setting/defsetting notification-thread-pool-size
-  :default    2
+  :default    3
   :export?    false
   :type       :integer
   :visibility :internal)</pre></td></tr><tr><td class="docs">
@@ -2965,27 +2964,12 @@ net.brehaut.ClojureTools = (function (SH) {
     (hydrate-notification-handler
      (t2/select :model/NotificationHandler :notification_id (:id notification-info)))
     ;; pulse-based notifications: dashboard subs, alerts
-    (vec (:handlers notification-info))))</pre></td></tr><tr><td class="docs"><p>TODO: should this be a multimethod?</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- do-after-notification-sent
-  [{:keys [payload_type] :as notification-info}]
-  (u/ignore-exceptions
-    (when (and (= :notification/card payload_type)
-               (-&gt; notification-info :alert :alert_first_only))
-      (t2/delete! :model/Pulse (-&gt; notification-info :alert :id)))
-    ;; TODO check how this is used, maybe we need to rework this
-    (when (#{:notification/card :notification/dashboard} payload_type)
-      (let [event-type (if (= :notification/dashboard payload_type)
-                         :event/subscription-send
-                         :event/alert-send)]
-        (events/publish-event! event-type {:id      (:id notification-info)
-                                           :user-id (:creator_id notification-info)
-                                           :object  {:recipients (-&gt;&gt; notification-info :handlers (mapcat :recipients) (map #(or (:user %)
-                                                                                                                                 (:email %))))
-                                                     :filters    (-&gt; notification-info #((if (= :notification/dashboard payload_type)
-                                                                                           :dashboard_subscription
-                                                                                           :alert)
-                                                                                         %)
-                                                                     :parameters)}})))))</pre></td></tr><tr><td class="docs"><p>Send the notification to all handlers synchronously. Do not use this directly, use <em>send-notification!</em> instead.</p>
+    (vec (:handlers notification-info))))</pre></td></tr><tr><td class="docs"><p>Performs post-notification actions based on the notification type.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmulti do-after-notification-sent
+  {:arglists '([notification-info notification-payload])}
+  (fn [notification-info _notification-payload]
+    (:payload_type notification-info)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod do-after-notification-sent :default [_notification-info _notification-payload] nil)</pre></td></tr><tr><td class="docs"><p>Send the notification to all handlers synchronously. Do not use this directly, use <em>send-notification!</em> instead.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn send-notification-sync!
   [notification-info :- notification.payload/Notification]
   (try
@@ -3013,7 +2997,7 @@ net.brehaut.ClojureTools = (function (SH) {
                     (log/infof &quot;[Notification %d] Sending message to channel %s&quot;
                                (:id notification-info) (:channel_type handler))
                     (channel-send-retrying! (:id notification-info) (:payload_type notification-info) handler message))))
-              (do-after-notification-sent notification-info)
+              (do-after-notification-sent notification-info notification-payload)
               (log/infof &quot;[Notification %d] Sent successfully&quot; (:id notification-info)))
             (log/infof &quot;[Notification %d] Skipping&quot; (:id notification-info))))))
     (catch Exception e
