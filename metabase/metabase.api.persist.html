@@ -2869,11 +2869,11 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.api.persist
   (:require
    [clojure.string :as str]
-   [compojure.core :refer [GET POST]]
    [honey.sql.helpers :as sql.helpers]
    [medley.core :as m]
    [metabase.api.common :as api]
    [metabase.api.common.validation :as validation]
+   [metabase.api.macros :as api.macros]
    [metabase.driver.ddl.interface :as ddl.i]
    [metabase.models.interface :as mi]
    [metabase.public-settings :as public-settings]
@@ -2919,9 +2919,8 @@ net.brehaut.ClojureTools = (function (SH) {
              (assoc pi
                     :schema_name (ddl.i/schema-name {:id database_id} site-uuid-str)
                     :next-fire-time (get-in db-id-&gt;fire-time [database_id :next-fire-time])))
-           results))))</pre></td></tr><tr><td class="docs"><p>/</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+           results))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/&quot;
   &quot;List the entries of [[PersistedInfo]] in order to show a status page.&quot;
   []
   (validation/check-has-application-permission :monitoring)
@@ -2942,20 +2941,18 @@ net.brehaut.ClojureTools = (function (SH) {
                                                        [:not :c.archived]]})
                0)
      :limit  (request/limit)
-     :offset (request/offset)}))</pre></td></tr><tr><td class="docs"><p>/:persisted-info-id</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+     :offset (request/offset)}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:persisted-info-id&quot;
   &quot;Fetch a particular [[PersistedInfo]] by id.&quot;
-  [persisted-info-id]
-  {persisted-info-id [:maybe ms/PositiveInt]}
+  [{:keys [persisted-info-id]} :- [:map
+                                   [:persisted-info-id ms/PositiveInt]]]
   (api/let-404 [persisted-info (first (fetch-persisted-info {:persisted-info-id persisted-info-id} nil nil))]
     (api/write-check (t2/select-one :model/Database :id (:database_id persisted-info)))
-    persisted-info))</pre></td></tr><tr><td class="docs"><p>/card/:card-id</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+    persisted-info))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/card/:card-id&quot;
   &quot;Fetch a particular [[PersistedInfo]] by card-id.&quot;
-  [card-id]
-  {card-id [:maybe ms/PositiveInt]}
+  [{:keys [card-id]} :- [:map
+                         [:card-id ms/PositiveInt]]]
   (api/let-404 [persisted-info (first (fetch-persisted-info {:card-id card-id} nil nil))]
     (api/read-check (t2/select-one :model/Database :id (:database_id persisted-info)))
     persisted-info))</pre></td></tr><tr><td class="docs"><p>Schema representing valid cron schedule for refreshing persisted models.</p>
@@ -2964,13 +2961,14 @@ net.brehaut.ClojureTools = (function (SH) {
    [:and
     ms/NonBlankString
     [:fn {:error/message (deferred-tru &quot;String representing a cron schedule&quot;)} #(= 7 (count (str/split % #&quot; &quot;)))]]
-   (deferred-tru &quot;Value must be a string representing a cron schedule of format &lt;seconds&gt; &lt;minutes&gt; &lt;hours&gt; &lt;day of month&gt; &lt;month&gt; &lt;day of week&gt; &lt;year&gt;&quot;)))</pre></td></tr><tr><td class="docs"><p>/set-refresh-schedule</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+   (deferred-tru &quot;Value must be a string representing a cron schedule of format &lt;seconds&gt; &lt;minutes&gt; &lt;hours&gt; &lt;day of month&gt; &lt;month&gt; &lt;day of week&gt; &lt;year&gt;&quot;)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/set-refresh-schedule&quot;
   &quot;Set the cron schedule to refresh persisted models.
    Shape should be JSON like {cron: \&quot;0 30 1/8 * * ? *\&quot;}.&quot;
-  [:as {{:keys [cron], :as _body} :body}]
-  {cron CronSchedule}
+  [_route-params
+   _query-params
+   {:keys [cron], :as _body} :- [:map
+                                 [:cron CronSchedule]]]
   (validation/check-has-application-permission :setting)
   (when cron
     (when-not (and (string? cron)
@@ -2980,9 +2978,8 @@ net.brehaut.ClojureTools = (function (SH) {
                       {:status-code 400})))
     (public-settings/persisted-model-refresh-cron-schedule! cron))
   (task.persist-refresh/reschedule-refresh!)
-  api/generic-204-no-content)</pre></td></tr><tr><td class="docs"><p>/enable</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+  api/generic-204-no-content)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/enable&quot;
   &quot;Enable global setting to allow databases to persist models.&quot;
   []
   (validation/check-has-application-permission :setting)
@@ -3001,9 +2998,8 @@ net.brehaut.ClojureTools = (function (SH) {
     (doseq [db enabled-dbs]
       (t2/update! :model/Database (u/the-id db)
                   {:settings (not-empty (dissoc (:settings db) :persist-models-enabled))}))
-    (task.persist-refresh/disable-persisting!)))</pre></td></tr><tr><td class="docs"><p>/disable</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+    (task.persist-refresh/disable-persisting!)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/disable&quot;
   &quot;Disable global setting to allow databases to persist models. This will remove all tasks to refresh tables, remove
   that option from databases which might have it enabled, and delete all cached tables.&quot;
   []
