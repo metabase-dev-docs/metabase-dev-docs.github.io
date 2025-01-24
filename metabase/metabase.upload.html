@@ -2904,6 +2904,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.util.malli.schema :as ms]
    [toucan2.core :as t2])
   (:import
+   (com.ibm.icu.text Transliterator)
    (java.io File InputStreamReader Reader)
    (java.nio.charset StandardCharsets)
    (org.apache.tika Tika)
@@ -2988,11 +2989,22 @@ net.brehaut.ClojureTools = (function (SH) {
             (t/local-date-time)
             (-&gt; prev-timestamp
                 (t/plus (t/seconds 1))
-                (t/truncate-to :seconds))))))</pre></td></tr><tr><td class="docs"><p>Append the current datetime to the given name to create a unique table name. The resulting name will be short enough for the given driver (truncating the supplied <code>table-name</code> if necessary).</p>
+                (t/truncate-to :seconds))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private transliterator
+  (Transliterator/getInstance &quot;Arabic-Latin; Bulgarian-Latin/BGN; Greek-Latin/BGN; Any-Latin; Latin-ASCII&quot;))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- transliterate [s]
+  (when-not (str/blank? s)
+    (-&gt; (.transliterate ^Transliterator transliterator ^String s)
+        (str/replace #&quot;\s+&quot; &quot;_&quot;)
+        (str/replace #&quot;[^\w]+&quot; &quot;_&quot;)
+        (str/replace #&quot;_{2,}&quot; &quot;_&quot;)
+        (str/replace #&quot;^_|_$&quot; ))))</pre></td></tr><tr><td class="docs"><p>Append the current datetime to the given name to create a unique table name. The resulting name will be short enough for the given driver (truncating the supplied <code>table-name</code> if necessary).</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- unique-table-name
   [driver table-name]
+  ;; TODO we should not rely on the timestamp to make the filename unique
+  ;; Ideally we would add an incrementing count, but it may be cheaper and easier to include some randomness.
   (let [time-format                 &quot;_yyyyMMddHHmmss&quot;
-        slugified-name               (or (u/slugify table-name) &quot;&quot;)
+        slugified-name              (or (u/not-blank (transliterate table-name)) &quot;blank&quot;)
         ;; since both the time-format and the slugified-name contain only ASCII characters, we can behave as if
         ;; [[driver/table-name-length-limit]] were defining a length in characters.
         max-length                  (- (min-safe (driver/table-name-length-limit driver)
