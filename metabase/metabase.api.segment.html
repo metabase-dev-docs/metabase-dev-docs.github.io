@@ -2868,8 +2868,8 @@ net.brehaut.ClojureTools = (function (SH) {
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.api.segment" name="metabase.api.segment"><h1 class="project-name">metabase.api.segment</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>/api/segment endpoints.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.api.segment
   (:require
-   [compojure.core :refer [DELETE GET POST PUT]]
    [metabase.api.common :as api]
+   [metabase.api.macros :as api.macros]
    [metabase.events :as events]
    [metabase.legacy-mbql.normalize :as mbql.normalize]
    [metabase.models.interface :as mi]
@@ -2879,15 +2879,16 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.util.malli :as mu]
    [metabase.util.malli.schema :as ms]
    [metabase.xrays.core :as xrays]
-   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs"><p>/</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/&quot;
   &quot;Create a new `Segment`.&quot;
-  [:as {{:keys [name description table_id definition], :as body} :body}]
-  {name        ms/NonBlankString
-   table_id    ms/PositiveInt
-   definition  ms/Map
-   description [:maybe :string]}
+  [_route-params
+   _query-params
+   {:keys [name description table_id definition], :as body} :- [:map
+                                                                [:name        ms/NonBlankString]
+                                                                [:table_id    ms/PositiveInt]
+                                                                [:definition  ms/Map]
+                                                                [:description {:optional true} [:maybe :string]]]]
   ;; TODO - why can't we set other properties like `show_in_getting_started` when we create the Segment?
   (api/create-check :model/Segment body)
   (let [segment (api/check-500
@@ -2901,15 +2902,13 @@ net.brehaut.ClojureTools = (function (SH) {
     (t2/hydrate segment :creator)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn- hydrated-segment [id :- ms/PositiveInt]
   (-&gt; (api/read-check (t2/select-one :model/Segment :id id))
-      (t2/hydrate :creator)))</pre></td></tr><tr><td class="docs"><p>/:id</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+      (t2/hydrate :creator)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:id&quot;
   &quot;Fetch `Segment` with ID.&quot;
-  [id]
-  {id ms/PositiveInt}
-  (hydrated-segment id))</pre></td></tr><tr><td class="docs"><p>/</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+  [{:keys [id]} :- [:map
+                    [:id ms/PositiveInt]]]
+  (hydrated-segment id))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/&quot;
   &quot;Fetch *all* `Segments`.&quot;
   []
   (as-&gt; (t2/select :model/Segment, :archived false, {:order-by [[:%lower.name :asc]]}) segments
@@ -2933,56 +2932,54 @@ event and returns updated/hydrated Segment.</p>
       (t2/update! :model/Segment id changes))
     (u/prog1 (hydrated-segment id)
       (events/publish-event! (if archive? :event/segment-delete :event/segment-update)
-                             {:object &lt;&gt; :user-id api/*current-user-id* :revision-message revision_message}))))</pre></td></tr><tr><td class="docs"><p>/:id</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint PUT 
+                             {:object &lt;&gt; :user-id api/*current-user-id* :revision-message revision_message}))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :put &quot;/:id&quot;
   &quot;Update a `Segment` with ID.&quot;
-  [id :as {{:keys [name definition revision_message archived caveats description points_of_interest
-                   show_in_getting_started]
-            :as   body} :body}]
-  {id                      ms/PositiveInt
-   name                    [:maybe ms/NonBlankString]
-   definition              [:maybe :map]
-   revision_message        ms/NonBlankString
-   archived                [:maybe :boolean]
-   caveats                 [:maybe :string]
-   description             [:maybe :string]
-   points_of_interest      [:maybe :string]
-   show_in_getting_started [:maybe :boolean]}
-  (write-check-and-update-segment! id body))</pre></td></tr><tr><td class="docs"><p>/:id</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint DELETE 
+  [{:keys [id]} :- [:map
+                    [:id ms/PositiveInt]]
+   _query-params
+   body :- [:map
+            [:name                    {:optional true} [:maybe ms/NonBlankString]]
+            [:definition              {:optional true} [:maybe :map]]
+            [:revision_message        ms/NonBlankString]
+            [:archived                {:optional true} [:maybe :boolean]]
+            [:caveats                 {:optional true} [:maybe :string]]
+            [:description             {:optional true} [:maybe :string]]
+            [:points_of_interest      {:optional true} [:maybe :string]]
+            [:show_in_getting_started {:optional true} [:maybe :boolean]]]]
+  (write-check-and-update-segment! id body))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :delete &quot;/:id&quot;
   &quot;Archive a Segment. (DEPRECATED -- Just pass updated value of `:archived` to the `PUT` endpoint instead.)&quot;
-  [id revision_message]
-  {id               ms/PositiveInt
-   revision_message ms/NonBlankString}
+  [{:keys [id]} :- [:map
+                    [:id ms/PositiveInt]]
+   {:keys [revision_message]} :- [:map
+                                  [:revision_message ms/NonBlankString]]]
   (log/warn &quot;DELETE /api/segment/:id is deprecated. Instead, change its `archived` value via PUT /api/segment/:id.&quot;)
   (write-check-and-update-segment! id {:archived true, :revision_message revision_message})
-  api/generic-204-no-content)</pre></td></tr><tr><td class="docs"><p>/:id/revisions</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+  api/generic-204-no-content)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:id/revisions&quot;
   &quot;Fetch `Revisions` for `Segment` with ID.&quot;
-  [id]
-  {id ms/PositiveInt}
+  [{:keys [id]} :- [:map
+                    [:id ms/PositiveInt]]]
   (api/read-check :model/Segment id)
-  (revision/revisions+details :model/Segment id))</pre></td></tr><tr><td class="docs"><p>/:id/revert</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+  (revision/revisions+details :model/Segment id))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/:id/revert&quot;
   &quot;Revert a `Segement` to a prior `Revision`.&quot;
-  [id :as {{:keys [revision_id]} :body}]
-  {id          ms/PositiveInt
-   revision_id ms/PositiveInt}
+  [{:keys [id]} :- [:map
+                    [:id ms/PositiveInt]]
+   _query-params
+   {:keys [revision_id]} :- [:map
+                             [:revision_id ms/PositiveInt]]]
   (api/write-check :model/Segment id)
   (revision/revert!
    {:entity      :model/Segment
     :id          id
     :user-id     api/*current-user-id*
-    :revision-id revision_id}))</pre></td></tr><tr><td class="docs"><p>/:id/related</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+    :revision-id revision_id}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:id/related&quot;
   &quot;Return related entities.&quot;
-  [id]
-  {id ms/PositiveInt}
+  [{:keys [id]} :- [:map
+                    [:id ms/PositiveInt]]]
   (-&gt; (t2/select-one :model/Segment :id id) api/read-check xrays/related))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(api/define-routes)</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();

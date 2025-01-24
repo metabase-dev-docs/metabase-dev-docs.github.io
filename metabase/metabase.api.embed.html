@@ -2884,11 +2884,10 @@ net.brehaut.ClojureTools = (function (SH) {
 </ol>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.api.embed
   (:require
-   [compojure.core :refer [GET]]
-   [medley.core :as m]
    [metabase.api.common :as api]
    [metabase.api.dataset :as api.dataset]
    [metabase.api.embed.common :as api.embed.common]
+   [metabase.api.macros :as api.macros]
    [metabase.api.public :as api.public]
    [metabase.events :as events]
    [metabase.query-processor.card :as qp.card]
@@ -2921,13 +2920,15 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defn unsign-and-translate-ids
   [message]
   (translate-token-ids (embed/unsign message)))</pre></td></tr><tr><td class="docs"><p>------------------------------------------- /api/embed/card endpoints --------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>/card/:token</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/card/:token&quot;
   &quot;Fetch a Card via a JSON Web Token signed with the `embedding-secret-key`.
+
    Token should have the following format:
+
      {:resource {:question &lt;card-id&gt;}}&quot;
-  [token]
+  [{:keys [token]} :- [:map
+                       [:token string?]]]
   (let [unsigned (unsign-and-translate-ids token)]
     (api.embed.common/check-embedding-enabled-for-card (embed/get-in-unsigned-token-or-throw unsigned [:resource :question]))
     (u/prog1 (api.embed.common/card-for-unsigned-token unsigned, :constraints [:enable_embedding true])
@@ -2948,38 +2949,46 @@ for this Card. Returns core.async channel to fetch the results.</p>
      :query-params      (api.embed.common/parse-query-params (dissoc query-params :format_rows :pivot_results))
      :qp                qp
      :constraints       constraints
-     :options           options)))</pre></td></tr><tr><td class="docs"><p>/card/:token/query</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+     :options           options)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/card/:token/query&quot;
   &quot;Fetch the results of running a Card using a JSON Web Token signed with the `embedding-secret-key`.
+
    Token should have the following format:
+
      {:resource {:question &lt;card-id&gt;}
       :params   &lt;parameters&gt;}&quot;
-  [token &amp; query-params]
+  [{:keys [token]} :- [:map
+                       [:token string?]]
+   query-params :- :map]
   (run-query-for-unsigned-token-async (unsign-and-translate-ids token) :api (api.embed.common/parse-query-params query-params)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET [&quot;/card/:token/query/:export-format&quot;, :export-format api.dataset/export-format-regex]
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get [&quot;/card/:token/query/:export-format&quot;, :export-format api.dataset/export-format-regex]
   &quot;Like `GET /api/embed/card/query`, but returns the results as a file in the specified format.&quot;
-  [token export-format format_rows pivot_results :as {:keys [query-params]}]
-  {export-format (into [:enum] api.dataset/export-formats)
-   format_rows   [:maybe :boolean]
-   pivot_results [:maybe :boolean]}
+  [{:keys [token export-format]} :- [:map
+                                     [:token         string?]
+                                     [:export-format (into [:enum] api.dataset/export-formats)]]
+   {format-rows? :format_rows
+    pivot?       :pivot_results
+    :as          query-params} :- [:map
+                                   [:format_rows   {:default false} :boolean]
+                                   [:pivot_results {:default false} :boolean]]]
   (run-query-for-unsigned-token-async
    (unsign-and-translate-ids token)
    export-format
-   (api.embed.common/parse-query-params (dissoc (m/map-keys keyword query-params) :format_rows :pivot_results))
+   (api.embed.common/parse-query-params (dissoc query-params :format_rows :pivot_results))
    :constraints nil
    :middleware {:process-viz-settings? true
                 :js-int-to-string?     false
-                :format-rows?          (or format_rows false)
-                :pivot?                (or pivot_results false)}))</pre></td></tr><tr><td class="docs"><p>----------------------------------------- /api/embed/dashboard endpoints -----------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>/dashboard/:token</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+                :format-rows?          format-rows?
+                :pivot?                pivot?}))</pre></td></tr><tr><td class="docs"><p>----------------------------------------- /api/embed/dashboard endpoints -----------------------------------------</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/dashboard/:token&quot;
   &quot;Fetch a Dashboard via a JSON Web Token signed with the `embedding-secret-key`.
+
    Token should have the following format:
+
      {:resource {:dashboard &lt;dashboard-id&gt;}}&quot;
-  [token]
+  [{:keys [token]} :- [:map
+                       [:token string?]]]
   (let [unsigned (unsign-and-translate-ids token)]
     (api.embed.common/check-embedding-enabled-for-dashboard (embed/get-in-unsigned-token-or-throw unsigned [:resource :dashboard]))
     (u/prog1 (api.embed.common/dashboard-for-unsigned-token unsigned, :constraints [:enable_embedding true])
@@ -3012,144 +3021,156 @@ for this Card. Returns core.async channel to fetch the results.</p>
      :query-params     (api.embed.common/parse-query-params (dissoc query-params :format_rows :pivot_results))
      :constraints      constraints
      :qp               qp
-     :middleware       middleware)))</pre></td></tr><tr><td class="docs"><p>/dashboard/:token/dashcard/:dashcard-id/card/:card-id</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+     :middleware       middleware)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/dashboard/:token/dashcard/:dashcard-id/card/:card-id&quot;
   &quot;Fetch the results of running a Card belonging to a Dashboard using a JSON Web Token signed with the
   `embedding-secret-key`&quot;
-  [token dashcard-id card-id &amp; query-params]
-  {dashcard-id ms/PositiveInt
-   card-id     ms/PositiveInt}
+  [{:keys [token dashcard-id card-id]} :- [:map
+                                           [:token       string?]
+                                           [:dashcard-id ms/PositiveInt]
+                                           [:card-id     ms/PositiveInt]]
+   query-params :- :map]
   (u/prog1 (process-query-for-dashcard-with-signed-token token dashcard-id card-id :api
                                                          (api.embed.common/parse-query-params query-params))
     (events/publish-event! :event/card-read {:object-id card-id, :user-id api/*current-user-id*, :context :dashboard})))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
 |                                        FieldValues, Search, Remappings                                         |
 +----------------------------------------------------------------------------------------------------------------+</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>-------------------------------------------------- Field Values --------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>/card/:token/field/:field-id/values</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/card/:token/field/:field-id/values&quot;
   &quot;Fetch FieldValues for a Field that is referenced by an embedded Card.&quot;
-  [token field-id]
-  {field-id ms/PositiveInt}
+  [{:keys [token field-id]} :- [:map
+                                [:token    string?]
+                                [:field-id ms/PositiveInt]]]
   (let [unsigned-token (unsign-and-translate-ids token)
         card-id        (embed/get-in-unsigned-token-or-throw unsigned-token [:resource :question])]
     (api.embed.common/check-embedding-enabled-for-card card-id)
-    (api.public/card-and-field-id-&gt;values card-id field-id)))</pre></td></tr><tr><td class="docs"><p>/dashboard/:token/field/:field-id/values</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+    (api.public/card-and-field-id-&gt;values card-id field-id)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/dashboard/:token/field/:field-id/values&quot;
   &quot;Fetch FieldValues for a Field that is used as a param in an embedded Dashboard.&quot;
-  [token field-id]
-  {field-id ms/PositiveInt}
+  [{:keys [token field-id]} :- [:map
+                                [:token    string?]
+                                [:field-id ms/PositiveInt]]]
   (let [unsigned-token (unsign-and-translate-ids token)
         dashboard-id   (embed/get-in-unsigned-token-or-throw unsigned-token [:resource :dashboard])]
     (api.embed.common/check-embedding-enabled-for-dashboard dashboard-id)
     (api.public/dashboard-and-field-id-&gt;values dashboard-id field-id)))</pre></td></tr><tr><td class="docs"><p>--------------------------------------------------- Searching ----------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>/card/:token/field/:field-id/search/:search-field-id</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/card/:token/field/:field-id/search/:search-field-id&quot;
   &quot;Search for values of a Field that is referenced by an embedded Card.&quot;
-  [token field-id search-field-id value limit]
-  {field-id        ms/PositiveInt
-   search-field-id ms/PositiveInt
-   value           ms/NonBlankString
-   limit           [:maybe ms/PositiveInt]}
+  [{:keys [token field-id search-field-id]} :- [:map
+                                                [:token           string?]
+                                                [:field-id        ms/PositiveInt]
+                                                [:search-field-id ms/PositiveInt]]
+   {:keys [value limit]} :- [:map
+                             [:value ms/NonBlankString]
+                             [:limit {:optional true} [:maybe ms/PositiveInt]]]]
   (let [unsigned-token (unsign-and-translate-ids token)
         card-id        (embed/get-in-unsigned-token-or-throw unsigned-token [:resource :question])]
     (api.embed.common/check-embedding-enabled-for-card card-id)
-    (api.public/search-card-fields card-id field-id search-field-id value (when limit (Integer/parseInt limit)))))</pre></td></tr><tr><td class="docs"><p>/dashboard/:token/field/:field-id/search/:search-field-id</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+    (api.public/search-card-fields card-id field-id search-field-id value (when limit (Integer/parseInt limit)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/dashboard/:token/field/:field-id/search/:search-field-id&quot;
   &quot;Search for values of a Field that is referenced by a Card in an embedded Dashboard.&quot;
-  [token field-id search-field-id value limit]
-  {field-id        ms/PositiveInt
-   search-field-id ms/PositiveInt
-   value           ms/NonBlankString
-   limit           [:maybe ms/PositiveInt]}
+  [{:keys [token field-id search-field-id]} :- [:map
+                                                [:token           string?]
+                                                [:field-id        ms/PositiveInt]
+                                                [:search-field-id ms/PositiveInt]]
+   {:keys [value limit]} :- [:map
+                             [:value ms/NonBlankString]
+                             [:limit {:optional true} [:maybe ms/PositiveInt]]]]
   (let [unsigned-token (unsign-and-translate-ids token)
         dashboard-id   (embed/get-in-unsigned-token-or-throw unsigned-token [:resource :dashboard])]
     (api.embed.common/check-embedding-enabled-for-dashboard dashboard-id)
     (api.public/search-dashboard-fields dashboard-id field-id search-field-id value (when limit
                                                                                       (Integer/parseInt limit)))))</pre></td></tr><tr><td class="docs"><p>--------------------------------------------------- Remappings ---------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>/card/:token/field/:field-id/remapping/:remapped-id</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/card/:token/field/:field-id/remapping/:remapped-id&quot;
   &quot;Fetch remapped Field values. This is the same as `GET /api/field/:id/remapping/:remapped-id`, but for use with
   embedded Cards.&quot;
-  [token field-id remapped-id value]
-  {field-id    ms/PositiveInt
-   remapped-id ms/PositiveInt
-   value       ms/NonBlankString}
+  [{:keys [token field-id remapped-id]} :- [:map
+                                            [:token       string?]
+                                            [:field-id    ms/PositiveInt]
+                                            [:remapped-id ms/PositiveInt]]
+   {:keys [value]} :- [:map
+                       [:value ms/NonBlankString]]]
   (let [unsigned-token (unsign-and-translate-ids token)
         card-id        (embed/get-in-unsigned-token-or-throw unsigned-token [:resource :question])]
     (api.embed.common/check-embedding-enabled-for-card card-id)
-    (api.public/card-field-remapped-values card-id field-id remapped-id value)))</pre></td></tr><tr><td class="docs"><p>/dashboard/:token/field/:field-id/remapping/:remapped-id</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+    (api.public/card-field-remapped-values card-id field-id remapped-id value)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/dashboard/:token/field/:field-id/remapping/:remapped-id&quot;
   &quot;Fetch remapped Field values. This is the same as `GET /api/field/:id/remapping/:remapped-id`, but for use with
   embedded Dashboards.&quot;
-  [token field-id remapped-id value]
-  {field-id    ms/PositiveInt
-   remapped-id ms/PositiveInt
-   value       ms/NonBlankString}
+  [{:keys [token field-id remapped-id]} :- [:map
+                                            [:token       string?]
+                                            [:field-id    ms/PositiveInt]
+                                            [:remapped-id ms/PositiveInt]]
+   {:keys [value]} :- [:map
+                       [:value ms/NonBlankString]]]
   (let [unsigned-token (unsign-and-translate-ids token)
         dashboard-id   (embed/get-in-unsigned-token-or-throw unsigned-token [:resource :dashboard])]
     (api.embed.common/check-embedding-enabled-for-dashboard dashboard-id)
     (api.public/dashboard-field-remapped-values dashboard-id field-id remapped-id value)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET [&quot;/dashboard/:token/dashcard/:dashcard-id/card/:card-id/:export-format&quot;
-                      :export-format api.dataset/export-format-regex]
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get [&quot;/dashboard/:token/dashcard/:dashcard-id/card/:card-id/:export-format&quot;
+                              :export-format api.dataset/export-format-regex]
   &quot;Fetch the results of running a Card belonging to a Dashboard using a JSON Web Token signed with the
   `embedding-secret-key` return the data in one of the export formats&quot;
-  [token export-format dashcard-id card-id format_rows pivot_results :as {:keys [query-params]}]
-  {dashcard-id   ms/PositiveInt
-   card-id       ms/PositiveInt
-   format_rows   [:maybe :boolean]
-   pivot_results [:maybe :boolean]
-   export-format (into [:enum] api.dataset/export-formats)}
+  [{:keys [token dashcard-id card-id export-format]} :- [:map
+                                                         [:dashcard-id   ms/PositiveInt]
+                                                         [:card-id       ms/PositiveInt]
+                                                         [:export-format (into [:enum] api.dataset/export-formats)]]
+   {format-rows? :format_rows
+    pivot?       :pivot_results
+    :as          query-params} :- [:map
+                                   [:format_rows   {:default false} :boolean]
+                                   [:pivot_results {:default false} :boolean]]]
   (process-query-for-dashcard-with-signed-token token
                                                 dashcard-id
                                                 card-id
                                                 export-format
-                                                (api.embed.common/parse-query-params (dissoc (m/map-keys keyword query-params) :format_rows))
+                                                (api.embed.common/parse-query-params (dissoc query-params :format_rows :pivot_results))
                                                 :constraints nil
                                                 :middleware {:process-viz-settings? true
                                                              :js-int-to-string?     false
-                                                             :format-rows?          (or format_rows false)
-                                                             :pivot?                (or pivot_results false)}))</pre></td></tr><tr><td class="docs"><p>----------------------------------------------- Param values -------------------------------------------------</p>
+                                                             :format-rows?          format-rows?
+                                                             :pivot?                pivot?}))</pre></td></tr><tr><td class="docs"><p>----------------------------------------------- Param values -------------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>embedding parameters in <code>:embedding_params</code> and the JWT are keyed by <code>:slug</code>; the chain filter endpoints instead
 key by <code>:id</code>. So we need to do a little conversion back and forth below.</p>
 
 <p>variables whose name includes <code>id-</code> e.g. <code>id-query-params</code> below are ones that are keyed by ID; ones whose name
 includes <code>slug-</code> are keyed by slug.</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>/dashboard/:token/params/:param-key/values</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/dashboard/:token/params/:param-key/values&quot;
   &quot;Embedded version of chain filter values endpoint.&quot;
-  [token param-key :as {:keys [query-params]}]
+  [{:keys [token param-key]} :- [:map
+                                 [:token     string?]
+                                 [:param-key string?]]
+   query-params]
   (api.embed.common/dashboard-param-values token param-key nil
-                                           (api.embed.common/parse-query-params query-params)))</pre></td></tr><tr><td class="docs"><p>/dashboard/:token/params/:param-key/search/:prefix</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+                                           (api.embed.common/parse-query-params query-params)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/dashboard/:token/params/:param-key/search/:prefix&quot;
   &quot;Embedded version of chain filter search endpoint.&quot;
-  [token param-key prefix :as {:keys [query-params]}]
+  [{:keys [token param-key prefix]}
+   query-params]
   (api.embed.common/dashboard-param-values token param-key prefix
-                                           (api.embed.common/parse-query-params query-params)))</pre></td></tr><tr><td class="docs"><p>/card/:token/params/:param-key/values</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+                                           (api.embed.common/parse-query-params query-params)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/card/:token/params/:param-key/values&quot;
   &quot;Embedded version of api.card filter values endpoint.&quot;
-  [token param-key]
+  [{:keys [token param-key]} :- [:map
+                                 [:token     string?]
+                                 [:param-key string?]]]
   (let [unsigned (unsign-and-translate-ids token)
         card-id  (embed/get-in-unsigned-token-or-throw unsigned [:resource :question])
         card     (t2/select-one :model/Card :id card-id)]
     (api.embed.common/check-embedding-enabled-for-card card-id)
     (api.embed.common/card-param-values {:unsigned-token unsigned
                                          :card           card
-                                         :param-key      param-key})))</pre></td></tr><tr><td class="docs"><p>/card/:token/params/:param-key/search/:prefix</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+                                         :param-key      param-key})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/card/:token/params/:param-key/search/:prefix&quot;
   &quot;Embedded version of chain filter search endpoint.&quot;
-  [token param-key prefix]
+  [{:keys [token param-key prefix]}] :- [:map
+                                         [:token     string?]
+                                         [:param-key string?]
+                                         [:prefix    string?]]
   (let [unsigned (unsign-and-translate-ids token)
         card-id  (embed/get-in-unsigned-token-or-throw unsigned [:resource :question])
         card     (t2/select-one :model/Card :id card-id)]
@@ -3157,24 +3178,28 @@ includes <code>slug-</code> are keyed by slug.</p>
     (api.embed.common/card-param-values {:unsigned-token unsigned
                                          :card           card
                                          :param-key      param-key
-                                         :search-prefix  prefix})))</pre></td></tr><tr><td class="docs"><p>/pivot/card/:token/query</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+                                         :search-prefix  prefix})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/pivot/card/:token/query&quot;
   &quot;Fetch the results of running a Card using a JSON Web Token signed with the `embedding-secret-key`.
+
    Token should have the following format:
+
      {:resource {:question &lt;card-id&gt;}
       :params   &lt;parameters&gt;}&quot;
-  [token &amp; query-params]
+  [{:keys [token]} :- [:map
+                       [:token string?]]
+   query-params    :- :map]
   (run-query-for-unsigned-token-async (unsign-and-translate-ids token)
                                       :api (api.embed.common/parse-query-params query-params)
-                                      :qp qp.pivot/run-pivot-query))</pre></td></tr><tr><td class="docs"><p>/pivot/dashboard/:token/dashcard/:dashcard-id/card/:card-id</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+                                      :qp qp.pivot/run-pivot-query))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/pivot/dashboard/:token/dashcard/:dashcard-id/card/:card-id&quot;
   &quot;Fetch the results of running a Card belonging to a Dashboard using a JSON Web Token signed with the
   `embedding-secret-key`&quot;
-  [token dashcard-id card-id &amp; query-params]
-  {dashcard-id ms/PositiveInt
-   card-id ms/PositiveInt}
+  [{:keys [token dashcard-id card-id]} :- [:map
+                                           [:token       string?]
+                                           [:dashcard-id ms/PositiveInt]
+                                           [:card-id     ms/PositiveInt]]
+   query-params :- :map]
   (u/prog1 (process-query-for-dashcard-with-signed-token token dashcard-id card-id
                                                          :api (api.embed.common/parse-query-params query-params)
                                                          :qp qp.pivot/run-pivot-query)
