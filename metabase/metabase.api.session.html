@@ -2868,7 +2868,6 @@ net.brehaut.ClojureTools = (function (SH) {
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.api.session" name="metabase.api.session"><h1 class="project-name">metabase.api.session</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>/api/session endpoints</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.api.session
   (:require
-   [compojure.core :refer [DELETE GET POST]]
    [java-time.api :as t]
    [metabase.analytics.snowplow :as snowplow]
    [metabase.api.common :as api]
@@ -3017,13 +3016,15 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defmacro http-401-on-error
   {:style/indent 0}
   [&amp; body]
-  `(do-http-401-on-error (fn [] ~@body)))</pre></td></tr><tr><td class="docs"><p>/</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+  `(do-http-401-on-error (fn [] ~@body)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/&quot;
   &quot;Login.&quot;
-  [:as {{:keys [username password]} :body, :as request}]
-  {username ms/NonBlankString
-   password ms/NonBlankString}
+  [_route-params
+   _query-params
+   {:keys [username password]} :- [:map
+                                   [:username ms/NonBlankString]
+                                   [:password ms/NonBlankString]]
+   request]
   (let [ip-address   (request/ip-address request)
         request-time (t/zoned-date-time (t/zone-id &quot;GMT&quot;))
         do-login     (fn []
@@ -3035,12 +3036,11 @@ net.brehaut.ClojureTools = (function (SH) {
       (http-401-on-error
         (throttle/with-throttling [(login-throttlers :ip-address) ip-address
                                    (login-throttlers :username)   username]
-          (do-login))))))</pre></td></tr><tr><td class="docs"><p>/</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint DELETE 
+          (do-login))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :delete &quot;/&quot;
   &quot;Logout.&quot;
   ;; `metabase-session-id` gets added automatically by the [[metabase.server.middleware.session]] middleware
-  [:as {:keys [metabase-session-id]}]
+  [_route-params _query-params _body {:keys [metabase-session-id], :as _request}]
   (api/check-exists? :model/Session metabase-session-id)
   (t2/delete! :model/Session :id metabase-session-id)
   (request/clear-session-cookie api/generic-204-no-content))</pre></td></tr><tr><td class="docs"><p>Reset tokens: We need some way to match a plaintext token with the a user since the token stored in the DB is
@@ -3070,12 +3070,14 @@ plaintext token is only sent in the password reset email to the user in question
           (log/info password-reset-url)
           (messages/send-password-reset-email! email nil password-reset-url is-active?)))
       (events/publish-event! :event/password-reset-initiated
-                             {:object (assoc user :token (t2/select-one-fn :reset_token :model/User :id user-id))}))))</pre></td></tr><tr><td class="docs"><p>/forgot_password</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+                             {:object (assoc user :token (t2/select-one-fn :reset_token :model/User :id user-id))}))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/forgot_password&quot;
   &quot;Send a reset email when user has forgotten their password.&quot;
-  [:as {{:keys [email]} :body, :as request}]
-  {email ms/Email}
+  [_route-params
+   _query-params
+   {:keys [email]} :- [:map
+                       [:email ms/Email]]
+   request]
   ;; Don't leak whether the account doesn't exist, just pretend everything is ok
   (let [request-source (request/ip-address request)]
     (throttle-check (forgot-password-throttlers :ip-address) request-source))
@@ -3106,13 +3108,15 @@ plaintext token is only sent in the password reset email to the user in question
             (when (&lt; token-age (reset-token-ttl-ms))
               user)))))))</pre></td></tr><tr><td class="docs"><p>Throttler for password_reset. There's no good field to mark so use password as a default.</p>
 </td><td class="codes"><pre class="brush: clojure">(def reset-password-throttler
-  (throttle/make-throttler :password :attempts-threshold 10))</pre></td></tr><tr><td class="docs"><p>/reset_password</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+  (throttle/make-throttler :password :attempts-threshold 10))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/reset_password&quot;
   &quot;Reset password with a reset token.&quot;
-  [:as {{:keys [token password]} :body, :as request}]
-  {token    ms/NonBlankString
-   password ms/ValidPassword}
+  [_route-params
+   _query-params
+   {:keys [token password]} :- [:map
+                                [:token    ms/NonBlankString]
+                                [:password ms/ValidPassword]]
+   request]
   (let [request-source (request/ip-address request)]
     (throttle-check reset-password-throttler request-source))
   (or (when-let [{user-id :id, :as user} (valid-reset-token-&gt;user token)]
@@ -3140,12 +3144,14 @@ plaintext token is only sent in the password reset email to the user in question
   &quot;Get all properties and their values. These are the specific `Settings` that are readable by the current user, or are
   public if no user is logged in.&quot;
   []
-  (setting/user-readable-values-map (setting/current-user-readable-visibilities)))</pre></td></tr><tr><td class="docs"><p>/google_auth</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+  (setting/user-readable-values-map (setting/current-user-readable-visibilities)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/google_auth&quot;
   &quot;Login with Google Auth.&quot;
-  [:as {{:keys [token]} :body, :as request}]
-  {token ms/NonBlankString}
+  [_route-params
+   _query-params
+   _body :- [:map
+             [:token ms/NonBlankString]]
+   request]
   (when-not (google/google-auth-client-id)
     (throw (ex-info &quot;Google Auth is disabled.&quot; {:status-code 400})))
   ;; Verify the token is valid with Google
@@ -3168,11 +3174,10 @@ plaintext token is only sent in the password reset email to the user in question
 </td><td class="codes"><pre class="brush: clojure">(defn- +log-all-request-failures [handler]
   (with-meta
    (fn [request respond raise]
-     (try
-       (handler request respond raise)
-       (catch Throwable e
-         (log/error e &quot;Authentication endpoint error&quot;)
-         (throw e))))
+     (letfn [(raise' [e]
+               (log/error e &quot;Authentication endpoint error&quot;)
+               (raise e))]
+       (handler request respond raise')))
    (meta handler)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(api/define-routes +log-all-request-failures)</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
