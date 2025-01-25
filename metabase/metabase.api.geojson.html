@@ -2871,9 +2871,9 @@ net.brehaut.ClojureTools = (function (SH) {
    [clj-http.client :as http]
    [clojure.java.io :as io]
    [clojure.string :as str]
-   [compojure.core :refer [GET]]
    [metabase.api.common :as api]
    [metabase.api.common.validation :as validation]
+   [metabase.api.macros :as api.macros]
    [metabase.models.setting :as setting :refer [defsetting]]
    [metabase.util.i18n :refer [deferred-tru tru]]
    [metabase.util.malli.registry :as mr]
@@ -3008,25 +3008,35 @@ net.brehaut.ClojureTools = (function (SH) {
   (with-open [^BufferedReader reader (url-&gt;reader url)
               is                     (ReaderInputStream. reader)]
     (respond (-&gt; (response/response is)
-                 (response/content-type &quot;application/json&quot;)))))</pre></td></tr><tr><td class="docs"><p>/:key</p>
-</td><td class="codes"><pre class="brush: clojure">(api/defendpoint-async GET 
+                 (response/content-type &quot;application/json&quot;)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:key&quot;
   &quot;Fetch a custom GeoJSON file as defined in the `custom-geojson` setting. (This just acts as a simple proxy for the
   file specified for `key`).&quot;
-  [{{:keys [key]} :params} respond raise]
-  {key ms/NonBlankString}
-  (when-not (or (custom-geojson-enabled) ((builtin-geojson) (keyword key)))
+  [{k :key, :as _route-params} :- [:map
+                                   [:key ms/NonBlankString]]
+   _query-params
+   _body
+   _request
+   respond
+   raise]
+  (when-not (or (custom-geojson-enabled) ((builtin-geojson) (keyword k)))
     (raise (ex-info (tru &quot;Custom GeoJSON is not enabled&quot;) {:status-code 400})))
-  (if-let [url (get-in (custom-geojson) [(keyword key) :url])]
+  (if-let [url (get-in (custom-geojson) [(keyword k) :url])]
     (try
       (read-url-and-respond url respond)
       (catch Throwable e
         (raise e)))
-    (raise (ex-info (tru &quot;Invalid custom GeoJSON key: {0}&quot; key) {:status-code 400}))))</pre></td></tr><tr><td class="docs"><p>/</p>
-</td><td class="codes"><pre class="brush: clojure">(api/defendpoint-async GET 
+    (raise (ex-info (tru &quot;Invalid custom GeoJSON key: {0}&quot; k) {:status-code 400}))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/&quot;
   &quot;Load a custom GeoJSON file based on a URL or file path provided as a query parameter.
   This behaves similarly to /api/geojson/:key but doesn't require the custom map to be saved to the DB first.&quot;
-  [{{:keys [url]} :params} respond raise]
-  {url ms/NonBlankString}
+  [_route-params
+   {:keys [url], :as _query-params} :- [:map
+                                        [:url ms/NonBlankString]]
+   _body
+   _request
+   respond
+   raise]
   (validation/check-has-application-permission :setting)
   (when-not (custom-geojson-enabled)
     (raise (ex-info (tru &quot;Custom GeoJSON is not enabled&quot;) {:status-code 400})))

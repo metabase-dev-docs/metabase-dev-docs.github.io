@@ -2871,17 +2871,16 @@ net.brehaut.ClojureTools = (function (SH) {
 we can have a uniform interface both via the API and code</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase-enterprise.sso.api.sso
   (:require
-   [compojure.core :refer [GET POST]]
    [metabase-enterprise.sso.api.interface :as sso.i]
    [metabase-enterprise.sso.integrations.jwt]
    [metabase-enterprise.sso.integrations.saml]
    [metabase-enterprise.sso.integrations.sso-settings :as sso-settings]
    [metabase.api.common :as api]
+   [metabase.api.macros :as api.macros]
    [metabase.request.core :as request]
    [metabase.util :as u]
    [metabase.util.log :as log]
    [metabase.util.malli :as mu]
-   [metabase.util.malli.schema :as ms]
    [metabase.util.urls :as urls]
    [saml20-clj.core :as saml]
    [saml20-clj.encode-decode :as encode-decode]
@@ -2889,15 +2888,12 @@ we can have a uniform interface both via the API and code</p>
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>load the SSO integrations so their implementations for the multimethods below are available.</p>
 </td><td class="codes"><pre class="brush: clojure">(comment metabase-enterprise.sso.integrations.jwt/keep-me
-         metabase-enterprise.sso.integrations.saml/keep-me)</pre></td></tr><tr><td class="docs"><p>/</p>
-
-<p>GET /auth/sso</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+         metabase-enterprise.sso.integrations.saml/keep-me)</pre></td></tr><tr><td class="docs"><p>GET /auth/sso</p>
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/&quot;
   &quot;SSO entry-point for an SSO user that has not logged in yet&quot;
-  [:as req]
+  [_route-params _query-params _body request]
   (try
-    (sso.i/sso-get req)
+    (sso.i/sso-get request)
     (catch Throwable e
       (log/error #_e &quot;Error returning SSO entry point&quot;)
       (throw e))))</pre></td></tr><tr><td class="docs">
@@ -2911,28 +2907,21 @@ we can have a uniform interface both via the API and code</p>
                                    {:logDirection   (name log-direction)
                                     :errorMessage   message
                                     :exceptionClass (.getName Exception)
-                                    :additionalData data}))})</pre></td></tr><tr><td class="docs"><p>/</p>
-
-<p>POST /auth/sso</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+                                    :additionalData data}))})</pre></td></tr><tr><td class="docs"><p>POST /auth/sso</p>
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/&quot;
   &quot;Route the SSO backends call with successful login details&quot;
-  [:as req]
+  [_route-params _query-params _body request]
   (try
-    (sso.i/sso-post req)
+    (sso.i/sso-post request)
     (catch Throwable e
       (log/error e &quot;Error logging in&quot;)
       (sso-error-page e :in))))</pre></td></tr><tr><td class="docs"><p>------------------------------ Single Logout aka SLO ------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>The url that the IdP should respond to. Not all IdPs support this, but it's a good idea to send it just in case.</p>
 </td><td class="codes"><pre class="brush: clojure">(def metabase-slo-redirect-url
-  &quot;/auth/sso/handle_slo&quot;)</pre></td></tr><tr><td class="docs"><p>/logout</p>
-
-<p>POST /auth/sso/logout</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+  &quot;/auth/sso/handle_slo&quot;)</pre></td></tr><tr><td class="docs"><p>POST /auth/sso/logout</p>
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/logout&quot;
   &quot;Logout.&quot;
-  [:as {cookies :cookies}]
-  {cookies [:map [request/metabase-session-cookie [:map [:value ms/NonBlankString]]]]}
+  [_route-params _query-params _body {cookies :cookies, :as _request}]
   (let [metabase-session-id (get-in cookies [request/metabase-session-cookie :value])]
     (api/check-exists? :model/Session metabase-session-id)
     (let [{:keys [email sso_source]}
@@ -2951,16 +2940,13 @@ we can have a uniform interface both via the API and code</p>
           :issuer (sso-settings/saml-application-name)
           :user-email email
           :relay-state (encode-decode/str-&gt;base64
-                        (str (urls/site-url) metabase-slo-redirect-url))))})))</pre></td></tr><tr><td class="docs"><p>/handle_slo</p>
-
-<p>POST /auth/sso/handle_slo</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+                        (str (urls/site-url) metabase-slo-redirect-url))))})))</pre></td></tr><tr><td class="docs"><p>POST /auth/sso/handle_slo</p>
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/handle_slo&quot;
   &quot;Handles client confirmation of saml logout via slo&quot;
-  [:as req]
+  [_route-params _query-params _body request]
   (try
     (if (sso-settings/saml-slo-enabled)
-      (sso.i/sso-handle-slo req)
+      (sso.i/sso-handle-slo request)
       (throw (ex-info &quot;SAML Single Logout is not enabled, request forbidden.&quot;
                       {:status-code 403})))
     (catch Throwable e

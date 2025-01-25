@@ -2870,11 +2870,11 @@ net.brehaut.ClojureTools = (function (SH) {
   (:require
    [clojure.java.jdbc :as jdbc]
    [clojure.string :as str]
-   [compojure.core :refer [POST]]
    [java-time.api :as t]
    [java-time.clock]
    [metabase.analytics.stats :as stats]
    [metabase.api.common :as api]
+   [metabase.api.macros :as api.macros]
    [metabase.config :as config]
    [metabase.db :as mdb]
    [metabase.search.core :as search]
@@ -2903,13 +2903,12 @@ net.brehaut.ClojureTools = (function (SH) {
   (let [path (snapshot-path-for-name snapshot-name)]
     (log/infof &quot;Saving snapshot to %s&quot; path)
     (jdbc/query {:datasource (mdb/app-db)} [&quot;SCRIPT TO ?&quot; path]))
-  :ok)</pre></td></tr><tr><td class="docs"><p>/snapshot/:name</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+  :ok)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/snapshot/:name&quot;
   &quot;Snapshot the database for testing purposes.&quot;
-  [name]
-  {name ms/NonBlankString}
-  (save-snapshot! name)
+  [{snapshot-name :name} :- [:map
+                             [:name ms/NonBlankString]]]
+  (save-snapshot! snapshot-name)
   nil)</pre></td></tr><tr><td class="docs"><p>RESTORE</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Immediately destroy all open connections in the app DB connection pool.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- reset-app-db-connection-pool!
@@ -2966,31 +2965,32 @@ net.brehaut.ClojureTools = (function (SH) {
         ;; that are initializing Quartz and opening new connections to do stuff on different threads.
         (when config/is-dev?
           (mdb/migrate! (mdb/app-db) :up)))))
-  :ok)</pre></td></tr><tr><td class="docs"><p>/restore/:name</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+  :ok)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/restore/:name&quot;
   &quot;Restore a database snapshot for testing purposes.&quot;
-  [name]
-  {name ms/NonBlankString}
-  (restore-snapshot! name)
+  [{snapshot-name :name} :- [:map
+                             [:name ms/NonBlankString]]]
+  (restore-snapshot! snapshot-name)
   (search/reindex!)
-  nil)</pre></td></tr><tr><td class="docs"><p>/echo</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
-  &quot;Simple echo hander. Fails when you POST {\&quot;fail\&quot;: true}.&quot;
-  [fail :as {:keys [body]}]
-  {fail ms/BooleanValue}
+  nil)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/echo&quot;
+  &quot;Simple echo hander. Fails when you POST with `?fail=true`.&quot;
+  [_route-params
+   {:keys [fail]} :- [:map
+                      [:fail {:default false} ms/BooleanValue]]
+   body]
   (if fail
     {:status 400
      :body {:error-code &quot;oops&quot;}}
     {:status 200
-     :body body}))</pre></td></tr><tr><td class="docs"><p>/set-time</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+     :body body}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/set-time&quot;
   &quot;Make java-time see world at exact time.&quot;
-  [:as {{:keys [time add-ms]} :body}]
-  {time   [:maybe ms/TemporalString]
-   add-ms [:maybe ms/Int]}
+  [_route-params
+   _query-params
+   {:keys [time add-ms]} :- [:map
+                             [:time   {:optional true} [:maybe ms/TemporalString]]
+                             [:add-ms {:optional true} [:maybe ms/Int]]]]
   (let [clock (when-let [time' (cond
                                  time   (u.date/parse time)
                                  add-ms (t/plus (t/zoned-date-time)
@@ -2999,25 +2999,26 @@ net.brehaut.ClojureTools = (function (SH) {
     ;; if time' is `nil`, we'll get system clock back
     (alter-var-root #'java-time.clock/*clock* (constantly clock))
     {:result (if clock :set :reset)
-     :time   (t/instant)}))</pre></td></tr><tr><td class="docs"><p>/echo</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
-  &quot;Simple echo hander. Fails when you GET {\&quot;fail\&quot;: true}.&quot;
-  [fail body]
-  {fail ms/BooleanValue
-   body ms/JSONString}
+     :time   (t/instant)}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/echo&quot;
+  &quot;Simple echo hander. Fails when you GET with `?fail=true`.&quot;
+  [_route-params
+   {:keys [fail body]} :- [:map
+                           [:fail {:default false} ms/BooleanValue]
+                           [:body ms/JSONString]]]
   (if fail
     {:status 400
      :body {:error-code &quot;oops&quot;}}
     {:status 200
-     :body (json/decode+kw body)}))</pre></td></tr><tr><td class="docs"><p>/mark-stale</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+     :body (json/decode+kw body)}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/mark-stale&quot;
   &quot;Mark the card or dashboard as stale&quot;
-  [:as {{:keys [id model date-str]} :body}]
-  {id             ms/PositiveInt
-   model          :string
-   date-str       [:maybe :string]}
+  [_route-params
+   _query-params
+   {:keys [id model date-str]} :- [:map
+                                   [:id       ms/PositiveInt]
+                                   [:model    :string]
+                                   [:date-str {:optional true} [:maybe :string]]]]
   (let [date (if date-str
                (try (t/local-date &quot;yyyy-MM-dd&quot; date-str)
                     (catch Exception _
@@ -3028,9 +3029,8 @@ net.brehaut.ClojureTools = (function (SH) {
                (t/minus (t/local-date) (t/months 7)))]
     (case model
       &quot;card&quot;      (t2/update! :model/Card :id id {:last_used_at date})
-      &quot;dashboard&quot; (t2/update! :model/Dashboard :id id {:last_viewed_at date}))))</pre></td></tr><tr><td class="docs"><p>/stats</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+      &quot;dashboard&quot; (t2/update! :model/Dashboard :id id {:last_viewed_at date}))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/stats&quot;
   &quot;Triggers a send of instance usage stats&quot;
   []
   (stats/phone-home-stats!)

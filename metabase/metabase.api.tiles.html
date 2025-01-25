@@ -2869,8 +2869,8 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.api.tiles
   (:require
    [clojure.set :as set]
-   [compojure.core :refer [GET]]
    [metabase.api.common :as api]
+   [metabase.api.macros :as api.macros]
    [metabase.legacy-mbql.normalize :as mbql.normalize]
    [metabase.legacy-mbql.util :as mbql.u]
    [metabase.query-processor :as qp]
@@ -3003,36 +3003,38 @@ provided. Since we deal exclusively with lat/long fields, assumed to be a float.
               lat-field lon-field
               x y zoom)
       (assoc-in [:query :fields] [lat-field lon-field])
-      (assoc-in [:query :limit] tile-coordinate-limit)))</pre></td></tr><tr><td class="docs"><p>/:zoom/:x/:y/:lat-field/:lon-field</p>
-
-<p>TODO - this can be reworked to be <code>defendpoint-async</code> instead</p>
+      (assoc-in [:query :limit] tile-coordinate-limit)))</pre></td></tr><tr><td class="docs"><p>TODO - this can be reworked to be async instead</p>
 
 <p>TODO - this should reduce results from the QP in a streaming fashion instead of requiring them all to be in memory
 at the same time</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:zoom/:x/:y/:lat-field/:lon-field&quot;
   &quot;This endpoints provides an image with the appropriate pins rendered given a MBQL `query` (passed as a GET query
   string param). We evaluate the query and find the set of lat/lon pairs which are relevant and then render the
   appropriate ones. It's expected that to render a full map view several calls will be made to this endpoint in
   parallel.&quot;
-  [zoom x y lat-field lon-field query]
-  {zoom        ms/Int
-   x           ms/Int
-   y           ms/Int
-   lat-field   :string
-   lon-field   :string
-   query       ms/JSONString}
+  [{:keys [zoom x y lat-field lon-field]} :- [:map
+                                              [:zoom      ms/Int]
+                                              [:x         ms/Int]
+                                              [:y         ms/Int]
+                                              [:lat-field :string]
+                                              [:lon-field :string]]
+   {:keys [query]} :- [:map
+                       [:query ms/JSONString]]]
   (let [lat-field-ref (field-ref lat-field)
         lon-field-ref (field-ref lon-field)
+
         query
         (mbql.normalize/normalize (json/decode+kw query))
+
         updated-query (query-&gt;tiles-query query {:zoom zoom :x x :y y
                                                  :lat-field lat-field-ref
                                                  :lon-field lon-field-ref})
+
         {:keys [status], {:keys [rows cols]} :data, :as result}
         (qp/process-query
          (qp/userland-query updated-query {:executed-by api/*current-user-id*
                                            :context     :map-tiles}))
+
         lat-key (qp.util/field-ref-&gt;key lat-field-ref)
         lon-key (qp.util/field-ref-&gt;key lon-field-ref)
         find-fn (fn [lat-or-lon-key]

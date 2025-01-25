@@ -2870,9 +2870,9 @@ net.brehaut.ClojureTools = (function (SH) {
 <p>Currently only used for http channels.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns ^{:added &quot;0.51.0&quot;} metabase.channel.api.channel
   (:require
-   [compojure.core :refer [DELETE GET POST PUT]]
    [metabase.api.common :as api]
    [metabase.api.common.validation :as validation]
+   [metabase.api.macros :as api.macros]
    [metabase.channel.core :as channel]
    [metabase.events :as events]
    [metabase.models.interface :as mi]
@@ -2885,12 +2885,13 @@ net.brehaut.ClojureTools = (function (SH) {
   [channel]
   (if (mi/can-write? channel)
     channel
-    (dissoc channel :details)))</pre></td></tr><tr><td class="docs"><p>/</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+    (dissoc channel :details)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/&quot;
   &quot;Get all channels&quot;
-  [:as {{:keys [include_inactive]} :body}]
-  {include_inactive [:maybe {:default false} :boolean]}
+  [_route-params
+   _query-params
+   {:keys [include_inactive]} :- [:map
+                                  [:include_inactive {:optional true} [:maybe {:default false} :boolean]]]]
   (map remove-details-if-needed (if include_inactive
                                   (t2/select :model/Channel)
                                   (t2/select :model/Channel :active true))))</pre></td></tr><tr><td class="docs">
@@ -2898,38 +2899,39 @@ net.brehaut.ClojureTools = (function (SH) {
   (mu/with-api-error-message
    [:fn {:decode/string keyword}
     #(= &quot;channel&quot; (namespace (keyword %)))]
-   (deferred-tru &quot;Must be a namespaced channel. E.g: channel/http&quot;)))</pre></td></tr><tr><td class="docs"><p>/</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+   (deferred-tru &quot;Must be a namespaced channel. E.g: channel/http&quot;)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/&quot;
   &quot;Create a channel&quot;
-  [:as {{:keys [name description type active details] :as body} :body}]
-  {name        ms/NonBlankString
-   description [:maybe ms/NonBlankString]
-   type        ChannelType
-   details     :map
-   active      [:maybe {:default true} :boolean]}
+  [_route-params
+   _query-params
+   {channel-name :name, :as body} :- [:map
+                                      [:name        ms/NonBlankString]
+                                      [:description {:optional true} [:maybe ms/NonBlankString]]
+                                      [:type        ChannelType]
+                                      [:details     :map]
+                                      [:active      {:optional true} [:maybe {:default true} :boolean]]]]
   (validation/check-has-application-permission :setting)
-  (when (t2/exists? :model/Channel :name name)
+  (when (t2/exists? :model/Channel :name channel-name)
     (throw (ex-info &quot;Channel with that name already exists&quot; {:status-code 409
                                                              :errors      {:name &quot;Channel with that name already exists&quot;}})))
   (u/prog1 (t2/insert-returning-instance! :model/Channel body)
-    (events/publish-event! :event/channel-create {:object &lt;&gt; :user-id api/*current-user-id*})))</pre></td></tr><tr><td class="docs"><p>/:id</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+    (events/publish-event! :event/channel-create {:object &lt;&gt; :user-id api/*current-user-id*})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:id&quot;
   &quot;Get a channel&quot;
-  [id]
-  {id ms/PositiveInt}
-  (-&gt; (t2/select-one :model/Channel id) api/check-404 remove-details-if-needed))</pre></td></tr><tr><td class="docs"><p>/:id</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint PUT 
+  [{:keys [id]} :- [:map
+                    [:id ms/PositiveInt]]]
+  (-&gt; (t2/select-one :model/Channel id) api/check-404 remove-details-if-needed))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :put &quot;/:id&quot;
   &quot;Update a channel&quot;
-  [id :as {{:keys [name type description details active] :as body} :body}]
-  {id          ms/PositiveInt
-   name        [:maybe ms/NonBlankString]
-   description [:maybe ms/NonBlankString]
-   type        [:maybe ChannelType]
-   details     [:maybe :map]
-   active      [:maybe :boolean]}
+  [{:keys [id]} :- [:map
+                    [:id ms/PositiveInt]]
+   _query-params
+   body :- [:map
+            [:name        {:optional true} [:maybe ms/NonBlankString]]
+            [:description {:optional true} [:maybe ms/NonBlankString]]
+            [:type        {:optional true} [:maybe ChannelType]]
+            [:details     {:optional true} [:maybe :map]]
+            [:active      {:optional true} [:maybe :boolean]]]]
   (validation/check-has-application-permission :setting)
   (let [channel-before-update (api/check-404 (t2/select-one :model/Channel id))]
     (t2/update! :model/Channel id body)
@@ -2949,13 +2951,14 @@ net.brehaut.ClojureTools = (function (SH) {
     (catch Exception e
       {:status 400
        :body   {:message     (ex-message e)
-                :data        (ex-data e)}})))</pre></td></tr><tr><td class="docs"><p>/test</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+                :data        (ex-data e)}})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/test&quot;
   &quot;Test a channel connection&quot;
-  [:as {{:keys [type details]} :body}]
-  {type    ChannelType
-   details :map}
+  [_route-params
+   _query-params
+   {:keys [type details]} :- [:map
+                              [:type    ChannelType]
+                              [:details :map]]]
   (test-channel-connection! type details))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(api/define-routes)</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();

@@ -2868,11 +2868,11 @@ net.brehaut.ClojureTools = (function (SH) {
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.setup.api" name="metabase.setup.api"><h1 class="project-name">metabase.setup.api</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.setup.api
   (:require
-   [compojure.core :refer [GET POST]]
    [java-time.api :as t]
    [metabase.analytics.snowplow :as snowplow]
    [metabase.api.common :as api]
    [metabase.api.common.validation :as validation]
+   [metabase.api.macros :as api.macros]
    [metabase.channel.email :as email]
    [metabase.config :as config]
    [metabase.db :as mdb]
@@ -2954,42 +2954,46 @@ to. This var is redef'd to false by certain tests to allow that.</p>
   (when site-locale
     (public-settings/site-locale! site-locale))
   ;; default to `true` the setting will set itself correctly whether a boolean or boolean string is specified
-  (public-settings/anon-tracking-enabled! true))</pre></td></tr><tr><td class="docs"><p>/</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+  (public-settings/anon-tracking-enabled! true))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/&quot;
   &quot;Special endpoint for creating the first user during setup. This endpoint both creates the user AND logs them in and
   returns a session ID. This endpoint can also be used to add a database, create and invite a second admin, and/or
   set specific settings from the setup flow.&quot;
-  [:as {{:keys                                          [token]
-         {:keys [first_name last_name email password]}  :user
-         {invited_first_name :first_name,
-          invited_last_name  :last_name,
-          invited_email      :email}                    :invite
-         {:keys [site_name site_locale]} :prefs}
-        :body,
-        :as request}]
-  {token              SetupToken
-   first_name         [:maybe ms/NonBlankString]
-   last_name          [:maybe ms/NonBlankString]
-   email              ms/Email
-   password           ms/ValidPassword
-   invited_first_name [:maybe ms/NonBlankString]
-   invited_last_name  [:maybe ms/NonBlankString]
-   invited_email      [:maybe ms/Email]
-   site_name          ms/NonBlankString
-   site_locale        [:maybe ms/ValidLocale]}
+  [_route-params
+   _query-params
+   {{first-name :first_name, last-name :last_name, :keys [email password]} :user
+    {invited-first-name :first_name
+     invited-last-name  :last_name
+     invited-email      :email} :invite
+    {site-name :site_name
+     site-locale :site_locale} :prefs}
+   :- [:map
+       [:token SetupToken]
+       [:user [:map
+               [:email      ms/Email]
+               [:password   ms/ValidPassword]
+               [:first_name {:optional true} [:maybe ms/NonBlankString]]
+               [:last_name  {:optional true} [:maybe ms/NonBlankString]]]]
+       [:invite {:optional true} [:map
+                                  [:first_name {:optional true} [:maybe ms/NonBlankString]]
+                                  [:last_name  {:optional true} [:maybe ms/NonBlankString]]
+                                  [:email      {:optional true} [:maybe ms/Email]]]]
+       [:prefs [:map
+                [:site_name   ms/NonBlankString]
+                [:site_locale {:optional true} [:maybe ms/ValidLocale]]]]]
+   request]
   (letfn [(create! []
             (try
               (t2/with-transaction []
                 (let [user-info (setup-create-user! {:email email
-                                                     :first-name first_name
-                                                     :last-name last_name
+                                                     :first-name first-name
+                                                     :last-name last-name
                                                      :password password})]
-                  (setup-maybe-create-and-invite-user! {:email invited_email,
-                                                        :first_name invited_first_name,
-                                                        :last_name invited_last_name}
-                                                       {:email email, :first_name first_name})
-                  (setup-set-settings! {:email email :site-name site_name :site-locale site_locale})
+                  (setup-maybe-create-and-invite-user! {:email invited-email
+                                                        :first_name invited-first-name
+                                                        :last_name invited-last-name}
+                                                       {:email email, :first_name first-name})
+                  (setup-set-settings! {:email email :site-name site-name :site-locale site-locale})
                   user-info))
               (catch Throwable e
                 ;; if the transaction fails, restore the Settings cache from the DB again so any changes made in this
@@ -3150,19 +3154,18 @@ The next step is the <em>first</em> step where <code>:triggered</code> is <code>
 </td><td class="codes"><pre class="brush: clojure">(defn- admin-checklist
   ([] (admin-checklist (state-for-checklist)))
   ([checklist-info]
-   (annotate (checklist-items checklist-info))))</pre></td></tr><tr><td class="docs"><p>/admin_checklist</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+   (annotate (checklist-items checklist-info))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/admin_checklist&quot;
   &quot;Return various \&quot;admin checklist\&quot; steps and whether they've been completed. You must be a superuser to see this!&quot;
   []
   (validation/check-has-application-permission :setting)
   (admin-checklist))</pre></td></tr><tr><td class="docs"><p>User defaults endpoint</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>/user_defaults</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint GET 
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/user_defaults&quot;
   &quot;Returns object containing default user details for initial setup, if configured,
    and if the provided token value matches the token in the configuration value.&quot;
-  [token]
+  [_route-params
+   {:keys [token]}]
   (let [{config-token :token :as defaults} (config/mb-user-defaults)]
     (api/check-404 config-token)
     (api/check-403 (= token config-token))
