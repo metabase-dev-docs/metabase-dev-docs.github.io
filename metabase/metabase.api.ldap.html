@@ -2869,8 +2869,8 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.api.ldap
   (:require
    [clojure.set :as set]
-   [compojure.core :refer [PUT]]
    [metabase.api.common :as api]
+   [metabase.api.macros :as api.macros]
    [metabase.integrations.ldap :as ldap]
    [metabase.models.setting :as setting :refer [defsetting]]
    [metabase.util.i18n :refer [deferred-tru tru]]
@@ -2942,12 +2942,13 @@ net.brehaut.ClojureTools = (function (SH) {
   (let [current-password (setting/get :ldap-password)]
     (if (= (setting/obfuscate-value current-password) new-password)
       current-password
-      new-password)))</pre></td></tr><tr><td class="docs"><p>/settings</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint PUT 
+      new-password)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :put &quot;/settings&quot;
   &quot;Update LDAP related settings. You must be a superuser to do this.&quot;
-  [:as {settings :body}]
-  {settings :map}
+  ;; TODO -- add `:ldap-port` and `:ldap-password` to the body schema and use Malli decoding for `:ldap-port`
+  [_route-params
+   _query-params
+   settings :- :map]
   (api/check-superuser)
   (let [ldap-settings (-&gt; settings
                           (assoc :ldap-port (when-let [^String ldap-port (not-empty (str (:ldap-port settings)))]
@@ -2958,7 +2959,8 @@ net.brehaut.ClojureTools = (function (SH) {
         results       (ldap/test-ldap-connection ldap-details)]
     (if (= :SUCCESS (:status results))
       (t2/with-transaction [_conn]
-       ;; We need to update the ldap settings before we update ldap-enabled, as the ldap-enabled setter tests the ldap settings
+       ;; We need to update the ldap settings before we update ldap-enabled, as the ldap-enabled setter tests the ldap
+       ;; settings
         (setting/set-many! ldap-settings)
         (setting/set-value-of-type! :boolean :ldap-enabled (boolean (:ldap-enabled settings))))
       ;; test failed, return result message

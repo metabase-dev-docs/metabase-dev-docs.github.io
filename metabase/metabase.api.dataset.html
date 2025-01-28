@@ -2869,9 +2869,9 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.api.dataset
   (:require
    [clojure.string :as str]
-   [compojure.core :refer [POST]]
    [metabase.api.common :as api]
    [metabase.api.field :as api.field]
+   [metabase.api.macros :as api.macros]
    [metabase.api.query-metadata :as api.query-metadata]
    [metabase.driver :as driver]
    [metabase.driver.util :as driver.u]
@@ -2941,12 +2941,13 @@ well.</p>
                                           (assoc :constraints (qp.constraints/default-query-constraints))
                                           (update :info merge info))
                                       rff)
-            (qp/process-query (update query :info merge info) rff)))))))</pre></td></tr><tr><td class="docs"><p>/</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+            (qp/process-query (update query :info merge info) rff)))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/&quot;
   &quot;Execute a query and retrieve the results in the usual format. The query will not use the cache.&quot;
-  [:as {{:keys [database] :as query} :body}]
-  {database [:maybe :int]}
+  [_route-params
+   _query-params
+   query :- [:map
+             [:database {:optional true} [:maybe :int]]]]
   (run-streaming-query
    (-&gt; query
        (update-in [:middleware :js-int-to-string?] (fnil identity true))
@@ -2964,7 +2965,7 @@ well.</p>
   (keyword (str (u/qualified-name export-format) &quot;-download&quot;)))</pre></td></tr><tr><td class="docs"><p>Regex for matching valid export formats (e.g., <code>json</code>) for queries.
  Inteneded for use in an endpoint definition:</p>
 
-<p>   (api/defendpoint-schema POST ["/:export-format", :export-format export-format-regex]</p>
+<p>   (api.macros/defendpoint :post ["/:export-format", :export-format export-format-regex]</p>
 </td><td class="codes"><pre class="brush: clojure">(def export-format-regex
   (re-pattern (str &quot;(&quot; (str/join &quot;|&quot; (map u/qualified-name (qp.streaming/export-formats))) &quot;)&quot;)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private column-ref-regex #&quot;^\[.+\]$&quot;)</pre></td></tr><tr><td class="docs"><p>Key function for parsing JSON visualization settings into the DB form. Converts most keys to
@@ -2974,19 +2975,29 @@ keywords, but leaves column references as strings.</p>
   (if (re-matches column-ref-regex json-key)
     json-key
     (keyword json-key)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST [&quot;/:export-format&quot;, :export-format export-format-regex]
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post [&quot;/:export-format&quot;, :export-format export-format-regex]
   &quot;Execute a query and download the result data as a file in the specified format.&quot;
-  [export-format :as {{:keys [query visualization_settings pivot_results format_rows]
-                       :or   {visualization_settings &quot;{}&quot;}} :params}]
-  {query                  ms/JSONString
-   visualization_settings ms/JSONString
-   format_rows            [:maybe ms/BooleanValue]
-   pivot_results          [:maybe ms/BooleanValue]
-   export-format          ExportFormat}
-  (let [{:keys [was-pivot] :as query} (json/decode+kw query)
-        query                         (dissoc query :was-pivot)
-        viz-settings                  (-&gt; (json/decode visualization_settings viz-setting-key-fn)
+  [{:keys [export-format]} :- [:map
+                               [:export-format ExportFormat]]
+   _query-params
+   {{:keys [was-pivot] :as query} :query
+    format-rows                   :format_rows
+    pivot-results                 :pivot_results
+    visualization-settings        :visualization_settings}
+   ;; Support JSON-encoded query and viz settings for backwards compatability for when downloads used to be triggered by
+   ;; `&lt;form&gt;` submissions... see https://metaboat.slack.com/archives/C010L1Z4F9S/p1738003606875659
+   :- [:map
+       [:query                  [:map
+                                 {:decode/api (fn [x]
+                                                (cond-&gt; x
+                                                  (string? x) json/decode+kw))}]]
+       [:visualization_settings {:default {}} [:map
+                                               {:decode/api (fn [x]
+                                                              (cond-&gt; x
+                                                                (string? x) (json/decode viz-setting-key-fn)))}]]
+       [:format_rows            {:default false} ms/BooleanValue]
+       [:pivot_results          {:default false} ms/BooleanValue]]]
+  (let [viz-settings                  (-&gt; visualization-settings
                                           (update :table.columns mbql.normalize/normalize)
                                           mb.viz/norm-&gt;db)
         query                         (-&gt; query
@@ -2994,8 +3005,8 @@ keywords, but leaves column references as strings.</p>
                                           (dissoc :constraints)
                                           (update :middleware #(-&gt; %
                                                                    (dissoc :add-default-userland-constraints? :js-int-to-string?)
-                                                                   (assoc :format-rows?          (or format_rows false)
-                                                                          :pivot?                (or pivot_results false)
+                                                                   (assoc :format-rows?          (or format-rows false)
+                                                                          :pivot?                (or pivot-results false)
                                                                           :process-viz-settings? true
                                                                           :skip-results-metadata? true))))]
     (run-streaming-query
@@ -3003,31 +3014,34 @@ keywords, but leaves column references as strings.</p>
      :export-format export-format
      :context      (export-format-&gt;context export-format)
      :was-pivot    was-pivot)))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------ Other Endpoints -------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>/query_metadata</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/query_metadata&quot;
   &quot;Get all of the required query metadata for an ad-hoc query.&quot;
-  [:as {{:keys [database] :as query} :body}]
-  {database ms/PositiveInt}
-  (api.query-metadata/batch-fetch-query-metadata [query]))</pre></td></tr><tr><td class="docs"><p>/native</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+  [_route-params
+   _query-params
+   query :- [:map
+             [:database ms/PositiveInt]]]
+  (api.query-metadata/batch-fetch-query-metadata [query]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/native&quot;
   &quot;Fetch a native version of an MBQL query.&quot;
-  [:as {{:keys [database pretty] :as query} :body}]
-  {database ms/PositiveInt
-   pretty  [:maybe :boolean]}
+  [_route-params
+   _query-params
+   {:keys [database pretty] :as query} :- [:map
+                                           [:database ms/PositiveInt]
+                                           [:pretty   {:default true} [:maybe :boolean]]]]
   (binding [persisted-info/*allow-persisted-substitution* false]
     (qp.perms/check-current-user-has-adhoc-native-query-perms query)
     (let [driver (driver.u/database-&gt;driver database)
           prettify (partial driver/prettify-native-form driver)
           compiled (qp.compile/compile-with-inline-parameters query)]
       (cond-&gt; compiled
-        (not (false? pretty)) (update :query prettify)))))</pre></td></tr><tr><td class="docs"><p>/pivot</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+        pretty (update :query prettify)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/pivot&quot;
   &quot;Generate a pivoted dataset for an ad-hoc query&quot;
-  [:as {{:keys [database] :as query} :body}]
-  {database [:maybe ms/PositiveInt]}
+  [_route-params
+   _query-params
+   {:keys [database] :as query} :- [:map
+                                    [:database {:optional true} [:maybe ms/PositiveInt]]]]
   (when-not database
     (throw (Exception. (str (tru &quot;`database` is required for all queries.&quot;)))))
   (api/read-check :model/Database database)
@@ -3059,22 +3073,26 @@ consulted if <code>:values_source_type</code> is nil. Query is an optional strin
   [parameter field-ids query]
   (custom-values/parameter-&gt;values
    parameter query
-   (fn [] (parameter-field-values field-ids query))))</pre></td></tr><tr><td class="docs"><p>/parameter/values</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+   (fn [] (parameter-field-values field-ids query))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/parameter/values&quot;
   &quot;Return parameter values for cards or dashboards that are being edited.&quot;
-  [:as {{:keys [parameter field_ids]} :body}]
-  {parameter ms/Parameter
-   field_ids [:maybe [:sequential ms/PositiveInt]]}
-  (parameter-values parameter field_ids nil))</pre></td></tr><tr><td class="docs"><p>/parameter/search/:query</p>
-</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
-(api/defendpoint POST 
+  [_route-params
+   _query-params
+   {:keys     [parameter]
+    field-ids :field_ids} :- [:map
+                              [:parameter ms/Parameter]
+                              [:field_ids {:optional true} [:maybe [:sequential ms/PositiveInt]]]]]
+  (parameter-values parameter field-ids nil))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/parameter/search/:query&quot;
   &quot;Return parameter values for cards or dashboards that are being edited. Expects a query string at `?query=foo`.&quot;
-  [query :as {{:keys [parameter field_ids]} :body}]
-  {parameter ms/Parameter
-   field_ids [:maybe [:sequential ms/PositiveInt]]
-   query     ms/NonBlankString}
-  (parameter-values parameter field_ids query))</pre></td></tr><tr><td class="docs">
+  [{:keys [query]} :- [:map
+                       [:query ms/NonBlankString]]
+   _query-params
+   {:keys     [parameter]
+    field-ids :field_ids} :- [:map
+                              [:parameter ms/Parameter]
+                              [:field_ids {:optional true} [:maybe [:sequential ms/PositiveInt]]]]]
+  (parameter-values parameter field-ids query))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(api/define-routes)</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
