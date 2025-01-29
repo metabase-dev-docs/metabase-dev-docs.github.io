@@ -3072,10 +3072,27 @@ than "iapetos_internal"</p>
    (prometheus/counter :metabase-search/response-ok
                        {:description &quot;Number of successful search requests.&quot;})
    (prometheus/counter :metabase-search/response-error
-                       {:description &quot;Number of errors when responding to search requests.&quot;})])</pre></td></tr><tr><td class="docs"><p>Implement this for a given metric to initialize zeros for the given set of label values.</p>
+                       {:description &quot;Number of errors when responding to search requests.&quot;})
+   (prometheus/gauge :metabase-search/engine-default
+                     {:description &quot;Whether a given engine is being used as the default. User can override via cookie.&quot;
+                      :labels [:engine]})
+   (prometheus/gauge :metabase-search/engine-active
+                     {:description &quot;Whether a given engine is active. This does NOT mean that it is the default.&quot;
+                      :labels [:engine]})])</pre></td></tr><tr><td class="docs"><p>Implement this for a given metric to initialize it for the given set of label values.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti known-labels
   {:arglists '([metric]), :added &quot;0.52.0&quot;}
-  identity)</pre></td></tr><tr><td class="docs"><p>Instrument the application. Conditionally done when some setting is set. If [[prometheus-server-port]] is not set it
+  identity)</pre></td></tr><tr><td class="docs"><p>Implement this for a given metric to have non-zero initial values for the given set of label values.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmulti initial-value
+  {:arglists '([metric labels]), :added &quot;0.52.0&quot;}
+  (fn [metric _labels]
+    metric))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod initial-value :default [_ _] 0)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- initial-labelled-metric-values []
+  (for [metric (keys (methods known-labels))
+        labels (known-labels metric)]
+    {:metric metric
+     :labels labels
+     :value  (initial-value metric labels)}))</pre></td></tr><tr><td class="docs"><p>Instrument the application. Conditionally done when some setting is set. If [[prometheus-server-port]] is not set it
 will throw.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- setup-metrics!
   [registry-name]
@@ -3087,9 +3104,8 @@ will throw.</p>
                                 (jetty-collectors)
                                 [@c3p0-collector]
                                 (product-collectors)))]
-    (doseq [metric (keys (methods known-labels))
-            labels (known-labels metric)]
-      (prometheus/inc registry metric labels 0))
+    (doseq [{:keys [metric labels value]} (initial-labelled-metric-values)]
+      (prometheus/inc registry metric labels value))
     registry))</pre></td></tr><tr><td class="docs"><p>Start the prometheus web-server. If [[prometheus-server-port]] is not set it will throw.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- start-web-server!
   [port registry]
