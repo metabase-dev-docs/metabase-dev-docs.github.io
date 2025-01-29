@@ -2865,135 +2865,19 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.api.common.internal" name="metabase.api.common.internal"><h1 class="project-name">metabase.api.common.internal</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Internal functions used by [[metabase.api.common]].
- These are primarily used as the internal implementation of legacy [[metabase.api.common/defendpoint]]. Most of this
-stuff can be removed once we remove the legacy implementation.</p>
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.api.common.internal" name="metabase.api.common.internal"><h1 class="project-name">metabase.api.common.internal</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Internal functions used by [[metabase.api.common]].</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.api.common.internal
   (:require
-   [clojure.string :as str]
    [clojure.walk :as walk]
    [malli.core :as mc]
-   [malli.error :as me]
    [malli.transform :as mtx]
-   [metabase.config :as config]
-   [metabase.server.streaming-response :as streaming-response]
+   [metabase.server.streaming-response]
    [metabase.util :as u]
-   [metabase.util.i18n :refer [tru]]
-   [metabase.util.log :as log]
-   [metabase.util.malli :as mu]
-   [metabase.util.malli.describe :as umd]
-   [metabase.util.malli.registry :as mr]
-   [metabase.util.malli.schema :as ms]
    [potemkin.types :as p.types])
   (:import
    (metabase.server.streaming_response StreamingResponse)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(comment streaming-response/keep-me)</pre></td></tr><tr><td class="docs"><p>HACK to make sure some enterprise endpoints are consistent with the code.
- The right way to fix this is to move them -- see #22687</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- handle-nonstandard-namespaces
-  [name]
-  (let [replacements
-        [;; Standard API replacement
-         [&quot;^metabase\\.api\\.&quot; &quot;/api/&quot;]
-         ;; /api/ee/sandbox/table -&gt; /api/table, this is an override route for /api/table if sandbox is available
-         [&quot;^metabase-enterprise\\.sandbox\\.api\\.table&quot; &quot;/api/table&quot;]
-         ;; /api/ee/sandbox -&gt; /api/mt
-         [&quot;^metabase-enterprise\\.sandbox\\.api\\.&quot; &quot;/api/mt/&quot;]
-         ;; /api/ee/content-verification -&gt; /api/moderation-review
-         [&quot;^metabase-enterprise\\.content-verification\\.api\\.&quot; &quot;/api/moderation-review/&quot;]
-         ;; /api/ee/sso/sso/ -&gt; /auth/sso
-         [&quot;^metabase-enterprise\\.sso\\.api\\.&quot; &quot;/auth/&quot;]
-         [&quot;^metabase-enterprise\\.serialization\\.api&quot; &quot;/api/ee/serialization&quot;]
-         [&quot;^metabase-enterprise\\.advanced-config\\.api\\.logs&quot; &quot;/api/ee/logs&quot;]
-         [&quot;^metabase-enterprise\\.query-reference-validation\\.api&quot; &quot;/api/ee/query-reference-validation&quot;]
-         [&quot;^metabase-enterprise\\.upload-management\\.api&quot; &quot;/api/ee/upload-management&quot;]
-         ;; this should be the only replace for enterprise once we resolved #22687
-         [&quot;^metabase-enterprise\\.([^\\.]+)\\.api\\.&quot; &quot;/api/ee/$1/&quot;]]]
-    (reduce (fn [result [pattern replacement]]
-              (str/replace result (re-pattern pattern) replacement))
-            name
-            replacements)))</pre></td></tr><tr><td class="docs"><p>Generate a string like <code>GET /api/meta/db/:id</code> for a defendpoint route.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- endpoint-name
-  ([method route]
-   (endpoint-name *ns* method route))
-  ([endpoint-namespace method route]
-   (format &quot;%s %s%s&quot;
-           (name method)
-           (-&gt; (.getName (the-ns endpoint-namespace))
-               handle-nonstandard-namespaces)
-           (if (vector? route)
-             (first route)
-             route))))</pre></td></tr><tr><td class="docs"><p>A version of <code>flatten</code> that will actually flatten a form such as:</p>
-
-<p>  [id :as {{:keys [dataset<em>query description display name visualization</em>settings]} :body}]</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- args-form-flatten
-  [form]
-  (cond
-    (map? form) (args-form-flatten (mapcat (fn [[k v]]
-                                             [(args-form-flatten k) (args-form-flatten v)])
-                                           form))
-    (sequential? form) (mapcat args-form-flatten form)
-    :else       [form]))</pre></td></tr><tr><td class="docs"><p>Return a map of arg -> nil for args taken from the arguments vector. This map is merged with the ones found in the
-schema validation map to build a complete map of args used by the endpoint.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- args-form-symbols
-  [form]
-  (into {} (for [arg   (args-form-flatten form)
-                 :when (and (symbol? arg)
-                            (not= arg 'body))]
-             {arg nil})))</pre></td></tr><tr><td class="docs"><p>Generate the docstring for <code>schema</code> for use in auto-generated API documentation.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- dox-for-schema
-  [schema route-str]
-  (try
-    ;; we can ignore the warning printed by umd/describe when schema is `nil`.
-    (binding [*out* (new java.io.StringWriter)]
-      (umd/describe schema))
-    (catch Exception e
-      (when (and schema config/is-dev?) ; schema is nil for any var without a schema. That's ok!
-        (log/warn
-         e
-         (u/format-color 'red &quot;Invalid Malli Schema: %s defined at %s&quot;
-                         (u/pprint-to-str schema)
-                         (u/add-period route-str))))
-      &quot;&quot;)))</pre></td></tr><tr><td class="docs"><p>Return the appropriate name for this <code>param-symb</code> based on its <code>schema</code>. Usually this is just the name of the
-<code>param-symb</code>, but if the schema used a call to <code>su/api-param</code> we;ll use that name instead.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- param-name
-  [param-symb schema]
-  (or (when (record? schema)
-        (:api-param-name schema))
-      (name param-symb)))</pre></td></tr><tr><td class="docs"><p>Generate the <code>params</code> section of the documentation for a <code>defendpoint</code>-defined function by using the
-<code>param-symb-&gt;schema</code> map passed in after the argslist.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- format-route-schema-dox
-  [param-symb-&gt;schema route-str]
-  (let [params (for [[param-symb schema] param-symb-&gt;schema
-                     :let [p-name (param-name param-symb schema)
-                           p-desc (dox-for-schema schema route-str)]
-                     :when (not (or
-                                 (str/blank? p-name)
-                                 (= &quot;_&quot; p-name)))]
-                 (format &quot;-  **`%s`** %s&quot;
-                         p-name
-                         (u/add-period p-desc)))]
-    (when (seq params)
-      (str &quot;\n\n### PARAMS:\n\n&quot;
-           (str/join &quot;\n\n&quot; params)))))</pre></td></tr><tr><td class="docs"><p>Return a markdown-formatted string to be used as documentation for a <code>defendpoint</code> function.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- format-route-dox
-  [route-str docstr param-&gt;schema]
-  (str (format &quot;## `%s`&quot; route-str)
-       (when (seq docstr)
-         (str &quot;\n\n&quot; (u/add-period docstr)))
-       (format-route-schema-dox param-&gt;schema route-str)))</pre></td></tr><tr><td class="docs"><p>Does the <code>body</code> of this <code>defendpoint</code> form contain a call to <code>check-superuser</code>?</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- contains-superuser-check?
-  [body]
-  (let [body (set body)]
-    (or (contains? body '(check-superuser))
-        (contains? body '(api/check-superuser)))))</pre></td></tr><tr><td class="docs"><p>Prints a markdown route doc for defendpoint</p>
-</td><td class="codes"><pre class="brush: clojure">(defn route-dox
-  [method route docstr args param-&gt;schema body]
-  (format-route-dox (endpoint-name method route)
-                    (str (u/add-period docstr) (when (contains-superuser-check? body)
-                                                 &quot;\n\nYou must be a superuser to do this.&quot;))
-                    (merge (args-form-symbols args)
-                           param-&gt;schema)))</pre></td></tr><tr><td class="docs"><p>Return a sequence of keywords for URL args in string <code>route</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(comment metabase.server.streaming-response/keep-me)</pre></td></tr><tr><td class="docs"><p>Return a sequence of keywords for URL args in string <code>route</code>.</p>
 
 <p>  (route-arg-keywords "/:id/cards") -> [:id]</p>
 </td><td class="codes"><pre class="brush: clojure">(defn route-arg-keywords
@@ -3025,90 +2909,12 @@ schema validation map to build a complete map of args used by the endpoint.</p>
        'int?     #&quot;-?[0-9]+&quot;
        :uuid     u/uuid-regex
        'uuid?    u/uuid-regex
-       nil)]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private no-regex-schemas #{(mc/type ms/NonBlankString)
-                                  (mc/type (mc/schema [:maybe ms/PositiveInt]))
-                                  (mc/type [:enum &quot;a&quot; &quot;b&quot;])
-                                  :fn
-                                  :string
-                                  :or})</pre></td></tr><tr><td class="docs"><p>Expand a <code>route</code> string like "/:id" into a Compojure route form with regexes to match parameters based on
-malli schemas given in the <code>arg-&gt;schema</code> map.</p>
-
-<p>(add-route-param-schema '{id :int} "/:id/card") -> ["/:id/card" :id #"[0-9]+"]
-(add-route-param-schema {} "/:id/card") -> "/:id/card"</p>
-</td><td class="codes"><pre class="brush: clojure">(defn add-route-param-schema
-  [arg-&gt;schema route]
-  (if (vector? route)
-    route
-    (let [[wildcard &amp; wildcards]
-          (-&gt;&gt; (for [[k schema] arg-&gt;schema
-                     :when      (re-find (re-pattern (str &quot;:&quot; k)) route)
-                     :let       [[schema-type re] (-&gt;matching-regex schema)]]
-                 (if re
-                   [route (keyword k) re]
-                   (when (and config/is-dev? (not (contains? no-regex-schemas schema-type)))
-                     (let [overview (str &quot;Warning: missing route-param regex for schema: &quot;
-                                         route &quot; &quot; [k schema])
-                           fix      (str &quot;Either add `&quot; (pr-str schema-type) &quot;` to &quot;
-                                         &quot;metabase.api.common.internal/-&gt;matching-regex or &quot;
-                                         &quot;metabase.api.common.internal/no-regex-schemas.&quot;)]
-                       (log/warn (u/colorize :red overview))
-                       (log/warn (u/colorize :green fix))))))
-               (remove nil?))]
-      (cond
-        ;; multiple hits -&gt; tack them onto the original route shape.
-        wildcards (vec (reduce into wildcard (mapv #(drop 1 %) wildcards)))
-        wildcard  wildcard
-        :else     route))))</pre></td></tr><tr><td class="docs"><p>Transformer used on values coming over the API via defendpoint.</p>
+       nil)]))</pre></td></tr><tr><td class="docs"><p>Transformer used on values coming over the API via defendpoint.</p>
 </td><td class="codes"><pre class="brush: clojure">(def defendpoint-transformer
   (mtx/transformer
    (mtx/string-transformer)
    (mtx/json-transformer)
-   (mtx/default-value-transformer)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- extract-symbols [in]
-  (let [*symbols (atom [])]
-    (walk/postwalk
-     (fn [x] (when (symbol? x) (swap! *symbols conj x)) x)
-     in)
-    @*symbols))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- mauto-let-form [arg-&gt;schema arg-symbol]
-  (when arg-&gt;schema
-    (when-let [schema (arg-&gt;schema arg-symbol)]
-      `[~arg-symbol (mc/decode ~schema ~arg-symbol defendpoint-transformer)])))</pre></td></tr><tr><td class="docs"><p>Create a <code>let</code> form that tries to coerce the value bound to any symbol in <code>args</code> that are present in
-<code>arg-&gt;schema</code> using [[defendpoint-transformer]].</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro auto-coerce
-  {:style/indent 1}
-  [args arg-&gt;schema &amp; body]
-  (let [let-forms (-&gt;&gt; args
-                       extract-symbols
-                       (mapcat #(mauto-let-form arg-&gt;schema %))
-                       (remove nil?))]
-    `(let [~@let-forms] ~@body)))</pre></td></tr><tr><td class="docs"><p>Validate a parameter against its respective malli schema, or throw an Exception.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn validate-param
-  [field-name value schema]
-  (when-not (mr/validate schema value)
-    (throw (ex-info (tru &quot;Invalid m field: {0}&quot; field-name)
-                    {:status-code 400
-                     :errors      {(keyword field-name) (umd/describe schema)}
-                     :specific-errors {(keyword field-name)
-                                       (-&gt; schema
-                                           (mr/explain value)
-                                           me/with-spell-checking
-                                           (me/humanize {:wrap mu/humanize-include-value}))}}))))</pre></td></tr><tr><td class="docs"><p>Generate a series of <code>validate-param</code> calls for each param and malli schema pair in PARAM->SCHEMA.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn validate-params
-  [param-&gt;schema]
-  (for [[param schema] param-&gt;schema]
-    `(validate-param '~param ~param ~schema)))</pre></td></tr><tr><td class="docs"><p>Generate a symbol suitable for use as the name of an API endpoint fn. Name is just <code>method</code> + <code>route</code> with slashes
-replaced by underscores.</p>
-
-<p>  (route-fn-name GET "/:id") ;-> GET_:id</p>
-</td><td class="codes"><pre class="brush: clojure">(defn route-fn-name
-  [method route]
-  ;; if we were passed a vector like [&quot;:id&quot; :id #&quot;[0-9+]&quot;] only use first part
-  (let [route (if (vector? route) (first route) route)]
-    (-&gt; (str (name method) route)
-        (^String .replace &quot;/&quot; &quot;_&quot;)
-        symbol)))</pre></td></tr><tr><td class="docs"><p>Protocol for transformations that should be done to the value returned by a <code>defendpoint</code> form before it
+   (mtx/default-value-transformer)))</pre></td></tr><tr><td class="docs"><p>Protocol for transformations that should be done to the value returned by a <code>defendpoint</code> form before it
 Compojure/Ring see it.</p>
 </td><td class="codes"><pre class="brush: clojure">(p.types/defprotocol+ EndpointResponse
   (wrap-response-if-needed [this]

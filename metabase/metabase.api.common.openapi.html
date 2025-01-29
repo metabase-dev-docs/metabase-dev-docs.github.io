@@ -2868,17 +2868,16 @@ net.brehaut.ClojureTools = (function (SH) {
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.api.common.openapi" name="metabase.api.common.openapi"><h1 class="project-name">metabase.api.common.openapi</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Generate OpenAPI schema for defendpoint routes</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.api.common.openapi
   (:require
-   [clojure.set :as set]
    [clojure.string :as str]
+   [malli.core :as mc]
    [malli.json-schema :as mjs]
    [medley.core :as m]
    [metabase.api.macros :as api.macros]
    [metabase.config :as config]
    [metabase.util :as u]
    [metabase.util.malli :as mu]
-   [metabase.util.malli.schema :as ms])
-  (:import
-   (clojure.lang PersistentVector)))</pre></td></tr><tr><td class="docs">
+   [metabase.util.malli.registry :as mr]
+   [metabase.util.malli.schema :as ms]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private ^:dynamic *definitions* nil)</pre></td></tr><tr><td class="docs"><p>Helpers</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>We transform json-schema in a few different places, but we need to collect all defitions in a single one.</p>
@@ -2936,17 +2935,6 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defn- path-&gt;openapi [path]
   (str/replace path #&quot;:([^/]+)&quot; &quot;{$1}&quot;))</pre></td></tr><tr><td class="docs"><p>OpenAPI generation</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- first-if-vec [x]
-  (if (vector? x) (first x) x))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- collect-defendpoint-1-routes [walk {:keys [prefix tag]} handler-var]
-  (let [tag  (or (not-empty tag) (some-&gt; (not-empty prefix) (subs 1)))
-        path (str prefix (-&gt; handler-var meta :path first-if-vec))]
-    (cons {:path  (path-&gt;openapi path)
-           :tag   tag
-           :route handler-var}
-          (when-let [routes (-&gt; handler-var meta :routes not-empty)]
-            (mapcat (partial walk {:prefix path :tag tag})
-                    routes)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- collect-defendpoint-2-routes [{:keys [prefix tag]} ns-symb]
   (for [route (vals (-&gt; ns-symb the-ns meta :api/endpoints))]
     {:path                     (path-&gt;openapi (str prefix (get-in route [:form :route :path])))
@@ -2965,44 +2953,12 @@ net.brehaut.ClojureTools = (function (SH) {
   &quot;Collect routes with schemas with their full paths.&quot;
   [root]
   (letfn [(walk [context handler]
-            (concat
-             (when-let [ns-symb (:api/defendpoint-2-namespace (meta handler))]
-               (collect-defendpoint-2-routes context ns-symb))
-             (collect-defendpoint-1-routes walk context handler)))]
+            (when-let [ns-symb (:api/defendpoint-2-namespace (meta handler))]
+              (collect-defendpoint-2-routes context ns-symb)))]
     (-&gt;&gt; (walk {:prefix } root)
          (filter #(or
                    (-&gt; % :route meta :schema) ; defendpoint 1 handler
-                   (:defendpoint-2-definition %))))))</pre></td></tr><tr><td class="docs"><p>This function is not trying to parse whole compojure syntax, just get the names of query parameters out</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- compojure-query-params
-  [args]
-  (loop [args args
-         params []]
-    (if (empty? args)
-      (map keyword params)
-      (let [[x y] args]
-        (cond
-          ;; we don't care about rest binding
-          (= '&amp; x)    (recur (nnext args) params)
-          ;; and about coercion too
-          (= :&lt;&lt; x)   (recur (nnext args) params)
-          (= :as x)   (recur (nnext args)
-                             (into params (when (map? y)
-                                            (let [qp (:query-params (set/map-invert y))]
-                                              (when (map? qp)
-                                                ;; {c :count :keys [a b}} ; =&gt; [count a b]
-                                                (flatten (vals qp)))))))
-          (symbol? x) (recur (next args)
-                             (conj params x)))))))</pre></td></tr><tr><td class="docs"><p>Find out everything that's renamed in Compojure routes</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- compojure-renames
-  [args]
-  (let [idx          (inc (.indexOf ^PersistentVector args :as))
-        req-bindings (get args idx)]
-    (when (and (pos? idx)
-               (map? req-bindings))
-      (let [renames (-&gt;&gt; (keys req-bindings) ; {{c :count} :query-params} ; =&gt; [{c :count}]
-                         (filter map?)       ; no stuff like {:keys [a]}
-                         (apply merge))]
-        (update-keys renames keyword)))))</pre></td></tr><tr><td class="docs">
+                   (:defendpoint-2-definition %))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- schema-&gt;params*
   [schema in-fn renames]
   (let [{:keys [properties required]} (mjs-collect-definitions schema)
@@ -3017,42 +2973,15 @@ net.brehaut.ClojureTools = (function (SH) {
                :name        k
                :required    (and (contains? required k) (not optional?))
                :schema      (dissoc schema :optional :description)}
-        (:description schema) (assoc :description (str (:description schema)))))))</pre></td></tr><tr><td class="docs"><p>https://spec.openapis.org/oas/latest.html#parameter-object</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- schema-&gt;params
-  [full-path args schema]
-  (let [in-path?  (set (map (comp keyword second) (re-seq #&quot;\{([^}]+)\}&quot; full-path)))
-        in-query? (set (compojure-query-params args))
-        in-fn     (fn [k]
-                    (cond
-                      (in-path? k)  :path
-                      (in-query? k) :query))
-        renames   (some-&gt; args compojure-renames)]
-    (schema-&gt;params* schema in-fn renames)))</pre></td></tr><tr><td class="docs"><p>Generate OpenAPI desc for a single legacy <code>defendpoint</code> handler</p>
-
-<p>https://spec.openapis.org/oas/latest.html#path-item-object</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- defendpoint-&gt;path-item
-  [tag
-   full-path   :- string?
-   handler-var :- (ms/InstanceOfClass clojure.lang.Var)]
-  (let [{:keys [method] :as data} (meta handler-var)
-        params                    (schema-&gt;params full-path (:args data) (:schema data))
-        non-body-param?           (set (map :name params))
-        body-params               (when (not= method :get)
-                                    (remove #(non-body-param? (first %)) (rest (:schema data))))
-        body-schema               (when (seq body-params)
-                                    (fix-json-schema
-                                     (mjs-collect-definitions (into [:map] body-params))))
-        ctype                     (if (:multipart (meta handler-var))
-                                    &quot;multipart/form-data&quot;
-                                    &quot;application/json&quot;)]
-    ;; summary is the string in the sidebar of Scalar
-    {method (cond-&gt; {:summary     (str (u/upper-case-en (name method)) &quot; &quot; full-path)
-                     :description (some-&gt; (or (:orig-doc data)
-                                              (:doc data))
-                                          str)
-                     :parameters params}
-              tag         (assoc :tags [tag])
-              body-schema (assoc :requestBody {:content {ctype {:schema body-schema}}}))}))</pre></td></tr><tr><td class="docs"><p>Generate OpenAPI desc for <code>defendpoint</code> 2.0 ([[metabase.api.macros/defendpoint]]) handler.</p>
+        (:description schema) (assoc :description (str (:description schema)))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- multipart-schema [form :- ::api.macros/parsed-args]
+  (when-let [request-schema (get-in form [:params :request :schema])]
+    (let [schema (-&gt; request-schema mr/resolve-schema mc/schema)]
+      (when (= (mc/type schema) :map)
+        (some (fn [[k _opts schema]]
+                (when (= k :multipart-params)
+                  schema))
+              (mc/children schema))))))</pre></td></tr><tr><td class="docs"><p>Generate OpenAPI desc for <code>defendpoint</code> 2.0 ([[metabase.api.macros/defendpoint]]) handler.</p>
 
 <p>https://spec.openapis.org/oas/latest.html#path-item-object</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn- defendpoint-2-&gt;path-item
@@ -3068,13 +2997,14 @@ net.brehaut.ClojureTools = (function (SH) {
                                    (for [param route-params]
                                      (assoc param :in :path))
                                    query-params)
-        body-schema               (some-&gt; (get-in form [:params :body :schema])
-                                          mjs-collect-definitions
-                                          fix-json-schema)
-        ;; multipart is not yet implemented for defendpoint 2 but this is a placeholder until it is I guess
         ctype                     (if (get-in form [:metadata :multipart])
                                     &quot;multipart/form-data&quot;
-                                    &quot;application/json&quot;)]
+                                    &quot;application/json&quot;)
+        body-schema               (some-&gt; (if (= ctype &quot;multipart/form-data&quot;)
+                                            (multipart-schema form)
+                                            (get-in form [:params :body :schema]))
+                                          mjs-collect-definitions
+                                          fix-json-schema)]
     ;; summary is the string in the sidebar of Scalar
     {method (cond-&gt; {:summary     (str (u/upper-case-en (name method)) &quot; &quot; full-path)
                      :description (some-&gt; (:docstr form) str)
@@ -3090,11 +3020,9 @@ net.brehaut.ClojureTools = (function (SH) {
     (let [paths (reduce (fn [acc [k v]]
                           (merge-with into acc {k v}))
                         {}
-                        (for [{:keys [path tag route defendpoint-2-definition]} (collect-routes root)]
+                        (for [{:keys [path tag defendpoint-2-definition]} (collect-routes root)]
                           (try
-                            [path (if defendpoint-2-definition
-                                    (defendpoint-2-&gt;path-item tag path defendpoint-2-definition)
-                                    (defendpoint-&gt;path-item tag path route))]
+                            [path (defendpoint-2-&gt;path-item tag path defendpoint-2-definition)]
                             (catch Exception e
                               (throw (ex-info (str &quot;Exception at &quot; path) {} e))))))]
       {:openapi    &quot;3.1.0&quot;

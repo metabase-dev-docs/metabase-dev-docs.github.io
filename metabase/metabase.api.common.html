@@ -2949,30 +2949,17 @@ to test them out in the REPL to see how they'll be transformed.</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Dynamic variables and utility functions/macros for writing API functions.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.api.common
   (:require
-   [clojure.set :as set]
-   [clojure.spec.alpha :as s]
-   [clojure.string :as str]
    [clojure.tools.macro :as macro]
    [compojure.core :as compojure]
-   [medley.core :as m]
-   [metabase.api.common.internal
-    :refer [add-route-param-schema
-            auto-coerce
-            route-dox
-            route-fn-name
-            validate-params
-            wrap-response-if-needed]]
    [metabase.api.common.openapi :as openapi]
    [metabase.config :as config]
    [metabase.events :as events]
    [metabase.models.interface :as mi]
    [metabase.util :as u]
    [metabase.util.i18n :as i18n :refer [deferred-tru tru]]
-   [metabase.util.log :as log]
    [metabase.util.malli :as mu]
    [metabase.util.malli.schema :as ms]
    [potemkin :as p]
-   [ring.middleware.multipart-params :as mp]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(declare check-403 check-404)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(p/import-vars [openapi openapi-object])</pre></td></tr><tr><td class="docs"><p>----------------------------------------------- DYNAMIC VARIABLES ------------------------------------------------
@@ -3129,106 +3116,7 @@ ex.</p>
 <p>TODO -- why does this live here but other 'generic' responses live in [[metabase.request.util]]. We should move this
 so it lives with its friends</p>
 </td><td class="codes"><pre class="brush: clojure">(def generic-204-no-content
-  {:status 204, :body nil})</pre></td></tr><tr><td class="docs"><p>--------------------------------------- DEFENDPOINT AND RELATED FUNCTIONS ----------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(s/def ::defendpoint-args
-  (s/cat
-   :method      symbol?
-   :route       (some-fn string? sequential?)
-   :docstr      (s/? string?)
-   :args        vector?
-   :arg-&gt;schema (s/? (s/map-of symbol? any?)) ;; any? is either a plumatic or malli schema
-   :body        (s/* any?)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- parse-defendpoint-args [args]
-  (let [parsed (s/conform ::defendpoint-args args)]
-    (when (= parsed ::s/invalid)
-      (throw (ex-info (str &quot;Invalid defendpoint args: &quot; (s/explain-str ::defendpoint-args args))
-                      (s/explain-data ::defendpoint-args args))))
-    (let [{:keys [method route docstr args arg-&gt;schema body]} parsed
-          fn-name                                             (route-fn-name method route)
-          route                                               (add-route-param-schema arg-&gt;schema route)
-          ;; eval the vals in arg-&gt;schema to make sure the actual schemas are resolved so we can document
-          ;; their API error messages
-          route-doc                                           (route-dox method route docstr args
-                                                                         (m/map-vals #_{:clj-kondo/ignore [:discouraged-var]} eval arg-&gt;schema)
-                                                                         body)]
-      ;; Don't i18n this, it's dev-facing only
-      (when-not docstr
-        (log/warn (u/format-color 'red &quot;Warning: endpoint %s/%s does not have a docstring. Go add one.&quot;
-                                  (ns-name *ns*) fn-name)))
-      (assoc parsed :fn-name fn-name, :route route, :route-doc route-doc, :docstr docstr))))</pre></td></tr><tr><td class="docs"><p>Log a warning if the request body contains any parameters not included in <code>expected-params</code> (which is presumably
-populated by the defendpoint schema)</p>
-</td><td class="codes"><pre class="brush: clojure">(defn validate-param-values
-  [{method :request-method uri :uri body :body} expected-params]
-  (when (and (not config/is-prod?)
-             (map? body))
-    (let [extraneous-params (set/difference (set (keys body))
-                                            (set expected-params))]
-      (when (seq extraneous-params)
-        (log/warnf &quot;Unexpected parameters at %s: %s\nPlease add them to the schema or remove them from the API client&quot;
-                   [method uri] (vec extraneous-params))))))</pre></td></tr><tr><td class="docs"><p>Convert Compojure-style HTTP method symbols (PUT, POST, etc.) to the keywords used internally by
-Compojure (:put, :post, ...)</p>
-</td><td class="codes"><pre class="brush: clojure">(defn method-symbol-&gt;keyword
-  [method-symbol]
-  (-&gt; method-symbol
-      name
-      u/lower-case-en
-      keyword))</pre></td></tr><tr><td class="docs"><p>Impl macro for [[defendpoint]]; don't use this directly.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro defendpoint*
-  [{:keys [method route fn-name route-doc docstr args body arg-&gt;schema]}]
-  {:pre [(or (string? route) (vector? route))]}
-  (let [method-kw       (method-symbol-&gt;keyword method)
-        allowed-params  (mapv keyword (keys arg-&gt;schema))
-        prep-route      #'compojure/prepare-route
-        multipart?      (get (meta method) :multipart false)
-        handler-wrapper (if multipart? mp/wrap-multipart-params identity)
-        schema          (into [:map] (for [[k v] arg-&gt;schema]
-                                       [(keyword k) v]))
-        quoted-args     (list 'quote args)]
-    `(def ~(vary-meta fn-name
-                      merge
-                      {:doc          route-doc
-                       :orig-doc     docstr
-                       :method       method-kw
-                       :path         route
-                       :schema       schema
-                       :args         quoted-args
-                       :is-endpoint? true}
-                      (meta method))
-       ;; The next form is a copy of `compojure/compile-route`, with the sole addition of the call to
-       ;; `validate-param-values`. This is because to validate the request body we need to intercept the request
-       ;; before the destructuring takes place. I.e., we need to validate the value of `(:body request#)`, and that's
-       ;; not available if we called `compile-route` ourselves.
-       (compojure/make-route
-        ~method-kw
-        ~(prep-route route)
-        (~handler-wrapper
-         (fn [request#]
-           (validate-param-values request# (quote ~allowed-params))
-           (compojure/let-request [~args request#]
-                                  ~@body)))))))</pre></td></tr><tr><td class="docs"><p>DEPRECATED! Use [[metabase.api.macros/defendpoint]] instead going forward.</p>
-
-<p>Define an API function.
- This automatically does several things:</p>
-
-<ul>
-<li><p>converts <code>route</code> from a simple form like <code>"/:id"</code> to a regex-typed one like <code>["/:id" :id #"[0-9]+"]</code> based
-on its malli schema</p></li>
-<li><p>sequentially applies specified annotation functions on args to validate them.</p></li>
-<li><p>automatically calls <code>wrap-response-if-needed</code> on the result of <code>body</code></p></li>
-<li><p>tags function's metadata in a way that subsequent calls to <code>define-routes</code> (see below) will automatically include
-the function in the generated <code>defroutes</code> form.</p></li>
-<li><p>Generates a super-sophisticated Markdown-formatted docstring</p></li>
-</ul>
-</td><td class="codes"><pre class="brush: clojure">(defmacro ^{:deprecated &quot;0.53.0&quot;} defendpoint
-  {:arglists '([method route docstr? args schemas-map? &amp; body])}
-  [&amp; defendpoint-args]
-  (let [{:keys [args body arg-&gt;schema], :as defendpoint-args} (parse-defendpoint-args defendpoint-args)]
-    `(defendpoint* ~(assoc defendpoint-args
-                           :body `((auto-coerce ~args ~arg-&gt;schema
-                                                ~@(validate-params arg-&gt;schema)
-                                                (wrap-response-if-needed
-                                                 (do ~@body))))))))</pre></td></tr><tr><td class="docs">
+  {:status 204, :body nil})</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- pass-thru-handler
   ([_request] nil)
   ([_request respond _raise] (respond nil)))</pre></td></tr><tr><td class="docs"><p>Get the combined handler created by [[metabase.api.macros/defendpoint-build-ns-handler]] for all the routes defined
@@ -3247,36 +3135,17 @@ by [[metabase.api.macros/defendpoint]].</p>
           (respond nil)))
       ;; For prod, fetching the handler on each request gives us nothing since it shouldn't change; fetch it once and if
       ;; it's not defined just use the [[pass-thru-handler]] above instead.
-      (or (handler-fn) pass-thru-handler))))</pre></td></tr><tr><td class="docs"><p>Return a sequence of all API endpoint functions defined by <code>defendpoint</code> in a namespace.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- namespace-&gt;defendpoint-1-route-vars
-  [nmspace]
-  (for [[_symb varr] (ns-publics nmspace)
-        :when        (:is-endpoint? (meta varr))]
-    varr))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- api-routes-docstring [nmspace route-fns middleware]
-  (str
-   (format &quot;Ring routes for %s:\n%s&quot;
-           (-&gt; (ns-name nmspace)
-               (str/replace #&quot;^metabase\.&quot; )
-               (str/replace #&quot;\.&quot; &quot;/&quot;))
-           (u/pprint-to-str route-fns))
-   (when (seq middleware)
-     (str &quot;\nMiddleware applied to all endpoints in this namespace:\n&quot;
-          (u/pprint-to-str middleware)))))</pre></td></tr><tr><td class="docs"><p>Create a <code>(defroutes routes ...)</code> form that automatically includes all functions created with <code>defendpoint</code> in the
+      (or (handler-fn) pass-thru-handler))))</pre></td></tr><tr><td class="docs"><p>Create a <code>(defroutes routes ...)</code> form that automatically includes all functions created with <code>defendpoint</code> in the
 current namespace. Optionally specify middleware that will apply to all of the endpoints in the current namespace.</p>
 
 <p>  (api/define-routes api/+check-superuser) ; all API endpoints in this namespace will require superuser access</p>
 </td><td class="codes"><pre class="brush: clojure">(defmacro define-routes
   {:style/indent 0}
   [&amp; middleware]
-  (let [api-route-fns (vec (namespace-&gt;defendpoint-1-route-vars *ns*))
-        routes        `(-&gt; (compojure/routes
-                            (defendpoint-2-handler '~(ns-name *ns*))
-                            ~@api-route-fns)
-                           (with-meta {:routes ~api-route-fns, :api/defendpoint-2-namespace '~(ns-name *ns*)}))
+  (let [routes        `(-&gt; (defendpoint-2-handler '~(ns-name *ns*))
+                           (with-meta {:api/defendpoint-2-namespace '~(ns-name *ns*)}))
         docstring     (str &quot;Routes for &quot; *ns*)]
     `(def ~(vary-meta 'routes assoc
-                      :doc                         (api-routes-docstring *ns* api-route-fns middleware)
                       ;; not really super clear whether the expectation is someone should be looking at the metadata on
                       ;; the varr
                       ;;
@@ -3286,8 +3155,8 @@ current namespace. Optionally specify middleware that will apply to all of the e
                       ;;
                       ;;    (meta metabase.api.timeline/routes)
                       ;;
-                      ;; ... the [[metabase.api.common.openapi]] code seems to do a little of both, so just support both for right now.
-                      :routes                      api-route-fns
+                      ;; ... the [[metabase.api.common.openapi]] code seems to do a little of both, so just support both
+                      ;; for right now.
                       :api/defendpoint-2-namespace (list 'quote (ns-name *ns*)))
        ~docstring
        ~(if (seq middleware)
