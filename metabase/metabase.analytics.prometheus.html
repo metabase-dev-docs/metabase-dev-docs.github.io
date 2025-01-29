@@ -3072,18 +3072,25 @@ than "iapetos_internal"</p>
    (prometheus/counter :metabase-search/response-ok
                        {:description &quot;Number of successful search requests.&quot;})
    (prometheus/counter :metabase-search/response-error
-                       {:description &quot;Number of errors when responding to search requests.&quot;})])</pre></td></tr><tr><td class="docs"><p>Instrument the application. Conditionally done when some setting is set. If [[prometheus-server-port]] is not set it
+                       {:description &quot;Number of errors when responding to search requests.&quot;})])</pre></td></tr><tr><td class="docs"><p>Implement this for a given metric to initialize zeros for the given set of label values.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmulti known-labels
+  {:arglists '([metric]), :added &quot;0.52.0&quot;}
+  identity)</pre></td></tr><tr><td class="docs"><p>Instrument the application. Conditionally done when some setting is set. If [[prometheus-server-port]] is not set it
 will throw.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- setup-metrics!
   [registry-name]
   (log/info &quot;Starting prometheus metrics collector&quot;)
-  (let [registry (prometheus/collector-registry registry-name)]
-    (apply prometheus/register
-           (collector.ring/initialize registry)
-           (concat (jvm-collectors)
-                   (jetty-collectors)
-                   [@c3p0-collector]
-                   (product-collectors)))))</pre></td></tr><tr><td class="docs"><p>Start the prometheus web-server. If [[prometheus-server-port]] is not set it will throw.</p>
+  (let [registry (prometheus/collector-registry registry-name)
+        registry (apply prometheus/register
+                        (collector.ring/initialize registry)
+                        (concat (jvm-collectors)
+                                (jetty-collectors)
+                                [@c3p0-collector]
+                                (product-collectors)))]
+    (doseq [metric (keys (methods known-labels))
+            labels (known-labels metric)]
+      (prometheus/inc registry metric labels 0))
+    registry))</pre></td></tr><tr><td class="docs"><p>Start the prometheus web-server. If [[prometheus-server-port]] is not set it will throw.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- start-web-server!
   [port registry]
   (log/infof &quot;Starting prometheus metrics web-server on port %s&quot; (str port))
