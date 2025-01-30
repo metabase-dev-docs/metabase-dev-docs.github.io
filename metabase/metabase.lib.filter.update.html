@@ -2940,22 +2940,30 @@ interpolate the missing values and still include points with values of zero; tha
 say "points" below.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private temporal-filter-min-num-points
   4)</pre></td></tr><tr><td class="docs"><p>E.g. the next unit after <code>:hour</code> is <code>:minute</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private unit-&gt;next-unit
+</td><td class="codes"><pre class="brush: clojure">(def ^:private unit-&gt;next-unit-datetime
   (let [units [:minute :hour :day :week :month :quarter :year]]
+    (zipmap units (cons nil units))))</pre></td></tr><tr><td class="docs"><p>E.g. the next unit after <code>:week</code> is <code>:day</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private unit-&gt;next-unit-date
+  (let [units [:day :week :month :quarter :year]]
     (zipmap units (cons nil units))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn- temporal-filter-find-best-breakout-unit :- ::lib.schema.temporal-bucketing/unit.date-time.truncate
   &quot;If the current breakout `unit` will not return at least [[temporal-filter-min-num-points]], find the largest unit
   that will.&quot;
-  [unit  :- ::lib.schema.temporal-bucketing/unit.date-time.truncate
-   start :- ::lib.schema.literal/temporal
-   end   :- ::lib.schema.literal/temporal]
-  (loop [unit unit]
-    (let [num-points      (u.time/unit-diff unit start end)
-          too-few-points? (&lt; num-points temporal-filter-min-num-points)]
-      (if-let [next-largest-unit (when too-few-points?
-                                   (unit-&gt;next-unit unit))]
-        (recur next-largest-unit)
-        unit))))</pre></td></tr><tr><td class="docs">
+  [unit        :- ::lib.schema.temporal-bucketing/unit.date-time.truncate
+   start       :- ::lib.schema.literal/temporal
+   end         :- ::lib.schema.literal/temporal
+   column-type :- :keyword]
+  (let [next-unit (if (= column-type :type/Date)
+                    unit-&gt;next-unit-date
+                    ;; should catch :type/DateTime and :type/DateTimeWithTZ
+                    unit-&gt;next-unit-datetime)]
+    (loop [unit unit]
+      (let [num-points      (u.time/unit-diff unit start end)
+            too-few-points? (&lt; num-points temporal-filter-min-num-points)]
+        (if-let [next-largest-unit (when too-few-points?
+                                     (next-unit unit))]
+          (recur next-largest-unit)
+          unit)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn- temporal-filter-update-breakouts :- ::lib.schema/query
   &quot;Update the first breakout against `column` so it uses `new-unit` rather than the original unit (if any); remove all
   other breakouts against that column.&quot;
@@ -3030,7 +3038,7 @@ the future if it works nicely.</p>
              start         (u.time/truncate (u.time/add start unit 1) unit)
              end           (u.time/truncate end unit)
              ;; update the breakout unit if appropriate.
-             breakout-unit (temporal-filter-find-best-breakout-unit unit start end)
+             breakout-unit (temporal-filter-find-best-breakout-unit unit start end (:effective-type temporal-column))
              query         (if (= unit breakout-unit)
                              query
                              (temporal-filter-update-breakouts query stage-number temporal-column breakout-unit))]
