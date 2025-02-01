@@ -2868,6 +2868,8 @@ net.brehaut.ClojureTools = (function (SH) {
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.models.query.permissions" name="metabase.models.query.permissions"><h1 class="project-name">metabase.models.query.permissions</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Functions used to calculate the permissions needed to run a query based on old-style DATA ACCESS PERMISSIONS. The
 only thing that is subject to these sorts of checks are <em>ad-hoc</em> queries, i.e. queries that have not yet been saved
 as a Card. Saved Cards are subject to the permissions of the Collection to which they belong.</p>
+
+<p>TODO -- does this belong HERE or in the <code>permissions</code> module?</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.models.query.permissions
   (:require
    [clojure.set :as set]
@@ -2879,10 +2881,8 @@ as a Card. Saved Cards are subject to the permissions of the Collection to which
    [metabase.lib.metadata.protocols :as lib.metadata.protocols]
    [metabase.lib.schema.id :as lib.schema.id]
    [metabase.lib.util.match :as lib.util.match]
-   [metabase.models.data-permissions :as data-perms]
    [metabase.models.interface :as mi]
-   [metabase.models.permissions :as perms]
-   [metabase.permissions.util :as perms.u]
+   [metabase.permissions.core :as perms]
    [metabase.query-processor.error-type :as qp.error-type]
    [metabase.query-processor.store :as qp.store]
    [metabase.query-processor.util :as qp.util]
@@ -2901,7 +2901,7 @@ as a Card. Saved Cards are subject to the permissions of the Collection to which
    (ex-info message
             (merge {:type                 qp.error-type/missing-required-permissions
                     :required-permissions required-perms
-                    :actual-permissions   (data-perms/permissions-for-user api/*current-user-id*)
+                    :actual-permissions   (perms/permissions-for-user api/*current-user-id*)
                     :permissions-error?   true}
                    additional-ex-data))))</pre></td></tr><tr><td class="docs"><p>---------------------------------------------- Permissions Checking ----------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Is calculating permissions for queries complicated? Some would say so. Refer to this handy flow chart to see how
@@ -2975,7 +2975,7 @@ Useful when bulk loading cards from different databases.</p>
           (t2/instance :model/Card {:collection_id collection-id}))
         (t2/select-one [:model/Card :collection_id] :id card-id))
       (throw (Exception. (tru &quot;Card {0} does not exist.&quot; card-id)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- source-card-read-perms :- [:set perms.u/PathSchema]
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- source-card-read-perms :- [:set perms/PathSchema]
   &quot;Calculate the permissions needed to run an ad-hoc query that uses a Card with `source-card-id` as its source
   query.&quot;
   [source-card-id :- ::lib.schema.id/card]
@@ -3059,11 +3059,11 @@ legacy implementation(s) of [[required-perms]].</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- has-perm-for-db?
   [perm-type required-perm gtap-perms db-id]
   (or
-   (data-perms/at-least-as-permissive? perm-type
-                                       (data-perms/full-db-permission-for-user api/*current-user-id* perm-type db-id)
-                                       required-perm)
+   (perms/at-least-as-permissive? perm-type
+                                  (perms/full-db-permission-for-user api/*current-user-id* perm-type db-id)
+                                  required-perm)
    (when gtap-perms
-     (data-perms/at-least-as-permissive? perm-type gtap-perms required-perm))))</pre></td></tr><tr><td class="docs"><p>Checks that the current user has the permissions for tables specified in <code>table-id-&gt;perm</code>. This can be satisfied via
+     (perms/at-least-as-permissive? perm-type gtap-perms required-perm))))</pre></td></tr><tr><td class="docs"><p>Checks that the current user has the permissions for tables specified in <code>table-id-&gt;perm</code>. This can be satisfied via
 the user's permissions stored in the database, or permissions in <code>gtap-table-perms</code> which are supplied by the
 row-level-restrictions QP middleware when sandboxing is in effect. Returns true if access is allowed, otherwise false.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- has-perm-for-table?
@@ -3071,7 +3071,7 @@ row-level-restrictions QP middleware when sandboxing is in effect. Returns true 
   (let [table-id-&gt;has-perm?
         (into {} (for [[table-id required-perm] table-id-&gt;required-perm]
                    [table-id (boolean
-                              (or (data-perms/user-has-permission-for-table?
+                              (or (perms/user-has-permission-for-table?
                                    api/*current-user-id*
                                    perm-type
                                    required-perm
@@ -3082,7 +3082,7 @@ row-level-restrictions QP middleware when sandboxing is in effect. Returns true 
                                                          gtap-table-perms
                                                          ;; ...or a map from table IDs to table permissions
                                                          (get gtap-table-perms table-id))]
-                                    (data-perms/at-least-as-permissive? perm-type gtap-perm required-perm))))]))]
+                                    (perms/at-least-as-permissive? perm-type gtap-perm required-perm))))]))]
     (every? true? (vals table-id-&gt;has-perm?))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn has-perm-for-query? :- :boolean
   &quot;Returns true when the query is accessible for the given perm-type and required-perms for individual tables, or the

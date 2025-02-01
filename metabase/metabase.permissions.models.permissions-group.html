@@ -2865,138 +2865,142 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.models.task-history" name="metabase.models.task-history"><h1 class="project-name">metabase.models.task-history</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.models.task-history
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.permissions.models.permissions-group" name="metabase.permissions.models.permissions-group"><h1 class="project-name">metabase.permissions.models.permissions-group</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>A <code>PermissionsGroup</code> is a group (or role) that can be assigned certain permissions. Users can be members of one or
+more of these groups.</p>
+
+<p>A few 'magic' groups exist: [[all-users]], which predicably contains All Users; and [[admin]], which contains all
+superusers. These groups are 'magic' in the sense that you cannot add users to them yourself, nor can you delete
+them; they are created automatically. You can, however, set permissions for them.</p>
+
+<p>See documentation in [[metabase.permissions.models.permissions]] for more information about the Metabase permissions system.</p>
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.permissions.models.permissions-group
   (:require
-   [java-time.api :as t]
+   [metabase.db :as mdb]
    [metabase.models.interface :as mi]
-   [metabase.permissions.core :as perms]
+   [metabase.models.serialization :as serdes]
+   [metabase.models.setting :as setting]
+   [metabase.permissions.models.data-permissions :as data-perms]
+   [metabase.plugins.classloader :as classloader]
    [metabase.premium-features.core :as premium-features]
    [metabase.util :as u]
-   [metabase.util.json :as json]
-   [metabase.util.malli :as mu]
-   [metabase.util.malli.schema :as ms]
+   [metabase.util.i18n :refer [tru]]
    [methodical.core :as methodical]
-   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>----------------------------------------------- Entity &amp; Lifecycle -----------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/table-name :model/TaskHistory [_model] :task_history)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(doto :model/TaskHistory
+   [toucan2.core :as t2]
+   [toucan2.tools.hydrate :as t2.hydrate]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/table-name :model/PermissionsGroup [_model] :permissions_group)
+(methodical/defmethod t2/model-for-automagic-hydration [:default :permissions_group] [_original-model _k] :model/PermissionsGroup)
+(methodical/defmethod t2.hydrate/fk-keys-for-automagic-hydration [:default :permissions_group :default]
+  [_original-model _dest-key _hydrating-model]
+  [:permissions_group_id])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(doto :model/PermissionsGroup
   (derive :metabase/model)
-  (derive ::mi/read-policy.full-perms-for-perms-set)
-  (derive ::mi/write-policy.full-perms-for-perms-set))</pre></td></tr><tr><td class="docs"><p>Permissions to read or write Task. If <code>advanced-permissions</code> is enabled it requires superusers or non-admins with
-monitoring permissions, Otherwise it requires superusers.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmethod mi/perms-objects-set :model/TaskHistory
-  [_task _read-or-write]
-  #{(if (premium-features/enable-advanced-permissions?)
-      (perms/application-perms-path :monitoring)
-      &quot;/&quot;)})</pre></td></tr><tr><td class="docs"><p>Deletes older TaskHistory rows. Will order TaskHistory by <code>ended_at</code> and delete everything after <code>num-rows-to-keep</code>.
-This is intended for a quick cleanup of old rows. Returns <code>true</code> if something was deleted.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn cleanup-task-history!
-  [num-rows-to-keep]
-  ;; Ideally this would be one query, but MySQL does not allow nested queries with a limit. The query below orders the
-  ;; tasks by the time they finished, newest first. Then finds the first row after skipping `num-rows-to-keep`. Using
-  ;; the date that task finished, it deletes everything after that. As we continue to add TaskHistory entries, this
-  ;; ensures we'll have a good amount of history for debugging/troubleshooting, but not grow too large and fill the
-  ;; disk.
-  (when-let [clean-before-date (t2/select-one-fn :ended_at :model/TaskHistory {:limit    1
-                                                                               :offset   num-rows-to-keep
-                                                                               :order-by [[:ended_at :desc]]})]
-    (t2/delete! (t2/table-name :model/TaskHistory) :ended_at [:&lt;= clean-before-date])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private task-history-status #{:started :success :failed})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- assert-task-history-status
-  [status]
-  (assert (task-history-status (keyword status)) &quot;Invalid task history status&quot;))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(t2/define-after-insert :model/TaskHistory
-  [task-history]
-  (assert-task-history-status (:status task-history))
-  task-history)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(t2/define-before-update :model/TaskHistory
-  [task-history]
-  (assert-task-history-status (:status task-history))
-  task-history)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(t2/deftransforms :model/TaskHistory
-  {:task_details mi/transform-json
-   :status       mi/transform-keyword})</pre></td></tr><tr><td class="docs"><p>Return all TaskHistory entries, applying <code>limit</code> and <code>offset</code> if not nil</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn all
-  [limit  :- [:maybe ms/PositiveInt]
-   offset :- [:maybe ms/IntGreaterThanOrEqualToZero]]
-  (t2/select :model/TaskHistory (merge {:order-by [[:started_at :desc]]}
-                                       (when limit
-                                         {:limit limit})
-                                       (when offset
-                                         {:offset offset}))))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
-|                                            with-task-history macro                                             |
-+----------------------------------------------------------------------------------------------------------------+</p>
+  (derive :hook/entity-id))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/hash-fields :model/PermissionsGroup
+  [_user]
+  [:name])</pre></td></tr><tr><td class="docs"><p>-------------------------------------------- Magic Groups Getter Fns ---------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private TaskHistoryCallBackInfo
-  [:map {:closed true}
-   [:status                        (into [:enum] task-history-status)]
-   [:task_details {:optional true} [:maybe :map]]])</pre></td></tr><tr><td class="docs"><p>Schema for <code>info</code> passed to the <code>with-task-history</code> macro.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private TaskHistoryInfo
-  [:map {:closed true}
-   [:task                             ms/NonBlankString] ; task name, i.e. `send-pulses`. Conventionally lisp-cased
-   [:db_id           {:optional true} [:maybe :int]]     ; DB involved, for sync operations or other tasks where this is applicable.
-   [:on-success-info {:optional true} [:maybe [:=&gt; [:cat TaskHistoryCallBackInfo :any] :map]]]
-   [:on-fail-info    {:optional true} [:maybe [:=&gt; [:cat TaskHistoryCallBackInfo :any] :map]]]
-   [:task_details    {:optional true} [:maybe :map]]])   ; additional map of details to include in the recorded row</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- ns-&gt;ms [nanoseconds]
-  (long (/ nanoseconds 1e6)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- update-task-history!
-  [th-id startime-ns info]
-  (let [updated-info (merge {:ended_at (t/instant)
-                             :duration (ns-&gt;ms (- (System/nanoTime) startime-ns))}
-                            info)]
-    (t2/update! :model/TaskHistory th-id updated-info)))</pre></td></tr><tr><td class="docs"><p>Impl for <code>with-task-history</code> macro; see documentation below.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn do-with-task-history
-  [info :- TaskHistoryInfo f]
-  (let [on-success-info (or (:on-success-info info) (fn [&amp; args] (first args)))
-        on-fail-info    (or (:on-fail-info info) (fn [&amp; args] (first args)))
-        info            (dissoc info :on-success-info :on-fail-info)
-        start-time-ns   (System/nanoTime)
-        th-id           (t2/insert-returning-pk! :model/TaskHistory
-                                                 (assoc info
-                                                        :status     :started
-                                                        :started_at (t/instant)))]
-    (try
-      (u/prog1 (f)
-        (update-task-history! th-id start-time-ns (on-success-info {:status       :success
-                                                                    :task_details (:task_details info)}
-                                                                   &lt;&gt;)))
-      (catch Throwable e
-        (update-task-history! th-id start-time-ns
-                              (on-fail-info {:task_details {:status        :failed
-                                                            :exception     (class e)
-                                                            :message       (.getMessage e)
-                                                            :stacktrace    (u/filtered-stacktrace e)
-                                                            :ex-data       (ex-data e)
-                                                            :original-info (:task_details info)}
-                                             :status       :failed}
-                                            e))
-        (throw e)))))</pre></td></tr><tr><td class="docs"><p>Record a TaskHistory before executing the body, updating TaskHistory accordingly when the body completes.
-<code>info</code> should contain at least a name for the task (conventionally lisp-cased) as <code>:task</code>;
-see the <code>TaskHistoryInfo</code> schema in this namespace for other optional keys.</p>
-
-<p>  (with-task-history {:task "send-pulses"
-                      :db_id 1
-                      :on-success-info (fn [info thunk-result] (assoc-in info [:task-details :thunk-result] thunk-result)})
-                      :on-fail-info (fn [info e] (assoc-in info [:task-details :exception-class] (class e)))}
-    ...)</p>
-
-<p>Optionally takes:
-  - on-success-info: a function that takes the updated task history and the result of the task,
-    returns a map of task history info to update when the task succeeds.
-  - on-fail-info: a function that takes the updated task history and the exception thrown by the task,
-    returns a map of task history info to update when the task fails.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro with-task-history
-  {:style/indent 1}
-  [info &amp; body]
-  `(do-with-task-history ~info (fn [] ~@body)))</pre></td></tr><tr><td class="docs"><p>TaskHistory can contain an exception for logging purposes, so use the built-in
-serialization of a <code>Throwable-&gt;map</code> to make this something that can be JSON encoded.</p>
-</td><td class="codes"><pre class="brush: clojure">(json/add-encoder
- Throwable
- (fn [throwable json-generator]
-   (json/generate-map (Throwable-&gt;map throwable) json-generator)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+</td><td class="codes"><pre class="brush: clojure">(defn- magic-group [group-name]
+  (mdb/memoize-for-application-db
+   (fn []
+     (u/prog1 (t2/select-one [:model/PermissionsGroup :id :name] :name group-name)
+       ;; normally it is impossible to delete the magic [[all-users]] or [[admin]] Groups -- see
+       ;; [[check-not-magic-group]]. This assertion is here to catch us if we do something dumb when hacking on
+       ;; the MB code -- to make tests fail fast. For that reason it's not i18n'ed.
+       (when-not &lt;&gt;
+         (throw (ex-info (format &quot;Fatal error: magic Permissions Group %s has gone missing.&quot; (pr-str group-name))
+                         {:name group-name})))))))</pre></td></tr><tr><td class="docs"><p>The name of the "All Users" magic group.</p>
+</td><td class="codes"><pre class="brush: clojure">(def all-users-group-name
+  &quot;All Users&quot;)</pre></td></tr><tr><td class="docs"><p>Fetch the <code>All Users</code> permissions group</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^{:arglists '([])} all-users
+  (magic-group all-users-group-name))</pre></td></tr><tr><td class="docs"><p>The name of the "Administrators" magic group.</p>
+</td><td class="codes"><pre class="brush: clojure">(def admin-group-name
+  &quot;Administrators&quot;)</pre></td></tr><tr><td class="docs"><p>Fetch the <code>Administrators</code> permissions group</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^{:arglists '([])} admin
+  (magic-group admin-group-name))</pre></td></tr><tr><td class="docs"><p>--------------------------------------------------- Validation ---------------------------------------------------</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Does a <code>PermissionsGroup</code> with <code>group-name</code> exist in the DB? (case-insensitive)</p>
+</td><td class="codes"><pre class="brush: clojure">(defn exists-with-name?
+  ^Boolean [group-name]
+  {:pre [((some-fn keyword? string?) group-name)]}
+  (t2/exists? :model/PermissionsGroup
+              :%lower.name (u/lower-case-en (name group-name))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- check-name-not-already-taken
+  [group-name]
+  (when (exists-with-name? group-name)
+    (throw (ex-info (tru &quot;A group with that name already exists.&quot;) {:status-code 400}))))</pre></td></tr><tr><td class="docs"><p>Make sure we're not trying to edit/delete one of the magic groups, or throw an exception.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- check-not-magic-group
+  [{id :id}]
+  {:pre [(integer? id)]}
+  (doseq [magic-group [(all-users)
+                       (admin)]]
+    (when (= id (:id magic-group))
+      (throw (ex-info (tru &quot;You cannot edit or delete the ''{0}'' permissions group!&quot; (:name magic-group))
+                      {:status-code 400})))))</pre></td></tr><tr><td class="docs"><p>--------------------------------------------------- Lifecycle ----------------------------------------------------</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(t2/define-before-insert :model/PermissionsGroup
+  [{group-name :name, :as group}]
+  (u/prog1 group
+    (check-name-not-already-taken group-name)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- set-default-permission-values!
+  [group]
+  (t2/with-transaction [_conn]
+    (doseq [db-id (t2/select-pks-vec :model/Database)]
+      (data-perms/set-new-group-permissions! group db-id (u/the-id (all-users))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(t2/define-after-insert :model/PermissionsGroup
+  [group]
+  (u/prog1 group
+    (set-default-permission-values! group)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(t2/define-before-delete :model/PermissionsGroup
+  [{id :id, :as group}]
+  (check-not-magic-group group)
+  ;; Remove from LDAP mappings
+  (classloader/require 'metabase.integrations.ldap)
+  (setting/set-value-of-type!
+   :json :ldap-group-mappings
+   (when-let [mappings (setting/get-value-of-type :json :ldap-group-mappings)]
+     (zipmap (keys mappings)
+             (for [val (vals mappings)]
+               (remove (partial = id) val))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(t2/define-before-update :model/PermissionsGroup
+  [group]
+  (let [changes (t2/changes group)]
+    (u/prog1 group
+      (when (contains? changes :name)
+        ;; Allow backfilling the entity ID for magic groups, but not changing anything else
+        (check-not-magic-group group))
+      (when-let [group-name (:name changes)]
+        (check-name-not-already-taken group-name)))))</pre></td></tr><tr><td class="docs"><p>---------------------------------------------------- Util Fns ----------------------------------------------------</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/batched-hydrate [:model/PermissionsGroup :members]
+  &quot;Batch hydration Users for a list of PermissionsGroups&quot;
+  [_model k groups]
+  (mi/instances-with-hydrated-data
+   groups k
+   #(group-by :group_id (t2/select :model/User {:select    [:u.id
+                                                            ;; user_id is for legacy reasons, we should remove it
+                                                            [:u.id :user_id]
+                                                            :u.first_name
+                                                            :u.last_name
+                                                            :u.email
+                                                            :pgm.group_id
+                                                            [:pgm.id :membership_id]
+                                                            (when (premium-features/enable-advanced-permissions?)
+                                                              [:pgm.is_group_manager :is_group_manager])]
+                                                :from      [[:core_user :u]]
+                                                :left-join [[:permissions_group_membership :pgm] [:= :u.id :pgm.user_id]]
+                                                :where     [:and
+                                                            [:= :u.is_active true]
+                                                            [:in :pgm.group_id (map :id groups)]]
+                                                :order-by  [[[:lower :u.first_name] :asc]
+                                                            [[:lower :u.last_name] :asc]]}))
+   :id
+   {:default []}))</pre></td></tr><tr><td class="docs"><p>Return a set of the IDs of all <code>PermissionsGroups</code>, aside from the admin group.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn non-admin-groups
+  []
+  (t2/select :model/PermissionsGroup :name [:not= admin-group-name]))</pre></td></tr><tr><td class="docs"><p>Return a set of the IDs of all <code>PermissionsGroups</code>, aside from the admin group and the All Users group.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn non-magic-groups
+  []
+  (t2/select :model/PermissionsGroup {:where [:and [:not= :name admin-group-name]
+                                              [:not= :name all-users-group-name]]}))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
