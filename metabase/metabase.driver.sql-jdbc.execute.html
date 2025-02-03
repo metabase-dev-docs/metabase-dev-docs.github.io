@@ -2876,6 +2876,7 @@ for JDBC drivers that do not support <code>java.time</code> classes can be found
    [clojure.java.jdbc :as jdbc]
    [clojure.string :as str]
    [java-time.api :as t]
+   [medley.core :as m]
    [metabase.driver :as driver]
    [metabase.driver.sql-jdbc.connection :as sql-jdbc.conn]
    [metabase.driver.sql-jdbc.execute.diagnostic :as sql-jdbc.execute.diagnostic]
@@ -3427,24 +3428,46 @@ fetch each value in the row. Returns <code>nil</code> when the result set has no
       (fn row-thunk* []
         (when (.next rs)
           (thunk))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- resolve-missing-base-types
+  [driver metadatas]
+  (if (qp.store/initialized?)
+    (let [missing (keep (fn [{:keys [database_type base_type]}]
+                          (when-not base_type
+                            database_type))
+                        metadatas)
+          lookup (driver/dynamic-database-types-lookup
+                  driver (lib.metadata/database (qp.store/metadata-provider)) missing)]
+      (if (seq lookup)
+        (mapv (fn [{:keys [database_type base_type] :as metadata}]
+                (if-not base_type
+                  (m/assoc-some metadata :base_type (lookup database_type))
+                  metadata))
+              metadatas)
+        metadatas))
+    metadatas))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod column-metadata :sql-jdbc
   [driver ^ResultSetMetaData rsmeta]
-  (mapv
-   (fn [^Long i]
-     (let [col-name     (.getColumnLabel rsmeta i)
-           db-type-name (.getColumnTypeName rsmeta i)
-           base-type    (sql-jdbc.sync.interface/database-type-&gt;base-type driver (keyword db-type-name))]
-       (log/tracef &quot;Column %d '%s' is a %s which is mapped to base type %s for driver %s\n&quot;
-                   i col-name db-type-name base-type driver)
-       {:name      col-name
-        ;; TODO - disabled for now since it breaks a lot of tests. We can re-enable it when the tests are in a better
-        ;; state
-        #_:original_name #_(.getColumnName rsmeta i)
-        #_:jdbc_type #_(u/ignore-exceptions
-                         (.getName (JDBCType/valueOf (.getColumnType rsmeta i))))
-        :base_type     (or base-type :type/*)
-        :database_type db-type-name}))
-   (column-range rsmeta)))</pre></td></tr><tr><td class="docs"><p>Returns an object that can be reduced to fetch the rows and columns in a <code>ResultSet</code> in a driver-specific way (e.g.
+  (-&gt;&gt; (mapv
+        (fn [^Long i]
+          (let [col-name     (.getColumnLabel rsmeta i)
+                db-type-name (.getColumnTypeName rsmeta i)
+                base-type    (sql-jdbc.sync.interface/database-type-&gt;base-type driver (keyword db-type-name))]
+            (log/tracef &quot;Column %d '%s' is a %s which is mapped to base type %s for driver %s\n&quot;
+                        i col-name db-type-name base-type driver)
+            {:name      col-name
+             ;; TODO - disabled for now since it breaks a lot of tests. We can re-enable it when the tests are in a better
+             ;; state
+             #_:original_name #_(.getColumnName rsmeta i)
+             #_:jdbc_type #_(u/ignore-exceptions
+                              (.getName (JDBCType/valueOf (.getColumnType rsmeta i))))
+             :base_type     base-type
+             :database_type db-type-name}))
+        (column-range rsmeta))
+       (resolve-missing-base-types driver)
+       (mapv (fn [{:keys [base_type] :as metadata}]
+               (if (nil? base_type)
+                 (assoc metadata :base_type :type/*)
+                 metadata)))))</pre></td></tr><tr><td class="docs"><p>Returns an object that can be reduced to fetch the rows and columns in a <code>ResultSet</code> in a driver-specific way (e.g.
 by using <code>read-column-thunk</code> to fetch values).</p>
 
 <p>The three-arity was added in 0.48.0</p>
