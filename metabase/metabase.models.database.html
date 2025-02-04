@@ -2867,9 +2867,11 @@ net.brehaut.ClojureTools = (function (SH) {
 })(SyntaxHighlighter);
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.models.database" name="metabase.models.database"><h1 class="project-name">metabase.models.database</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.models.database
+  #_{:clj-kondo/ignore [:metabase/ns-module-checker]}
   (:require
    [clojure.core.match :refer [match]]
    [medley.core :as m]
+   [metabase.analytics.prometheus :as prometheus]
    [metabase.api.common :as api]
    [metabase.audit :as audit]
    [metabase.db :as mdb]
@@ -2886,6 +2888,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.premium-features.core :as premium-features :refer [defenterprise]]
    ;; Trying to use metabase.search would cause a circular reference ;_;
    [metabase.search.spec :as search.spec]
+   [metabase.sync.concurrent :as sync.concurrent]
    [metabase.sync.schedules :as sync.schedules]
    [metabase.util :as u]
    [metabase.util.honey-sql-2 :as h2x]
@@ -2983,10 +2986,22 @@ net.brehaut.ClojureTools = (function (SH) {
     ;; this is done this way to avoid circular dependencies
     ((requiring-resolve 'metabase.sync.task.sync-databases/check-and-schedule-tasks-for-db!) database)
     (catch Throwable e
-      (log/error e &quot;Error scheduling tasks for DB&quot;))))</pre></td></tr><tr><td class="docs"><p>(Re)schedule sync operation tasks for any database which is not yet being synced regularly.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn check-and-schedule-tasks!
+      (log/error e &quot;Error scheduling tasks for DB&quot;))))</pre></td></tr><tr><td class="docs"><p>Checks database health off-thread, currently just checks connectivity.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn health-check-database!
+  [{:keys [engine details] :as database}]
+  (when-not (or (:is_audit database) (:is_sample database))
+    (sync.concurrent/submit-task!
+     (fn []
+       (try
+         (if (driver.u/can-connect-with-details? engine (assoc details :engine engine))
+           (prometheus/inc! :metabase-database/healthy {:driver engine} 1)
+           (prometheus/inc! :metabase-database/unhealthy {:driver engine} 1))
+         (catch Throwable _
+           (prometheus/inc! :metabase-database/unhealthy {:driver engine} 1)))))))</pre></td></tr><tr><td class="docs"><p>(Re)schedule sync operation tasks for any database which is not yet being synced regularly.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn check-health-and-schedule-tasks!
   []
   (doseq [database (t2/select :model/Database)]
+    (health-check-database! database)
     (check-and-schedule-tasks-for-db! database)))</pre></td></tr><tr><td class="docs"><p>TODO - something like NSNotificationCenter in Objective-C would be really really useful here so things that want to
 implement behavior when an object is deleted can do it without having to put code here</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Unschedule any currently pending sync operation tasks for <code>database</code>.</p>
