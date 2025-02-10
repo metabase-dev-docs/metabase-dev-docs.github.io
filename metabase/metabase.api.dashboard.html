@@ -2886,6 +2886,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.legacy-mbql.normalize :as mbql.normalize]
    [metabase.legacy-mbql.schema :as mbql.s]
    [metabase.legacy-mbql.util :as mbql.u]
+   [metabase.lib.core :as lib]
    [metabase.lib.metadata.jvm :as lib.metadata.jvm]
    [metabase.lib.schema.parameter :as lib.schema.parameter]
    [metabase.lib.util.match :as lib.util.match]
@@ -3881,29 +3882,61 @@ that subscriptions require). If so, delete the subscriptions and notify the dash
     :=))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn- param-&gt;fields
   [{:keys [mappings] :as param} :- mbql.s/Parameter]
-  (for [{:keys [target] {:keys [card]} :dashcard} mappings
-        :let  [[_ dimension] (-&gt;&gt; (mbql.normalize/normalize-tokens target :ignore-path)
-                                  (mbql.u/check-clause :dimension))]
-        :when dimension
-        :let  [ttag      (get-template-tag dimension card)
-               dimension (condp mbql.u/is-clause? dimension
-                           :field        dimension
-                           :expression   dimension
-                           :template-tag (:dimension ttag)
-                           (log/error &quot;cannot handle this dimension&quot; {:dimension dimension}))
-               field-id  (or
-                          ;; Get the field id from the field-clause if it contains it. This is the common case
-                          ;; for mbql queries.
-                          (lib.util.match/match-one dimension [:field (id :guard integer?) _] id)
-                          ;; Attempt to get the field clause from the model metadata corresponding to the field.
-                          ;; This is the common case for native queries in which mappings from original columns
-                          ;; have been performed using model metadata.
-                          (:id (qp.util/field-&gt;field-info dimension (:result_metadata card))))]
-        :when field-id]
-    {:field-id field-id
-     :op       (param-type-&gt;op (:type param))
-     :options  (merge (:options ttag)
-                      (:options param))}))</pre></td></tr><tr><td class="docs">
+  (let [cards (into {}
+                    (map (fn [mapping]
+                           (let [card (get-in mapping [:dashcard :card])]
+                             [(:id card) card])))
+                    mappings)
+        metadata-providers (-&gt;&gt;
+                            cards
+                            vals
+                            (map :database_id)
+                            distinct
+                            (into {}
+                                  (map (fn [database-id]
+                                         [database-id
+                                          (lib.metadata.jvm/application-database-metadata-provider database-id)]))))
+        filterable-columns (into {}
+                                 (map (fn [[card-id card]]
+                                        (let [dataset-query (:dataset_query card)]
+                                          [card-id
+                                           (if (seq dataset-query)
+                                             (-&gt;&gt; dataset-query
+                                                  (lib/query (metadata-providers (:database_id card)))
+                                                  lib/filterable-columns)
+                                             [])])))
+                                 cards)]
+    (for [{:keys [target] {:keys [card]} :dashcard} mappings
+          :let  [[_ dimension] (-&gt;&gt; (mbql.normalize/normalize-tokens target :ignore-path)
+                                    (mbql.u/check-clause :dimension))]
+          :when dimension
+          :let  [ttag      (get-template-tag dimension card)
+                 dimension (condp mbql.u/is-clause? dimension
+                             :field        dimension
+                             :expression   dimension
+                             :template-tag (:dimension ttag)
+                             (log/error &quot;cannot handle this dimension&quot; {:dimension dimension}))
+                 field-id  (or
+                            ;; Get the field id from the field-clause if it contains it. This is the common case
+                            ;; for mbql queries.
+                            (lib.util.match/match-one dimension [:field (id :guard integer?) _] id)
+                            ;; Attempt to get the field clause from the model metadata corresponding to the field.
+                            ;; This is the common case for native queries in which mappings from original columns
+                            ;; have been performed using model metadata.
+                            (:id (qp.util/field-&gt;field-info dimension (:result_metadata card)))
+                            ;; Look through the card's filterable columns and see if any of them match. This is common
+                            ;; when the query has an aggregation and you want to filter on something pre-aggregation.
+                            (lib.util.match/match-one dimension [:field (field-name :guard string?) _]
+                              (-&gt;&gt; card
+                                   :id
+                                   filterable-columns
+                                   (lib/find-matching-column (lib/-&gt;pMBQL dimension))
+                                   :id)))]
+          :when field-id]
+      {:field-id field-id
+       :op       (param-type-&gt;op (:type param))
+       :options  (merge (:options ttag)
+                        (:options param))})))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn- chain-filter-constraints :- chain-filter/Constraints
   [dashboard                   :- :map
    constraint-param-key-&gt;value :- [:map-of string? any?]]
