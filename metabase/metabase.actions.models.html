@@ -2865,434 +2865,366 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.lib.query" name="metabase.lib.query"><h1 class="project-name">metabase.lib.query</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.lib.query
-  (:refer-clojure :exclude [remove])
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.actions.models" name="metabase.actions.models"><h1 class="project-name">metabase.actions.models</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.actions.models
   (:require
    [medley.core :as m]
-   [metabase.legacy-mbql.normalize :as mbql.normalize]
-   [metabase.lib.cache :as lib.cache]
-   [metabase.lib.convert :as lib.convert]
-   [metabase.lib.dispatch :as lib.dispatch]
-   [metabase.lib.expression :as lib.expression]
-   [metabase.lib.hierarchy :as lib.hierarchy]
-   [metabase.lib.metadata :as lib.metadata]
-   [metabase.lib.metadata.calculation :as lib.metadata.calculation]
-   [metabase.lib.normalize :as lib.normalize]
-   [metabase.lib.options :as lib.options]
-   [metabase.lib.schema :as lib.schema]
-   [metabase.lib.schema.common :as lib.schema.common]
-   [metabase.lib.schema.expression :as lib.schema.expression]
-   [metabase.lib.schema.id :as lib.schema.id]
-   [metabase.lib.schema.metadata :as lib.schema.metadata]
-   [metabase.lib.temporal-bucket :as lib.temporal-bucket]
-   [metabase.lib.types.isa :as lib.types.isa]
-   [metabase.lib.util :as lib.util]
-   [metabase.lib.util.match :as lib.util.match]
+   [metabase.models.interface :as mi]
+   [metabase.models.query :as query]
+   [metabase.models.serialization :as serdes]
+   [metabase.search.core :as search]
    [metabase.util :as u]
-   [metabase.util.i18n :as i18n]
-   [metabase.util.log :as log]
+   [metabase.util.i18n :refer [tru]]
+   [metabase.util.json :as json]
    [metabase.util.malli :as mu]
-   [metabase.util.malli.registry :as mr]
-   [weavejester.dependency :as dep]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/metadata-method :mbql/query
-  [_query _stage-number _x]
-  ;; not i18n'ed because this shouldn't be developer-facing.
-  (throw (ex-info &quot;You can't calculate a metadata map for a query! Use lib.metadata.calculation/returned-columns-method instead.&quot;
-                  {})))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/returned-columns-method :mbql/query
-  [query stage-number a-query options]
-  (lib.metadata.calculation/returned-columns query stage-number (lib.util/query-stage a-query stage-number) options))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/display-name-method :mbql/query
-  [query stage-number x style]
-  (lib.metadata.calculation/display-name query stage-number (lib.util/query-stage x stage-number) style))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn native? :- :boolean
-  &quot;Given a query, return whether it is a native query.&quot;
-  [query :- ::lib.schema/query]
-  (let [stage (lib.util/query-stage query 0)]
-    (= (:lib/type stage) :mbql.stage/native)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/display-info-method :mbql/query
-  [_query _stage-number query]
-  {:is-native   (native? query)
-   :is-editable (lib.metadata/editable? query)})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn stage-count :- ::lib.schema.common/int-greater-than-or-equal-to-zero
-  &quot;Returns the count of stages in query&quot;
-  [query :- ::lib.schema/query]
-  (count (:stages query)))</pre></td></tr><tr><td class="docs"><p>Returns whether the query is runnable based on first stage :lib/type</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti can-run-method
-  {:arglists '([query card-type])}
-  (fn [query _card-type]
-    (:lib/type (lib.util/query-stage query 0))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod can-run-method :default
-  [_query _card-type]
-  true)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod can-run-method :mbql.stage/mbql
-  [query card-type]
-  (or (not= card-type :metric)
-      (let [stage        (lib.util/query-stage query 0)
-            aggregations (:aggregation stage)
-            breakouts    (:breakout stage)]
-        (and (= (stage-count query) 1)
-             (= (count aggregations) 1)
-             (or (empty? breakouts)
-                 (and (= (count breakouts) 1)
-                      (-&gt; (lib.metadata.calculation/metadata query (first breakouts))
-                          ;; extraction units change `:effective-type` to `:type/Integer`, so remove temporal bucketing
-                          ;; before doing type checks
-                          (lib.temporal-bucket/with-temporal-bucket nil)
-                          lib.types.isa/date-or-datetime?)))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn can-run :- :boolean
-  &quot;Returns whether the query is runnable. Manually validate schema for cljs.&quot;
-  [query :- ::lib.schema/query
-   card-type :- ::lib.schema.metadata/card.type]
-  (and (binding [lib.schema.expression/*suppress-expression-type-check?* true]
-         (mr/validate ::lib.schema/query query))
-       (:database query)
-       (boolean (can-run-method query card-type))))</pre></td></tr><tr><td class="docs"><p>Returns whether the query can be saved based on first stage :lib/type.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti can-save-method
-  {:arglists '([query card-type])}
-  (fn [query _card-type]
-    (:lib/type (lib.util/query-stage query 0))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod can-save-method :default
-  [_query _card-type]
-  true)</pre></td></tr><tr><td class="docs"><p>TODO FIXME -- boolean functions should end in <code>?</code></p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn can-save :- :boolean
-  &quot;Returns whether `query` for a card of `card-type` can be saved.&quot;
-  [query :- ::lib.schema/query
-   card-type :- ::lib.schema.metadata/card.type]
-  (and (lib.metadata/editable? query)
-       (can-run query card-type)
-       (boolean (can-save-method query card-type))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn can-preview :- :boolean
-  &quot;Returns whether the query can be previewed.
-  See [[metabase.lib.js/can-preview]] for how this differs from [[can-run]].&quot;
-  [query :- ::lib.schema/query]
-  (and (can-run query &quot;question&quot;)
-       ;; Either it contains no expressions with `:offset`, or there is at least one order-by.
-       (every? (fn [stage]
-                 (boolean
-                  (or (seq (:order-by stage))
-                      (not (lib.util.match/match-one (:expressions stage) :offset)))))
-               (:stages query))))</pre></td></tr><tr><td class="docs"><p>Add <code>:base-type</code> and <code>:effective-type</code> to options of fields in <code>x</code> using <code>metadata-provider</code>. Works on pmbql fields.
-<code>:effective-type</code> is required for coerced fields to pass schema checks.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn add-types-to-fields
-  [x metadata-provider]
-  (if-let [field-ids (lib.util.match/match x
-                       [:field
-                        (_options :guard (every-pred map? (complement (every-pred :base-type :effective-type))))
-                        (id :guard integer? pos?)]
-                       (when-not (some #{:mbql/stage-metadata} &amp;parents)
-                         id))]
-    ;; &quot;pre-warm&quot; the metadata provider
-    (do (lib.metadata/bulk-metadata metadata-provider :metadata/column field-ids)
-        (lib.util.match/replace
-          x
-          [:field
-           (options :guard (every-pred map? (complement (every-pred :base-type :effective-type))))
-           (id :guard integer? pos?)]
-          (if (some #{:mbql/stage-metadata} &amp;parents)
-            &amp;match
-            (update &amp;match 1 merge
-                   ;; TODO: For brush filters, query with different base type as in metadata is sent from FE. In that
-                   ;;       case no change is performed. Find a way how to handle this properly!
-                    (when-not (and (some? (:base-type options))
-                                   (not= (:base-type options)
-                                         (:base-type (lib.metadata/field metadata-provider id))))
-                     ;; Following key is used to track which base-types we added during `query` call. It is used in
-                     ;; [[metabase.lib.convert/options-&gt;legacy-MBQL]] to remove those, so query after conversion
-                     ;; as legacy -&gt; pmbql -&gt; legacy looks closer to the original.
-                      (merge (when-not (contains? options :base-type)
-                               {::transformation-added-base-type true})
-                             (-&gt; (lib.metadata/field metadata-provider id)
-                                 (select-keys [:base-type :effective-type]))))))))
-    x))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn query-with-stages :- ::lib.schema/query
-  &quot;Create a query from a sequence of stages.&quot;
-  ([metadata-providerable stages]
-   (query-with-stages (:id (lib.metadata/database metadata-providerable)) metadata-providerable stages))
-  ([database-id           :- ::lib.schema.id/database
-    metadata-providerable :- ::lib.schema.metadata/metadata-providerable
-    stages]
-   {:lib/type     :mbql/query
-    :lib/metadata (lib.metadata/-&gt;metadata-provider metadata-providerable)
-    :database     database-id
-    :stages       stages}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- query-from-legacy-query
-  [metadata-providerable legacy-query]
-  (try
-    (let [pmbql-query (-&gt; (binding [lib.schema.expression/*suppress-expression-type-check?* true]
-                            (lib.convert/-&gt;pMBQL (mbql.normalize/normalize-or-throw legacy-query)))
-                          (add-types-to-fields metadata-providerable))]
-      (merge
-       pmbql-query
-       (query-with-stages metadata-providerable (:stages pmbql-query))))
-    (catch #?(:clj Throwable :cljs :default) e
-      (throw (ex-info (i18n/tru &quot;Error creating query from legacy query: {0}&quot; (ex-message e))
-                      {:legacy-query legacy-query}
-                      e)))))</pre></td></tr><tr><td class="docs"><p>Implementation for [[query]].</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti ^:private query-method
-  {:arglists '([metadata-providerable x])}
-  (fn [_metadata-providerable x]
-    (or (lib.util/normalized-query-type x)
-        (lib.dispatch/dispatch-value x)))
-  :hierarchy lib.hierarchy/hierarchy)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod query-method :query ; legacy MBQL query
-  [metadata-providerable legacy-query]
-  (query-from-legacy-query metadata-providerable legacy-query))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod query-method :native ; legacy native query
-  [metadata-providerable legacy-query]
-  (query-from-legacy-query metadata-providerable legacy-query))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod query-method :dispatch-type/map
-  [metadata-providerable query]
-  (query-method metadata-providerable (assoc (lib.convert/-&gt;pMBQL query) :lib/type :mbql/query)))</pre></td></tr><tr><td class="docs"><p>this should already be a query in the shape we want but:
-- let's make sure it has the database metadata that was passed in
-- fill in field refs with metadata (#33680)
-- fill in top expression refs with metadata</p>
-</td><td class="codes"><pre class="brush: clojure">(defmethod query-method :mbql/query
-  [metadata-providerable {converted? :lib.convert/converted? :as query}]
-  (let [metadata-provider (lib.metadata/-&gt;metadata-provider metadata-providerable)
-        query (-&gt; query
-                  (assoc :lib/metadata metadata-provider)
-                  (dissoc :lib.convert/converted?)
-                  lib.normalize/normalize)
-        stages (:stages query)]
-    (cond-&gt; query
-      converted?
-      (assoc
-       :stages
-       (mapv (fn [[stage-number stage]]
-               (-&gt; stage
-                   (add-types-to-fields metadata-provider)
-                   (lib.util.match/replace
-                     [:expression
-                      (opts :guard (every-pred map? (complement (every-pred :base-type :effective-type))))
-                      expression-name]
-                     (let [found-ref (try
-                                       (m/remove-vals
-                                        #(= :type/* %)
-                                        (-&gt; (lib.expression/expression-ref query stage-number expression-name)
-                                            second
-                                            (select-keys [:base-type :effective-type])))
-                                       (catch #?(:clj Exception :cljs :default) _
-                                        ;; This currently does not find expressions defined in join stages
-                                         nil))]
-                      ;; Fallback if metadata is missing
-                       [:expression (merge found-ref opts) expression-name]))))
-             (m/indexed stages))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod query-method :metadata/table
-  [metadata-providerable table-metadata]
-  (query-with-stages metadata-providerable
-                     [{:lib/type     :mbql.stage/mbql
-                       :source-table (u/the-id table-metadata)}]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(declare query)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- metric-query
-  [metadata-providerable card-metadata]
-  (let [card-id (u/the-id card-metadata)
-        metric-first-stage (-&gt; (query metadata-providerable (:dataset-query card-metadata))
-                               (lib.util/query-stage 0))
-        base-query (query-with-stages metadata-providerable
-                                      [(select-keys metric-first-stage [:lib/type :source-card :source-table])])
-        base-query (reduce
-                    #(lib.util/add-summary-clause %1 0 :breakout %2)
-                    base-query
-                    (:breakout metric-first-stage))]
-    (-&gt; base-query
-        (lib.util/add-summary-clause
-         0 :aggregation
-         (lib.options/ensure-uuid [:metric {} card-id])))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod query-method :metadata/card
-  [metadata-providerable card-metadata]
-  (if (or (= (:type card-metadata) :metric)
-          (= (:lib/type card-metadata) :metadata/metric))
-    (metric-query metadata-providerable card-metadata)
-    (query-with-stages metadata-providerable
-                       [{:lib/type :mbql.stage/mbql
-                         :source-card (u/the-id card-metadata)}])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod query-method :metadata/metric
-  [metadata-providerable card-metadata]
-  (metric-query metadata-providerable card-metadata))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod query-method :mbql.stage/mbql
-  [metadata-providerable mbql-stage]
-  (query-with-stages metadata-providerable [mbql-stage]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod query-method :mbql.stage/native
-  [metadata-providerable native-stage]
-  (query-with-stages metadata-providerable [native-stage]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn query :- ::lib.schema/query
-  &quot;Create a new MBQL query from anything that could conceptually be an MBQL query, like a Database or Table or an
-  existing MBQL query or saved question or whatever. If the thing in question does not already include metadata, pass
-  it in separately -- metadata is needed for most query manipulation operations.&quot;
-  [metadata-providerable :- ::lib.schema.metadata/metadata-providerable
-   x]
-  (lib.cache/attach-query-cache (query-method metadata-providerable x)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn query-from-legacy-inner-query :- ::lib.schema/query
-  &quot;Create a pMBQL query from a legacy inner query.&quot;
-  [metadata-providerable :- ::lib.schema.metadata/metadata-providerable
-   database-id           :- ::lib.schema.id/database
-   inner-query           :- :map]
-  (-&gt;&gt; (lib.convert/legacy-query-from-inner-query database-id inner-query)
-       lib.convert/-&gt;pMBQL
-       (query metadata-providerable)))</pre></td></tr><tr><td class="docs"><p>Convert the pMBQL <code>a-query</code> into a legacy MBQL query.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn -&gt;legacy-MBQL
-  [a-query]
-  (-&gt; a-query lib.convert/-&gt;legacy-MBQL))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn with-different-table :- ::lib.schema/query
-  &quot;Changes an existing query to use a different source table or card.
-   Can be passed an integer table id or a legacy `card__&lt;id&gt;` string.&quot;
-  [original-query :- ::lib.schema/query
-   table-id :- [:or ::lib.schema.id/table :string]]
-  (let [metadata-provider (lib.metadata/-&gt;metadata-provider original-query)]
-    (query metadata-provider (lib.metadata/table-or-card metadata-provider table-id))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- occurs-in-expression?
-  [expression-clause clause-type expression-body]
-  (or (and (lib.util/clause-of-type? expression-clause clause-type)
-           (= (nth expression-clause 2) expression-body))
-      (and (sequential? expression-clause)
-           (boolean
-            (some #(occurs-in-expression? % clause-type expression-body)
-                  (nnext expression-clause))))))</pre></td></tr><tr><td class="docs"><p>Tests whether predicate <code>pred</code> is true for an element of clause <code>clause</code> of <code>query-or-join</code>.
-The test is transitive over joins.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- occurs-in-stage-clause?
-  [query-or-join clause pred]
-  (boolean
-   (some (fn [stage]
-           (or (some pred (clause stage))
-               (some #(occurs-in-stage-clause? % clause pred) (:joins stage))))
-         (:stages query-or-join))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn uses-segment? :- :boolean
-  &quot;Tests whether `a-query` uses segment with ID `segment-id`.
-  `segment-id` can be a regular segment ID or a string. The latter is for symmetry
-  with [[uses-metric?]].&quot;
-  [a-query :- ::lib.schema/query
-   segment-id :- [:or ::lib.schema.id/segment :string]]
-  (occurs-in-stage-clause? a-query :filters #(occurs-in-expression? % :segment segment-id)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn uses-metric? :- :boolean
-  &quot;Tests whether `a-query` uses metric with ID `metric-id`.&quot;
-  [a-query :- ::lib.schema/query
-   metric-id :- ::lib.schema.id/metric]
-  (occurs-in-stage-clause? a-query :aggregation #(occurs-in-expression? % :metric metric-id)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private clause-types-order
-  ;; When previewing some clause type `:x`, we drop the prefix of this list up to but excluding `:x`.
-  ;; So if previewing `:aggregation`, we drop `:limit` and `:order-by`;
-  ;; if previewing `:filters` we drop `:limit`, `:order-by`, `:aggregation` and `:breakout`.
-  ;; (In practice `:breakout` is never previewed separately, but the order is important to get the behavior above.
-  ;; There are tests for this.)
-  [:limit :order-by :aggregation :breakout :filters :expressions :joins :data])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- preview-stage [stage clause-type clause-index]
-  (let [to-drop (take-while #(not= % clause-type) clause-types-order)]
-    (cond-&gt; (reduce dissoc stage to-drop)
-      clause-index (update clause-type #(vec (take (inc clause-index) %))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn preview-query :- [:maybe ::lib.schema/query]
-  &quot;*Truncates* a query for use in the Notebook editor's \&quot;preview\&quot; system.
-  Takes `query` and `stage-index` as usual.
-  - Stages later than `stage-index` are dropped.
-  - `clause-type` is an enum (see below); all clauses of *later* types are dropped.
-  - `clause-index` is optional: if not provided then all clauses are kept; if it's a number than clauses
-    `[0, clause-index]` are kept. (To keep no clauses, specify the earlier `clause-type`.)
-  The `clause-type` enum represents the steps of the notebook editor, in the order they appear in the notebook:
-  - `:data` - just the source data for the stage
-  - `:joins`
-  - `:expressions`
-  - `:filters`
-  - `:breakout`
-  - `:aggregation`
-  - `:order-by`
-  - `:limit`&quot;
-  [a-query      :- ::lib.schema/query
-   stage-number :- :int
-   clause-type  :- [:enum :data :joins :expressions :filters :aggregation :breakout :order-by :limit]
-   clause-index :- [:maybe :int]]
-  (when (native? a-query)
-    (throw (ex-info &quot;preview-query cannot be called on native queries&quot; {:query a-query})))
-  (let [stage-number (lib.util/canonical-stage-index a-query stage-number)]
-    (-&gt; a-query
-        (update :stages #(vec (take (inc stage-number) %)))
-        (update-in [:stages stage-number] preview-stage clause-type clause-index))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn wrap-native-query-with-mbql :- [:map
-                                         [:query ::lib.schema/query]
-                                         [:stage-number :int]]
-  &quot;Given a query and stage number, return a possibly-updated query and stage number which is guaranteed to be MBQL and
-  so to support drill-thru and similar logic. Such a query must be saved, hence the `card-id`.
-  If the provided query is already MBQL, this is transparent.
-  Returns `{:query query', :stage-number stage-number'}`.
-  You might find it more convenient to call [[with-wrapped-native-query]].&quot;
-  [a-query      :- ::lib.schema/query
-   stage-number :- :int
-   card-id      :- [:maybe ::lib.schema.id/card]]
-  (or (and (lib.util/native-stage? a-query stage-number)
-           card-id
-           (if-let [card (lib.metadata/card a-query card-id)]
-             {:query        (query a-query card)
-              :stage-number -1}
-             (do
-               (log/warn &quot;Failed to wrap native query with MBQL; card not found&quot; {:query   a-query
-                                                                                  :card-id card-id})
-               nil)))
-      {:query        a-query
-       :stage-number stage-number}))</pre></td></tr><tr><td class="docs"><p>Calls [[wrap-native-query-with-mbql]] on the given <code>a-query</code>, <code>stage-number</code> and <code>card-id</code>, then calls
-<code>(f a-query' stage-number' args...)</code> using the query and stage number for the wrapper.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn with-wrapped-native-query
-  [a-query stage-number card-id f &amp; args]
-  (let [{q :query, n :stage-number} (wrap-native-query-with-mbql a-query stage-number card-id)]
-    (apply f q n args)))</pre></td></tr><tr><td class="docs"><p>Given a query, ensure it doesn't have any keys or structures that aren't safe for serialization.</p>
+   [methodical.core :as methodical]
+   [toucan2.core :as t2]
+   [toucan2.tools.hydrate :as t2.hydrate]))</pre></td></tr><tr><td class="docs"><p>-------------------------------------------- Entity &amp; Life Cycle ----------------------------------------------</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/table-name :model/Action [_model] :action)
+(methodical/defmethod t2/table-name :model/QueryAction [_model] :query_action)
+(methodical/defmethod t2/table-name :model/HTTPAction [_model] :http_action)
+(methodical/defmethod t2/table-name :model/ImplicitAction [_model] :implicit_action)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private action-sub-models [:model/QueryAction :model/HTTPAction :model/ImplicitAction])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(doto :model/Action
+  (derive :metabase/model)
+  ;;; You can read/write an Action if you can read/write its model (Card)
+  (derive ::mi/read-policy.full-perms-for-perms-set)
+  (derive ::mi/write-policy.full-perms-for-perms-set)
+  (derive :hook/entity-id)
+  (derive :hook/timestamped?))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(doseq [model action-sub-models]
+  (derive model :metabase/model))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(derive :model/QueryAction :hook/search-index)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/primary-keys :model/QueryAction    [_model] [:action_id])
+(methodical/defmethod t2/primary-keys :model/HTTPAction     [_model] [:action_id])
+(methodical/defmethod t2/primary-keys :model/ImplicitAction [_model] [:action_id])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private transform-action-visualization-settings
+  {:in  mi/json-in
+   :out (comp (fn [viz-settings]
+                ;; the keys of :fields should be strings, not keywords
+                (m/update-existing viz-settings :fields update-keys name))
+              mi/json-out-with-keywordization)})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(t2/deftransforms :model/Action
+  {:type                   mi/transform-keyword
+   :parameter_mappings     mi/transform-parameters-list
+   :parameters             mi/transform-card-parameters-list
+   :visualization_settings transform-action-visualization-settings})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(t2/deftransforms :model/QueryAction
+  ;; shouldn't this be mi/transform-metabase-query?
+  {:dataset_query mi/transform-json})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private transform-json-with-nested-parameters
+  {:in  (comp mi/json-in
+              (fn [template]
+                (u/update-if-exists template :parameters mi/normalize-parameters-list)))
+   :out (comp (fn [template]
+                (u/update-if-exists template :parameters (mi/catch-normalization-exceptions mi/normalize-parameters-list)))
+              mi/json-out-with-keywordization)})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(t2/deftransforms :model/HTTPAction
+  {:template transform-json-with-nested-parameters})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/batched-hydrate [:model/Action :model]
+  [_model k actions]
+  (mi/instances-with-hydrated-data
+   actions k
+   #(t2/select-pk-&gt;fn identity :model/Card :id [:in (map :model_id actions)])
+   :model_id))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- check-model-is-not-a-saved-question
+  [model-id]
+  (when-not (= (t2/select-one-fn :type [:model/Card :type] :id model-id) :model)
+    (throw (ex-info (tru &quot;Actions must be made with models, not cards.&quot;)
+                    {:status-code 400}))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(t2/define-before-insert :model/Action
+  [{model-id :model_id, :as action}]
+  (u/prog1 action
+    (check-model-is-not-a-saved-question model-id)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(t2/define-before-update :model/Action
+  [{archived? :archived, id :id, model-id :model_id, :as changes}]
+  (u/prog1 changes
+    (if archived?
+      (t2/delete! :model/DashboardCard :action_id id)
+      (check-model-is-not-a-saved-question model-id))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defmethod mi/perms-objects-set :model/Action :- [:set {:min 1} :string]
+  [instance      :- [:map
+                     [:model_id pos-int?]]
+   read-or-write :- [:enum :read :write]]
+  (mi/perms-objects-set (t2/select-one :model/Card :id (:model_id instance)) read-or-write))</pre></td></tr><tr><td class="docs"><p>The columns that are common to all Action types.</p>
+</td><td class="codes"><pre class="brush: clojure">(def action-columns
+  [:archived :created_at :creator_id :description :entity_id :made_public_by_id :model_id :name :parameter_mappings
+   :parameters :public_uuid :type :updated_at :visualization_settings])</pre></td></tr><tr><td class="docs"><p>Returns the model from an action type.
+ <code>action-type</code> can be a string or a keyword.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn type-&gt;model
+  [action-type]
+  (case action-type
+    :http     :model/HTTPAction
+    :implicit :model/ImplicitAction
+    :query    :model/QueryAction))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------ CRUD fns -----------------------------------------------------</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Inserts an Action and related type table. Returns the action id.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn insert!
+  [action-data]
+  (t2/with-transaction [_conn]
+    (let [action (first (t2/insert-returning-instances! :model/Action (select-keys action-data action-columns)))
+          model  (type-&gt;model (:type action))]
+      (t2/query-one {:insert-into (t2/table-name model)
+                     :values [(-&gt; (apply dissoc action-data action-columns)
+                                  (assoc :action_id (:id action))
+                                  (cond-&gt;
+                                   (= (:type action) :implicit)
+                                    (dissoc :database_id)
+                                    (= (:type action) :http)
+                                    (update :template json/encode)
+                                    (= (:type action) :query)
+                                    (update :dataset_query json/encode)))]})
+      (:id action))))</pre></td></tr><tr><td class="docs"><p>Updates an Action and the related type table.
+ Deletes the old type table row if the type has changed.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn update!
+  [{:keys [id] :as action} existing-action]
+  (when-let [action-row (not-empty (select-keys action action-columns))]
+    (t2/update! :model/Action id action-row))
+  (when-let [type-row (not-empty (cond-&gt; (apply dissoc action :id action-columns)
+                                   (= (or (:type action) (:type existing-action))
+                                      :implicit)
+                                   (dissoc :database_id)))]
+    (let [type-row (assoc type-row :action_id id)
+          existing-model (type-&gt;model (:type existing-action))]
+      (if (and (:type action) (not= (:type action) (:type existing-action)))
+        (let [new-model (type-&gt;model (:type action))]
+          (t2/delete! existing-model :action_id id)
+          (t2/insert! new-model (assoc type-row :action_id id)))
+        (t2/update! existing-model id type-row)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- normalize-query-actions [actions]
+  (when (seq actions)
+    (let [query-actions (t2/select :model/QueryAction :action_id [:in (map :id actions)])
+          action-id-&gt;query-actions (m/index-by :action_id query-actions)]
+      (for [action actions]
+        (merge action (-&gt; action :id action-id-&gt;query-actions (dissoc :action_id)))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- normalize-http-actions [actions]
+  (when (seq actions)
+    (let [http-actions (t2/select :model/HTTPAction :action_id [:in (map :id actions)])
+          http-actions-by-action-id (m/index-by :action_id http-actions)]
+      (map (fn [action]
+             (let [http-action (get http-actions-by-action-id (:id action))]
+               (-&gt; action
+                   (merge
+                    {:disabled false}
+                    (select-keys http-action [:template :response_handle :error_handle])
+                    (select-keys (:template http-action) [:parameters :parameter_mappings])))))
+           actions))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- normalize-implicit-actions [actions]
+  (when (seq actions)
+    (let [implicit-actions (t2/select :model/ImplicitAction :action_id [:in (map :id actions)])
+          implicit-actions-by-action-id (m/index-by :action_id implicit-actions)]
+      (map (fn [action]
+             (let [implicit-action (get implicit-actions-by-action-id (:id action))]
+               (merge action
+                      (select-keys implicit-action [:kind]))))
+           actions))))</pre></td></tr><tr><td class="docs"><p>Select Actions and fill in sub type information. Don't use this if you need implicit parameters
+ for implicit actions, use [[select-action]] instead.
+ <code>options</code> is passed to <code>t2/select</code> <code>&amp; options</code> arg.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- select-actions-without-implicit-params
+  [&amp; options]
+  (let [{:keys [query http implicit]} (group-by :type (apply t2/select :model/Action options))
+        query-actions                 (normalize-query-actions query)
+        http-actions                  (normalize-http-actions http)
+        implicit-actions              (normalize-implicit-actions implicit)]
+    (sort-by :updated_at (concat query-actions http-actions implicit-actions))))</pre></td></tr><tr><td class="docs"><p>Makes sure that if <code>coll</code> is indexed by <code>index-by</code>, no keys will be in conflict.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn unique-field-slugs?
+  [fields]
+  (empty? (m/filter-vals #(not= % 1) (frequencies (map (comp u/slugify :name) fields)))))</pre></td></tr><tr><td class="docs"><p>Returns a map of card-id -> implicit-parameters for the given models</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- implicit-action-parameters
+  [cards]
+  (let [card-by-table-id (into {}
+                               (for [card cards
+                                     :let [{:keys [table-id]} (query/query-&gt;database-and-table-ids (:dataset_query card))]
+                                     :when table-id]
+                                 [table-id card]))
+        tables (when-let [table-ids (seq (keys card-by-table-id))]
+                 (t2/hydrate (t2/select 'Table :id [:in table-ids]) :fields))]
+    (into {}
+          (for [table tables
+                :let [fields (:fields table)]
+                ;; Skip tables for have conflicting slugified columns i.e. table has &quot;name&quot; and &quot;NAME&quot; columns.
+                :when (unique-field-slugs? fields)
+                :let [card         (get card-by-table-id (:id table))
+                      id-&gt;metadata (m/index-by :id (:result_metadata card))
+                      parameters (-&gt;&gt; fields
+                                      ;; get display_name from metadata
+                                      (keep (fn [field]
+                                              (when-let [metadata (id-&gt;metadata (:id field))]
+                                                (assoc field :display_name (:display_name metadata)))))
+                                      ;; remove exploded json fields and any structured field
+                                      (remove (some-fn
+                                               ;; exploded json fields can't be recombined in sql yet
+                                               :nfc_path
+                                               ;; their parents, a json field, nor things like cidr, macaddr, xml, etc
+                                               (comp #(isa? % :type/Structured) :effective_type)
+                                               ;; or things which we don't recognize
+                                               (comp #{:type/*} :effective_type)))
+                                      (map (fn [field]
+                                             {:id (u/slugify (:name field))
+                                              :display-name (:display_name field)
+                                              :target [:variable [:template-tag (u/slugify (:name field))]]
+                                              :type (:base_type field)
+                                              :required (:database_required field)
+                                              :is-auto-increment (:database_is_auto_increment field)
+                                              ::field-id (:id field)
+                                              ::pk? (isa? (:semantic_type field) :type/PK)})))]]
+            [(:id card) parameters]))))</pre></td></tr><tr><td class="docs"><p>Find actions with given options and generate implicit parameters for execution. Also adds the <code>:database_id</code> of the
+ model for implicit actions.</p>
 
-<p>For example, any Atoms or Delays or should be removed.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn serializable
-  [a-query]
-  (-&gt; a-query
-      (dissoc a-query :lib/metadata)
-      lib.cache/discard-query-cache))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- stage-seq* [query-fragment]
-  (cond
-    (vector? query-fragment)
-    (case (first query-fragment)
-      :metric
-      [{:source-card (get query-fragment 2)}]
-      (mapcat stage-seq* query-fragment))
-    (map? query-fragment)
-    (concat (:stages query-fragment) (mapcat stage-seq* (vals query-fragment)))
-    :else
-    []))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- stage-seq [card-id a-query]
-  (map #(assoc % ::from-card card-id) (stage-seq* a-query)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- expand-stage [metadata-provider stage]
-  (let [card-id (:source-card stage)
-        expanded-query (some-&gt;&gt; card-id
-                                (lib.metadata/card metadata-provider)
-                                :dataset-query
-                                (query metadata-provider))]
-    (stage-seq card-id expanded-query)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- add-stage-dep [graph stage]
-  (let [card-id  (:source-card  stage)
-        table-id (:source-table stage)
-        from-id  (::from-card   stage)]
-    (try
-      (cond-&gt; graph
-        card-id  (dep/depend [:card from-id] [:card  card-id])
-        table-id (dep/depend [:card from-id] [:table table-id]))
-      (catch #?(:clj Exception :cljs :default) _e
-        (throw (ex-info (i18n/tru &quot;Cannot save card with cycles.&quot;) {}))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- build-graph [source-id metadata-provider a-query]
-  (loop [graph (dep/graph)
-         stages-visited 0
-         stages (stage-seq source-id a-query)]
-    (cond
-      (empty? stages)
-      graph
-      (&gt; stages-visited 50)
-      (throw (ex-info (i18n/tru &quot;The chain of dependencies is too long to save card.&quot;) {}))
-      :else
-      (let [[stage &amp; stages] stages]
-        (recur (add-stage-dep graph stage)
-               (inc stages-visited)
-               (concat stages (expand-stage metadata-provider stage)))))))</pre></td></tr><tr><td class="docs"><p>Returns nil if the card with given <code>card-id</code> can be overwritten with <code>query</code>.
-Throws <code>ExceptionInfo</code> with a user-facing message otherwise.</p>
-
-<p>Currently checks for cycles (self-referencing queries).</p>
-</td><td class="codes"><pre class="brush: clojure">(defn check-overwrite
-  [card-id new-query]
-  (build-graph card-id new-query new-query)
-  ;; return nil if nothing throws
-  nil)</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+<p> Pass in known-models to save a second Card lookup.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn select-actions
+  [known-models &amp; options]
+  (let [actions                       (apply select-actions-without-implicit-params options)
+        implicit-action-model-ids     (set (map :model_id (filter #(= :implicit (:type %)) actions)))
+        implicit-action-models        (if known-models
+                                        (-&gt;&gt; known-models
+                                             (filter #(contains? implicit-action-model-ids (:id %)))
+                                             distinct)
+                                        (when (seq implicit-action-model-ids)
+                                          (t2/select 'Card :id [:in implicit-action-model-ids])))
+        model-id-&gt;db-id               (into {} (for [card implicit-action-models]
+                                                 [(:id card) (:database_id card)]))
+        model-id-&gt;implicit-parameters (when (seq implicit-action-models)
+                                        (implicit-action-parameters implicit-action-models))]
+    (for [action actions]
+      (if (= (:type action) :implicit)
+        (let [model-id        (:model_id action)
+              saved-params    (m/index-by :id (:parameters action))
+              action-kind     (:kind action)
+              implicit-params (cond-&gt;&gt; (get model-id-&gt;implicit-parameters model-id)
+                                :always
+                                (map (fn [param] (merge param (get saved-params (:id param)))))
+                                (= &quot;row/delete&quot; action-kind)
+                                (filter ::pk?)
+                                (= &quot;row/create&quot; action-kind)
+                                (remove #(or (:is-auto-increment %)
+                                             ;; non-required PKs like column with default is uuid_generate_v4()
+                                             (and (::pk? %) (not (:required %)))))
+                                (contains? #{&quot;row/update&quot; &quot;row/delete&quot;} action-kind)
+                                (map (fn [param] (cond-&gt; param (::pk? param) (assoc :required true))))
+                                :always
+                                (map #(dissoc % ::pk? ::field-id)))]
+          (cond-&gt; (assoc action :database_id (model-id-&gt;db-id (:model_id action)))
+            (seq implicit-params)
+            (-&gt; (assoc :parameters implicit-params)
+                (update-in [:visualization_settings :fields]
+                           (fn [fields]
+                             (let [param-ids (map :id implicit-params)
+                                   fields    (-&gt;&gt; (or fields {})
+                                                  ;; remove entries that don't match params (in case of deleted columns)
+                                                  (m/filter-keys (set param-ids)))]
+                               ;; add default entries for params that don't have an entry
+                               (reduce (fn [acc param-id]
+                                         (if (contains? acc param-id)
+                                           acc
+                                           (assoc acc param-id {:id param-id, :hidden false})))
+                                       fields
+                                       param-ids)))))))
+        action))))</pre></td></tr><tr><td class="docs"><p>Selects an Action and fills in the subtype data and implicit parameters.
+ <code>options</code> is [[apply]]ed to [[t2/select]].</p>
+</td><td class="codes"><pre class="brush: clojure">(defn select-action
+  [&amp; options]
+  ;; TODO -- it's dumb that we're calling `t2/select` rather than `t2/select-one` above, limiting like this should never
+  ;; be done server-side. I don't have time to fix this right now. -- Cam
+  (first (apply select-actions nil options)))</pre></td></tr><tr><td class="docs"><p>Adds a boolean field <code>:database-enabled-actions</code> to each action according to the <code>database-enable-actions</code> setting for
+ the action's database.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- map-assoc-database-enable-actions
+  [actions]
+  (let [action-ids                  (map :id actions)
+        get-database-enable-actions (fn [{:keys [settings]}]
+                                      (boolean (some-&gt; settings
+                                                       ((get-in (t2/transforms :model/Database) [:settings :out]))
+                                                       :database-enable-actions)))
+        id-&gt;database-enable-actions (into {}
+                                          (map (juxt :id get-database-enable-actions))
+                                          (t2/query {:select [:action.id :db.settings]
+                                                     :from   :action
+                                                     :join   [[:report_card :card] [:= :card.id :action.model_id]
+                                                              [:metabase_database :db] [:= :db.id :card.database_id]]
+                                                     :where  [:in :action.id action-ids]}))]
+    (map (fn [action]
+           (assoc action :database_enabled_actions (get id-&gt;database-enable-actions (:id action))))
+         actions)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2.hydrate/batched-hydrate [:model/DashboardCard :dashcard/action]
+  &quot;Hydrates actions from DashboardCards. Adds a boolean field `:database-enabled-actions` to each action according to
+  the\n `database-enable-actions` setting for the action's database.&quot;
+  [_model _k dashcards]
+  (let [actions-by-id (when-let [action-ids (seq (keep :action_id dashcards))]
+                        (-&gt;&gt; (select-actions nil :id [:in action-ids])
+                             map-assoc-database-enable-actions
+                             (m/index-by :id)))]
+    (for [dashcard dashcards]
+      (m/assoc-some dashcard :action (get actions-by-id (:action_id dashcard))))))</pre></td></tr><tr><td class="docs"><p>Get the action associated with a dashcard if exists, return <code>nil</code> otherwise.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn dashcard-&gt;action
+  [dashcard-or-dashcard-id]
+  (some-&gt;&gt; (t2/select-one-fn :action_id :model/DashboardCard :id (u/the-id dashcard-or-dashcard-id))
+           (select-action :id)))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------ Serialization ---------------------------------------------------</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/hash-fields :model/Action [_action]
+  [:name (serdes/hydrated-hash :model) :created_at])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/generate-path &quot;QueryAction&quot; [_ _] nil)
+(defmethod serdes/make-spec &quot;QueryAction&quot; [_model-name _opts]
+  {:copy      []
+   :transform {:action_id     (serdes/parent-ref)
+               :database_id   (serdes/fk :model/Database :name)
+               :dataset_query {:export serdes/export-mbql :import serdes/import-mbql}}})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/generate-path &quot;HTTPAction&quot; [_ _] nil)
+(defmethod serdes/make-spec &quot;HTTPAction&quot; [_model-name _opts]
+  {:copy      [:error_handle :response_handle :template]
+   :transform {:action_id (serdes/parent-ref)}})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/generate-path &quot;ImplicitAction&quot; [_ _] nil)
+(defmethod serdes/make-spec &quot;ImplicitAction&quot; [_model-name _opts]
+  {:copy      [:kind]
+   :transform {:action_id (serdes/parent-ref)}})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/make-spec &quot;Action&quot; [_model-name opts]
+  {:copy      [:archived :description :entity_id :name :public_uuid]
+   :skip      []
+   :transform {:created_at             (serdes/date)
+               :type                   (serdes/kw)
+               :creator_id             (serdes/fk :model/User)
+               :made_public_by_id      (serdes/fk :model/User)
+               :model_id               (serdes/fk :model/Card)
+               :query                  (serdes/nested :model/QueryAction :action_id opts)
+               :http                   (serdes/nested :model/HTTPAction :action_id opts)
+               :implicit               (serdes/nested :model/ImplicitAction :action_id opts)
+               :parameters             {:export serdes/export-parameters :import serdes/import-parameters}
+               :parameter_mappings     {:export serdes/export-parameter-mappings
+                                        :import serdes/import-parameter-mappings}
+               :visualization_settings {:export serdes/export-visualization-settings
+                                        :import serdes/import-visualization-settings}}})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/dependencies &quot;Action&quot; [action]
+  (set
+   (concat
+    ;; other stuff is implicitly referenced through a Card
+    [[{:model &quot;Card&quot; :id (:model_id action)}]]
+    ;; this method is called on ingested data before transformation, and so here it always will be a string
+    (when (= (:type action) &quot;query&quot;)
+      (let [{:keys [database_id dataset_query]} (first (:query action))]
+        (concat
+         [[{:model &quot;Database&quot; :id database_id}]]
+         (serdes/mbql-deps dataset_query)))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod serdes/storage-path &quot;Action&quot; [action _ctx]
+  (let [{:keys [id label]} (-&gt; action serdes/path last)]
+    [&quot;actions&quot; (serdes/storage-leaf-file-name id label)]))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------- Search ----------------------------------------------------------</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(search/define-spec &quot;action&quot;
+  {:model        :model/Action
+   :attrs        {:archived       true
+                  :collection-id  :model.collection_id
+                  :creator-id     true
+                  :database-id    :query_action.database_id
+                  :native-query   :query_action.dataset_query
+                  ;; workaround for actions not having revisions (yet)
+                  :last-edited-at :updated_at
+                  :created-at     true
+                  :updated-at     true}
+   :search-terms [:name :description]
+   :render-terms {:model-id   :model.id
+                  :model-name :model.name}
+   :where        [:= :collection.namespace nil]
+   :joins        {:model        [:model/Card [:= :model.id :this.model_id]]
+                  :query_action [:model/QueryAction [:= :query_action.action_id :this.id]]
+                  :collection   [:model/Collection [:= :collection.id :model.collection_id]]}})</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

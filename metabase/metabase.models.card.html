@@ -2898,7 +2898,6 @@ is a historical name, but is the same thing; both terms are used interchangeably
    [metabase.models.pulse :as models.pulse]
    [metabase.models.query :as query]
    [metabase.models.query.permissions :as query-perms]
-   [metabase.models.revision :as revision]
    [metabase.models.serialization :as serdes]
    [metabase.moderation :as moderation]
    [metabase.permissions.core :as perms]
@@ -2937,7 +2936,27 @@ is a historical name, but is the same thing; both terms are used interchangeably
   ;; You can read/write a Card if you can read/write its parent Collection
   (derive :perms/use-parent-collection-perms)
   (derive :hook/timestamped?)
-  (derive :hook/entity-id))</pre></td></tr><tr><td class="docs">
+  (derive :hook/entity-id))</pre></td></tr><tr><td class="docs"><p>Make sure the Current User has the appropriate permissions to run <code>query</code>. We don't want Users saving Cards with
+queries they wouldn't be allowed to run!</p>
+
+<p>TODO -- this should be part of <code>can-write?</code>/<code>can-update?</code> and be done automatically</p>
+</td><td class="codes"><pre class="brush: clojure">(defn check-run-permissions-for-query
+  [query]
+  {:pre [(map? query)]}
+  (when-not (query-perms/can-run-query? query)
+    (let [required-perms (try
+                           (query-perms/required-perms-for-query query :throw-exceptions? true)
+                           (catch Throwable e
+                             e))]
+      (throw (ex-info (tru &quot;You cannot save this Question because you do not have permissions to run its query.&quot;)
+                      {:status-code    403
+                       :query          query
+                       :required-perms (if (instance? Throwable required-perms)
+                                         :error
+                                         required-perms)
+                       :actual-perms   @api/*current-user-permissions-set*}
+                      (when (instance? Throwable required-perms)
+                        required-perms))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod mi/can-write? :model/Card
   ([instance]
    ;; Cards in audit collection should not be writable.
@@ -3139,27 +3158,7 @@ the <code>:can_run_adhoc_query</code> above</p>
                               {:order-by [[:name :asc]]})
                    (filter mi/can-read?)))
    :id))</pre></td></tr><tr><td class="docs"><p>There's more hydration in the shared metabase.moderation namespace, but it needs to be required:</p>
-</td><td class="codes"><pre class="brush: clojure">(comment moderation/keep-me)</pre></td></tr><tr><td class="docs"><p>--------------------------------------------------- Revisions ----------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private excluded-columns-for-card-revision
-  [:id :created_at :updated_at :last_used_at :entity_id :creator_id :public_uuid :made_public_by_id :metabase_version
-   :initially_published_at :cache_invalidated_at :view_count])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod revision/revert-to-revision! :model/Card
-  [model id user-id serialized-card]
-  ;; make sure we handle &lt; 50 cards that had `:dataset` instead of `:type`
-  (let [serialized-card (cond-&gt; serialized-card
-                          (contains? serialized-card :dataset) (-&gt; (dissoc :dataset)
-                                                                   (assoc :type (if (:dataset serialized-card) :model :question))))]
-    ((get-method revision/revert-to-revision! :default) model id user-id serialized-card)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod revision/serialize-instance :model/Card
-  ([instance]
-   (revision/serialize-instance :model/Card nil instance))
-  ([_model _id instance]
-   (cond-&gt; (apply dissoc instance excluded-columns-for-card-revision)
-     ;; datasets should preserve edits to metadata
-     ;; the type check only needed in tests because most test object does not include `type` key
-     (and (some? (:type instance)) (not (model? instance)))
-     (dissoc :result_metadata))))</pre></td></tr><tr><td class="docs"><p>--------------------------------------------------- Lifecycle ----------------------------------------------------</p>
+</td><td class="codes"><pre class="brush: clojure">(comment moderation/keep-me)</pre></td></tr><tr><td class="docs"><p>--------------------------------------------------- Lifecycle ----------------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Lift <code>database_id</code>, <code>table_id</code>, <code>query_type</code>, and <code>source_card_id</code> fields
 from query definition when inserting/updating a Card.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn populate-query-fields

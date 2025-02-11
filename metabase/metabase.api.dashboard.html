@@ -2890,7 +2890,6 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.lib.metadata.jvm :as lib.metadata.jvm]
    [metabase.lib.schema.parameter :as lib.schema.parameter]
    [metabase.lib.util.match :as lib.util.match]
-   [metabase.models.action :as action]
    [metabase.models.card :as card]
    [metabase.models.collection :as collection]
    [metabase.models.collection.root :as collection.root]
@@ -2903,8 +2902,6 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.models.params.custom-values :as custom-values]
    [metabase.models.pulse :as models.pulse]
    [metabase.models.query.permissions :as query-perms]
-   [metabase.models.revision :as revision]
-   [metabase.models.revision.last-edit :as last-edit]
    [metabase.permissions.core :as perms]
    [metabase.query-processor.dashboard :as qp.dashboard]
    [metabase.query-processor.error-type :as qp.error-type]
@@ -2913,6 +2910,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.query-processor.pivot :as qp.pivot]
    [metabase.query-processor.util :as qp.util]
    [metabase.request.core :as request]
+   [metabase.revisions.core :as revisions]
    [metabase.util :as u]
    [metabase.util.honey-sql-2 :as h2x]
    [metabase.util.i18n :refer [deferred-tru tru]]
@@ -2945,7 +2943,7 @@ net.brehaut.ClojureTools = (function (SH) {
    {:keys [f]} :- [:map
                    [:f {:optional true} [:maybe [:enum &quot;all&quot; &quot;mine&quot; &quot;archived&quot;]]]]]
   (let [dashboards (dashboards-list f)
-        edit-infos (:dashboard (last-edit/fetch-last-edited-info {:dashboard-ids (map :id dashboards)}))]
+        edit-infos (:dashboard (revisions/fetch-last-edited-info {:dashboard-ids (map :id dashboards)}))]
     (into []
           (map (fn [{:keys [id] :as dashboard}]
                  (if-let [edit-info (get edit-infos id)]
@@ -3010,7 +3008,7 @@ net.brehaut.ClojureTools = (function (SH) {
     (-&gt; dash
         hydrate-dashboard-details
         collection.root/hydrate-root-collection
-        (assoc :last-edit-info (last-edit/edit-information-for-user @api/*current-user*)))))</pre></td></tr><tr><td class="docs"><p>-------------------------------------------- Hiding Unreadable Cards ---------------------------------------------</p>
+        (assoc :last-edit-info (revisions/edit-information-for-user @api/*current-user*)))))</pre></td></tr><tr><td class="docs"><p>-------------------------------------------- Hiding Unreadable Cards ---------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>If CARD is unreadable, replace it with an object containing only its <code>:id</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- hide-unreadable-card
   [card]
@@ -3328,7 +3326,7 @@ collections and it is omitted.</p>
    {dashboard-load-id :dashboard_load_id}]
   (with-dashboard-load-id dashboard-load-id
     (let [dashboard (get-dashboard id)]
-      (u/prog1 (first (last-edit/with-last-edit-info [dashboard] :dashboard))
+      (u/prog1 (first (revisions/with-last-edit-info [dashboard] :dashboard))
         (events/publish-event! :event/dashboard-read {:object-id (:id dashboard) :user-id api/*current-user-id*})))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:id/items&quot;
   &quot;Get Dashboard with ID.&quot;
@@ -3717,7 +3715,7 @@ that subscriptions require). If so, delete the subscriptions and notify the dash
         (track-dashcard-and-tab-events! dashboard @changes-stats)
         (-&gt; dashboard
             hydrate-dashboard-details
-            (assoc :last-edit-info (last-edit/edit-information-for-user @api/*current-user*)))))))</pre></td></tr><tr><td class="docs"><p>Schema for Dashboard Updates.</p>
+            (assoc :last-edit-info (revisions/edit-information-for-user @api/*current-user*)))))))</pre></td></tr><tr><td class="docs"><p>Schema for Dashboard Updates.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private DashUpdates
   [:map
    [:name                    {:optional true} [:maybe ms/NonBlankString]]
@@ -3770,25 +3768,6 @@ that subscriptions require). If so, delete the subscriptions and notify the dash
   (let [dashboard (update-dashboard id {:dashcards cards :tabs tabs})]
     {:cards (:dashcards dashboard)
      :tabs  (:tabs dashboard)}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:id/revisions&quot;
-  &quot;Fetch `Revisions` for Dashboard with ID.&quot;
-  [{:keys [id]} :- [:map
-                    [:id ms/PositiveInt]]]
-  (api/read-check :model/Dashboard id)
-  (revision/revisions+details :model/Dashboard id))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/:id/revert&quot;
-  &quot;Revert a Dashboard to a prior `Revision`.&quot;
-  [{:keys [id]} :- [:map
-                    [:id ms/PositiveInt]]
-   _query-params
-   {:keys [revision_id]} :- [:map
-                             [:revision_id ms/PositiveInt]]]
-  (api/write-check :model/Dashboard id)
-  (revision/revert!
-   {:entity      :model/Dashboard
-    :id          id
-    :user-id     api/*current-user-id*
-    :revision-id revision_id}))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:id/query_metadata&quot;
   &quot;Get all of the required query metadata for the cards on dashboard.&quot;
   [{:keys [id]} :- [:map
@@ -4112,7 +4091,7 @@ different?</p>
                             [:parameters {:optional true} ms/JSONString]]]
   (api/read-check :model/Dashboard dashboard-id)
   (actions/fetch-values
-   (api/check-404 (action/dashcard-&gt;action dashcard-id))
+   (api/check-404 (actions/dashcard-&gt;action dashcard-id))
    (json/decode parameters)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/:dashboard-id/dashcard/:dashcard-id/execute&quot;
   &quot;Execute the associated Action in the context of a `Dashboard` and `DashboardCard` that includes it.

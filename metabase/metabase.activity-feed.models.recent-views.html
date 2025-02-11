@@ -2865,434 +2865,492 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.lib.query" name="metabase.lib.query"><h1 class="project-name">metabase.lib.query</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.lib.query
-  (:refer-clojure :exclude [remove])
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.activity-feed.models.recent-views" name="metabase.activity-feed.models.recent-views"><h1 class="project-name">metabase.activity-feed.models.recent-views</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>The Recent Views table is used to track the most recent views of objects such as Cards, Models, Tables, Dashboards,
+and Collections for each user. For an up to date list, see [[rv-models]].</p>
+
+<p>It offers a simple API to add a recent view item, and fetch the list of recents.</p>
+
+<p>Adding Recent Items:
+   <code>(recent-views/update-users-recent-views! &lt;user-id&gt; &lt;model&gt; &lt;model-id&gt; &lt;context&gt;)</code>
+     see: [[update-users-recent-views!]]
+    This is almost always called from a published event handler.
+Fetching Recent Items:
+   <code>(recent-views/get-recents &lt;user-id&gt; &lt;context&gt;)</code>
+     returns a map like {:recents [Item]}
+     see also: [[get-recents]]</p>
+
+<p>The recent items are partitioned into model and context buckets. So, when adding a recent item, duplicates will be
+removed, and if there are more than [[<em>recent-views-stored-per-user-per-model</em>]] (20 currently) of any entity type,
+the oldest one(s) will be deleted, so that the count stays at least 20.</p>
+
+<p>Context:
+We want to keep track of recents in multiple contexts. e.g. when selecting a value from the data-picker, that should
+log a recent_view row with context=<code>selection</code>. At this time there are only <code>view</code> and <code>selection</code> contexts.</p>
+
+<p>E.G., if you were to view lots of <em>cards</em>, it would not push collections and dashboards out of your recents.</p>
+
+<p>[Metrics] TODO:
+At some point in 2024, there was an attempt to add <code>metric</code> to the list of recent-view models. This
+was never completed, and the code has not been hooked up. There is no query for metrics, despite there being a
+<code>:metric</code> model in the <code>models-of-interest</code> list. This is a TODO to complete this work.</p>
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.activity-feed.models.recent-views
   (:require
+   [clojure.set :as set]
+   [colorize.core :as colorize]
+   [java-time.api :as t]
+   [malli.core :as mc]
+   [malli.error :as me]
    [medley.core :as m]
-   [metabase.legacy-mbql.normalize :as mbql.normalize]
-   [metabase.lib.cache :as lib.cache]
-   [metabase.lib.convert :as lib.convert]
-   [metabase.lib.dispatch :as lib.dispatch]
-   [metabase.lib.expression :as lib.expression]
-   [metabase.lib.hierarchy :as lib.hierarchy]
-   [metabase.lib.metadata :as lib.metadata]
-   [metabase.lib.metadata.calculation :as lib.metadata.calculation]
-   [metabase.lib.normalize :as lib.normalize]
-   [metabase.lib.options :as lib.options]
-   [metabase.lib.schema :as lib.schema]
-   [metabase.lib.schema.common :as lib.schema.common]
-   [metabase.lib.schema.expression :as lib.schema.expression]
-   [metabase.lib.schema.id :as lib.schema.id]
-   [metabase.lib.schema.metadata :as lib.schema.metadata]
-   [metabase.lib.temporal-bucket :as lib.temporal-bucket]
-   [metabase.lib.types.isa :as lib.types.isa]
-   [metabase.lib.util :as lib.util]
-   [metabase.lib.util.match :as lib.util.match]
+   [metabase.config :as config]
+   [metabase.models.collection :as collection]
+   [metabase.models.collection.root :as root]
+   [metabase.models.interface :as mi]
    [metabase.util :as u]
-   [metabase.util.i18n :as i18n]
+   [metabase.util.honey-sql-2 :as h2x]
    [metabase.util.log :as log]
    [metabase.util.malli :as mu]
    [metabase.util.malli.registry :as mr]
-   [weavejester.dependency :as dep]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/metadata-method :mbql/query
-  [_query _stage-number _x]
-  ;; not i18n'ed because this shouldn't be developer-facing.
-  (throw (ex-info &quot;You can't calculate a metadata map for a query! Use lib.metadata.calculation/returned-columns-method instead.&quot;
-                  {})))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/returned-columns-method :mbql/query
-  [query stage-number a-query options]
-  (lib.metadata.calculation/returned-columns query stage-number (lib.util/query-stage a-query stage-number) options))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/display-name-method :mbql/query
-  [query stage-number x style]
-  (lib.metadata.calculation/display-name query stage-number (lib.util/query-stage x stage-number) style))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn native? :- :boolean
-  &quot;Given a query, return whether it is a native query.&quot;
-  [query :- ::lib.schema/query]
-  (let [stage (lib.util/query-stage query 0)]
-    (= (:lib/type stage) :mbql.stage/native)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/display-info-method :mbql/query
-  [_query _stage-number query]
-  {:is-native   (native? query)
-   :is-editable (lib.metadata/editable? query)})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn stage-count :- ::lib.schema.common/int-greater-than-or-equal-to-zero
-  &quot;Returns the count of stages in query&quot;
-  [query :- ::lib.schema/query]
-  (count (:stages query)))</pre></td></tr><tr><td class="docs"><p>Returns whether the query is runnable based on first stage :lib/type</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti can-run-method
-  {:arglists '([query card-type])}
-  (fn [query _card-type]
-    (:lib/type (lib.util/query-stage query 0))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod can-run-method :default
-  [_query _card-type]
-  true)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod can-run-method :mbql.stage/mbql
-  [query card-type]
-  (or (not= card-type :metric)
-      (let [stage        (lib.util/query-stage query 0)
-            aggregations (:aggregation stage)
-            breakouts    (:breakout stage)]
-        (and (= (stage-count query) 1)
-             (= (count aggregations) 1)
-             (or (empty? breakouts)
-                 (and (= (count breakouts) 1)
-                      (-&gt; (lib.metadata.calculation/metadata query (first breakouts))
-                          ;; extraction units change `:effective-type` to `:type/Integer`, so remove temporal bucketing
-                          ;; before doing type checks
-                          (lib.temporal-bucket/with-temporal-bucket nil)
-                          lib.types.isa/date-or-datetime?)))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn can-run :- :boolean
-  &quot;Returns whether the query is runnable. Manually validate schema for cljs.&quot;
-  [query :- ::lib.schema/query
-   card-type :- ::lib.schema.metadata/card.type]
-  (and (binding [lib.schema.expression/*suppress-expression-type-check?* true]
-         (mr/validate ::lib.schema/query query))
-       (:database query)
-       (boolean (can-run-method query card-type))))</pre></td></tr><tr><td class="docs"><p>Returns whether the query can be saved based on first stage :lib/type.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti can-save-method
-  {:arglists '([query card-type])}
-  (fn [query _card-type]
-    (:lib/type (lib.util/query-stage query 0))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod can-save-method :default
-  [_query _card-type]
-  true)</pre></td></tr><tr><td class="docs"><p>TODO FIXME -- boolean functions should end in <code>?</code></p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn can-save :- :boolean
-  &quot;Returns whether `query` for a card of `card-type` can be saved.&quot;
-  [query :- ::lib.schema/query
-   card-type :- ::lib.schema.metadata/card.type]
-  (and (lib.metadata/editable? query)
-       (can-run query card-type)
-       (boolean (can-save-method query card-type))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn can-preview :- :boolean
-  &quot;Returns whether the query can be previewed.
-  See [[metabase.lib.js/can-preview]] for how this differs from [[can-run]].&quot;
-  [query :- ::lib.schema/query]
-  (and (can-run query &quot;question&quot;)
-       ;; Either it contains no expressions with `:offset`, or there is at least one order-by.
-       (every? (fn [stage]
-                 (boolean
-                  (or (seq (:order-by stage))
-                      (not (lib.util.match/match-one (:expressions stage) :offset)))))
-               (:stages query))))</pre></td></tr><tr><td class="docs"><p>Add <code>:base-type</code> and <code>:effective-type</code> to options of fields in <code>x</code> using <code>metadata-provider</code>. Works on pmbql fields.
-<code>:effective-type</code> is required for coerced fields to pass schema checks.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn add-types-to-fields
-  [x metadata-provider]
-  (if-let [field-ids (lib.util.match/match x
-                       [:field
-                        (_options :guard (every-pred map? (complement (every-pred :base-type :effective-type))))
-                        (id :guard integer? pos?)]
-                       (when-not (some #{:mbql/stage-metadata} &amp;parents)
-                         id))]
-    ;; &quot;pre-warm&quot; the metadata provider
-    (do (lib.metadata/bulk-metadata metadata-provider :metadata/column field-ids)
-        (lib.util.match/replace
-          x
-          [:field
-           (options :guard (every-pred map? (complement (every-pred :base-type :effective-type))))
-           (id :guard integer? pos?)]
-          (if (some #{:mbql/stage-metadata} &amp;parents)
-            &amp;match
-            (update &amp;match 1 merge
-                   ;; TODO: For brush filters, query with different base type as in metadata is sent from FE. In that
-                   ;;       case no change is performed. Find a way how to handle this properly!
-                    (when-not (and (some? (:base-type options))
-                                   (not= (:base-type options)
-                                         (:base-type (lib.metadata/field metadata-provider id))))
-                     ;; Following key is used to track which base-types we added during `query` call. It is used in
-                     ;; [[metabase.lib.convert/options-&gt;legacy-MBQL]] to remove those, so query after conversion
-                     ;; as legacy -&gt; pmbql -&gt; legacy looks closer to the original.
-                      (merge (when-not (contains? options :base-type)
-                               {::transformation-added-base-type true})
-                             (-&gt; (lib.metadata/field metadata-provider id)
-                                 (select-keys [:base-type :effective-type]))))))))
-    x))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn query-with-stages :- ::lib.schema/query
-  &quot;Create a query from a sequence of stages.&quot;
-  ([metadata-providerable stages]
-   (query-with-stages (:id (lib.metadata/database metadata-providerable)) metadata-providerable stages))
-  ([database-id           :- ::lib.schema.id/database
-    metadata-providerable :- ::lib.schema.metadata/metadata-providerable
-    stages]
-   {:lib/type     :mbql/query
-    :lib/metadata (lib.metadata/-&gt;metadata-provider metadata-providerable)
-    :database     database-id
-    :stages       stages}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- query-from-legacy-query
-  [metadata-providerable legacy-query]
-  (try
-    (let [pmbql-query (-&gt; (binding [lib.schema.expression/*suppress-expression-type-check?* true]
-                            (lib.convert/-&gt;pMBQL (mbql.normalize/normalize-or-throw legacy-query)))
-                          (add-types-to-fields metadata-providerable))]
-      (merge
-       pmbql-query
-       (query-with-stages metadata-providerable (:stages pmbql-query))))
-    (catch #?(:clj Throwable :cljs :default) e
-      (throw (ex-info (i18n/tru &quot;Error creating query from legacy query: {0}&quot; (ex-message e))
-                      {:legacy-query legacy-query}
-                      e)))))</pre></td></tr><tr><td class="docs"><p>Implementation for [[query]].</p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti ^:private query-method
-  {:arglists '([metadata-providerable x])}
-  (fn [_metadata-providerable x]
-    (or (lib.util/normalized-query-type x)
-        (lib.dispatch/dispatch-value x)))
-  :hierarchy lib.hierarchy/hierarchy)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod query-method :query ; legacy MBQL query
-  [metadata-providerable legacy-query]
-  (query-from-legacy-query metadata-providerable legacy-query))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod query-method :native ; legacy native query
-  [metadata-providerable legacy-query]
-  (query-from-legacy-query metadata-providerable legacy-query))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod query-method :dispatch-type/map
-  [metadata-providerable query]
-  (query-method metadata-providerable (assoc (lib.convert/-&gt;pMBQL query) :lib/type :mbql/query)))</pre></td></tr><tr><td class="docs"><p>this should already be a query in the shape we want but:
-- let's make sure it has the database metadata that was passed in
-- fill in field refs with metadata (#33680)
-- fill in top expression refs with metadata</p>
-</td><td class="codes"><pre class="brush: clojure">(defmethod query-method :mbql/query
-  [metadata-providerable {converted? :lib.convert/converted? :as query}]
-  (let [metadata-provider (lib.metadata/-&gt;metadata-provider metadata-providerable)
-        query (-&gt; query
-                  (assoc :lib/metadata metadata-provider)
-                  (dissoc :lib.convert/converted?)
-                  lib.normalize/normalize)
-        stages (:stages query)]
-    (cond-&gt; query
-      converted?
-      (assoc
-       :stages
-       (mapv (fn [[stage-number stage]]
-               (-&gt; stage
-                   (add-types-to-fields metadata-provider)
-                   (lib.util.match/replace
-                     [:expression
-                      (opts :guard (every-pred map? (complement (every-pred :base-type :effective-type))))
-                      expression-name]
-                     (let [found-ref (try
-                                       (m/remove-vals
-                                        #(= :type/* %)
-                                        (-&gt; (lib.expression/expression-ref query stage-number expression-name)
-                                            second
-                                            (select-keys [:base-type :effective-type])))
-                                       (catch #?(:clj Exception :cljs :default) _
-                                        ;; This currently does not find expressions defined in join stages
-                                         nil))]
-                      ;; Fallback if metadata is missing
-                       [:expression (merge found-ref opts) expression-name]))))
-             (m/indexed stages))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod query-method :metadata/table
-  [metadata-providerable table-metadata]
-  (query-with-stages metadata-providerable
-                     [{:lib/type     :mbql.stage/mbql
-                       :source-table (u/the-id table-metadata)}]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(declare query)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- metric-query
-  [metadata-providerable card-metadata]
-  (let [card-id (u/the-id card-metadata)
-        metric-first-stage (-&gt; (query metadata-providerable (:dataset-query card-metadata))
-                               (lib.util/query-stage 0))
-        base-query (query-with-stages metadata-providerable
-                                      [(select-keys metric-first-stage [:lib/type :source-card :source-table])])
-        base-query (reduce
-                    #(lib.util/add-summary-clause %1 0 :breakout %2)
-                    base-query
-                    (:breakout metric-first-stage))]
-    (-&gt; base-query
-        (lib.util/add-summary-clause
-         0 :aggregation
-         (lib.options/ensure-uuid [:metric {} card-id])))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod query-method :metadata/card
-  [metadata-providerable card-metadata]
-  (if (or (= (:type card-metadata) :metric)
-          (= (:lib/type card-metadata) :metadata/metric))
-    (metric-query metadata-providerable card-metadata)
-    (query-with-stages metadata-providerable
-                       [{:lib/type :mbql.stage/mbql
-                         :source-card (u/the-id card-metadata)}])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod query-method :metadata/metric
-  [metadata-providerable card-metadata]
-  (metric-query metadata-providerable card-metadata))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod query-method :mbql.stage/mbql
-  [metadata-providerable mbql-stage]
-  (query-with-stages metadata-providerable [mbql-stage]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod query-method :mbql.stage/native
-  [metadata-providerable native-stage]
-  (query-with-stages metadata-providerable [native-stage]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn query :- ::lib.schema/query
-  &quot;Create a new MBQL query from anything that could conceptually be an MBQL query, like a Database or Table or an
-  existing MBQL query or saved question or whatever. If the thing in question does not already include metadata, pass
-  it in separately -- metadata is needed for most query manipulation operations.&quot;
-  [metadata-providerable :- ::lib.schema.metadata/metadata-providerable
-   x]
-  (lib.cache/attach-query-cache (query-method metadata-providerable x)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn query-from-legacy-inner-query :- ::lib.schema/query
-  &quot;Create a pMBQL query from a legacy inner query.&quot;
-  [metadata-providerable :- ::lib.schema.metadata/metadata-providerable
-   database-id           :- ::lib.schema.id/database
-   inner-query           :- :map]
-  (-&gt;&gt; (lib.convert/legacy-query-from-inner-query database-id inner-query)
-       lib.convert/-&gt;pMBQL
-       (query metadata-providerable)))</pre></td></tr><tr><td class="docs"><p>Convert the pMBQL <code>a-query</code> into a legacy MBQL query.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn -&gt;legacy-MBQL
-  [a-query]
-  (-&gt; a-query lib.convert/-&gt;legacy-MBQL))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn with-different-table :- ::lib.schema/query
-  &quot;Changes an existing query to use a different source table or card.
-   Can be passed an integer table id or a legacy `card__&lt;id&gt;` string.&quot;
-  [original-query :- ::lib.schema/query
-   table-id :- [:or ::lib.schema.id/table :string]]
-  (let [metadata-provider (lib.metadata/-&gt;metadata-provider original-query)]
-    (query metadata-provider (lib.metadata/table-or-card metadata-provider table-id))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- occurs-in-expression?
-  [expression-clause clause-type expression-body]
-  (or (and (lib.util/clause-of-type? expression-clause clause-type)
-           (= (nth expression-clause 2) expression-body))
-      (and (sequential? expression-clause)
-           (boolean
-            (some #(occurs-in-expression? % clause-type expression-body)
-                  (nnext expression-clause))))))</pre></td></tr><tr><td class="docs"><p>Tests whether predicate <code>pred</code> is true for an element of clause <code>clause</code> of <code>query-or-join</code>.
-The test is transitive over joins.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- occurs-in-stage-clause?
-  [query-or-join clause pred]
-  (boolean
-   (some (fn [stage]
-           (or (some pred (clause stage))
-               (some #(occurs-in-stage-clause? % clause pred) (:joins stage))))
-         (:stages query-or-join))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn uses-segment? :- :boolean
-  &quot;Tests whether `a-query` uses segment with ID `segment-id`.
-  `segment-id` can be a regular segment ID or a string. The latter is for symmetry
-  with [[uses-metric?]].&quot;
-  [a-query :- ::lib.schema/query
-   segment-id :- [:or ::lib.schema.id/segment :string]]
-  (occurs-in-stage-clause? a-query :filters #(occurs-in-expression? % :segment segment-id)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn uses-metric? :- :boolean
-  &quot;Tests whether `a-query` uses metric with ID `metric-id`.&quot;
-  [a-query :- ::lib.schema/query
-   metric-id :- ::lib.schema.id/metric]
-  (occurs-in-stage-clause? a-query :aggregation #(occurs-in-expression? % :metric metric-id)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private clause-types-order
-  ;; When previewing some clause type `:x`, we drop the prefix of this list up to but excluding `:x`.
-  ;; So if previewing `:aggregation`, we drop `:limit` and `:order-by`;
-  ;; if previewing `:filters` we drop `:limit`, `:order-by`, `:aggregation` and `:breakout`.
-  ;; (In practice `:breakout` is never previewed separately, but the order is important to get the behavior above.
-  ;; There are tests for this.)
-  [:limit :order-by :aggregation :breakout :filters :expressions :joins :data])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- preview-stage [stage clause-type clause-index]
-  (let [to-drop (take-while #(not= % clause-type) clause-types-order)]
-    (cond-&gt; (reduce dissoc stage to-drop)
-      clause-index (update clause-type #(vec (take (inc clause-index) %))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn preview-query :- [:maybe ::lib.schema/query]
-  &quot;*Truncates* a query for use in the Notebook editor's \&quot;preview\&quot; system.
-  Takes `query` and `stage-index` as usual.
-  - Stages later than `stage-index` are dropped.
-  - `clause-type` is an enum (see below); all clauses of *later* types are dropped.
-  - `clause-index` is optional: if not provided then all clauses are kept; if it's a number than clauses
-    `[0, clause-index]` are kept. (To keep no clauses, specify the earlier `clause-type`.)
-  The `clause-type` enum represents the steps of the notebook editor, in the order they appear in the notebook:
-  - `:data` - just the source data for the stage
-  - `:joins`
-  - `:expressions`
-  - `:filters`
-  - `:breakout`
-  - `:aggregation`
-  - `:order-by`
-  - `:limit`&quot;
-  [a-query      :- ::lib.schema/query
-   stage-number :- :int
-   clause-type  :- [:enum :data :joins :expressions :filters :aggregation :breakout :order-by :limit]
-   clause-index :- [:maybe :int]]
-  (when (native? a-query)
-    (throw (ex-info &quot;preview-query cannot be called on native queries&quot; {:query a-query})))
-  (let [stage-number (lib.util/canonical-stage-index a-query stage-number)]
-    (-&gt; a-query
-        (update :stages #(vec (take (inc stage-number) %)))
-        (update-in [:stages stage-number] preview-stage clause-type clause-index))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn wrap-native-query-with-mbql :- [:map
-                                         [:query ::lib.schema/query]
-                                         [:stage-number :int]]
-  &quot;Given a query and stage number, return a possibly-updated query and stage number which is guaranteed to be MBQL and
-  so to support drill-thru and similar logic. Such a query must be saved, hence the `card-id`.
-  If the provided query is already MBQL, this is transparent.
-  Returns `{:query query', :stage-number stage-number'}`.
-  You might find it more convenient to call [[with-wrapped-native-query]].&quot;
-  [a-query      :- ::lib.schema/query
-   stage-number :- :int
-   card-id      :- [:maybe ::lib.schema.id/card]]
-  (or (and (lib.util/native-stage? a-query stage-number)
-           card-id
-           (if-let [card (lib.metadata/card a-query card-id)]
-             {:query        (query a-query card)
-              :stage-number -1}
-             (do
-               (log/warn &quot;Failed to wrap native query with MBQL; card not found&quot; {:query   a-query
-                                                                                  :card-id card-id})
-               nil)))
-      {:query        a-query
-       :stage-number stage-number}))</pre></td></tr><tr><td class="docs"><p>Calls [[wrap-native-query-with-mbql]] on the given <code>a-query</code>, <code>stage-number</code> and <code>card-id</code>, then calls
-<code>(f a-query' stage-number' args...)</code> using the query and stage number for the wrapper.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn with-wrapped-native-query
-  [a-query stage-number card-id f &amp; args]
-  (let [{q :query, n :stage-number} (wrap-native-query-with-mbql a-query stage-number card-id)]
-    (apply f q n args)))</pre></td></tr><tr><td class="docs"><p>Given a query, ensure it doesn't have any keys or structures that aren't safe for serialization.</p>
+   [metabase.util.malli.schema :as ms]
+   [methodical.core :as methodical]
+   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(doto :model/RecentViews (derive :metabase/model))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(t2/deftransforms :model/RecentViews
+  {:context mi/transform-keyword})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/table-name :model/RecentViews [_model] :recent_views)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(t2/define-before-insert :model/RecentViews
+  [log-entry]
+  (let [defaults {:timestamp (t/zoned-date-time)}]
+    (merge defaults log-entry)))</pre></td></tr><tr><td class="docs"><p>The number of recently viewed items to keep per user per model. This is used to keep the most recent views of each
+model type in [[models-of-interest]].</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *recent-views-stored-per-user-per-model*
+  20)</pre></td></tr><tr><td class="docs"><p>Returns a set of IDs of duplicate models in the RecentViews table. Duplicate means that the same model and model_id
+ shows up more than once. This returns the ids for the copies that are not the most recent entry.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- duplicate-model-ids
+  [user-id context]
+  (-&gt;&gt; (t2/select :model/RecentViews
+                  :user_id user-id
+                  :context context
+                  {:order-by [[:timestamp :desc]]})
+       (group-by (juxt :model :model_id))
+       ;; skip the first row for each group, since it's the most recent
+       (mapcat (fn [[_ rows]] (drop 1 rows)))
+       (map :id)
+       set))</pre></td></tr><tr><td class="docs"><p>These are models for which we will retrieve recency.</p>
+</td><td class="codes"><pre class="brush: clojure">(def rv-models
+  [:card :dataset :metric
+   ;; n.b.: `:card`, `metric` and `:model` are stored in recent_views as &quot;card&quot;, and a join with report_card is
+   ;; needed to distinguish between them.
+   :dashboard :table :collection])</pre></td></tr><tr><td class="docs"><p>Given a rv-model, returns the toucan model identifier for it.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn rv-model-&gt;model
+  [rvm :- (into [:enum] rv-models)]
+  (get {:dataset    :model/Card
+        :card       :model/Card
+        :dashboard  :model/Dashboard
+        :table      :model/Table
+        :collection :model/Collection}
+       rvm))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- ids-to-prune-for-user+model [user-id model context]
+  (t2/select-fn-set :id
+                    :model/RecentViews
+                    {:select [:rv.id]
+                     :from [[:recent_views :rv]]
+                     :where [:and
+                             [:= :rv.model (get {:dataset &quot;card&quot;} model (name model))]
+                             [:= :rv.user_id user-id]
+                             [:= :rv.context (h2x/literal (name context))]
+                             (when (#{:card :dataset} model) ;; TODO add metric
+                               [:= :rc.type (cond (= model :card) (h2x/literal &quot;question&quot;)
+                                                  ;; TODO add metric
+                                                  (= model :dataset) (h2x/literal &quot;model&quot;))])]
+                     :left-join [[:report_card :rc]
+                                 [:and
+                                  [:= :rc.id :rv.model_id]
+                                  [:= :rv.model (h2x/literal &quot;card&quot;)]]]
+                     :order-by [[:rv.timestamp :desc]]
+                     ;; mysql doesn't support offset without limit :derp:
+                     :limit 100000
+                     :offset *recent-views-stored-per-user-per-model*}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- overflowing-model-buckets [user-id context]
+  (into #{} (mapcat #(ids-to-prune-for-user+model user-id % context)) rv-models))</pre></td></tr><tr><td class="docs"><p>Returns IDs to prune, which includes 2 things:
+1. duplicated views for (user-id, model, model_id, context), this will return the IDs of all duplicates except the newest.
+2. views that are older than the most recent <em>recent-views-stored-per-user-per-model</em> views for the user. </p>
+</td><td class="codes"><pre class="brush: clojure">(defn ids-to-prune
+  [user-id context]
+  (set/union
+   (duplicate-model-ids user-id context)
+   (overflowing-model-buckets user-id context)))</pre></td></tr><tr><td class="docs"><p>Updates the RecentViews table for a given user with a new view, and prunes old views.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn update-users-recent-views!
+  [user-id :- [:maybe ms/PositiveInt]
+   model :- [:enum :model/Card :model/Table :model/Dashboard :model/Collection]
+   model-id :- ms/PositiveInt
+   context :- [:enum :view :selection]]
+  (when user-id
+    (t2/with-transaction [_conn]
+      (t2/insert! :model/RecentViews {:user_id user-id
+                                      :model (u/lower-case-en (name model))
+                                      :model_id model-id
+                                      :context (name context)})
+      (let [prune-ids (ids-to-prune user-id context)]
+        (when (seq prune-ids)
+          (t2/delete! :model/RecentViews :id [:in prune-ids]))))))</pre></td></tr><tr><td class="docs"><p>Returns ID of the most recently viewed dashboard for a given user within the last 24 hours, or <code>nil</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn most-recently-viewed-dashboard-id
+  [user-id]
+  (t2/select-one-fn
+   :model_id
+   :model/RecentViews
+   {:where    [:and
+               [:= :user_id user-id]
+               [:= :model (h2x/literal &quot;dashboard&quot;)]
+               [:&gt; :timestamp (t/minus (t/zoned-date-time) (t/days 1))]
+               [:not= :d.archived true]]
+    :order-by [[:recent_views.id :desc]]
+    :left-join [[:report_dashboard :d]
+                [:= :recent_views.model_id :d.id]]}))</pre></td></tr><tr><td class="docs"><p>The shape of a recent view item, returned from <code>GET /recent_views</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(def Item
+  (mc/schema
+   [:and {:registry {::official [:maybe [:enum :official &quot;official&quot;]]
+                     ::verified [:maybe [:enum :verified &quot;verified&quot;]]
+                     ::pc [:map
+                           [:id [:or [:int {:min 1}] [:= &quot;root&quot;]]]
+                           [:name :string]
+                           [:authority_level ::official]]}}
+    [:map
+     [:id [:int {:min 1}]]
+     [:name :string]
+     [:description [:maybe :string]]
+     [:model [:enum :dataset :card :metric :dashboard :collection :table]]
+     [:can_write :boolean]
+     [:timestamp :string]]
+    ;; database_id was commented out below because this schema was not actually being used correctly
+    ;; by [[metabase.activity-feed.api/get-popular-items-model-and-id]] and when I fixed it in #47418
+    ;; [[metabase.activity-feed.api-test/popular-items-test]] started failing because things don't actually come back with
+    ;; database IDs... commented out for now until someone gets a change to look at this. -- Cam
+    [:multi {:dispatch :model}
+     [:card [:map
+             [:display :string]
+             #_[:database_id :int]
+             [:parent_collection ::pc]
+             [:moderated_status ::verified]]]
+     [:dataset [:map
+                #_[:database_id :int]
+                [:parent_collection ::pc]
+                [:moderated_status ::verified]]]
+     [:metric [:map
+               [:display :string]
+               [:parent_collection ::pc]
+               [:moderated_status ::verified]]]
+     [:dashboard
+      [:map
+       [:parent_collection ::pc]
+       [:moderated_status ::verified]]]
+     [:table [:map
+              [:display_name :string]
+              [:table_schema [:maybe :string]]
+              [:database [:map
+                          #_[:id [:int {:min 1}]]
+                          [:name :string]]]]]
+     [:collection [:map
+                   [:parent_collection ::pc]
+                   [:effective_location :string]
+                   [:authority_level ::official]]]]]))</pre></td></tr><tr><td class="docs"><p>Fills in additional information for a recent view, such as the display name of the object, returns [[Item]].</p>
 
-<p>For example, any Atoms or Delays or should be removed.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn serializable
-  [a-query]
-  (-&gt; a-query
-      (dissoc a-query :lib/metadata)
-      lib.cache/discard-query-cache))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- stage-seq* [query-fragment]
-  (cond
-    (vector? query-fragment)
-    (case (first query-fragment)
-      :metric
-      [{:source-card (get query-fragment 2)}]
-      (mapcat stage-seq* query-fragment))
-    (map? query-fragment)
-    (concat (:stages query-fragment) (mapcat stage-seq* (vals query-fragment)))
-    :else
-    []))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- stage-seq [card-id a-query]
-  (map #(assoc % ::from-card card-id) (stage-seq* a-query)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- expand-stage [metadata-provider stage]
-  (let [card-id (:source-card stage)
-        expanded-query (some-&gt;&gt; card-id
-                                (lib.metadata/card metadata-provider)
-                                :dataset-query
-                                (query metadata-provider))]
-    (stage-seq card-id expanded-query)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- add-stage-dep [graph stage]
-  (let [card-id  (:source-card  stage)
-        table-id (:source-table stage)
-        from-id  (::from-card   stage)]
-    (try
-      (cond-&gt; graph
-        card-id  (dep/depend [:card from-id] [:card  card-id])
-        table-id (dep/depend [:card from-id] [:table table-id]))
-      (catch #?(:clj Exception :cljs :default) _e
-        (throw (ex-info (i18n/tru &quot;Cannot save card with cycles.&quot;) {}))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- build-graph [source-id metadata-provider a-query]
-  (loop [graph (dep/graph)
-         stages-visited 0
-         stages (stage-seq source-id a-query)]
-    (cond
-      (empty? stages)
-      graph
-      (&gt; stages-visited 50)
-      (throw (ex-info (i18n/tru &quot;The chain of dependencies is too long to save card.&quot;) {}))
-      :else
-      (let [[stage &amp; stages] stages]
-        (recur (add-stage-dep graph stage)
-               (inc stages-visited)
-               (concat stages (expand-stage metadata-provider stage)))))))</pre></td></tr><tr><td class="docs"><p>Returns nil if the card with given <code>card-id</code> can be overwritten with <code>query</code>.
-Throws <code>ExceptionInfo</code> with a user-facing message otherwise.</p>
+<p>For most items, we gather information from the db in a single query, but certain things are more prudent to check
+with code (e.g. a collection's parent collection.)</p>
 
-<p>Currently checks for cycles (self-referencing queries).</p>
-</td><td class="codes"><pre class="brush: clojure">(defn check-overwrite
-  [card-id new-query]
-  (build-graph card-id new-query new-query)
-  ;; return nil if nothing throws
-  nil)</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+<p>Sometimes we get an invalid or inconsistent recent view record. (E.g. the parent collection for an item no longer
+exists). In these cases we simply do not include the value in the recent views response.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmulti fill-recent-view-info
+  {:arglists '([recent-view])}
+  (fn [{:keys [model #_model_id #_timestamp card_type]}]
+    (or (get {&quot;model&quot; :dataset &quot;question&quot; :card &quot;metric&quot; :metric} card_type)
+        (keyword model))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod fill-recent-view-info :default [m] (throw (ex-info &quot;Unknown model&quot; {:model m})))</pre></td></tr><tr><td class="docs"><p>Returns the model when it's not archived.
+We use this to ensure that archived models are not returned in the recent views.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- ellide-archived
+  [model]
+  (when (false? (:archived model)) model))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- root-coll []
+  (select-keys
+   (root/root-collection-with-ui-details {})
+   [:id :name :authority_level]))</pre></td></tr><tr><td class="docs"><p>================== Recent Cards ==================</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Query to select <code>report_card</code> data</p>
+</td><td class="codes"><pre class="brush: clojure">(defn card-recents
+  [card-ids]
+  (if-not (seq card-ids)
+    []
+    (t2/select :model/Card
+               {:select [:card.name
+                         :card.description
+                         :card.archived
+                         :card.id
+                         :card.database_id
+                         :card.display
+                         [:dashboard.id :dashboard_id]
+                         [:dashboard.name :dashboard_name]
+                         [:card.collection_id :entity-coll-id]
+                         [:mr.status :moderated-status]
+                         [:collection.id :collection_id]
+                         [:collection.name :collection_name]
+                         [:collection.authority_level :collection_authority_level]]
+                :from [[:report_card :card]]
+                :where [:in :card.id card-ids]
+                :left-join [[:moderation_review :mr]
+                            [:and
+                             [:= :mr.moderated_item_id :card.id]
+                             [:= :mr.moderated_item_type &quot;card&quot;]
+                             [:= :mr.most_recent true]]
+                            [:collection]
+                            [:and
+                             [:= :collection.id :card.collection_id]
+                             [:= :collection.archived false]]
+                            [:report_dashboard :dashboard]
+                            [:= :dashboard.id :card.dashboard_id]]})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- fill-parent-coll [model-object]
+  (if (:collection_id model-object)
+    {:id (:collection_id model-object)
+     :name (:collection_name model-object)
+     :authority_level (some-&gt; (:collection_authority_level model-object) name)}
+    (root-coll)))</pre></td></tr><tr><td class="docs"><p>Returns true when a parent collection actually exists for this item.</p>
+
+<p>Careful: the root collection will have a nil <code>collection_id</code> and a nil <code>collection_name</code>. We return false when the
+collection has a <code>collection_id</code>, and a nil <code>collection_name</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- parent-collection-valid?
+  [{:keys [collection_id entity-coll-id]}]
+  (not (and entity-coll-id (nil? collection_id))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod fill-recent-view-info :card [{:keys [_model model_id timestamp model_object]}]
+  (when-let [card (and
+                   (mi/can-read? model_object)
+                   ;; The parent collection exists:
+                   (parent-collection-valid? model_object)
+                   (ellide-archived model_object))]
+    {:id model_id
+     :dashboard (when (:dashboard_id card)
+                  {:name (:dashboard_name card)
+                   :id (:dashboard_id card)})
+     :name (:name card)
+     :database_id (:database_id card)
+     :description (:description card)
+     :display (some-&gt; card :display name)
+     :model :card
+     :can_write (mi/can-write? card)
+     :timestamp (str timestamp)
+     :moderated_status (:moderated-status card)
+     :parent_collection (fill-parent-coll card)}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod fill-recent-view-info :dataset [{:keys [_model model_id timestamp model_object]}]
+  (when-let [dataset (and
+                      (mi/can-read? model_object)
+                      ;; If the parent collection no longer exists, there won't be a name.
+                      (parent-collection-valid? model_object)
+                      (ellide-archived model_object))]
+    {:id model_id
+     :name (:name dataset)
+     :database_id (:database_id dataset)
+     :description (:description dataset)
+     :model :dataset
+     :can_write (mi/can-write? dataset)
+     :timestamp (str timestamp)
+     ;; another table that doesn't differentiate between card and dataset :cry:
+     :moderated_status (:moderated-status dataset)
+     :parent_collection (fill-parent-coll dataset)}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod fill-recent-view-info :metric [{:keys [_model model_id timestamp model_object]}]
+  (when-let [metric (and
+                     (mi/can-read? model_object)
+                     (parent-collection-valid? model_object)
+                     (ellide-archived model_object))]
+    {:id model_id
+     :name (:name metric)
+     :description (:description metric)
+     :display (some-&gt; metric :display name)
+     :model :metric
+     :can_write (mi/can-write? metric)
+     :timestamp (str timestamp)
+     :moderated_status (:moderated-status metric)
+     :parent_collection (fill-parent-coll metric)}))</pre></td></tr><tr><td class="docs"><p>================== Recent Dashboards ==================</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Query to select recent dashboard data</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- dashboard-recents
+  [dashboard-ids]
+  (if (empty? dashboard-ids)
+    []
+    (t2/select :model/Dashboard
+               {:select [:dash.id
+                         :dash.name
+                         :dash.description
+                         :dash.archived
+                         [:dash.collection_id :entity-coll-id]
+                         [:c.id :collection_id]
+                         [:c.name :collection_name]
+                         [:c.authority_level :collection_authority_level]
+                         [:mr.status :moderated-status]]
+                :from [[:report_dashboard :dash]]
+                :where [:in :dash.id dashboard-ids]
+                :left-join [[:moderation_review :mr]
+                            [:and
+                             [:= :mr.moderated_item_id :dash.id]
+                             [:= :mr.moderated_item_type &quot;dashboard&quot;]
+                             [:= :mr.most_recent true]]
+                            [:collection :c]
+                            [:and
+                             [:= :c.id :dash.collection_id]
+                             [:= :c.archived false]]]})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod fill-recent-view-info :dashboard [{:keys [_model model_id timestamp model_object]}]
+  (when-let [dashboard (and (mi/can-read? model_object)
+                            (parent-collection-valid? model_object)
+                            (ellide-archived model_object))]
+    {:id model_id
+     :name (:name dashboard)
+     :description (:description dashboard)
+     :model :dashboard
+     :can_write (mi/can-write? dashboard)
+     :timestamp (str timestamp)
+     :moderated_status (:moderated-status dashboard)
+     :parent_collection (fill-parent-coll dashboard)}))</pre></td></tr><tr><td class="docs"><p>================== Recent Collections ==================</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Query to select recent collection data</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- collection-recents
+  [collection-ids]
+  (if-not (seq collection-ids)
+    []
+    (let [;; these have their parent collection id in effective_location, but we need the id, name, and authority_level.
+          collections (t2/select :model/Collection
+                                 {:select [:id :name :description :authority_level
+                                           :archived :location]
+                                  :where [:and
+                                          [:in :id collection-ids]
+                                          [:= :archived false]]})]
+      (-&gt;&gt; (t2/hydrate collections :effective_parent)
+           (map #(m/dissoc-in % [:effective_parent :type]))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod fill-recent-view-info :collection [{:keys [_model model_id timestamp model_object]}]
+  (when-let [collection (and
+                         (mi/can-read? model_object)
+                         (ellide-archived model_object))]
+    {:id model_id
+     :name (:name collection)
+     :description (:description collection)
+     :model :collection
+     :can_write (mi/can-write? collection)
+     :timestamp (str timestamp)
+     :authority_level (some-&gt; (:authority_level collection) name)
+     :effective_location (:effective_location collection)
+     :parent_collection (or (:effective_parent collection) (root-coll))}))</pre></td></tr><tr><td class="docs"><p>================== Recent Tables ==================</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Query to select recent table data</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- table-recents
+  [table-ids]
+  (t2/select :model/Table
+             {:select [:t.id :t.name :t.description
+                       :t.display_name :t.active :t.visibility_type :t.schema
+                       [:db.name :database-name]
+                       [:db.id :database-id]
+                       [:db.initial_sync_status :initial-sync-status]]
+              :from [[:metabase_table :t]]
+              :where (let [base-condition [:or
+                                           [:= :visibility_type nil]
+                                           [:!= :visibility_type &quot;hidden&quot;]]]
+                       (if (seq table-ids)
+                         [:and base-condition [:in :t.id table-ids]]
+                         base-condition))
+              :left-join [[:metabase_database :db]
+                          [:= :db.id :t.db_id]]}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod fill-recent-view-info :table [{:keys [_model model_id timestamp model_object]}]
+  (let [table model_object]
+    (when (and (not= &quot;hidden&quot; (:visibility_type table))
+               (:database-name table)
+               (:active table)
+               (mi/can-read? :model/Table model_id))
+      {:id model_id
+       :name (:name table)
+       :description (:description table)
+       :model :table
+       :display_name (:display_name table)
+       :can_write (mi/can-write? table)
+       :timestamp (str timestamp)
+       :table_schema (:schema table)
+       :database {:id (:database-id table)
+                  :name (:database-name table)
+                  :initial_sync_status (:initial-sync-status table)}})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private query-context-&gt;recent-context
+  {:views      &quot;view&quot;
+   :selections &quot;selection&quot;})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn ^:private do-query [user-id context]
+  (when-not (seq context)
+    (throw (ex-info &quot;context must be non-empty&quot; {:context context})))
+  (t2/select :model/RecentViews {:select    [:rv.* [:rc.type :card_type]]
+                                 :from      [[:recent_views :rv]]
+                                 :where     [:and
+                                             [:= :rv.user_id user-id]
+                                             [:in :rv.context (map query-context-&gt;recent-context context)]
+                                             ;; include non-collections, or collections without a namespace/type.
+                                             [:or
+                                              [:= :coll.id nil]
+                                              [:and
+                                               ;; trash collection is never returned
+                                               [:or [:= nil :coll.type] [:not= :coll.type collection/trash-collection-type]]
+                                               ;; collections in a different namespace can't interact with collections
+                                               ;; in the normal NULL namespace.
+                                               [:= nil :coll.namespace]
+                                               ;; exclude instance analytics for selects
+                                               (when (contains? (set context) :selections)
+                                                 [:or [:= nil :coll.type] [:not= :coll.type collection/instance-analytics-collection-type]])]]]
+                                 :left-join [[:report_card :rc]
+                                             [:and
+                                              ;; only want to join on card_type if it's a card
+                                              [:= :rv.model &quot;card&quot;]
+                                              [:= :rc.id :rv.model_id]]
+                                             [:collection :coll]
+                                             [:and
+                                              [:= :rv.model &quot;collection&quot;]
+                                              [:= :coll.id :rv.model_id]]]
+                                 :order-by  [[:rv.timestamp :desc]]}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- model-&gt;return-model [model :- :keyword]
+  (if (= :question model) :card model))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- post-process [entity-&gt;id-&gt;data recent-view]
+  (when recent-view
+    (let [entity (some-&gt; recent-view :model keyword)
+          id (some-&gt; recent-view :model_id)]
+      (when-let [model-object (get-in entity-&gt;id-&gt;data [entity id])]
+        (some-&gt; (assoc recent-view :model_object model-object)
+                fill-recent-view-info
+                (dissoc :card_type)
+                (update :model model-&gt;return-model))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- get-entity-&gt;id-&gt;data [views]
+  (let [{card-ids       :card
+         dashboard-ids  :dashboard
+         collection-ids :collection
+         table-ids      :table} (as-&gt; views views
+                                  (group-by (comp keyword :model) views)
+                                  (update-vals views #(mapv :model_id %)))]
+    {:card       (m/index-by :id (card-recents card-ids))
+     :dashboard  (m/index-by :id (dashboard-recents dashboard-ids))
+     :collection (m/index-by :id (collection-recents collection-ids))
+     :table      (m/index-by :id (table-recents table-ids))}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ItemValidator (mr/validator Item))</pre></td></tr><tr><td class="docs"><p>The underlying data model here can become inconsistent, and it's better to return the recents data that we know is
+correct than throw an error. So, in prod, we silently filter out known-bad recent views.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn error-avoider
+  [item]
+  (if (and item (ItemValidator item))
+    item
+    (when-not config/is-prod?
+      (log/errorf (colorize/red &quot;Invalid recent view item: %s reason: %s&quot;)
+                  (pr-str item)
+                  (me/humanize (mr/explain Item item))))))</pre></td></tr><tr><td class="docs"><p>Gets all recent views for a given user, and context. Returns a list of at most 20 [[Item]]s per [[models-of-interest]], per context.</p>
+
+<p>Returns: [:map [:recents [:sequential Item]]]</p>
+
+<p>[[do-query]] can return nils, and we remove them here becuase there can be recent views for deleted entities, and we
+don't want to show those in the recent views.</p>
+
+<p>Returns a sequence of [[Item]]s. The reason this isn't a <code>mu/defn</code>, is that error-avoider validates each Item in the
+sequence, so there's no need to do it twice.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn get-recents
+  ([user-id] (get-recents user-id [:views :selections]))
+  ([user-id context :- [:sequential [:enum :views :selections]]]
+   (let [recent-items (do-query user-id context)
+         entity-&gt;id-&gt;data (get-entity-&gt;id-&gt;data recent-items)
+         view-items (into []
+                          (comp
+                           (keep (partial post-process entity-&gt;id-&gt;data))
+                           (keep error-avoider)
+                           (m/distinct-by (juxt :id :model)))
+                          recent-items)]
+     {:recents view-items})))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
