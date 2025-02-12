@@ -2865,388 +2865,360 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.lib.metadata.jvm" name="metabase.lib.metadata.jvm"><h1 class="project-name">metabase.lib.metadata.jvm</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Implementation(s) of [[metabase.lib.metadata.protocols/MetadataProvider]] only for the JVM.</p>
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.lib.metadata.jvm
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.xrays.api.automagic-dashboards" name="metabase.xrays.api.automagic-dashboards"><h1 class="project-name">metabase.xrays.api.automagic-dashboards</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.xrays.api.automagic-dashboards
   (:require
-   [clojure.core.cache.wrapped :as cache.wrapped]
-   [clojure.string :as str]
-   ^{:clj-kondo/ignore [:discouraged-namespace]}
-   [metabase.driver :as driver]
-   [metabase.lib.metadata.cached-provider :as lib.metadata.cached-provider]
-   [metabase.lib.metadata.ident :as lib.metadata.ident]
-   [metabase.lib.metadata.invocation-tracker :as lib.metadata.invocation-tracker]
-   [metabase.lib.metadata.protocols :as lib.metadata.protocols]
-   [metabase.lib.schema.id :as lib.schema.id]
-   [metabase.lib.schema.metadata :as lib.schema.metadata]
-   [metabase.models.interface :as mi]
-   [metabase.models.setting :as setting]
-   [metabase.util :as u]
-   [metabase.util.log :as log]
+   [buddy.core.codecs :as codecs]
+   [metabase.api.common :as api]
+   [metabase.api.macros :as api.macros]
+   [metabase.api.query-metadata :as api.query-metadata]
+   [metabase.models.query :as query]
+   [metabase.models.query.permissions :as query-perms]
+   [metabase.util.i18n :as i18n :refer [deferred-tru]]
+   [metabase.util.json :as json]
    [metabase.util.malli :as mu]
-   [metabase.util.snake-hating-map :as u.snake-hating-map]
-   [methodical.core :as methodical]
-   [potemkin :as p]
-   [pretty.core :as pretty]
-   ^{:clj-kondo/ignore [:discouraged-namespace]}
-   [toucan2.core :as t2]
-   [toucan2.model :as t2.model]
-   [toucan2.pipeline :as t2.pipeline]
-   [toucan2.query :as t2.query]))</pre></td></tr><tr><td class="docs">
+   [metabase.util.malli.schema :as ms]
+   [metabase.util.regex :as u.regex]
+   [metabase.xrays.automagic-dashboards.comparison :as automagic-dashboards.comparison]
+   [metabase.xrays.automagic-dashboards.core :as automagic-dashboards.core]
+   [metabase.xrays.automagic-dashboards.dashboard-templates :as automagic-dashboards.dashboard-templates]
+   [metabase.xrays.transforms.dashboard :as transforms.dashboard]
+   [metabase.xrays.transforms.materialize :as transforms.materialize]
+   [ring.util.codec :as codec]
+   [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- qualified-key? [k]
-  (or (qualified-keyword? k)
-      (str/includes? k &quot;.&quot;)))</pre></td></tr><tr><td class="docs"><p>Calculating the kebab-case version of a key every time is pretty slow (even with the LRU
-caching [[u/->kebab-case-en]] has), since the keys here are static and finite we can just memoize them forever and
-get a nice performance boost.</p>
-
-<p>we spent a lot of time messing around with different ways of doing this and this seems to be the fastest. See
-https://metaboat.slack.com/archives/C04CYTEL9N2/p1702671632956539 -- Cam</p>
-</td><td class="codes"><pre class="brush: clojure">(let [cache      (java.util.concurrent.ConcurrentHashMap.)
-      mapping-fn (reify java.util.function.Function
-                   (apply [_this k]
-                     (u/-&gt;kebab-case-en k)))]
-  (defn- memoized-kebab-key
-    [k]
-    (.computeIfAbsent cache k mapping-fn)))</pre></td></tr><tr><td class="docs"><p>Convert a (presumably) Toucan 2 instance of an application database model with <code>snake_case</code> keys to a MLv2 style
-metadata instance with <code>:lib/type</code> and <code>kebab-case</code> keys.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn instance-&gt;metadata
-  [instance metadata-type]
-  (-&gt; instance
-      (update-keys memoized-kebab-key)
-      (assoc :lib/type metadata-type)
-      u.snake-hating-map/snake-hating-map))</pre></td></tr><tr><td class="docs"><p>Database</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private Show
+  (mu/with-api-error-message
+   [:maybe [:or [:enum &quot;all&quot;] nat-int?]]
+   (deferred-tru &quot;invalid show value&quot;)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private Prefix
+  [:fn
+   {:error/fn  (fn [_ _]
+                 (i18n/tru &quot;invalid value for prefix&quot;))
+    :api/regex #&quot;[A-Za-z]+&quot;}
+   (fn [prefix]
+     (some #(not-empty (automagic-dashboards.dashboard-templates/get-dashboard-templates [% prefix])) [&quot;table&quot; &quot;metric&quot; &quot;field&quot;]))])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private DashboardTemplate
+  (mu/with-api-error-message
+   [:fn (fn [dashboard-template]
+          (some (fn [toplevel]
+                  (some (comp automagic-dashboards.dashboard-templates/get-dashboard-template
+                              (fn [prefix]
+                                [toplevel prefix dashboard-template])
+                              :dashboard-template-name)
+                        (automagic-dashboards.dashboard-templates/get-dashboard-templates [toplevel])))
+                [&quot;table&quot; &quot;metric&quot; &quot;field&quot;]))]
+   (deferred-tru &quot;invalid value for dashboard template name&quot;)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^{:arglists '([s])} decode-base64-json
+  (comp json/decode+kw codecs/bytes-&gt;str codec/base64-decode))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private Base64EncodedJSON
+  [:fn
+   {:description &quot;form-encoded base-64-encoded JSON&quot;
+    :error/fn    (fn [_ _]
+                   (i18n/tru &quot;value couldn''t be parsed as base64 encoded JSON&quot;))}
+   decode-base64-json])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/database/:id/candidates&quot;
+  &quot;Return a list of candidates for automagic dashboards ordered by interestingness.&quot;
+  [{:keys [id]} :- [:map
+                    [:id ms/PositiveInt]]]
+  (-&gt; (t2/select-one :model/Database :id id)
+      api/read-check
+      automagic-dashboards.core/candidate-tables))</pre></td></tr><tr><td class="docs"><p>----------------------------------------- API Endpoints for viewing a transient dashboard ----------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :metadata/database :model/Database)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2.model/resolve-model :metadata/database
-  [model]
-  (t2/resolve-model :model/Database) ; for side-effects
-  model)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2.pipeline/build [#_query-type     :toucan.query-type/select.*
-                                         #_model          :metadata/database
-                                         #_resolved-query clojure.lang.IPersistentMap]
-  [query-type model parsed-args honeysql]
-  (merge (next-method query-type model parsed-args honeysql)
-         {:select [:id :engine :name :dbms_version :settings :is_audit :details :timezone]}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(t2/define-after-select :metadata/database
-  [database]
-  ;; ignore encrypted details that we cannot decrypt, because that breaks schema
-  ;; validation
-  (let [database (instance-&gt;metadata database :metadata/database)
-        database (assoc database :lib/methods {:escape-alias (partial driver/escape-alias (:engine database))})]
-    (cond-&gt; database
-      (not (map? (:details database))) (dissoc :details))))</pre></td></tr><tr><td class="docs"><p>Table</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :metadata/table :model/Table)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2.model/resolve-model :metadata/table
-  [model]
-  (t2/resolve-model :model/Table)
-  model)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2.pipeline/build [#_query-type     :toucan.query-type/select.*
-                                         #_model          :metadata/table
-                                         #_resolved-query clojure.lang.IPersistentMap]
-  [query-type model parsed-args honeysql]
-  (merge (next-method query-type model parsed-args honeysql)
-         {:select [:id :db_id :name :display_name :schema :active :visibility_type]}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(t2/define-after-select :metadata/table
-  [table]
-  (instance-&gt;metadata table :metadata/table))</pre></td></tr><tr><td class="docs"><p>Field</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :metadata/column :model/Field)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^:dynamic *table-idents* nil)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2.model/resolve-model :metadata/column
-  [model]
-  (t2/resolve-model :model/Dimension) ; for side-effects
-  (t2/resolve-model :model/Field)
-  (t2/resolve-model :model/FieldValues)
-  (t2/resolve-model :model/Table)
-  model)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2.model/model-&gt;namespace :metadata/column
-  &quot;:metadata/column joins Dimension and FieldValues by default; namespace their columns so we can distinguish them from
-  the columns coming back from Field.&quot;
-  [_model]
-  {:model/Dimension   &quot;dimension&quot;
-   :model/FieldValues &quot;values&quot;})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2.query/apply-kv-arg [#_model          :metadata/column
-                                             #_resolved-query clojure.lang.IPersistentMap
-                                             #_k              :default]
-  &quot;Qualify unqualified kv-args when fetching a `:metadata/column`.&quot;
-  [model honeysql k v]
-  (let [k (if (not (qualified-key? k))
-            (keyword &quot;field&quot; (name k))
-            k)]
-    (next-method model honeysql k v)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2.pipeline/build [#_query-type     :toucan.query-type/select.*
-                                         #_model          :metadata/column
-                                         #_resolved-query clojure.lang.IPersistentMap]
-  [query-type model parsed-args honeysql]
-  (merge
-   (next-method query-type model parsed-args honeysql)
-   {:select    [:field/active
-                :field/base_type
-                :field/coercion_strategy
-                :field/database_type
-                :field/description
-                :field/display_name
-                :field/effective_type
-                :field/fingerprint
-                :field/fk_target_field_id
-                :field/id
-                :field/name
-                :field/nfc_path
-                :field/parent_id
-                :field/position
-                :field/semantic_type
-                :field/settings
-                :field/table_id
-                :field/visibility_type
-                :dimension/human_readable_field_id
-                :dimension/id
-                :dimension/name
-                :dimension/type
-                :values/human_readable_values
-                :values/values]
-    :from      [[(t2/table-name :model/Field) :field]]
-    :left-join [[(t2/table-name :model/Table) :table]
-                [:= :field/table_id :table/id]
-                [(t2/table-name :model/Dimension) :dimension]
-                [:and
-                 [:= :dimension/field_id :field/id]
-                 [:inline [:in :dimension/type [&quot;external&quot; &quot;internal&quot;]]]]
-                [(t2/table-name :model/FieldValues) :values]
-                [:and
-                 [:= :values/field_id :field/id]
-                 [:= :values/type [:inline &quot;full&quot;]]]]}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(t2/define-after-select :metadata/column
-  [field]
-  (let [field          (instance-&gt;metadata field :metadata/column)
-        dimension-type (some-&gt; (:dimension/type field) keyword)]
-    (merge
-     (dissoc field
-             :dimension/human-readable-field-id :dimension/id :dimension/name :dimension/type
-             :values/human-readable-values :values/values)
-     (when-let [prefix (get *table-idents* (:table-id field))]
-       {:ident (lib.metadata.ident/ident-for-field prefix field)})
-     (when (and (= dimension-type :external)
-                (:dimension/human-readable-field-id field))
-       {:lib/external-remap {:lib/type :metadata.column.remapping/external
-                             :id       (:dimension/id field)
-                             :name     (:dimension/name field)
-                             :field-id (:dimension/human-readable-field-id field)}})
-     (when (and (= dimension-type :internal)
-                (:values/values field)
-                (:values/human-readable-values field))
-       {:lib/internal-remap {:lib/type              :metadata.column.remapping/internal
-                             :id                    (:dimension/id field)
-                             :name                  (:dimension/name field)
-                             :values                (mi/json-out-with-keywordization
-                                                     (:values/values field))
-                             :human-readable-values (mi/json-out-without-keywordization
-                                                     (:values/human-readable-values field))}}))))</pre></td></tr><tr><td class="docs"><p>Card</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :metadata/card :model/Card)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2.model/resolve-model :metadata/card
-  [model]
-  (t2/resolve-model :model/Card)
-  (t2/resolve-model :model/PersistedInfo)
-  model)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2.model/model-&gt;namespace :metadata/card
-  [_model]
-  {:model/PersistedInfo &quot;persisted&quot;})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2.query/apply-kv-arg [#_model          :metadata/card
-                                             #_resolved-query clojure.lang.IPersistentMap
-                                             #_k              :default]
-  [model honeysql k v]
-  ()
-  (let [k (if (not (qualified-key? k))
-            (keyword &quot;card&quot; (name k))
-            k)]
-    (next-method model honeysql k v)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2.pipeline/build [#_query-type     :toucan.query-type/select.*
-                                         #_model          :metadata/card
-                                         #_resolved-query clojure.lang.IPersistentMap]
-  [query-type model parsed-args honeysql]
-  (merge
-   (next-method query-type model parsed-args honeysql)
-   {:select    [:card/collection_id
-                :card/created_at   ; Needed for backfilling :entity_id on demand; see [[metabase.models.card]].
-                :card/database_id
-                :card/dataset_query
-                :card/id
-                :card/entity_id
-                :card/name
-                :card/result_metadata
-                :card/table_id
-                :card/type
-                :card/visualization_settings
-                :persisted/active
-                :persisted/state
-                :persisted/definition
-                :persisted/query_hash
-                :persisted/table_name]
-    :from      [[(t2/table-name :model/Card) :card]]
-    :left-join [[(t2/table-name :model/PersistedInfo) :persisted]
-                [:= :persisted/card_id :card/id]]}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- parse-persisted-info-definition [x]
-  ((get-in (t2/transforms :model/PersistedInfo) [:definition :out] identity) x))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(t2/define-after-select :metadata/card
-  [card]
-  (let [card (instance-&gt;metadata card :metadata/card)]
-    (merge
-     (dissoc card :persisted/active :persisted/state :persisted/definition :persisted/query-hash :persisted/table-name)
-     (when (:persisted/definition card)
-       {:lib/persisted-info {:active     (:persisted/active card)
-                             :state      (:persisted/state card)
-                             :definition (parse-persisted-info-definition (:persisted/definition card))
-                             :query-hash (:persisted/query-hash card)
-                             :table-name (:persisted/table-name card)}}))))</pre></td></tr><tr><td class="docs"><p>Metric</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :metadata/metric :model/Card)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(t2/define-after-select :metadata/metric
-  [metric]
-  (instance-&gt;metadata metric :metadata/metric))</pre></td></tr><tr><td class="docs"><p>Segment</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(derive :metadata/segment :model/Segment)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2.model/resolve-model :metadata/segment
-  [model]
-  (t2.model/resolve-model :model/Segment)
-  (t2.model/resolve-model :model/Table)
-  model)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2.query/apply-kv-arg [#_model          :metadata/segment
-                                             #_resolved-query clojure.lang.IPersistentMap
-                                             #_k              :default]
-  [model honeysql k v]
-  (let [k (if (not (qualified-key? k))
-            (keyword &quot;segment&quot; (name k))
-            k)]
-    (next-method model honeysql k v)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2.pipeline/build [#_query-type     :toucan.query-type/select.*
-                                         #_model          :metadata/segment
-                                         #_resolved-query clojure.lang.IPersistentMap]
-  [query-type model parsed-args honeysql]
-  (merge
-   (next-method query-type model parsed-args honeysql)
-   {:select    [:segment/id
-                :segment/table_id
-                :segment/name
-                :segment/description
-                :segment/archived
-                :segment/definition]
-    :from      [[(t2/table-name :model/Segment) :segment]]
-    :left-join [[(t2/table-name :model/Table) :table]
-                [:= :segment/table_id :table/id]]}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(t2/define-after-select :metadata/segment
-  [segment]
-  (instance-&gt;metadata segment :metadata/segment))</pre></td></tr><tr><td class="docs"><p>MetadataProvider</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- database [database-id]
-  (when-not database-id
-    (throw (ex-info (format &quot;Cannot use %s with %s with a nil Database ID&quot;
-                            `lib.metadata.protocols/database
-                            `UncachedApplicationDatabaseMetadataProvider)
-                    {})))
-  (t2/select-one :metadata/database database-id))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- metadatas [database-id metadata-type ids]
-  (let [database-id-key (case metadata-type
-                          :metadata/table :db_id
-                          :metadata/card  :database_id
-                          :table/db_id)]
-    (when (seq ids)
-      (t2/select metadata-type
-                 database-id-key database-id
-                 :id             [:in (set ids)]))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- tables [database-id]
-  (t2/select :metadata/table
-             :db_id           database-id
-             :active          true
-             :visibility_type [:not-in #{&quot;hidden&quot; &quot;technical&quot; &quot;cruft&quot;}]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- metadatas-for-table [metadata-type table-id]
-  (case metadata-type
-    :metadata/column
-    (into [] (lib.metadata.ident/attach-idents #(get *table-idents* %))
-          (t2/select :metadata/column
-                     :table_id        table-id
-                     :active          true
-                     :visibility_type [:not-in #{&quot;sensitive&quot; &quot;retired&quot;}]))
-    :metadata/metric
-    (t2/select :metadata/metric :table_id table-id, :source_card_id [:= nil], :type :metric, :archived false)
-    :metadata/segment
-    (t2/select :metadata/segment :table_id table-id, :archived false)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- metadatas-for-card [metadata-type card-id]
-  (case metadata-type
-    :metadata/metric
-    (t2/select :metadata/metric :source_card_id card-id, :type :metric, :archived false)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- database-name [database-id atom-db-name]
-  (if-let [db-name @atom-db-name]
-    db-name
-    (reset! atom-db-name (:name (database database-id)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- table-idents [db-name tbls]
-  (into {} (comp (filter identity)
-                 (map (juxt :id #(lib.metadata.ident/table-prefix db-name %))))
-        tbls))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- ensure-table-idents [table-idents-atom db-name table-ids]
-  (let [id-&gt;ident (or @table-idents-atom {})]
-    (or (when-let [missing-ids (not-empty (into #{} (remove id-&gt;ident) table-ids))]
-          (log/debugf &quot;Fetching tables for their idents: %s&quot; (pr-str missing-ids))
-          (let [tbls (t2/select :metadata/table :id [:in missing-ids])]
-            (swap! table-idents-atom merge (table-idents db-name tbls))))
-        id-&gt;ident)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- attach-idents [table-idents-atom db-name columns]
-  (let [table-ids (into #{} (map :table-id) columns)
-        id-&gt;ident (ensure-table-idents table-idents-atom db-name table-ids)]
-    (lib.metadata.ident/attach-idents id-&gt;ident columns)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(p/deftype+ UncachedApplicationDatabaseMetadataProvider [database-id db-name-atom table-idents-atom]
-  lib.metadata.protocols/MetadataProvider
-  (database [_this]
-    (let [db (database database-id)]
-      (reset! db-name-atom (:name db))
-      db))
-  (metadatas [_this metadata-type ids]
-    (let [ms (metadatas database-id metadata-type ids)]
-      (cond-&gt;&gt; ms
-        (= metadata-type :metadata/column) (attach-idents table-idents-atom (database-name database-id db-name-atom)))))
-  (tables [_this]
-    (let [tbls (tables database-id)]
-      (swap! table-idents-atom merge (table-idents (database-name database-id db-name-atom) tbls))))
-  (metadatas-for-table [_this metadata-type table-id]
-    (ensure-table-idents table-idents-atom (database-name database-id db-name-atom) [table-id])
-    (binding [*table-idents* @table-idents-atom]
-      (metadatas-for-table metadata-type table-id)))
-  (metadatas-for-card [_this metadata-type card-id]
-    (metadatas-for-card metadata-type card-id))
-  (setting [_this setting-name]
-    (setting/get setting-name))
-  pretty/PrettyPrintable
-  (pretty [_this]
-    (list `-&gt;UncachedApplicationDatabaseMetadataProvider database-id))
-  Object
-  (equals [_this another]
-    (and (instance? UncachedApplicationDatabaseMetadataProvider another)
-         (= database-id (.database-id ^UncachedApplicationDatabaseMetadataProvider another)))))</pre></td></tr><tr><td class="docs"><p>Inner function that constructs a new <code>MetadataProvider</code>.
-I couldn't resist the Java naming, <code>foo-provider-factory-strategy-bean</code>.</p>
-
-<p>Call [[application-database-metadata-provider]] instead, which wraps this inner function with optional, dynamically
-scoped caching, to allow reuse of <code>MetadataProvider</code>s across the life of an API request.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- application-database-metadata-provider-factory
-  [database-id]
-  (-&gt; (-&gt;UncachedApplicationDatabaseMetadataProvider database-id (atom nil) (atom {}))
-      lib.metadata.cached-provider/cached-metadata-provider
-      lib.metadata.invocation-tracker/invocation-tracker-provider))</pre></td></tr><tr><td class="docs"><p>Bind this to a <code>(atom (clojure.core.cache/basic-cache-factory {}))</code> or similar cache-atom, and
-[[application-database-metadata-provider]] will use it for caching the <code>MetadataProvider</code> for each <code>database-id</code>
-over the lifespan of this binding.</p>
-
-<p>This is useful for an API request, or group fo API requests like a dashboard load, to reduce appdb traffic.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *metadata-provider-cache*
-  nil)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn application-database-metadata-provider :- ::lib.schema.metadata/metadata-provider
-  &quot;An implementation of [[metabase.lib.metadata.protocols/MetadataProvider]] for the application database.
-  Supports caching over a dynamic scope (eg. an API request or group of API requests like a dashboard load) via
-  [[*metadata-provider-cache*]]. Outside such a scope, this creates a new `MetadataProvider` for each call.
-  On the returned `MetadataProvider`, all operations are cached. You can use the bulk operations to pre-warm the cache
-  if you need to.&quot;
-  [database-id :- ::lib.schema.id/database]
-  (if-let [cache-atom *metadata-provider-cache*]
-    (cache.wrapped/lookup-or-miss cache-atom database-id application-database-metadata-provider-factory)
-    (application-database-metadata-provider-factory database-id)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+</td><td class="codes"><pre class="brush: clojure">(defn- adhoc-query-read-check
+  [query]
+  (api/check-403
+   (query-perms/check-data-perms (:dataset_query query)
+                                 (query-perms/required-perms-for-query (:dataset_query query))
+                                 :throw-exceptions? false))
+  query)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- ensure-int
+  [x]
+  (if (string? x)
+    (Integer/parseInt x)
+    x))</pre></td></tr><tr><td class="docs"><p>Parse/decode/coerce string <code>s</code> an to an entity of <code>entity-type</code>. <code>s</code> is something like a unparsed integer row ID,
+encoded query, or transform name.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmulti ^:private -&gt;entity
+  {:arglists '([entity-type s])}
+  (fn [entity-type _s]
+    (keyword entity-type)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;entity :table
+  [_entity-type table-id-str]
+  ;; table-id can also be a source query reference like `card__1` so in that case we should pull the ID out and use the
+  ;; `:question` method instead
+  (if-let [[_ card-id-str] (when (string? table-id-str)
+                             (re-matches #&quot;^card__(\d+$)&quot; table-id-str))]
+    (-&gt;entity :question card-id-str)
+    (api/read-check (t2/select-one :model/Table :id (ensure-int table-id-str)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;entity :segment
+  [_entity-type segment-id-str]
+  (api/read-check (t2/select-one :model/Segment :id (ensure-int segment-id-str))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;entity :model
+  [_entity-type card-id-str]
+  (api/read-check (t2/select-one :model/Card
+                                 :id (ensure-int card-id-str)
+                                 :type :model)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;entity :question
+  [_entity-type card-id-str]
+  (api/read-check (t2/select-one :model/Card :id (ensure-int card-id-str))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;entity :adhoc
+  [_entity-type encoded-query]
+  (adhoc-query-read-check (query/adhoc-query (decode-base64-json encoded-query))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;entity :metric
+  [_entity-type metric-id-str]
+  (api/read-check (t2/select-one :model/LegacyMetric :id (ensure-int metric-id-str))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;entity :field
+  [_entity-type field-id-str]
+  (api/read-check (t2/select-one :model/Field :id (ensure-int field-id-str))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod -&gt;entity :transform
+  [_entity-type transform-name]
+  (api/read-check (t2/select-one :model/Collection :id (transforms.materialize/get-collection transform-name)))
+  transform-name)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private entities
+  (map name (keys (methods -&gt;entity))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private Entity
+  (into [:enum {:api/regex (u.regex/re-or entities)
+                :error/fn  (fn [_ _]
+                             (i18n/tru &quot;Invalid entity type&quot;))}]
+        entities))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ComparisonEntity
+  (mu/with-api-error-message
+   [:enum &quot;segment&quot; &quot;adhoc&quot; &quot;table&quot;]
+   (deferred-tru &quot;Invalid comparison entity type. Can only be one of \&quot;table\&quot;, \&quot;segment\&quot;, or \&quot;adhoc\)))</pre></td></tr><tr><td class="docs"><p>Show is either nil, "all", or a number. If it's a string it needs to be converted into a keyword.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- coerce-show
+  [show]
+  (cond-&gt; show (= &quot;all&quot; show) keyword))</pre></td></tr><tr><td class="docs"><p>Return an automagic dashboard for entity <code>entity</code> with id <code>id</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn get-automagic-dashboard
+  [entity entity-id-or-query show]
+  (if (= entity &quot;transform&quot;)
+    (transforms.dashboard/dashboard (-&gt;entity entity entity-id-or-query))
+    (-&gt; (-&gt;entity entity entity-id-or-query)
+        (automagic-dashboards.core/automagic-analysis {:show (coerce-show show)}))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:entity/:entity-id-or-query&quot;
+  &quot;Return an automagic dashboard for entity `entity` with id `id`.&quot;
+  [{:keys [entity entity-id-or-query]} :- [:map
+                                           [:entity Entity]]
+   {:keys [show]} :- [:map
+                      [:show {:optional true} [:maybe [:or [:= &quot;all&quot;] nat-int?]]]]]
+  (get-automagic-dashboard entity entity-id-or-query show))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:entity/:entity-id-or-query/query_metadata&quot;
+  &quot;Return all metadata for an automagic dashboard for entity `entity` with id `id`.&quot;
+  [{:keys [entity entity-id-or-query]} :- [:map
+                                           [:entity Entity]]]
+  (api.query-metadata/batch-fetch-dashboard-metadata
+   [(get-automagic-dashboard entity entity-id-or-query nil)]))</pre></td></tr><tr><td class="docs"><p>Identify the pk field of the model with <code>pk_ref</code>, and then find any fks that have that pk as a target.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn linked-entities
+  [{{field-ref :pk_ref} :model-index {rsmd :result_metadata} :model}]
+  (when-let [field-id (:id (some #(when ((comp #{field-ref} :field_ref) %) %) rsmd))]
+    (map
+     (fn [{:keys [table_id id]}]
+       {:linked-table-id table_id
+        :linked-field-id id})
+     (t2/select 'Field :fk_target_field_id field-id))))</pre></td></tr><tr><td class="docs"><p>Insert a source model link card into the sequence of passed in cards.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- add-source-model-link
+  [{model-name :name model-id :id} cards]
+  (let [max-width (-&gt;&gt; (map (fn [{:keys [col size_x]}] (+ col size_x)) cards)
+                       (into [4])
+                       (apply max))]
+    (cons
+     {:id                     (gensym)
+      :size_x                 max-width
+      :size_y                 1
+      :row                    0
+      :col                    0
+      :visualization_settings {:virtual_card {:display  &quot;link&quot;
+                                              :archived false},
+                               :link         {:entity {:id          model-id
+                                                       :name        model-name
+                                                       :model       &quot;dataset&quot;
+                                                       :display     &quot;table&quot;
+                                                       :description nil}}}}
+     cards)))</pre></td></tr><tr><td class="docs"><p>For each joinable table from <code>model</code>, create an x-ray dashboard as a tab.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- create-linked-dashboard
+  [{{indexed-entity-name :name :keys [model_pk]} :model-index-value
+    {model-name :name :as model}                 :model
+    :keys                                        [linked-tables]}]
+  (if (seq linked-tables)
+    (let [child-dashboards (map (fn [{:keys [linked-table-id linked-field-id]}]
+                                  (let [table (t2/select-one :model/Table :id linked-table-id)]
+                                    (automagic-dashboards.core/automagic-analysis
+                                     table
+                                     {:show         :all
+                                      :query-filter [:= [:field linked-field-id nil] model_pk]})))
+                                linked-tables)
+          seed-dashboard   (-&gt; (first child-dashboards)
+                               (merge
+                                {:name         (format &quot;Here's a look at \&quot;%s\&quot; from \&quot;%s\&quot;&quot; indexed-entity-name model-name)
+                                 :description  (format &quot;A dashboard focusing on information linked to %s&quot; indexed-entity-name)
+                                 :parameters   []
+                                 :param_fields {}})
+                               (dissoc :transient_name
+                                       :transient_filters))]
+      (if (second child-dashboards)
+        (-&gt;&gt; child-dashboards
+             (map-indexed (fn [idx {tab-name :name tab-cards :dashcards}]
+                            ;; id starts at 0. want our temporary ids to start at -1, -2, ...
+                            (let [tab-id (dec (- idx))]
+                              {:tab {:id       tab-id
+                                     :name     tab-name
+                                     :position idx}
+                               :dash-cards
+                               (map (fn [dc]
+                                      (assoc dc :dashboard_tab_id tab-id))
+                                    (add-source-model-link model tab-cards))})))
+             (reduce (fn [dashboard {:keys [tab dash-cards]}]
+                       (-&gt; dashboard
+                           (update :dashcards into dash-cards)
+                           (update :tabs conj tab)))
+                     (merge
+                      seed-dashboard
+                      {:dashcards []
+                       :tabs      []})))
+        (update seed-dashboard
+                :dashcards (fn [cards] (add-source-model-link model cards)))))
+    {:name      (format &quot;Here's a look at \&quot;%s\&quot; from \&quot;%s\&quot;&quot; indexed-entity-name model-name)
+     :dashcards (add-source-model-link
+                 model
+                 [{:row                    0
+                   :col                    0
+                   :size_x                 18
+                   :size_y                 2
+                   :visualization_settings {:text                &quot;# Unfortunately, there's not much else to show right now...&quot;
+                                            :virtual_card        {:display :text}
+                                            :dashcard.background false
+                                            :text.align_vertical :bottom}}])}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/model_index/:model-index-id/primary_key/:pk-id&quot;
+  &quot;Return an automagic dashboard for an entity detail specified by `entity`
+  with id `id` and a primary key of `indexed-value`.&quot;
+  [{:keys [model-index-id pk-id]} :- [:map
+                                      [:model-index-id :int]
+                                      [:pk-id          :int]]]
+  (api/let-404 [model-index (t2/select-one :model/ModelIndex model-index-id)
+                model (t2/select-one :model/Card (:model_id model-index))
+                model-index-value (t2/select-one :model/ModelIndexValue
+                                                 :model_index_id model-index-id
+                                                 :model_pk pk-id)]
+               ;; `-&gt;entity` does a read check on the model but this is here as well to be extra sure.
+    (api/read-check :model/Card (:model_id model-index))
+    (let [linked (linked-entities {:model             model
+                                   :model-index       model-index
+                                   :model-index-value model-index-value})]
+      (create-linked-dashboard {:model             model
+                                :linked-tables     linked
+                                :model-index       model-index
+                                :model-index-value model-index-value}))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:entity/:entity-id-or-query/rule/:prefix/:dashboard-template&quot;
+  &quot;Return an automagic dashboard for entity `entity` with id `id` using dashboard-template `dashboard-template`.&quot;
+  [{:keys [entity entity-id-or-query prefix dashboard-template]} :- [:map
+                                                                     [:entity             Entity]
+                                                                     [:entity-id-or-query ms/NonBlankString]
+                                                                     [:prefix             Prefix]
+                                                                     [:dashboard-template DashboardTemplate]]
+   {:keys [show]} :- [:map
+                      [:show {:optional true} Show]]]
+  (-&gt; (-&gt;entity entity entity-id-or-query)
+      (automagic-dashboards.core/automagic-analysis {:show               (coerce-show show)
+                                                     :dashboard-template [&quot;table&quot; prefix dashboard-template]})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:entity/:entity-id-or-query/cell/:cell-query&quot;
+  &quot;Return an automagic dashboard analyzing cell in automagic dashboard for entity `entity` defined by query
+  `cell-query`.&quot;
+  [{:keys [entity entity-id-or-query cell-query]} :- [:map
+                                                      [:entity             Entity]
+                                                      [:entity-id-or-query ms/NonBlankString]
+                                                      [:cell-query         Base64EncodedJSON]]
+   {:keys [show]} :- [:map
+                      [:show {:optional true} Show]]]
+  (-&gt; (-&gt;entity entity entity-id-or-query)
+      (automagic-dashboards.core/automagic-analysis {:show       (coerce-show show)
+                                                     :cell-query (decode-base64-json cell-query)})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:entity/:entity-id-or-query/cell/:cell-query/rule/:prefix/:dashboard-template&quot;
+  &quot;Return an automagic dashboard analyzing cell in question with id `id` defined by query `cell-query` using
+  dashboard-template `dashboard-template`.&quot;
+  [{:keys [entity entity-id-or-query cell-query prefix dashboard-template]} :- [:map
+                                                                                [:entity             Entity]
+                                                                                [:entity-id-or-query ms/NonBlankString]
+                                                                                [:prefix             Prefix]
+                                                                                [:dashboard-template DashboardTemplate]
+                                                                                [:cell-query         Base64EncodedJSON]]
+   {:keys [show]} :- [:map
+                      [:show {:optional true} Show]]]
+  (-&gt; (-&gt;entity entity entity-id-or-query)
+      (automagic-dashboards.core/automagic-analysis {:show               (coerce-show show)
+                                                     :dashboard-template [&quot;table&quot; prefix dashboard-template]
+                                                     :cell-query         (decode-base64-json cell-query)})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:entity/:entity-id-or-query/compare/:comparison-entity/:comparison-entity-id-or-query&quot;
+  &quot;Return an automagic comparison dashboard for entity `entity` with id `id` compared with entity `comparison-entity`
+  with id `comparison-entity-id-or-query.`&quot;
+  [{:keys [entity entity-id-or-query comparison-entity
+           comparison-entity-id-or-query]} :- [:map
+                                               [:entity-id-or-query ms/NonBlankString]
+                                               [:entity             Entity]
+                                               [:comparison-entity  ComparisonEntity]]
+   {:keys [show]} :- [:map
+                      [:show {:optional true} Show]]]
+  (let [left      (-&gt;entity entity entity-id-or-query)
+        right     (-&gt;entity comparison-entity comparison-entity-id-or-query)
+        dashboard (automagic-dashboards.core/automagic-analysis left {:show         (coerce-show show)
+                                                                      :query-filter nil
+                                                                      :comparison?  true})]
+    (automagic-dashboards.comparison/comparison-dashboard dashboard left right {})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:entity/:entity-id-or-query/rule/:prefix/:dashboard-template/compare/:comparison-entity/:comparison-entity-id-or-query&quot;
+  &quot;Return an automagic comparison dashboard for entity `entity` with id `id` using dashboard-template
+  `dashboard-template`; compared with entity `comparison-entity` with id `comparison-entity-id-or-query.`.&quot;
+  [{:keys [entity entity-id-or-query prefix dashboard-template
+           comparison-entity comparison-entity-id-or-query]} :- [:map
+                                                                 [:entity             Entity]
+                                                                 [:entity-id-or-query ms/NonBlankString]
+                                                                 [:prefix             Prefix]
+                                                                 [:dashboard-template DashboardTemplate]
+                                                                 [:comparison-entity  ComparisonEntity]]
+   {:keys [show]} :- [:map
+                      [:show {:optional true} Show]]]
+  (let [left      (-&gt;entity entity entity-id-or-query)
+        right     (-&gt;entity comparison-entity comparison-entity-id-or-query)
+        dashboard (automagic-dashboards.core/automagic-analysis left {:show               (coerce-show show)
+                                                                      :dashboard-template [&quot;table&quot; prefix dashboard-template]
+                                                                      :query-filter       nil
+                                                                      :comparison?        true})]
+    (automagic-dashboards.comparison/comparison-dashboard dashboard left right {})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:entity/:entity-id-or-query/cell/:cell-query/compare/:comparison-entity/:comparison-entity-id-or-query&quot;
+  &quot;Return an automagic comparison dashboard for cell in automagic dashboard for entity `entity`
+   with id `id` defined by query `cell-query`; compared with entity `comparison-entity` with id
+   `comparison-entity-id-or-query.`.&quot;
+  [{:keys [entity entity-id-or-query cell-query
+           comparison-entity comparison-entity-id-or-query]} :- [:map
+                                                                 [:entity             Entity]
+                                                                 [:entity-id-or-query ms/NonBlankString]
+                                                                 [:cell-query         Base64EncodedJSON]
+                                                                 [:comparison-entity  ComparisonEntity]]
+   {:keys [show]} :- [:map
+                      [:show {:optional true} Show]]]
+  (let [left      (-&gt;entity entity entity-id-or-query)
+        right     (-&gt;entity comparison-entity comparison-entity-id-or-query)
+        dashboard (automagic-dashboards.core/automagic-analysis left {:show         (coerce-show show)
+                                                                      :query-filter nil
+                                                                      :comparison?  true})]
+    (automagic-dashboards.comparison/comparison-dashboard dashboard left right {:left {:cell-query (decode-base64-json cell-query)}})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:entity/:entity-id-or-query/cell/:cell-query/rule/:prefix/:dashboard-template/compare/:comparison-entity/:comparison-entity-id-or-query&quot;
+  &quot;Return an automagic comparison dashboard for cell in automagic dashboard for entity `entity`
+   with id `id` defined by query `cell-query` using dashboard-template `dashboard-template`; compared with entity
+   `comparison-entity` with id `comparison-entity-id-or-query.`.&quot;
+  [{:keys [entity entity-id-or-query cell-query prefix dashboard-template
+           comparison-entity comparison-entity-id-or-query]} :- [:map
+                                                                 [:entity             Entity]
+                                                                 [:entity-id-or-query ms/NonBlankString]
+                                                                 [:prefix             Prefix]
+                                                                 [:dashboard-template DashboardTemplate]
+                                                                 [:cell-query         Base64EncodedJSON]
+                                                                 [:comparison-entity  ComparisonEntity]]
+   {:keys [show]} :- [:map
+                      [:show {:optional true} Show]]]
+  (let [left      (-&gt;entity entity entity-id-or-query)
+        right     (-&gt;entity comparison-entity comparison-entity-id-or-query)
+        dashboard (automagic-dashboards.core/automagic-analysis left {:show               (coerce-show show)
+                                                                      :dashboard-template [&quot;table&quot; prefix dashboard-template]
+                                                                      :query-filter       nil})]
+    (automagic-dashboards.comparison/comparison-dashboard dashboard left right {:left {:cell-query (decode-base64-json cell-query)}})))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
