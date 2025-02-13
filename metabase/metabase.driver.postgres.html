@@ -3291,8 +3291,15 @@ name, but first fetches database enum types so we have access to them.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/add-interval-honeysql-form :postgres
   [driver hsql-form amount unit]
   ;; Postgres doesn't support quarter in intervals (#20683)
-  (if (= unit :quarter)
+  (cond
+    (= unit :quarter)
     (recur driver hsql-form (* 3 amount) :month)
+
+    ;; date + interval -&gt; timestamp, so cast the expression back to date
+    (h2x/is-of-type? hsql-form &quot;date&quot;)
+    (h2x/cast &quot;date&quot; (h2x/+ hsql-form (interval amount unit)))
+
+    :else
     (let [hsql-form (-&gt;timestamp hsql-form)]
       (-&gt; (h2x/+ hsql-form (interval amount unit))
           (h2x/with-type-info (h2x/type-info hsql-form))))))</pre></td></tr><tr><td class="docs">
@@ -3301,7 +3308,8 @@ name, but first fetches database enum types so we have access to them.</p>
   (h2x/with-database-type-info :%now &quot;timestamptz&quot;))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/unix-timestamp-&gt;honeysql [:postgres :seconds]
   [_ _ expr]
-  [:to_timestamp expr])</pre></td></tr><tr><td class="docs">
+  ;; without tagging the expression, other code will want to add a type
+  (h2x/with-database-type-info [:to_timestamp expr] &quot;timestamptz&quot;))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/cast-temporal-string [:postgres :Coercion/YYYYMMDDHHMMSSString-&gt;Temporal]
   [_driver _coercion-strategy expr]
   [:to_timestamp expr (h2x/literal &quot;YYYYMMDDHH24MISS&quot;)])</pre></td></tr><tr><td class="docs">
@@ -3332,6 +3340,9 @@ name, but first fetches database enum types so we have access to them.</p>
     (time-trunc unit expr)
     &quot;timetz&quot;
     (h2x/cast &quot;timetz&quot; (time-trunc unit expr))
+    ;; postgres returns timestamp or timestamptz from `date_trunc`, so cast back if we've got a date column
+    &quot;date&quot;
+    (h2x/cast &quot;date&quot; [:date_trunc (h2x/literal unit) expr])
     #_else
     (let [expr' (-&gt;timestamp expr)]
       (-&gt; [:date_trunc (h2x/literal unit) expr']
@@ -3346,7 +3357,6 @@ name, but first fetches database enum types so we have access to them.</p>
 (defmethod sql.qp/date [:postgres :minute-of-hour]   [_ _ expr] (extract-integer :minute expr))
 (defmethod sql.qp/date [:postgres :hour]             [_ _ expr] (date-trunc :hour expr))
 (defmethod sql.qp/date [:postgres :hour-of-day]      [_ _ expr] (extract-integer :hour expr))
-(defmethod sql.qp/date [:postgres :day]              [_ _ expr] (h2x/-&gt;date expr))
 (defmethod sql.qp/date [:postgres :day-of-month]     [_ _ expr] (extract-integer :day expr))
 (defmethod sql.qp/date [:postgres :day-of-year]      [_ _ expr] (extract-integer :doy expr))
 (defmethod sql.qp/date [:postgres :month]            [_ _ expr] (date-trunc :month expr))
@@ -3371,6 +3381,9 @@ name, but first fetches database enum types so we have access to them.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn- quoted? [database-type :- ::lib.schema.common/non-blank-string]
   (and (str/starts-with? database-type &quot;\)
        (str/ends-with? database-type &quot;\)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/date [:postgres :day]
+  [_ _ expr]
+  (h2x/maybe-cast (h2x/database-type expr) (h2x/-&gt;date expr)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod sql.qp/-&gt;honeysql [:postgres :convert-timezone]
   [driver [_ arg target-timezone source-timezone]]
   (let [expr         (sql.qp/-&gt;honeysql driver (cond-&gt; arg

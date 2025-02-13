@@ -2869,6 +2869,7 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.notification.send
   (:require
    [java-time.api :as t]
+   [metabase.analytics.prometheus :as prometheus]
    [metabase.channel.core :as channel]
    [metabase.models.setting :as setting]
    [metabase.models.task-history :as task-history]
@@ -2916,47 +2917,52 @@ net.brehaut.ClojureTools = (function (SH) {
             (contains? (:errors (ex-data exception)) :slack-token))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- channel-send-retrying!
   [notification-id payload-type handler message]
-  (try
-    (let [#_notification-id #_(:notification_id handler)
-          retry-config    default-retry-config
-          retry-errors    (volatile! [])
-          retry-report    (fn []
-                            {:attempted_retries (count @retry-errors)
-                            ;; we want the last retry to be the most recent
-                             :retry_errors       (reverse @retry-errors)})
-          channel         (or (:channel handler)
-                              {:type (:channel_type handler)})
-          send!           (fn []
-                            (try
-                              (channel/send! channel message)
-                              (catch Exception e
-                                (when (should-retry-sending? e (:type channel))
-                                  (vswap! retry-errors conj {:message   (u/strip-error e)
-                                                             :timestamp (t/offset-date-time)})
-                                  (log/warnf e &quot;[Notification %d] Failed to send to channel %s , retrying...&quot;
-                                             notification-id (handler-&gt;channel-name handler))
-                                  (throw e)))))
-          retrier         (retry/make retry-config)]
-      (log/debugf &quot;[Notification %d] Sending a message to channel %s&quot; notification-id (handler-&gt;channel-name handler))
-      (task-history/with-task-history {:task            &quot;channel-send&quot;
-                                       :on-success-info (fn [update-map _result]
-                                                          (cond-&gt; update-map
-                                                            (seq @retry-errors)
-                                                            (update :task_details merge (retry-report))))
-                                       :on-fail-info    (fn [update-map _result]
-                                                          (update update-map :task_details merge (retry-report)))
-                                       :task_details    {:retry_config      retry-config
-                                                         :channel_id        (:id channel)
-                                                         :channel_type      (:type channel)
-                                                         :template_id       (:template_id handler)
-                                                         :notification_id   notification-id
-                                                         :notification_type payload-type
-                                                         :recipient_ids     (map :id (:recipients handler))}}
-        (retrier send!)
-        (log/debugf &quot;[Notification %d] Sent to channel %s with %d retries&quot;
-                    notification-id (handler-&gt;channel-name handler) (count @retry-errors))))
-    (catch Throwable e
-      (log/errorf e &quot;[Notification %d] Error sending notification!&quot; notification-id))))</pre></td></tr><tr><td class="docs">
+  (let [channel      (or (:channel handler)
+                         {:type (:channel_type handler)})
+        channel-type (:type channel)]
+    (try
+      (let [#_notification-id #_(:notification_id handler)
+            retry-config    default-retry-config
+            retry-errors    (volatile! [])
+            retry-report    (fn []
+                              {:attempted_retries (count @retry-errors)
+                               ;; we want the last retry to be the most recent
+                               :retry_errors       (reverse @retry-errors)})
+            send!           (fn []
+                              (try
+                                (channel/send! channel message)
+                                (catch Exception e
+                                  (when (should-retry-sending? e (:type channel))
+                                    (vswap! retry-errors conj {:message   (u/strip-error e)
+                                                               :timestamp (t/offset-date-time)})
+                                    (log/warnf e &quot;[Notification %d] Failed to send to channel %s , retrying...&quot;
+                                               notification-id (handler-&gt;channel-name handler))
+                                    (throw e)))))
+            retrier         (retry/make retry-config)]
+        (log/debugf &quot;[Notification %d] Sending a message to channel %s&quot; notification-id (handler-&gt;channel-name handler))
+        (task-history/with-task-history {:task            &quot;channel-send&quot;
+                                         :on-success-info (fn [update-map _result]
+                                                            (cond-&gt; update-map
+                                                              (seq @retry-errors)
+                                                              (update :task_details merge (retry-report))))
+                                         :on-fail-info    (fn [update-map _result]
+                                                            (update update-map :task_details merge (retry-report)))
+                                         :task_details    {:retry_config      retry-config
+                                                           :channel_id        (:id channel)
+                                                           :channel_type      (:type channel)
+                                                           :template_id       (:template_id handler)
+                                                           :notification_id   notification-id
+                                                           :notification_type payload-type
+                                                           :recipient_ids     (map :id (:recipients handler))}}
+          (retrier send!)
+          (log/debugf &quot;[Notification %d] Sent to channel %s with %d retries&quot;
+                      notification-id (handler-&gt;channel-name handler) (count @retry-errors))))
+      (prometheus/inc! :metabase-notification/channel-send-ok {:payload-type payload-type
+                                                               :channel-type channel-type})
+      (catch Throwable e
+        (prometheus/inc! :metabase-notification/channel-send-error {:payload-type payload-type
+                                                                    :channel-type channel-type})
+        (log/errorf e &quot;[Notification %d] Error sending notification!&quot; notification-id)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- noti-handlers
   [notification-info]
   (case (:payload_type notification-info)
@@ -2969,41 +2975,57 @@ net.brehaut.ClojureTools = (function (SH) {
   {:arglists '([notification-info notification-payload])}
   (fn [notification-info _notification-payload]
     (:payload_type notification-info)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod do-after-notification-sent :default [_notification-info _notification-payload] nil)</pre></td></tr><tr><td class="docs"><p>Send the notification to all handlers synchronously. Do not use this directly, use <em>send-notification!</em> instead.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmethod do-after-notification-sent :default [_notification-info _notification-payload] nil)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private payload-labels         (for [payload-type (keys (methods notification.payload/payload))]
+                                        {:payload-type payload-type}))
+(def ^:private payload-channel-labels (for [[channel-type payload-type] (keys (methods channel/render-notification))]
+                                        {:payload-type payload-type
+                                         :channel-type channel-type}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod prometheus/known-labels :metabase-notification/send-ok [_] payload-labels)
+(defmethod prometheus/known-labels :metabase-notification/send-error [_] payload-labels)
+(defmethod prometheus/known-labels :metabase-notification/channel-send-ok [_] payload-channel-labels)
+(defmethod prometheus/known-labels :metabase-notification/channel-send-error [_] payload-channel-labels)</pre></td></tr><tr><td class="docs"><p>Send the notification to all handlers synchronously. Do not use this directly, use <em>send-notification!</em> instead.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn send-notification-sync!
-  [notification-info :- notification.payload/Notification]
-  (try
-    (log/infof &quot;[Notification %d] Sending&quot; (:id notification-info))
-    (let [handlers (noti-handlers notification-info)]
-      (task-history/with-task-history {:task          &quot;notification-send&quot;
-                                       :task_details {:notification_id       (:id notification-info)
-                                                      :notification_handlers (map #(select-keys % [:id :channel_type :channel_id :template_id]) handlers)}}
-        (let [notification-payload (notification.payload/notification-payload notification-info)]
-          (if (notification.payload/should-send-notification? notification-payload)
-            (do
-              (log/debugf &quot;[Notification %d] Found %d handlers&quot; (:id notification-info) (count handlers))
-              (doseq [handler handlers]
-                (let [channel-type (:channel_type handler)
-                      messages     (channel/render-notification
-                                    channel-type
-                                    notification-payload
-                                    (:template handler)
-                                    (:recipients handler))]
-                  (log/debugf &quot;[Notification %d] Got %d messages for channel %s with template %d&quot;
-                              (:id notification-info) (count messages)
-                              (handler-&gt;channel-name handler)
-                              (-&gt; handler :template :id))
-                  (doseq [message messages]
-                    (log/infof &quot;[Notification %d] Sending message to channel %s&quot;
-                               (:id notification-info) (:channel_type handler))
-                    (channel-send-retrying! (:id notification-info) (:payload_type notification-info) handler message))))
-              (do-after-notification-sent notification-info notification-payload)
-              (log/infof &quot;[Notification %d] Sent successfully&quot; (:id notification-info)))
-            (log/infof &quot;[Notification %d] Skipping&quot; (:id notification-info))))))
-    (catch Exception e
-      (log/errorf e &quot;[Notification %d] Failed to send&quot; (:id notification-info))
-      (throw e)))
-  nil)</pre></td></tr><tr><td class="docs"><p>Send a notification asynchronously.</p>
+  [{:keys [id payload_type] :as notification-info} :- notification.payload/Notification]
+  (u/with-timer-ms [duration-ms-fn]
+    (try
+      (log/infof &quot;[Notification %d] Sending&quot; id)
+      (prometheus/inc! :metabase-notification/concurrent-tasks)
+      (let [handlers (noti-handlers notification-info)]
+        (task-history/with-task-history {:task          &quot;notification-send&quot;
+                                         :task_details {:notification_id       id
+                                                        :notification_handlers (map #(select-keys % [:id :channel_type :channel_id :template_id]) handlers)}}
+          (let [notification-payload (notification.payload/notification-payload notification-info)]
+            (if (notification.payload/should-send-notification? notification-payload)
+              (do
+                (log/debugf &quot;[Notification %d] Found %d handlers&quot; id (count handlers))
+                (doseq [handler handlers]
+                  (let [channel-type (:channel_type handler)
+                        messages     (channel/render-notification
+                                      channel-type
+                                      notification-payload
+                                      (:template handler)
+                                      (:recipients handler))]
+                    (log/debugf &quot;[Notification %d] Got %d messages for channel %s with template %d&quot;
+                                id (count messages)
+                                (handler-&gt;channel-name handler)
+                                (-&gt; handler :template :id))
+                    (doseq [message messages]
+                      (log/infof &quot;[Notification %d] Sending message to channel %s&quot;
+                                 id (:channel_type handler))
+                      (channel-send-retrying! id payload_type handler message))))
+                (do-after-notification-sent notification-info notification-payload)
+                (log/infof &quot;[Notification %d] Sent successfully&quot; id))
+              (log/infof &quot;[Notification %d] Skipping&quot; id))
+            (prometheus/inc! :metabase-notification/send-ok {:payload-type payload_type}))))
+      (catch Exception e
+        (log/errorf e &quot;[Notification %d] Failed to send&quot; id)
+        (prometheus/inc! :metabase-notification/send-error {:payload-type payload_type})
+        (throw e))
+      (finally
+        (prometheus/dec! :metabase-notification/concurrent-tasks)))
+    (prometheus/observe! :metabase-notification/send-duration-ms {:payload-type payload_type} (duration-ms-fn))
+    nil))</pre></td></tr><tr><td class="docs"><p>Send a notification asynchronously.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn send-notification-async!
   [notification :- notification.payload/Notification]
   (.submit ^ExecutorService @pool ^Callable

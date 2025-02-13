@@ -2880,6 +2880,7 @@ http://localhost:<prometheus-server-port>/metrics.</p>
    [iapetos.core :as prometheus]
    [metabase.models.setting :as setting :refer [defsetting]]
    [metabase.server.core :as server]
+   [metabase.util :as u]
    [metabase.util.i18n :refer [deferred-trs trs]]
    [metabase.util.log :as log]
    [potemkin :as p]
@@ -3084,7 +3085,25 @@ than "iapetos_internal"</p>
                       :labels [:engine]})
    (prometheus/gauge :metabase-search/engine-active
                      {:description &quot;Whether a given engine is active. This does NOT mean that it is the default.&quot;
-                      :labels [:engine]})])</pre></td></tr><tr><td class="docs"><p>Implement this for a given metric to initialize it for the given set of label values.</p>
+                      :labels [:engine]})
+   ;; notification metrics
+   (prometheus/counter :metabase-notification/send-ok
+                       {:description &quot;Number of successful notification sends.&quot;
+                        :labels [:payload-type]})
+   (prometheus/counter :metabase-notification/send-error
+                       {:description &quot;Number of errors when sending notifications.&quot;
+                        :labels [:payload-type]})
+   (prometheus/histogram :metabase-notification/send-duration-ms
+                         {:description &quot;Duration of notification sends in milliseconds.&quot;
+                          :labels [:payload-type]})
+   (prometheus/counter :metabase-notification/channel-send-ok
+                       {:description &quot;Number of successful channel sends.&quot;
+                        :labels [:payload-type :channel-type]})
+   (prometheus/counter :metabase-notification/channel-send-error
+                       {:description &quot;Number of errors when sending channel notifications.&quot;
+                        :labels [:payload-type :channel-type]})
+   (prometheus/gauge :metabase-notification/concurrent-tasks
+                     {:description &quot;Number of concurrent notification sends.&quot;})])</pre></td></tr><tr><td class="docs"><p>Implement this for a given metric to initialize it for the given set of label values.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti known-labels
   {:arglists '([metric]), :added &quot;0.52.0&quot;}
   identity)</pre></td></tr><tr><td class="docs"><p>Implement this for a given metric to have non-zero initial values for the given set of label values.</p>
@@ -3098,7 +3117,13 @@ than "iapetos_internal"</p>
         labels (known-labels metric)]
     {:metric metric
      :labels labels
-     :value  (initial-value metric labels)}))</pre></td></tr><tr><td class="docs"><p>Instrument the application. Conditionally done when some setting is set. If [[prometheus-server-port]] is not set it
+     :value  (initial-value metric labels)}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- qualified-vals
+  [m]
+  (update-vals m (fn [v] (cond
+                           (map? v) (qualified-vals v)
+                           (keyword? v) (u/qualified-name v)
+                           :else v))))</pre></td></tr><tr><td class="docs"><p>Instrument the application. Conditionally done when some setting is set. If [[prometheus-server-port]] is not set it
 will throw.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- setup-metrics!
   [registry-name]
@@ -3111,7 +3136,7 @@ will throw.</p>
                                 [@c3p0-collector]
                                 (product-collectors)))]
     (doseq [{:keys [metric labels value]} (initial-labelled-metric-values)]
-      (prometheus/inc registry metric labels value))
+      (prometheus/inc registry metric (qualified-vals labels) value))
     registry))</pre></td></tr><tr><td class="docs"><p>Start the prometheus web-server. If [[prometheus-server-port]] is not set it will throw.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- start-web-server!
   [port registry]
@@ -3145,18 +3170,44 @@ will throw.</p>
              (alter-var-root #'system (constantly nil))
              (log/info &quot;Prometheus web-server shut down&quot;)
              (catch Exception e
-               (log/warn e &quot;Error stopping prometheus web-server&quot;)))))))</pre></td></tr><tr><td class="docs"><p>Call iapetos.core/inc on the metric in the global registry.
+               (log/warn e &quot;Error stopping prometheus web-server&quot;)))))))</pre></td></tr><tr><td class="docs"><p>Call iapetos.core/observe on the metric in the global registry.
+ Inits registry if it's not been initialized yet.</p>
+
+<p>Should be used with histograms and summaries.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn observe!
+  ([metric] (observe! metric nil 1))
+  ([metric labels-or-amount]
+   (if (number? labels-or-amount)
+     (observe! metric nil labels-or-amount)
+     (observe! metric labels-or-amount 1)))
+  ([metric labels amount]
+   (when-not system
+     (setup!))
+   (prometheus/observe (:registry system) metric (qualified-vals labels) amount)))</pre></td></tr><tr><td class="docs"><p>Call iapetos.core/inc on the metric in the global registry.
  Inits registry if it's not been initialized yet.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn inc!
   ([metric] (inc! metric nil 1))
   ([metric labels-or-amount]
-   (if (seq? labels-or-amount)
-     (inc! metric labels-or-amount 1)
-     (inc! metric nil labels-or-amount)))
+   (if (number? labels-or-amount)
+     (inc! metric nil labels-or-amount)
+     (inc! metric labels-or-amount 1)))
   ([metric labels amount]
    (when-not system
      (setup!))
-   (prometheus/inc (:registry system) metric labels amount)))</pre></td></tr><tr><td class="docs"><p>Call iapetos.core/set on the metric in the global registry.
+   (prometheus/inc (:registry system) metric (qualified-vals labels) amount)))</pre></td></tr><tr><td class="docs"><p>Call iapetos.core/dec on the metric in the global registry.
+ Inits registry if it's not been initialized yet.</p>
+
+<p>Should be used for gauge metrics.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn dec!
+  ([metric] (dec! metric nil 1))
+  ([metric labels-or-amount]
+   (if (number? labels-or-amount)
+     (dec! metric nil labels-or-amount)
+     (dec! metric labels-or-amount 1)))
+  ([metric labels amount]
+   (when-not system
+     (setup!))
+   (prometheus/dec (:registry system) metric (qualified-vals labels) amount)))</pre></td></tr><tr><td class="docs"><p>Call iapetos.core/set on the metric in the global registry.
  Inits registry if it's not been initialized yet.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn set!
   ([metric amount]
@@ -3166,7 +3217,7 @@ will throw.</p>
   ([metric labels amount]
    (when-not system
      (setup!))
-   (prometheus/set (:registry system) metric labels amount)))</pre></td></tr><tr><td class="docs">
+   (prometheus/set (:registry system) metric (qualified-vals labels) amount)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(comment
   (require 'iapetos.export)
   (spit &quot;metrics&quot; (iapetos.export/text-format (:registry system))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
