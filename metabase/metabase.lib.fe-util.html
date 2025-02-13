@@ -2895,6 +2895,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.util.formatting.date :as fmt.date]
    [metabase.util.i18n :as i18n]
    [metabase.util.malli :as mu]
+   [metabase.util.number :as u.number]
    [metabase.util.time :as u.time]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private ExpressionParts
   [:map
@@ -3029,9 +3030,19 @@ arguments.</p>
       {:operator op, :column (ref-&gt;col col-ref), :values args, :options {:case-sensitive (get opts :case-sensitive true)}}
       ;; do not match inner clauses
       _
-      nil)))</pre></td></tr><tr><td class="docs"><p>String is used when the value cannot be accurately represented as a JS number.</p>
+      nil)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private NumberFilterValue
-  [:or number? :string])</pre></td></tr><tr><td class="docs">
+  [:or number? [:fn u.number/bigint?]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- number-&gt;expression-arg
+  [value]
+  (if (u.number/bigint? value)
+    (str value)
+    value))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- expression-arg-&gt;number
+  [value]
+  (cond
+    (number? value) value
+    (string? value) (u.number/parse-bigint value)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private NumberFilterParts
   [:map
    [:operator ::lib.schema.filter/number-filter-operator]
@@ -3043,7 +3054,7 @@ arguments.</p>
   [operator :- ::lib.schema.filter/number-filter-operator
    column   :- ::lib.schema.metadata/column
    values   :- [:maybe [:sequential NumberFilterValue]]]
-  (expression-clause-with-in operator (into [column] values) {}))</pre></td></tr><tr><td class="docs">
+  (expression-clause-with-in operator (into [column] (map number-&gt;expression-arg) values) {}))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn number-filter-parts :- [:maybe NumberFilterParts]
   &quot;Destructures a numeric filter clause created by [[number-filter-clause]]. Returns `nil` if the clause does not match
   the expected shape.&quot;
@@ -3052,23 +3063,23 @@ arguments.</p>
    filter-clause :- ::lib.schema.expression/expression]
   (let [ref-&gt;col    #(column-metadata-from-ref query stage-number %)
         number-col? #(ref-clause-with-type? % [:type/Number])
-        number-arg? #(or (number? %) (string? %))]
+        number-arg? #(some? (expression-arg-&gt;number %))]
     (lib.util.match/match-one filter-clause
       ;; no arguments
       [(op :guard #{:is-null :not-null}) _ (col-ref :guard number-col?)]
       {:operator op, :column (ref-&gt;col col-ref), :values []}
       ;; multiple arguments, `:=`
       [(_ :guard #{:= :in}) _ (col-ref :guard number-col?) &amp; (args :guard #(every? number-arg? %))]
-      {:operator :=, :column (ref-&gt;col col-ref), :values args}
+      {:operator :=, :column (ref-&gt;col col-ref), :values (mapv expression-arg-&gt;number args)}
       ;; multiple arguments, `:!=`
       [(_ :guard #{:!= :not-in}) _ (col-ref :guard number-col?) &amp; (args :guard #(every? number-arg? %))]
-      {:operator :!=, :column (ref-&gt;col col-ref), :values args}
+      {:operator :!=, :column (ref-&gt;col col-ref), :values (mapv expression-arg-&gt;number args)}
       ;; exactly 1 argument
       [(op :guard #{:&gt; :&gt;= :&lt; :&lt;=}) _ (col-ref :guard number-col?) (arg :guard number-arg?)]
-      {:operator op, :column (ref-&gt;col col-ref), :values [arg]}
+      {:operator op, :column (ref-&gt;col col-ref), :values [(expression-arg-&gt;number arg)]}
       ;; exactly 2 arguments
       [(op :guard #{:between}) _ (col-ref :guard number-col?) (start :guard number-arg?) (end :guard number-arg?)]
-      {:operator op, :column (ref-&gt;col col-ref), :values [start end]}
+      {:operator op, :column (ref-&gt;col col-ref), :values [(expression-arg-&gt;number start) (expression-arg-&gt;number end)]}
       ;; do not match inner clauses
       _
       nil)))</pre></td></tr><tr><td class="docs">
@@ -3087,7 +3098,7 @@ arguments.</p>
    values           :- [:maybe [:sequential NumberFilterValue]]]
   (if (= operator :inside)
     (expression-clause operator (into [column longitude-column] values) {})
-    (expression-clause-with-in operator (into [column] values) {})))</pre></td></tr><tr><td class="docs">
+    (expression-clause-with-in operator (into [column] (map number-&gt;expression-arg) values) {})))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn coordinate-filter-parts :- [:maybe CoordinateFilterParts]
   &quot;Destructures a coordinate filter clause created by [[coordinate-filter-clause]]. Returns `nil` if the clause does not
   match the expected shape. Unlike regular numeric filters, coordinate filters do not support `:is-null` and
@@ -3098,30 +3109,33 @@ arguments.</p>
   (let [ref-&gt;col        #(column-metadata-from-ref query stage-number %)
         coordinate-col? #(and (ref-clause-with-type? % [:type/Number])
                               (lib.types.isa/coordinate? (ref-&gt;col %)))
-        number-arg?     #(or (number? %) (string? %))]
+        number-arg?     #(some? (expression-arg-&gt;number %))]
     (lib.util.match/match-one filter-clause
       ;; multiple arguments, `:=`
       [(_ :guard #{:= :in}) _ (col-ref :guard coordinate-col?) &amp; (args :guard #(every? number-arg? %))]
-      {:operator :=, :column (ref-&gt;col col-ref), :values args}
+      {:operator :=, :column (ref-&gt;col col-ref), :values (mapv expression-arg-&gt;number args)}
       ;; multiple arguments, `:!=`
       [(_ :guard #{:!= :not-in}) _ (col-ref :guard coordinate-col?) &amp; (args :guard #(every? number-arg? %))]
-      {:operator :!=, :column (ref-&gt;col col-ref), :values args}
+      {:operator :!=, :column (ref-&gt;col col-ref), :values (mapv expression-arg-&gt;number args)}
      ;; exactly 1 argument
       [(op :guard #{:&gt; :&gt;= :&lt; :&lt;=}) _ (col-ref :guard coordinate-col?) (arg :guard number-arg?)]
-      {:operator op, :column (ref-&gt;col col-ref), :values [arg]}
+      {:operator op, :column (ref-&gt;col col-ref), :values [(expression-arg-&gt;number arg)]}
       ;; exactly 2 arguments
       [(op :guard #{:between})
        _
        (col-ref :guard coordinate-col?)
        &amp; (args :guard #(and (every? number-arg? %) (= (count %) 2)))]
-      {:operator op, :column (ref-&gt;col col-ref), :values args}
+      {:operator op, :column (ref-&gt;col col-ref), :values (mapv expression-arg-&gt;number args)}
       ;; exactly 4 arguments
       [(op :guard #{:inside})
        _
        (lat-col-ref :guard coordinate-col?)
        (lon-col-ref :guard coordinate-col?)
        &amp; (args :guard #(and (every? number-arg? %) (= (count %) 4)))]
-      {:operator op, :column (ref-&gt;col lat-col-ref), :longitude-column (ref-&gt;col lon-col-ref), :values args}
+      {:operator op
+       :column (ref-&gt;col lat-col-ref)
+       :longitude-column (ref-&gt;col lon-col-ref)
+       :values (mapv expression-arg-&gt;number args)}
       ;; do not match inner clauses
       _
       nil)))</pre></td></tr><tr><td class="docs">
