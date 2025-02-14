@@ -2895,7 +2895,6 @@ is a historical name, but is the same thing; both terms are used interchangeably
    [metabase.models.moderation-review :as moderation-review]
    [metabase.models.parameter-card :as parameter-card]
    [metabase.models.params :as params]
-   [metabase.models.pulse :as models.pulse]
    [metabase.models.query :as query]
    [metabase.models.query.permissions :as query-perms]
    [metabase.models.serialization :as serdes]
@@ -2903,6 +2902,8 @@ is a historical name, but is the same thing; both terms are used interchangeably
    [metabase.permissions.core :as perms]
    [metabase.premium-features.core :refer [defenterprise]]
    [metabase.public-settings :as public-settings]
+   ^{:clj-kondo/ignore [:deprecated-namespace]}
+   [metabase.pulse.core :as pulse]
    [metabase.query-analysis.core :as query-analysis]
    [metabase.query-processor.util :as qp.util]
    [metabase.search.core :as search]
@@ -3726,62 +3727,7 @@ created.</p>
      ;; include same information returned by GET /api/card/:id since frontend replaces the Card it currently has with
      ;; returned one -- See #4283
      card)))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------- Updating Cards -------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- card-archived? [old-card new-card]
-  (and (not (:archived old-card))
-       (:archived new-card)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- line-area-bar? [display]
-  (contains? #{:line :area :bar} display))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- progress? [display]
-  (= :progress display))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- allows-rows-alert? [display]
-  (not (contains? #{:line :bar :area :progress} display)))</pre></td></tr><tr><td class="docs"><p>Alerts no longer make sense when the kind of question being alerted on significantly changes. Setting up an alert
-when a time series query reaches 10 is no longer valid if the question switches from a line graph to a table. This
-function goes through various scenarios that render an alert no longer valid</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- display-change-broke-alert?
-  [{old-display :display} {new-display :display}]
-  (when-not (= old-display new-display)
-    (or
-     ;; Did the alert switch from a table type to a line/bar/area/progress graph type?
-     (and (allows-rows-alert? old-display)
-          (or (line-area-bar? new-display)
-              (progress? new-display)))
-     ;; Switching from a line/bar/area to another type that is not those three invalidates the alert
-     (and (line-area-bar? old-display)
-          (not (line-area-bar? new-display)))
-     ;; Switching from a progress graph to anything else invalidates the alert
-     (and (progress? old-display)
-          (not (progress? new-display))))))</pre></td></tr><tr><td class="docs"><p>If we had a goal before, and now it's gone, the alert is no longer valid</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- goal-missing?
-  [old-card new-card]
-  (and
-   (get-in old-card [:visualization_settings :graph.goal_value])
-   (not (get-in new-card [:visualization_settings :graph.goal_value]))))</pre></td></tr><tr><td class="docs"><p>If there are multiple breakouts and a goal, we don't know which breakout to compare to the goal, so it invalidates
-the alert</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- multiple-breakouts?
-  [{:keys [display] :as new-card}]
-  (and (get-in new-card [:visualization_settings :graph.goal_value])
-       (or (line-area-bar? display)
-           (progress? display))
-       (&lt; 1 (count (get-in new-card [:dataset_query :query :breakout])))))</pre></td></tr><tr><td class="docs"><p>Removes all of the alerts and notifies all of the email recipients of the alerts change.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- delete-alert-and-notify!
-  [topic actor alerts]
-  (t2/delete! :model/Pulse :id [:in (mapv u/the-id alerts)])
-  (events/publish-event! topic {:alerts alerts, :actor actor}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- delete-alerts-if-needed! [&amp; {:keys [old-card new-card actor]}]
-  ;; If there are alerts, we need to check to ensure the card change doesn't invalidate the alert
-  (when-let [alerts (binding [models.pulse/*allow-hydrate-archived-cards* true]
-                      (not-empty (models.pulse/retrieve-alerts-for-cards {:card-ids [(u/the-id new-card)]})))]
-    (cond
-      (card-archived? old-card new-card)
-      (delete-alert-and-notify! :event/card-update.alerts-deleted.card-archived actor alerts)
-      (or (display-change-broke-alert? old-card new-card)
-          (goal-missing? old-card new-card)
-          (multiple-breakouts? new-card))
-      (delete-alert-and-notify! :event/card-update.alerts-deleted.card-became-invalid actor alerts)
-      ;; The change doesn't invalidate the alert, do nothing
-      :else
-      nil)))</pre></td></tr><tr><td class="docs"><p>Return true if card is verified, false otherwise. Assumes that moderation reviews are ordered so that the most recent
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Return true if card is verified, false otherwise. Assumes that moderation reviews are ordered so that the most recent
 is the first. This is the case from the hydration function for moderation_reviews.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- card-is-verified?
   [card]
@@ -3922,7 +3868,8 @@ included, otherwise the metadata will be saved to the database asynchronously.</
                    &quot;`card-updates`:&quot; (pr-str card-updates)))))
   ;; Fetch the updated Card from the DB
   (let [card (t2/select-one :model/Card :id (:id card-before-update))]
-    (delete-alerts-if-needed! :old-card card-before-update, :new-card card, :actor actor)
+    ;;; TODO -- consider whether this should be triggered indirectly by `:event/card-update`
+    (pulse/delete-alerts-if-needed! :old-card card-before-update, :new-card card, :actor actor)
     ;; skip publishing the event if it's just a change in its collection position
     (when-not (= #{:collection_position}
                  (set (keys card-updates)))
