@@ -2865,188 +2865,242 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.query-processor.util" name="metabase.query-processor.util"><h1 class="project-name">metabase.query-processor.util</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Utility functions used by the global query processor and middleware functions.</p>
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.query-processor.util
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.cloud-migration.models.cloud-migration" name="metabase.cloud-migration.models.cloud-migration"><h1 class="project-name">metabase.cloud-migration.models.cloud-migration</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>A model representing a migration to cloud.</p>
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.cloud-migration.models.cloud-migration
   (:require
-   [buddy.core.codecs :as codecs]
-   [buddy.core.hash :as buddy-hash]
-   [clojure.string :as str]
-   [clojure.walk :as walk]
-   [medley.core :as m]
-   [metabase.driver :as driver]
-   [metabase.legacy-mbql.normalize :as mbql.normalize]
-   [metabase.lib.convert :as lib.convert]
-   [metabase.lib.schema.expression :as lib.schema.expression]
-   [metabase.lib.schema.util :as lib.schema.util]
-   [metabase.query-processor.schema :as qp.schema]
+   [clj-http.client :as http]
+   [clojure.java.io :as io]
+   [clojure.set :as set]
+   [metabase.cloud-migration.settings :as cloud-migration.settings]
+   [metabase.cmd.copy :as copy]
+   [metabase.cmd.dump-to-h2 :as dump-to-h2]
+   [metabase.config :as config]
+   [metabase.db :as mdb]
+   [metabase.models.interface :as mi]
+   [metabase.models.setting.cache :as setting.cache]
    [metabase.util :as u]
+   [metabase.util.i18n :refer [tru]]
    [metabase.util.json :as json]
-   [metabase.util.malli :as mu]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>TODO - I think most of the functions in this namespace that we don't remove could be moved to [[metabase.legacy-mbql.util]]</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Is the given query an MBQL query without a <code>:limit</code>, <code>:aggregation</code>, or <code>:page</code> clause?</p>
-</td><td class="codes"><pre class="brush: clojure">(defn query-without-aggregations-or-limits?
-  [{{aggregations :aggregation, :keys [limit page]} :query}]
-  (and (not limit)
-       (not page)
-       (empty? aggregations)))</pre></td></tr><tr><td class="docs"><p>Generates the default query remark. Exists as a separate function so that overrides of the query->remark multimethod
- can access the default value.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn default-query-&gt;remark
-  [{{:keys [executed-by query-hash], :as _info} :info, query-type :type}]
-  (str &quot;Metabase&quot; (when executed-by
-                    (assert (bytes? query-hash) &quot;If info includes executed-by it should also include query-hash&quot;)
-                    (format &quot;:: userID: %s queryType: %s queryHash: %s&quot;
-                            executed-by
-                            (case (keyword query-type)
-                              :query  &quot;MBQL&quot;
-                              :native &quot;native&quot;)
-                            (codecs/bytes-&gt;hex query-hash)))))</pre></td></tr><tr><td class="docs"><p>Generate an appropriate remark <code>^String</code> to be prepended to a query to give DBAs additional information about the query
-being executed. See documentation for [[metabase.driver/mbql->native]] and #2386.
-for more information.</p>
-
-<p>So this turns your average 10, 20, 30 character query into a 110, 120, 130 etc character query.
-One leaky-abstraction part of this is that this will confuse the bejeezus out of
-people who first encounter their passed-through RDBMS error messages.</p>
-
-<p>'Hey, this is a 20 character query! What's it talking about, error at position 120?'
-This gets fixed, but in a spooky-action-at-a-distance way, in
-<code>frontend/src/metabase/query_builder/components/VisualizationError.jsx</code></p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti query-&gt;remark
-  {:arglists '(^String [driver query])}
-  driver/dispatch-on-initialized-driver
-  :hierarchy #'driver/hierarchy)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod query-&gt;remark :default
-  [_ query]
-  (default-query-&gt;remark query))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------- Normalization --------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>TODO - this has been moved to <code>metabase.legacy-mbql.util</code>; use that implementation instead.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:deprecated normalize-token :- :keyword
-  &quot;Convert a string or keyword in various cases (`lisp-case`, `snake_case`, or `SCREAMING_SNAKE_CASE`) to a lisp-cased
-  keyword.&quot;
-  [token :- [:or :keyword :string]]
-  (-&gt; (name token)
-      u/lower-case-en
-      (str/replace #&quot;_&quot; &quot;-&quot;)
-      keyword))</pre></td></tr><tr><td class="docs"><p>---------------------------------------------------- Hashing -----------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>We don't want two queries to have different hashes because their map keys are in different orders, now do we? Convert
-all the maps to sorted maps so queries are serialized to JSON in an identical order.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- walk-query-sort-maps
-  [x]
-  (walk/postwalk
-   (fn [x]
-     (if (and (map? x)
-              (not (sorted? x)))
-       (into (sorted-map) x)
-       x))
-   x))</pre></td></tr><tr><td class="docs"><p>Return the sequence of parameter maps, but with any :value keys sorted if they are a sequence. Parameter values can
-be of mixed types, as bigintegers are passed as strings to avoid precision loss.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- sort-parameter-values
-  [params :- [:or :nil [:sequential :any]]]
-  (map #(if (sequential? (:value %)) (update % :value (partial sort-by str)) %) params))</pre></td></tr><tr><td class="docs"><p>Return <code>query</code> with only the keys relevant to hashing kept.
-(This is done so irrelevant info or options that don't affect query results doesn't result in the same query
-producing different hashes.)</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- select-keys-for-hashing
-  [query :- [:maybe :map]]
-  (let [{:keys [constraints parameters], :as query} (select-keys query [:database :lib/type :stages :parameters :constraints])]
-    (cond-&gt; query
-      (empty? constraints) (dissoc :constraints)
-      true                 (update :parameters sort-parameter-values)
-      (empty? parameters)  (dissoc :parameters)
-      true                 lib.schema.util/indexed-order-bys
-      true                 lib.schema.util/remove-randomized-idents
-      true                 walk-query-sort-maps)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn query-hash :- bytes?
-  &quot;Return a 256-bit SHA3 hash of `query` as a key for the cache. (This is returned as a byte array.)&quot;
-  ^bytes [query :- [:maybe :map]]
-  ;; convert to pMBQL first if this is a legacy query.
-  (let [query (try
-                ;; Expression type check supression is necessary because coerced fields in `query` may not have
-                ;; `:effective-type` populated. That's the case during call to this function in
-                ;; `process-userland-query-middleware` that occurs before normalization.
-                (binding [lib.schema.expression/*suppress-expression-type-check?* true]
-                  (cond-&gt; query
-                    (#{&quot;query&quot; &quot;native&quot;} (:type query)) (#(lib.convert/-&gt;pMBQL (mbql.normalize/normalize %)))
-                    (#{:query :native} (:type query))   lib.convert/-&gt;pMBQL))
-                (catch Throwable e
-                  (throw (ex-info &quot;Error hashing query. Is this a valid query?&quot;
-                                  {:query query}
-                                  e))))]
-    (buddy-hash/sha3-256 (json/encode (select-keys-for-hashing query)))))</pre></td></tr><tr><td class="docs"><p>--------------------------------------------- Query Source Card IDs ----------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Return the ID of the Card used as the "source" query of this query, if applicable; otherwise return <code>nil</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn query-&gt;source-card-id
-  ^Integer [outer-query]
-  (let [source-table (get-in outer-query [:query :source-table])]
-    (when (string? source-table)
-      (when-let [[_ card-id-str] (re-matches #&quot;^card__(\d+$)&quot; source-table)]
-        (Integer/parseInt card-id-str)))))</pre></td></tr><tr><td class="docs"><p>------------------------------------------- Metadata Combination Utils --------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>A standard and repeatable way to address a column. Names can collide and sometimes are not unique. Field refs should
-be stable, except we have to exclude the last part as extra information can be tucked in there. Names can be
-non-unique at times, numeric ids are not guaranteed.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn field-ref-&gt;key
-  [[tyype identifier]]
-  [tyype identifier])</pre></td></tr><tr><td class="docs"><p>Set of FieldOptions that only mattered for identification purposes.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private field-options-for-identification
-   ;; base-type is required for field that use name instead of id
-  #{:source-field :join-alias :base-type})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- field-normalizer
-  [field]
-  (let [[type id-or-name options] (mbql.normalize/normalize-tokens field)]
-    [type id-or-name (select-keys options field-options-for-identification)]))</pre></td></tr><tr><td class="docs"><p>Given a field and result<em>metadata, return a map of information about the field if result</em>metadata contains a matched field. </p>
-</td><td class="codes"><pre class="brush: clojure">(defn field-&gt;field-info
-  [field result-metadata]
-  (let [[_ttype id-or-name options :as field] (field-normalizer field)]
-    (or
-      ;; try match field_ref first
-     (first (filter (fn [field-info]
-                      (= field
-                         (-&gt; field-info
-                             :field_ref
-                             field-normalizer)))
-                    result-metadata))
-      ;; if not match name and base type for aggregation or field with string id
-     (first (filter (fn [field-info]
-                      (and (= (:name field-info)
-                              id-or-name)
-                           (= (:base-type options)
-                              (:base_type field-info))))
-                    result-metadata)))))</pre></td></tr><tr><td class="docs"><p>Keys that can survive merging metadata from the database onto metadata computed from the query. When merging
-metadata, the types returned should be authoritative. But things like semantic<em>type, display</em>name, and description
-can be merged on top.</p>
-</td><td class="codes"><pre class="brush: clojure">(def preserved-keys
-  ;; TODO: ideally we don't preserve :id but some notion of :user-entered-id or :identified-id
-  [:id :description :display_name :semantic_type
-   :fk_target_field_id :settings :visibility_type])</pre></td></tr><tr><td class="docs"><p>Blend saved metadata from previous runs into fresh metadata from an actual run of the query.</p>
-
-<p>Ensure that saved metadata from datasets or source queries can remain in the results metadata. We always recompute
-metadata in general, so need to blend the saved metadata on top of the computed metadata. First argument should be
-the metadata from a run from the query, and <code>pre-existing</code> should be the metadata from the database we wish to
-ensure survives.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn combine-metadata
-  [fresh pre-existing]
-  (let [by-name (m/index-by :name pre-existing)]
-    (for [{:keys [source] :as col} fresh]
-      (if-let [existing (and (not= :aggregation source)
-                             (get by-name (:name col)))]
-        (merge col (select-keys existing preserved-keys))
-        col))))</pre></td></tr><tr><td class="docs"><p>Used to control <code>with-execute-async</code> to whether or not execute its body asynchronously.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *execute-async?*
-  true)</pre></td></tr><tr><td class="docs"><p>Impl of <code>with-execute-async</code></p>
-</td><td class="codes"><pre class="brush: clojure">(defn do-with-execute-async
-  [thunk]
-  (if *execute-async?*
-    (.submit clojure.lang.Agent/pooledExecutor ^Runnable thunk)
-    (thunk)))</pre></td></tr><tr><td class="docs"><p>Execute body asynchronously in a pooled executor.</p>
-
-<p>Used for side effects during query execution like saving query execution info or capturing FieldUsages.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro with-execute-async
-  [thunk]
-  `(do-with-execute-async ~thunk))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn userland-query? :- :boolean
-  &quot;Returns true if the query is an userland query, else false.&quot;
-  [query :- ::qp.schema/qp]
-  (boolean (get-in query [:middleware :userland-query?])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn internal-query? :- :boolean
-  &quot;Returns `true` if query is an internal query.&quot;
-  [{query-type :type} :- ::qp.schema/qp]
-  (= :internal (keyword query-type)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+   [metabase.util.log :as log]
+   [methodical.core :as methodical]
+   [toucan2.core :as t2]
+   [toucan2.pipeline :as t2.pipeline])
+  (:import
+   (java.io File InputStream)
+   (org.apache.commons.io.input BoundedInputStream)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(doto :model/CloudMigration
+  (derive :metabase/model)
+  (derive :hook/timestamped?))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/table-name :model/CloudMigration [_model] :cloud_migration)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(t2/deftransforms :model/CloudMigration
+  {:state mi/transform-keyword})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private read-only-mode-inclusions
+  (-&gt;&gt; copy/entities (map t2/table-name) (into #{})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private read-only-mode-exceptions
+  (update-keys {;; Migrations need to update their own state
+                :model/CloudMigration :all :model/Setting :all
+                ;; Users need to login, make queries, and we need need to audit them.
+                :model/User :all :model/Session :all :model/LoginHistory :all
+                :model/UserParameterValue :all
+                :model/AuditLog :all :model/ViewLog :all
+                ;; Cards need to able to update their last used at timestamp, but we don't want to create
+                ;; new cards or update other fields.
+                :model/Card #{:id :last_used_at :updated_at}}
+               ;; These exceptions use table name instead of model name because you can actually bypass the model
+               ;; and write toucan2 functions that interact with table directly.
+               t2/table-name))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- update-exempted?
+  [table-name {:keys [changes]}]
+  (or (=  (read-only-mode-exceptions table-name) :all)
+      (set/subset? (read-only-mode-exceptions table-name)
+                   (-&gt;&gt; changes keys (into #{})))))</pre></td></tr><tr><td class="docs"><p>Block write calls to most tables in read-only mode.</p>
+</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2.pipeline/build :before [#_query-type     :toucan.statement-type/DML
+                                                 #_model          :default
+                                                 #_resolved-query :default]
+  [_query-type model parsed-args resolved-query]
+  (let [table-name (t2/table-name model)]
+    (when (and (cloud-migration.settings/read-only-mode)
+               (read-only-mode-inclusions table-name)
+               (not (update-exempted? table-name parsed-args)))
+      (throw (ex-info (tru &quot;Metabase is in read-only-mode mode!&quot;)
+                      {:status-code 403}))))
+  resolved-query)</pre></td></tr><tr><td class="docs"><p>Helpers</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Store API URL for migrations.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn migration-url
+  ([]
+   (str (cloud-migration.settings/store-api-url) &quot;/api/v2/migration&quot;))
+  ([external-id path]
+   (str (migration-url) &quot;/&quot; external-id path)))</pre></td></tr><tr><td class="docs"><p>Cloud migration states that are terminal.</p>
+</td><td class="codes"><pre class="brush: clojure">(def terminal-states
+  #{:done :error :cancelled})</pre></td></tr><tr><td class="docs"><p>EXPERIMENTAL Returns true if this metabase instance is part of a cluster.
+Works by checking how many Quartz nodes there are.
+See https://github.com/quartz-scheduler/quartz/issues/733</p>
+</td><td class="codes"><pre class="brush: clojure">(defn cluster?
+  []
+  (&gt;= (t2/count (if (= (mdb/db-type) :postgres)
+                  &quot;qrtz_scheduler_state&quot;
+                  &quot;QRTZ_SCHEDULER_STATE&quot;))
+      2))</pre></td></tr><tr><td class="docs"><p>File input stream that calls on-percent-progress with current read progress as int from 0 to 100.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- progress-file-input-stream
+  ^InputStream [^File file on-percent-progress]
+  (let [input-stream             (io/input-stream file)
+        length                   (.length file)
+        *bytes                   (atom 0)
+        add-bytes                #(on-percent-progress (int (* 100 (/ (swap! *bytes + %) length))))
+        f                        (fn [ret &amp; single?]
+                                   (cond
+                                     ;; -1 is end of stream
+                                     (= -1 ret)  (on-percent-progress 100)
+                                     single?     (add-bytes 1)
+                                     (int? ret)  (add-bytes ret))
+                                   ret)]
+    (proxy [InputStream] []
+      (read
+        ([]
+         (f (.read input-stream) true))
+        ([^bytes b]
+         (f (.read input-stream b)))
+        ([^bytes b off len]
+         (f (.read input-stream b off len))))
+      (close [] (.close input-stream)))))</pre></td></tr><tr><td class="docs"><p>Attempt to set id to state and progress.
+Throws if the migration has already reached a terminal state (e.g. cancelled).
+This is the main cluster coordination mechanism for migrations, since any instance
+can cancel the migration, not just the one that initiated it.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- set-progress
+  [id state progress]
+  (when (= 0 (t2/update! :model/CloudMigration :id id :state [:not-in terminal-states]
+                         {:state state :progress progress}))
+    (throw (ex-info &quot;Cannot update migration in terminal state&quot; {:terminal true}))))</pre></td></tr><tr><td class="docs"><p>Returns absolute progress from a relative progress.
+E.g. if you're at relative 50 from 51 to 99, that's absolute 75.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn abs-progress
+  [relative-progress from to]
+  (int (+ from (* (- to from) (/ relative-progress 100)))))</pre></td></tr><tr><td class="docs"><p>Like subs, but for input-streams.
+Returns a sub-stream that should be used inside with-open.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn sub-stream
+  [^InputStream stream start end]
+  (.skip stream start)
+  (BoundedInputStream. stream (- end start)))</pre></td></tr><tr><td class="docs"><p>Put file, whole or from start to end, on url, reporting on-progress. Retries up to 3 times.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- put-file
+  [url ^File file on-progress &amp; {:keys [headers start end]}]
+  (u/auto-retry 3
+    (with-open [file-stream (progress-file-input-stream file on-progress)]
+      (let [[stream length] (if (and start end)
+                              [(sub-stream file-stream start end) (- end start)]
+                              [file-stream (.length file)])]
+        (http/put url {:headers headers :length length :body stream})))))</pre></td></tr><tr><td class="docs"><p>~100mb</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private part-size 100e6)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- upload [{:keys [id external_id upload_url]} ^File dump-file]
+  (let [;; memoize so we don't have repeats for each percent and don't go back on retries
+        set-progress-memo (memoize set-progress)
+        ;; 50 is set before we start the upload
+        on-progress       #(set-progress-memo id :upload (abs-progress % 51 99))
+        ;; the migration-dump-file setting is used for testing older dumps in the rich comment
+        ;; at the end of this file
+        file              (if (cloud-migration.settings/migration-dump-file)
+                            (io/file (cloud-migration.settings/migration-dump-file))
+                            dump-file)
+        file-length       (.length file)]
+    (if-not (&gt; file-length part-size)
+      ;; single put uses SSE, but multipart doesn't support it.
+      (put-file upload_url file on-progress :headers {&quot;x-amz-server-side-encryption&quot; &quot;aws:kms&quot;})
+      (let [parts
+            (partition 2 1 (-&gt; (range 0 file-length part-size)
+                               vec
+                               (conj file-length)))
+            {:keys [multipart-upload-id multipart-urls]}
+            (-&gt; (http/put (migration-url external_id &quot;/multipart&quot;)
+                          {:form-params  {:part_count (count parts)}
+                           :content-type :json})
+                :body
+                json/decode+kw)
+            etags
+            (-&gt;&gt; (map (fn [[start end] [part-number url]]
+                        [part-number
+                         (get-in (put-file url file on-progress :start start :end end)
+                                 [:headers &quot;ETag&quot;])])
+                      parts multipart-urls)
+                 (into {}))]
+        (http/put (migration-url external_id &quot;/multipart/complete&quot;)
+                  {:form-params  {:multipart_upload_id multipart-upload-id
+                                  :multipart_etags     etags}
+                   :content-type :json})))))</pre></td></tr><tr><td class="docs"><p>Migrate this instance to Metabase Cloud.
+Will exit early if migration has been cancelled in any cluster instance.
+Should run in a separate thread since it can take a long time to complete.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn migrate!
+  [{:keys [id external_id] :as migration} &amp; {:keys [retry?]}]
+  ;; dump-to-h2 starts behaving oddly if you try to dump repeatly to the same file
+  ;; in the same process, so use a random name.
+  ;; The docker image process runs in non-root, so write to a dir it can access.
+  (let [dump-file (io/file (System/getProperty &quot;java.io.tmpdir&quot;)
+                           (str &quot;cloud_migration_dump_&quot; (random-uuid) &quot;.mv.db&quot;))]
+    (try
+      (when retry?
+        (t2/update! :model/CloudMigration :id id {:state :init}))
+      (log/info &quot;Setting read-only mode&quot;)
+      (set-progress id :setup 1)
+      (cloud-migration.settings/read-only-mode! true)
+      (when (cluster?)
+        (log/info &quot;Cluster detected, waiting for read-only mode to propagate&quot;)
+        (Thread/sleep (int (* 1.5 setting.cache/cache-update-check-interval-ms))))
+      (log/info &quot;Dumping h2 backup to&quot; (.getAbsolutePath dump-file))
+      (set-progress id :dump 20)
+      (dump-to-h2/dump-to-h2! (.getAbsolutePath dump-file) {:dump-plaintext? true})
+      (when-not (cloud-migration.settings/read-only-mode)
+        (throw (ex-info &quot;Read-only mode disabled before h2 dump was completed, contents might not be self-consistent!&quot;
+                        {:id id})))
+      (cloud-migration.settings/read-only-mode! false)
+      (log/info &quot;Uploading dump to store&quot;)
+      (set-progress id :upload 50)
+      (upload migration dump-file)
+      (log/info &quot;Notifying store that upload is done&quot;)
+      (http/put (migration-url external_id &quot;/uploaded&quot;))
+      (log/info &quot;Migration finished&quot;)
+      (set-progress id :done 100)
+      (catch Exception e
+        ;; See set-progress for when :terminal is set.
+        (if (-&gt; e ex-data :terminal)
+          (log/info &quot;Migration interruped due to terminal state&quot;)
+          (do
+            (t2/update! :model/CloudMigration id {:state :error})
+            (log/info &quot;Migration failed&quot;)
+            (throw (ex-info &quot;Error performing migration&quot; {:error e})))))
+      (finally
+        (cloud-migration.settings/read-only-mode! false)
+        (io/delete-file dump-file :silently)))))</pre></td></tr><tr><td class="docs"><p>Calls Store and returns {:external<em>id ,,, :upload</em>url ,,,}.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn get-store-migration
+  []
+  (-&gt; (migration-url)
+      (http/post {:form-params  {:local_mb_version (or (cloud-migration.settings/migration-dump-version)
+                                                       (config/mb-version-info :tag))}
+                  :content-type :json})
+      :body
+      json/decode+kw
+      (select-keys [:id :upload_url])
+      (set/rename-keys {:id :external_id})))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(comment
+  ;; are we in read-only-mode ?
+  (read-only-mode)
+  ;; test settings you might want to change manually
+  ;; force prod if even in dev
+  #_(migration-use-staging! false)
+  ;; make sure to use a version that store supports, and a dump for that version.
+  #_(migration-dump-version! &quot;v0.49.7&quot;)
+  ;; make a new dump with any released metabase jar using the command below:
+  ;;   java --add-opens java.base/java.nio=ALL-UNNAMED -jar metabase.jar dump-to-h2 dump --dump-plaintext
+  #_(migration-dump-file! &quot;/path/to/dump.mv.db&quot;)
+  ;; force migration with a smaller multipart threshold (~6mb is minimum)
+  #_(def ^:private part-size 6e6)
+  ;; add new
+  (t2/insert-returning-instance! :model/CloudMigration (get-store-migration))
+  ;; get migration
+  @(def mig (t2/select-one :model/CloudMigration {:order-by [[:created_at :desc]]}))
+  ;; migrate
+  (migrate! mig)
+  ;; retry failed migration
+  (migrate! mig :retry? true)
+  ;; cancel all
+  (t2/update! :model/CloudMigration {:state [:not-in terminal-states]} {:state :cancelled}))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

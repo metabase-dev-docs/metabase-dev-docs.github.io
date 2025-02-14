@@ -2963,20 +2963,21 @@ net.brehaut.ClojureTools = (function (SH) {
                (cond-&gt; acc
                  required-symbol (conj required-symbol)))
              (z/right zloc)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(comment
-  (find-required-namespaces (z/of-string &quot;(require 'malli.generator)&quot;))
-  (find-required-namespaces (z/of-string &quot;(require (quote malli.generator))&quot;))
-  (find-required-namespaces (z/of-string &quot;(classloader/require 'a 'b)&quot;))
-  (find-required-namespaces (z/of-string &quot;(requiring-resolve 'a/b 'c/d)&quot;))
-  (find-required-namespaces (z/of-string &quot;(require '[malli.generator :as mg])&quot;))
-  (find-required-namespaces (z/of-string &quot;(require '[malli.generator])&quot;)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- find-requires :- [:sequential ::zloc]
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- comment-loc?
+  [zloc :- ::zloc]
+  (or (and (= (z/tag zloc) :list)
+           (let [child-loc (z/down zloc)]
+             (and (= (z/tag child-loc) :token)
+                  (= (z/sexpr child-loc) 'comment))))
+      (= (z/tag zloc) :uneval)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- find-requires :- [:maybe [:sequential ::zloc]]
   [zloc :- ::zloc]
   (concat
-   (if (require-loc? zloc)
-     [zloc]
-     (when-let [down (z/down zloc)]
-       (find-requires down)))
+   (when-not (comment-loc? zloc)
+     (if (require-loc? zloc)
+       [zloc]
+       (when-let [down (z/down zloc)]
+         (find-requires down))))
    (when-let [right (z/right zloc)]
      (find-requires right))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn- find-dynamically-loaded-namespaces :- [:set simple-symbol?]
@@ -2994,7 +2995,12 @@ net.brehaut.ClojureTools = (function (SH) {
   ;; uses requiring-resolve, has more than one.
   (find-dynamically-loaded-namespaces &quot;src/metabase/api/user.clj&quot;)
   ;; has require inside of a `comment` form, should ignore it.
-  (find-dynamically-loaded-namespaces &quot;src/metabase/xrays/automagic_dashboards/schema.clj&quot;))</pre></td></tr><tr><td class="docs">
+  (find-dynamically-loaded-namespaces &quot;src/metabase/xrays/automagic_dashboards/schema.clj&quot;)
+  (find-dynamically-loaded-namespaces &quot;src/metabase/api/open_api.clj&quot;))</pre></td></tr><tr><td class="docs"><p>Technically <code>config</code> 'uses' <code>enterprise/core</code> and <code>test</code> since it tries to load them to see if they exist so we know
+if EE/test code is available; however we can ignore them since they're not 'real' usages. So add them here so we
+don't include them in our deps tree.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ignored-dependencies
+  '{metabase.config #{metabase-enterprise.core metabase.test.core}})</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn- file-dependencies :- [:map
                                 [:namespace simple-symbol?]
                                 [:module    symbol?]
@@ -3013,20 +3019,23 @@ net.brehaut.ClojureTools = (function (SH) {
           deps         (into (sorted-set) cat [static-deps dynamic-deps])]
       {:namespace ns-symb
        :module    (module ns-symb)
-       :deps      (keep (fn [symb]
-                          (when-let [module (module symb)]
-                            (merge
-                             {:namespace symb
-                              :module    module}
-                             (when (::dynamic (meta symb))
-                               {:dynamic true}))))
+       :deps      (keep (fn [required-ns]
+                          (when-let [module (module required-ns)]
+                            (when-not (some-&gt; ignored-dependencies ns-symb required-ns)
+                              (merge
+                               {:namespace required-ns
+                                :module    module}
+                               (when (::dynamic (meta required-ns))
+                                 {:dynamic true})))))
                         deps)})
     (catch Throwable e
       (throw (ex-info (format &quot;Error calculating dependencies for %s&quot; file)
                       {:file file}
                       e)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(comment
-  (file-dependencies &quot;src/metabase/db/setup.clj&quot;))</pre></td></tr><tr><td class="docs">
+  (file-dependencies &quot;src/metabase/db/setup.clj&quot;)
+  ;; should ignore the entries from [[ignored-dependencies]]
+  (file-dependencies &quot;src/metabase/config.clj&quot;))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^{:arglists '([])} dependencies
   (memoize/ttl
    (fn []
@@ -3119,6 +3128,11 @@ which ones can easily get a consolidated API namespace without drama.</p>
           (map (fn [[k v]]
                  [k (expand-deps v)]))
           deps-graph)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn module-deps-count []
+  (into (sorted-map)
+        (map (fn [[k v]]
+               [k (count v)]))
+        (full-dependencies)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn module-dependencies-mermaid []
   (doseq [[module deps] (module-dependencies)
           dep deps]

@@ -2865,188 +2865,32 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.query-processor.util" name="metabase.query-processor.util"><h1 class="project-name">metabase.query-processor.util</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Utility functions used by the global query processor and middleware functions.</p>
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.query-processor.util
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.session.task.session-cleanup" name="metabase.session.task.session-cleanup"><h1 class="project-name">metabase.session.task.session-cleanup</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.session.task.session-cleanup
   (:require
-   [buddy.core.codecs :as codecs]
-   [buddy.core.hash :as buddy-hash]
-   [clojure.string :as str]
-   [clojure.walk :as walk]
-   [medley.core :as m]
-   [metabase.driver :as driver]
-   [metabase.legacy-mbql.normalize :as mbql.normalize]
-   [metabase.lib.convert :as lib.convert]
-   [metabase.lib.schema.expression :as lib.schema.expression]
-   [metabase.lib.schema.util :as lib.schema.util]
-   [metabase.query-processor.schema :as qp.schema]
-   [metabase.util :as u]
-   [metabase.util.json :as json]
-   [metabase.util.malli :as mu]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>TODO - I think most of the functions in this namespace that we don't remove could be moved to [[metabase.legacy-mbql.util]]</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Is the given query an MBQL query without a <code>:limit</code>, <code>:aggregation</code>, or <code>:page</code> clause?</p>
-</td><td class="codes"><pre class="brush: clojure">(defn query-without-aggregations-or-limits?
-  [{{aggregations :aggregation, :keys [limit page]} :query}]
-  (and (not limit)
-       (not page)
-       (empty? aggregations)))</pre></td></tr><tr><td class="docs"><p>Generates the default query remark. Exists as a separate function so that overrides of the query->remark multimethod
- can access the default value.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn default-query-&gt;remark
-  [{{:keys [executed-by query-hash], :as _info} :info, query-type :type}]
-  (str &quot;Metabase&quot; (when executed-by
-                    (assert (bytes? query-hash) &quot;If info includes executed-by it should also include query-hash&quot;)
-                    (format &quot;:: userID: %s queryType: %s queryHash: %s&quot;
-                            executed-by
-                            (case (keyword query-type)
-                              :query  &quot;MBQL&quot;
-                              :native &quot;native&quot;)
-                            (codecs/bytes-&gt;hex query-hash)))))</pre></td></tr><tr><td class="docs"><p>Generate an appropriate remark <code>^String</code> to be prepended to a query to give DBAs additional information about the query
-being executed. See documentation for [[metabase.driver/mbql->native]] and #2386.
-for more information.</p>
-
-<p>So this turns your average 10, 20, 30 character query into a 110, 120, 130 etc character query.
-One leaky-abstraction part of this is that this will confuse the bejeezus out of
-people who first encounter their passed-through RDBMS error messages.</p>
-
-<p>'Hey, this is a 20 character query! What's it talking about, error at position 120?'
-This gets fixed, but in a spooky-action-at-a-distance way, in
-<code>frontend/src/metabase/query_builder/components/VisualizationError.jsx</code></p>
-</td><td class="codes"><pre class="brush: clojure">(defmulti query-&gt;remark
-  {:arglists '(^String [driver query])}
-  driver/dispatch-on-initialized-driver
-  :hierarchy #'driver/hierarchy)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defmethod query-&gt;remark :default
-  [_ query]
-  (default-query-&gt;remark query))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------- Normalization --------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>TODO - this has been moved to <code>metabase.legacy-mbql.util</code>; use that implementation instead.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn ^:deprecated normalize-token :- :keyword
-  &quot;Convert a string or keyword in various cases (`lisp-case`, `snake_case`, or `SCREAMING_SNAKE_CASE`) to a lisp-cased
-  keyword.&quot;
-  [token :- [:or :keyword :string]]
-  (-&gt; (name token)
-      u/lower-case-en
-      (str/replace #&quot;_&quot; &quot;-&quot;)
-      keyword))</pre></td></tr><tr><td class="docs"><p>---------------------------------------------------- Hashing -----------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>We don't want two queries to have different hashes because their map keys are in different orders, now do we? Convert
-all the maps to sorted maps so queries are serialized to JSON in an identical order.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- walk-query-sort-maps
-  [x]
-  (walk/postwalk
-   (fn [x]
-     (if (and (map? x)
-              (not (sorted? x)))
-       (into (sorted-map) x)
-       x))
-   x))</pre></td></tr><tr><td class="docs"><p>Return the sequence of parameter maps, but with any :value keys sorted if they are a sequence. Parameter values can
-be of mixed types, as bigintegers are passed as strings to avoid precision loss.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- sort-parameter-values
-  [params :- [:or :nil [:sequential :any]]]
-  (map #(if (sequential? (:value %)) (update % :value (partial sort-by str)) %) params))</pre></td></tr><tr><td class="docs"><p>Return <code>query</code> with only the keys relevant to hashing kept.
-(This is done so irrelevant info or options that don't affect query results doesn't result in the same query
-producing different hashes.)</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- select-keys-for-hashing
-  [query :- [:maybe :map]]
-  (let [{:keys [constraints parameters], :as query} (select-keys query [:database :lib/type :stages :parameters :constraints])]
-    (cond-&gt; query
-      (empty? constraints) (dissoc :constraints)
-      true                 (update :parameters sort-parameter-values)
-      (empty? parameters)  (dissoc :parameters)
-      true                 lib.schema.util/indexed-order-bys
-      true                 lib.schema.util/remove-randomized-idents
-      true                 walk-query-sort-maps)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn query-hash :- bytes?
-  &quot;Return a 256-bit SHA3 hash of `query` as a key for the cache. (This is returned as a byte array.)&quot;
-  ^bytes [query :- [:maybe :map]]
-  ;; convert to pMBQL first if this is a legacy query.
-  (let [query (try
-                ;; Expression type check supression is necessary because coerced fields in `query` may not have
-                ;; `:effective-type` populated. That's the case during call to this function in
-                ;; `process-userland-query-middleware` that occurs before normalization.
-                (binding [lib.schema.expression/*suppress-expression-type-check?* true]
-                  (cond-&gt; query
-                    (#{&quot;query&quot; &quot;native&quot;} (:type query)) (#(lib.convert/-&gt;pMBQL (mbql.normalize/normalize %)))
-                    (#{:query :native} (:type query))   lib.convert/-&gt;pMBQL))
-                (catch Throwable e
-                  (throw (ex-info &quot;Error hashing query. Is this a valid query?&quot;
-                                  {:query query}
-                                  e))))]
-    (buddy-hash/sha3-256 (json/encode (select-keys-for-hashing query)))))</pre></td></tr><tr><td class="docs"><p>--------------------------------------------- Query Source Card IDs ----------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Return the ID of the Card used as the "source" query of this query, if applicable; otherwise return <code>nil</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn query-&gt;source-card-id
-  ^Integer [outer-query]
-  (let [source-table (get-in outer-query [:query :source-table])]
-    (when (string? source-table)
-      (when-let [[_ card-id-str] (re-matches #&quot;^card__(\d+$)&quot; source-table)]
-        (Integer/parseInt card-id-str)))))</pre></td></tr><tr><td class="docs"><p>------------------------------------------- Metadata Combination Utils --------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>A standard and repeatable way to address a column. Names can collide and sometimes are not unique. Field refs should
-be stable, except we have to exclude the last part as extra information can be tucked in there. Names can be
-non-unique at times, numeric ids are not guaranteed.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn field-ref-&gt;key
-  [[tyype identifier]]
-  [tyype identifier])</pre></td></tr><tr><td class="docs"><p>Set of FieldOptions that only mattered for identification purposes.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private field-options-for-identification
-   ;; base-type is required for field that use name instead of id
-  #{:source-field :join-alias :base-type})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- field-normalizer
-  [field]
-  (let [[type id-or-name options] (mbql.normalize/normalize-tokens field)]
-    [type id-or-name (select-keys options field-options-for-identification)]))</pre></td></tr><tr><td class="docs"><p>Given a field and result<em>metadata, return a map of information about the field if result</em>metadata contains a matched field. </p>
-</td><td class="codes"><pre class="brush: clojure">(defn field-&gt;field-info
-  [field result-metadata]
-  (let [[_ttype id-or-name options :as field] (field-normalizer field)]
-    (or
-      ;; try match field_ref first
-     (first (filter (fn [field-info]
-                      (= field
-                         (-&gt; field-info
-                             :field_ref
-                             field-normalizer)))
-                    result-metadata))
-      ;; if not match name and base type for aggregation or field with string id
-     (first (filter (fn [field-info]
-                      (and (= (:name field-info)
-                              id-or-name)
-                           (= (:base-type options)
-                              (:base_type field-info))))
-                    result-metadata)))))</pre></td></tr><tr><td class="docs"><p>Keys that can survive merging metadata from the database onto metadata computed from the query. When merging
-metadata, the types returned should be authoritative. But things like semantic<em>type, display</em>name, and description
-can be merged on top.</p>
-</td><td class="codes"><pre class="brush: clojure">(def preserved-keys
-  ;; TODO: ideally we don't preserve :id but some notion of :user-entered-id or :identified-id
-  [:id :description :display_name :semantic_type
-   :fk_target_field_id :settings :visibility_type])</pre></td></tr><tr><td class="docs"><p>Blend saved metadata from previous runs into fresh metadata from an actual run of the query.</p>
-
-<p>Ensure that saved metadata from datasets or source queries can remain in the results metadata. We always recompute
-metadata in general, so need to blend the saved metadata on top of the computed metadata. First argument should be
-the metadata from a run from the query, and <code>pre-existing</code> should be the metadata from the database we wish to
-ensure survives.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn combine-metadata
-  [fresh pre-existing]
-  (let [by-name (m/index-by :name pre-existing)]
-    (for [{:keys [source] :as col} fresh]
-      (if-let [existing (and (not= :aggregation source)
-                             (get by-name (:name col)))]
-        (merge col (select-keys existing preserved-keys))
-        col))))</pre></td></tr><tr><td class="docs"><p>Used to control <code>with-execute-async</code> to whether or not execute its body asynchronously.</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *execute-async?*
-  true)</pre></td></tr><tr><td class="docs"><p>Impl of <code>with-execute-async</code></p>
-</td><td class="codes"><pre class="brush: clojure">(defn do-with-execute-async
-  [thunk]
-  (if *execute-async?*
-    (.submit clojure.lang.Agent/pooledExecutor ^Runnable thunk)
-    (thunk)))</pre></td></tr><tr><td class="docs"><p>Execute body asynchronously in a pooled executor.</p>
-
-<p>Used for side effects during query execution like saving query execution info or capturing FieldUsages.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro with-execute-async
-  [thunk]
-  `(do-with-execute-async ~thunk))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn userland-query? :- :boolean
-  &quot;Returns true if the query is an userland query, else false.&quot;
-  [query :- ::qp.schema/qp]
-  (boolean (get-in query [:middleware :userland-query?])))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn internal-query? :- :boolean
-  &quot;Returns `true` if query is an internal query.&quot;
-  [{query-type :type} :- ::qp.schema/qp]
-  (= :internal (keyword query-type)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+   [clojurewerkz.quartzite.jobs :as jobs]
+   [clojurewerkz.quartzite.schedule.cron :as cron]
+   [clojurewerkz.quartzite.triggers :as triggers]
+   [metabase.session.models.session :as session]
+   [metabase.task :as task]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private session-cleanup-job-key (jobs/key &quot;metabase.task.session-cleanup.job&quot;))
+(def ^:private session-cleanup-trigger-key (triggers/key &quot;metabase.task.session-cleanup.trigger&quot;))</pre></td></tr><tr><td class="docs"><p>Job that cleans up outdated sessions.</p>
+</td><td class="codes"><pre class="brush: clojure">(jobs/defjob 
+  SessionCleanup
+  [_]
+  (session/cleanup-sessions!))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod task/init! ::SessionCleanup [_]
+  (let [job (jobs/build
+             (jobs/of-type SessionCleanup)
+             (jobs/with-identity session-cleanup-job-key))
+        trigger (triggers/build
+                 (triggers/with-identity session-cleanup-trigger-key)
+                 (triggers/start-now)
+                 (triggers/with-schedule
+                    ;; run once a day
+                  (cron/cron-schedule &quot;0 0 2 * * ? *&quot;)))]
+    (task/schedule-task! job trigger)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
