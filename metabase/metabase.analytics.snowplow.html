@@ -2871,8 +2871,8 @@ net.brehaut.ClojureTools = (function (SH) {
    [clojure.string :as str]
    [java-time.api :as t]
    [medley.core :as m]
+   [metabase.analytics.settings :as analytics.settings]
    [metabase.api.common :as api]
-   [metabase.config :as config]
    [metabase.models.setting :as setting :refer [defsetting]]
    [metabase.public-settings :as public-settings]
    [metabase.util.date-2 :as u.date]
@@ -2903,70 +2903,33 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"></td></tr><tr><td class="docs"><p>The most recent version for each event schema. This should be updated whenever a new version of a schema is added
 to SnowcatCloud, at the same time that the data sent to the collector is updated.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private schema-&gt;version
-  {::account        &quot;1-0-1&quot;
-   ::browse_data    &quot;1-0-0&quot;
-   ::invite         &quot;1-0-1&quot;
-   ::instance_stats &quot;2-0-0&quot;
-   ::csvupload      &quot;1-0-3&quot;
-   ::dashboard      &quot;1-1-4&quot;
-   ::database       &quot;1-0-1&quot;
-   ::instance       &quot;1-1-2&quot;
-   ::metabot        &quot;1-0-1&quot;
-   ::search         &quot;1-0-1&quot;
-   ::model          &quot;1-0-0&quot;
-   ::timeline       &quot;1-0-0&quot;
-   ::task           &quot;1-0-0&quot;
-   ::upsell         &quot;1-0-0&quot;
-   ::action         &quot;1-0-0&quot;
-   ::embed_share    &quot;1-0-0&quot;
-   ::llm_usage      &quot;1-0-0&quot;
-   ::serialization  &quot;1-0-1&quot;
-   ::cleanup        &quot;1-0-0&quot;})</pre></td></tr><tr><td class="docs"><p>Malli enum for valid Snowplow schemas</p>
+  {:snowplow/account        &quot;1-0-1&quot;
+   :snowplow/browse_data    &quot;1-0-0&quot;
+   :snowplow/invite         &quot;1-0-1&quot;
+   :snowplow/instance_stats &quot;2-0-0&quot;
+   :snowplow/csvupload      &quot;1-0-3&quot;
+   :snowplow/dashboard      &quot;1-1-4&quot;
+   :snowplow/database       &quot;1-0-1&quot;
+   :snowplow/instance       &quot;1-1-2&quot;
+   :snowplow/metabot        &quot;1-0-1&quot;
+   :snowplow/search         &quot;1-0-1&quot;
+   :snowplow/model          &quot;1-0-0&quot;
+   :snowplow/timeline       &quot;1-0-0&quot;
+   :snowplow/task           &quot;1-0-0&quot;
+   :snowplow/upsell         &quot;1-0-0&quot;
+   :snowplow/action         &quot;1-0-0&quot;
+   :snowplow/embed_share    &quot;1-0-0&quot;
+   :snowplow/llm_usage      &quot;1-0-0&quot;
+   :snowplow/serialization  &quot;1-0-1&quot;
+   :snowplow/cleanup        &quot;1-0-0&quot;})</pre></td></tr><tr><td class="docs"><p>Malli enum for valid Snowplow schemas</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private SnowplowSchema
-  (into [:enum] (keys schema-&gt;version)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defsetting analytics-uuid
-  (deferred-tru
-   (str &quot;Unique identifier to be used in Snowplow analytics, to identify this instance of Metabase. &quot;
-        &quot;This is a public setting since some analytics events are sent prior to initial setup.&quot;))
-  :encryption :no
-  :visibility :public
-  :base       setting/uuid-nonce-base
-  :doc        false)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defsetting snowplow-available
-  (deferred-tru
-   (str &quot;Boolean indicating whether a Snowplow collector is available to receive analytics events. &quot;
-        &quot;Should be set via environment variable in Cypress tests or during local development.&quot;))
-  :type       :boolean
-  :visibility :public
-  :default    config/is-prod?
-  :doc        false
-  :audit      :never)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defsetting snowplow-enabled
-  (deferred-tru
-   (str &quot;Boolean indicating whether analytics events are being sent to Snowplow. &quot;
-        &quot;True if anonymous tracking is enabled for this instance, and a Snowplow collector is available.&quot;))
-  :type       :boolean
-  :setter     :none
-  :getter     (fn [] (and (snowplow-available)
-                          (public-settings/anon-tracking-enabled)))
-  :visibility :public
-  :doc        false)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defsetting snowplow-url
-  (deferred-tru &quot;The URL of the Snowplow collector to send analytics events to.&quot;)
-  :encryption :no
-  :default    (if config/is-prod?
-                &quot;https://sp.metabase.com&quot;
-                ;; See the iglu-schema-registry repo for instructions on how to run Snowplow Micro locally for development
-                &quot;http://localhost:9090&quot;)
-  :visibility :public
-  :audit      :never
-  :doc        false)</pre></td></tr><tr><td class="docs"><p>Returns the earliest user creation timestamp in the database</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- first-user-creation
-  []
-  (:min (t2/select-one [:model/User [:%min.date_joined :min]])))</pre></td></tr><tr><td class="docs"><p>We need to declare <code>track-event!</code> up front so that we can use it in the custom getter of <code>instance-creation</code>.
+  (into [:enum] (keys schema-&gt;version)))</pre></td></tr><tr><td class="docs"><p>We need to declare <code>track-event!</code> up front so that we can use it in the custom getter of <code>instance-creation</code>.
 We can't move <code>instance-creation</code> below <code>track-event!</code> because it has to be defined before <code>context</code>, which is called
 by <code>track-event!</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(declare track-event!)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(declare track-event!)</pre></td></tr><tr><td class="docs"><p>Returns the earliest user creation timestamp in the database</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- first-user-creation
+  []
+  (:min (t2/select-one [:model/User [:%min.date_joined :min]])))</pre></td></tr><tr><td class="docs"><p>[[instance-creation]] should live in analytics.settings, but it would cause a circular dep with [[track-event!]]</p>
 </td><td class="codes"><pre class="brush: clojure">(defsetting instance-creation
   (deferred-tru &quot;The approximate timestamp at which this instance of Metabase was created, for inclusion in analytics.&quot;)
   :visibility :public
@@ -2978,7 +2941,7 @@ by <code>track-event!</code>.</p>
                   ;; is first read.
                   (let [value (or (first-user-creation) (t/offset-date-time))]
                     (setting/set-value-of-type! :timestamp :instance-creation value)
-                    (track-event! ::account {:event :new_instance_created} nil)))
+                    (track-event! :snowplow/account {:event :new_instance_created} nil)))
                 (u.date/format-rfc3339 (setting/get-value-of-type :timestamp :instance-creation)))
   :doc false)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- tracker-config
@@ -2995,7 +2958,7 @@ by <code>track-event!</code>.</p>
                    (.setConnectionManager (PoolingHttpClientConnectionManager.))
                    (.setDefaultRequestConfig request-config)
                    (.build))
-        http-client-adapter (ApacheHttpClientAdapter. (snowplow-url) client)]
+        http-client-adapter (ApacheHttpClientAdapter. (analytics.settings/snowplow-url) client)]
     (NetworkConfiguration. http-client-adapter)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- emitter-config
   []
@@ -3025,8 +2988,8 @@ by <code>track-event!</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- context
   []
   (new SelfDescribingJson
-       (str &quot;iglu:com.metabase/instance/jsonschema/&quot; (schema-&gt;version ::instance))
-       {&quot;id&quot;                           (analytics-uuid)
+       (str &quot;iglu:com.metabase/instance/jsonschema/&quot; (schema-&gt;version :snowplow/instance))
+       {&quot;id&quot;                           (analytics.settings/analytics-uuid)
         &quot;version&quot;                      {&quot;tag&quot; (:tag (public-settings/version))}
         &quot;token_features&quot;               (m/map-keys name (public-settings/token-features))
         &quot;created_at&quot;                   (instance-creation)
@@ -3053,7 +3016,7 @@ is available.</p>
   ([schema :- SnowplowSchema data]
    (track-event! schema data api/*current-user-id*))
   ([schema :- SnowplowSchema data user-id]
-   (when (snowplow-enabled)
+   (when (analytics.settings/snowplow-enabled)
      (try
        (let [^SelfDescribing$Builder2 builder (-&gt; (. SelfDescribing builder)
                                                   (.eventData (payload schema (schema-&gt;version schema) data))

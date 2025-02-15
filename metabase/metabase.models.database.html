@@ -2870,7 +2870,7 @@ net.brehaut.ClojureTools = (function (SH) {
   (:require
    [clojure.core.match :refer [match]]
    [medley.core :as m]
-   [metabase.analytics.prometheus :as prometheus]
+   [metabase.analytics.core :as analytics]
    [metabase.api.common :as api]
    [metabase.audit :as audit]
    [metabase.db :as mdb]
@@ -2882,7 +2882,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.models.interface :as mi]
    [metabase.models.secret :as secret]
    [metabase.models.serialization :as serdes]
-   [metabase.models.setting :as setting :refer [defsetting]]
+   [metabase.models.setting :as setting]
    [metabase.permissions.core :as perms]
    [metabase.premium-features.core :as premium-features :refer [defenterprise]]
    ;; Trying to use metabase.search would cause a circular reference ;_;
@@ -2891,7 +2891,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.sync.schedules :as sync.schedules]
    [metabase.util :as u]
    [metabase.util.honey-sql-2 :as h2x]
-   [metabase.util.i18n :refer [deferred-tru trs]]
+   [metabase.util.i18n :refer [trs]]
    [metabase.util.log :as log]
    [methodical.core :as methodical]
    [toucan2.core :as t2]
@@ -3012,15 +3012,23 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defn health-check-database!
   [{:keys [engine] :as database}]
   (when-not (or (:is_audit database) (:is_sample database))
+    (log/info (u/format-color :cyan &quot;Health check: queueing %s {:id %d}&quot; (:name database) (:id database)))
     (sync.concurrent/submit-task!
      (fn []
        (let [details (maybe-test-and-migrate-details! database)]
          (try
+           (log/info (u/format-color :cyan &quot;Health check: checking %s {:id %d}&quot; (:name database) (:id database)))
            (if (driver.u/can-connect-with-details? engine (assoc details :engine engine))
-             (prometheus/inc! :metabase-database/healthy {:driver engine} 1)
-             (prometheus/inc! :metabase-database/unhealthy {:driver engine} 1))
-           (catch Throwable _
-             (prometheus/inc! :metabase-database/unhealthy {:driver engine} 1))))))))</pre></td></tr><tr><td class="docs"><p>(Re)schedule sync operation tasks for any database which is not yet being synced regularly.</p>
+             (do
+               (log/info (u/format-color :green &quot;Health check: success %s {:id %d}&quot; (:name database) (:id database)))
+               (analytics/inc! :metabase-database/healthy {:driver engine} 1))
+             (do
+               (log/warn (u/format-color :yellow &quot;Health check: failure %s {:id %d}&quot; (:name database) (:id database)))
+               (analytics/inc! :metabase-database/unhealthy {:driver engine} 1)))
+           (catch Throwable e
+             (do
+               (log/error e (u/format-color :red &quot;Health check: failure with error %s {:id %d}&quot; (:name database) (:id database)))
+               (analytics/inc! :metabase-database/unhealthy {:driver engine} 1)))))))))</pre></td></tr><tr><td class="docs"><p>(Re)schedule sync operation tasks for any database which is not yet being synced regularly.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn check-health-and-schedule-tasks!
   []
   (doseq [database (t2/select :model/Database)]
@@ -3158,12 +3166,6 @@ recursion. [[driver/normalize-db-details]] is actually done for side effects!</p
 </td><td class="codes"><pre class="brush: clojure">(defmethod serdes/hash-fields :model/Database
   [_database]
   [:name :engine])</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defsetting persist-models-enabled
-  (deferred-tru &quot;Whether to enable models persistence for a specific Database.&quot;)
-  :default        false
-  :type           :boolean
-  :visibility     :public
-  :database-local :only)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod mi/exclude-internal-content-hsql :model/Database
   [_model &amp; {:keys [table-alias]}]
   (let [maybe-alias #(h2x/identifier :field table-alias %)]

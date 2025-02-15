@@ -2878,10 +2878,10 @@ http://localhost:<prometheus-server-port>/metrics.</p>
    [iapetos.collector :as collector]
    [iapetos.collector.ring :as collector.ring]
    [iapetos.core :as prometheus]
-   [metabase.models.setting :as setting :refer [defsetting]]
+   [metabase.analytics.settings :refer [prometheus-server-port]]
    [metabase.server.core :as server]
    [metabase.util :as u]
-   [metabase.util.i18n :refer [deferred-trs trs]]
+   [metabase.util.i18n :refer [trs]]
    [metabase.util.log :as log]
    [potemkin :as p]
    [potemkin.types :as p.types]
@@ -2896,19 +2896,6 @@ http://localhost:<prometheus-server-port>/metrics.</p>
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Infra:
 defsetting enables and [[system]] holds the system (webserver and registry)</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defsetting prometheus-server-port
-  (deferred-trs (str &quot;Port to serve prometheus metrics from. If set, prometheus collectors are registered&quot;
-                     &quot; and served from `localhost:&lt;port&gt;/metrics`.&quot;))
-  :type       :integer
-  :visibility :internal
-  ;; settable only through environmental variable
-  :setter     :none
-  :getter     (fn reading-prometheus-port-setting []
-                (let [parse (fn [raw-value]
-                              (if-let [parsed (parse-long raw-value)]
-                                parsed
-                                (log/warnf &quot;MB_PROMETHEUS_SERVER_PORT value of '%s' is not parseable as an integer.&quot; raw-value)))]
-                  (setting/get-raw-value :prometheus-server-port integer? parse))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(p.types/defprotocol+ PrometheusActions
   (stop-web-server [this]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(p/defrecord+ PrometheusSystem [registry web-server]
@@ -2951,7 +2938,7 @@ Becomes {:numConnections [{:name :numConnections,
                            :timestamp 1662563931039,
                            :label "db-2-postgres-clean"}]
         ...}</p>
-</td><td class="codes"><pre class="brush: clojure">(defn c3p0-stats
+</td><td class="codes"><pre class="brush: clojure">(defn- c3p0-stats
   [raw-stats]
   (let [now    (.toEpochMilli (java.time.Instant/now))
         sample (fn sample [[db-label k v]]
@@ -3001,7 +2988,7 @@ the property and the database information is attached as a label to multiple mea
 </td><td class="codes"><pre class="brush: clojure">(defn connection-pool-info
   []
   (reduce conn-pool-bean-diag-info {} (jmx/mbean-names &quot;com.mchange.v2.c3p0:type=PooledDataSource,*&quot;)))</pre></td></tr><tr><td class="docs"><p>c3p0 collector delay</p>
-</td><td class="codes"><pre class="brush: clojure">(def c3p0-collector
+</td><td class="codes"><pre class="brush: clojure">(def ^:private c3p0-collector
   (letfn [(collect-metrics []
             (-&gt; (connection-pool-info)
                 c3p0-stats
@@ -3148,7 +3135,7 @@ will throw.</p>
                             (collector.ring/wrap-metrics registry {:path &quot;/metrics&quot;}))
                         {:join?       false
                          :port        port
-                         :max-threads 8}))</pre></td></tr><tr><td class="docs"><p>API: call [[setup!]] once, call [[shutdown!]] on shutdown</p>
+                         :max-threads 8}))</pre></td></tr><tr><td class="docs"><p>Public API: call [[setup!]] once, call [[shutdown!]] on shutdown</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Start the prometheus metric collector and web-server.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn setup!
   []
