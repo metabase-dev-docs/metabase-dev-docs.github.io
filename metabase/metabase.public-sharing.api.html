@@ -2865,64 +2865,650 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.api.common.validation" name="metabase.api.common.validation"><h1 class="project-name">metabase.api.common.validation</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.api.common.validation
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.public-sharing.api" name="metabase.public-sharing.api"><h1 class="project-name">metabase.public-sharing.api</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Metabase API endpoints for viewing publicly-accessible Cards and Dashboards.</p>
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.public-sharing.api
   (:require
-   [clojure.string :as str]
+   [medley.core :as m]
+   [metabase.actions.core :as actions]
+   [metabase.analytics.core :as analytics]
+   [metabase.api.card :as api.card]
    [metabase.api.common :as api]
-   [metabase.config :as config]
-   [metabase.embed.settings :as embed.settings]
-   [metabase.models.setting :as setting]
-   [metabase.plugins.classloader :as classloader]
-   [metabase.premium-features.core :as premium-features]
-   [metabase.util.i18n :refer [tru]]))</pre></td></tr><tr><td class="docs"><p>TODO: figure out what other functions to move here from metabase.api.common</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Check that the <code>public-sharing-enabled</code> Setting is <code>true</code>, or throw a <code>400</code>.</p>
+   [metabase.api.common.validation :as validation]
+   [metabase.api.dashboard :as api.dashboard]
+   [metabase.api.dataset :as api.dataset]
+   [metabase.api.field :as api.field]
+   [metabase.api.macros :as api.macros]
+   [metabase.db.query :as mdb.query]
+   [metabase.events :as events]
+   [metabase.lib.schema.id :as lib.schema.id]
+   [metabase.lib.schema.info :as lib.schema.info]
+   [metabase.lib.util.match :as lib.util.match]
+   [metabase.models.card :as card]
+   [metabase.models.interface :as mi]
+   [metabase.models.params :as params]
+   [metabase.query-processor.card :as qp.card]
+   [metabase.query-processor.dashboard :as qp.dashboard]
+   [metabase.query-processor.error-type :as qp.error-type]
+   [metabase.query-processor.middleware.constraints :as qp.constraints]
+   [metabase.query-processor.middleware.permissions :as qp.perms]
+   [metabase.query-processor.pipeline :as qp.pipeline]
+   [metabase.query-processor.pivot :as qp.pivot]
+   [metabase.query-processor.streaming :as qp.streaming]
+   [metabase.request.core :as request]
+   [metabase.util :as u]
+   [metabase.util.embed :as embed]
+   [metabase.util.i18n :refer [tru]]
+   [metabase.util.json :as json]
+   [metabase.util.malli :as mu]
+   [metabase.util.malli.schema :as ms]
+   [throttle.core :as throttle]
+   [toucan2.core :as t2])
+  (:import
+   (clojure.lang ExceptionInfo)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private ^:const ^Integer default-embed-max-height 800)
+(def ^:private ^:const ^Integer default-embed-max-width 1024)</pre></td></tr><tr><td class="docs"><p>-------------------------------------------------- Public Cards --------------------------------------------------</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Update <code>card.parameters</code> to include parameters from template-tags.</p>
 
-<p>TODO -- move this into the <code>public-sharing</code> module</p>
-</td><td class="codes"><pre class="brush: clojure">(defn check-public-sharing-enabled
-  []
-  (api/check (setting/get :enable-public-sharing)
-             [400 (tru &quot;Public sharing is not enabled.&quot;)]))</pre></td></tr><tr><td class="docs"><p>Is embedding of Cards or Objects (secured access via <code>/api/embed</code> endpoints with a signed JWT enabled?</p>
-</td><td class="codes"><pre class="brush: clojure">(defn check-embedding-enabled
-  []
-  (api/check (embed.settings/enable-embedding-static)
-             [400 (tru &quot;Embedding is not enabled.&quot;)]))</pre></td></tr><tr><td class="docs"><p>If <code>advanced-permissions</code> is enabled, check <code>*current-user*</code> has application permission of type <code>perm-type</code>.
-Set <code>require-superuser?</code> to <code>true</code> to perform a superuser check when <code>advanced-permissions</code> is disabled.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn check-has-application-permission
-  ([perm-type]
-   (check-has-application-permission perm-type true))
-  ([perm-type require-superuser?]
-   (if-let [f (and (premium-features/enable-advanced-permissions?)
-                   (resolve 'metabase-enterprise.advanced-permissions.common/current-user-has-application-permissions?))]
-     (api/check-403 (f perm-type))
-     (when require-superuser?
-       (api/check-superuser)))))</pre></td></tr><tr><td class="docs"><p>Check if advanced permissions is enabled to use permission types such as :group-manager or :application-permissions.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn check-advanced-permissions-enabled
-  [perm-type]
-  (api/check (premium-features/enable-advanced-permissions?)
-             [402 (tru &quot;The {0} permissions functionality is only enabled if you have a premium token with the advanced-permissions feature.&quot;
-                       (str/replace (name perm-type) &quot;-&quot; &quot; &quot;))]))</pre></td></tr><tr><td class="docs"><p>If <code>advanced-permissions</code> is enabled, check is <code>*current-user*</code> a manager of at least one group.
- Set <code>require-superuser?</code> to <code>false</code> to disable superuser checks if <code>advanced-permissions</code> is not enabled.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn check-group-manager
-  ([]
-   (check-group-manager true))
-  ([require-superuser?]
-   (if (premium-features/enable-advanced-permissions?)
-     (api/check-403 (or api/*is-superuser?* api/*is-group-manager?*))
-     (when require-superuser?
-       (api/check-superuser)))))</pre></td></tr><tr><td class="docs"><p>If <code>advanced-permissions</code> is enabled, check is <code>*current-user*</code> is manager of <code>group-or-id</code>.
-Set <code>require-superuser?</code> to <code>false</code> to disable superuser checks if <code>advanced-permissions</code> is not enabled.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn check-manager-of-group
-  ([group-or-id]
-   (check-manager-of-group group-or-id true))
-  ([group-or-id require-superuser?]
-   (when config/ee-available?
-     (classloader/require 'metabase-enterprise.advanced-permissions.common))
-   (if-let [f (and (premium-features/enable-advanced-permissions?)
-                   (resolve 'metabase-enterprise.advanced-permissions.common/current-user-is-manager-of-group?))]
-     (api/check-403 (or api/*is-superuser?* (f group-or-id)))
-     (when require-superuser?
-       (api/check-superuser)))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+<p>On native queries parameters exists in 2 forms:
+- parameters
+- dataset_query.native.template-tags</p>
+
+<p>In most cases, these 2 are sync, meaning, if you have a template-tag, there will be a parameter.
+However, since card.parameters is a recently added feature, there may be instances where a template-tag
+is not present in the parameters.
+This function ensures that all template-tags are converted to parameters and added to card.parameters.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn combine-parameters-and-template-tags
+  [{:keys [parameters] :as card}]
+  (let [template-tag-parameters     (card/template-tag-parameters card)
+        id-&gt;template-tags-parameter (m/index-by :id template-tag-parameters)
+        id-&gt;parameter               (m/index-by :id parameters)]
+    (assoc card :parameters (vals (reduce-kv (fn [acc id parameter]
+                                               ;; order importance: we want the info from `template-tag` to be merged last
+                                               (update acc id #(merge % parameter)))
+                                             id-&gt;parameter
+                                             id-&gt;template-tags-parameter)))))</pre></td></tr><tr><td class="docs"><p>Remove everyting from public <code>card</code> that shouldn't be visible to the general public.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- remove-card-non-public-columns
+  [card]
+  ;; We need to check this to resolve params - we set `request/as-admin` there
+  (if qp.perms/*param-values-query*
+    card
+    (mi/instance
+     :model/Card
+     (u/select-nested-keys card [:id :name :description :display :visualization_settings :parameters
+                                 [:dataset_query :type [:native :template-tags]]]))))</pre></td></tr><tr><td class="docs"><p>Return a public Card matching key-value <code>conditions</code>, removing all columns that should not be visible to the general
+public. Throws a 404 if the Card doesn't exist.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn public-card
+  [&amp; conditions]
+  (binding [params/*ignore-current-user-perms-and-return-all-field-values* true]
+    (-&gt; (api/check-404 (apply t2/select-one [:model/Card :id :dataset_query :description :display :name :parameters :visualization_settings]
+                              :archived false, conditions))
+        remove-card-non-public-columns
+        combine-parameters-and-template-tags
+        (t2/hydrate :param_values :param_fields))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- card-with-uuid [uuid] (public-card :public_uuid uuid))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/card/:uuid&quot;
+  &quot;Fetch a publicly-accessible Card an return query results as well as `:card` information. Does not require auth
+   credentials. Public sharing must be enabled.&quot;
+  [{:keys [uuid]} :- [:map
+                      [:uuid ms/UUIDString]]]
+  (validation/check-public-sharing-enabled)
+  (u/prog1 (card-with-uuid uuid)
+    (events/publish-event! :event/card-read {:object-id (:id &lt;&gt;), :user-id api/*current-user-id*, :context :question})))</pre></td></tr><tr><td class="docs"><p>Transform results to be suitable for a public endpoint</p>
+</td><td class="codes"><pre class="brush: clojure">(defmulti ^:private transform-qp-result
+  {:arglists '([results])}
+  :status)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod transform-qp-result :default
+  [x]
+  x)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod transform-qp-result :completed
+  [results]
+  (u/select-nested-keys
+   results
+   [[:data :cols :rows :rows_truncated :insights :requested_timezone :results_timezone]
+    [:json_query :parameters]
+    :status]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod transform-qp-result :failed
+  [{error-type :error_type, :as results}]
+  ;; if the query failed instead, unless the error type is specified and is EXPLICITLY allowed to be shown for embeds,
+  ;; instead of returning anything about the query just return a generic error message
+  (merge
+   (select-keys results [:status :error :error_type])
+   (when-not (qp.error-type/show-in-embeds? error-type)
+     {:error (tru &quot;An error occurred while running the query.&quot;)})))</pre></td></tr><tr><td class="docs"><p>Create the <code>:make-run</code> function used for [[process-query-for-card-with-id]] and [[process-query-for-dashcard]].</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- process-query-for-card-with-id-run-fn
+  [qp export-format]
+  (fn run [query info]
+    (qp.streaming/streaming-response [rff export-format (u/slugify (:card-name info))]
+      (binding [qp.pipeline/*result* (comp qp.pipeline/*result* transform-qp-result)]
+        (request/as-admin
+          (qp (update query :info merge info) rff))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- export-format-&gt;context :- ::lib.schema.info/context
+  [export-format]
+  (case export-format
+    &quot;csv&quot;  :public-csv-download
+    &quot;xlsx&quot; :public-xlsx-download
+    &quot;json&quot; :public-json-download
+    :public-question))</pre></td></tr><tr><td class="docs"><p>Run the query belonging to Card with <code>card-id</code> with <code>parameters</code> and other query options (e.g. <code>:constraints</code>).
+Returns a <code>StreamingResponse</code> object that should be returned as the result of an API endpoint.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn process-query-for-card-with-id
+  [card-id :- ::lib.schema.id/card
+   export-format
+   parameters
+   &amp; {:keys [qp]
+      :or   {qp qp.card/process-query-for-card-default-qp}
+      :as   options}]
+  ;; run this query with full superuser perms
+  ;;
+  ;; we actually need to bind the current user perms here twice, once so `card-api` will have the full perms when it
+  ;; tries to do the `read-check`, and a second time for when the query is ran (async) so the QP middleware will have
+  ;; the correct perms
+  (request/as-admin
+    (m/mapply qp.card/process-query-for-card card-id export-format
+              :parameters parameters
+              :context    (export-format-&gt;context export-format)
+              :qp         qp
+              :make-run   process-query-for-card-with-id-run-fn
+              options)))</pre></td></tr><tr><td class="docs"><p>Run query for a <em>public</em> Card with UUID. If public sharing is not enabled, this throws an exception. Returns a
+<code>StreamingResponse</code> object that should be returned as the result of an API endpoint.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn ^:private process-query-for-card-with-public-uuid
+  [uuid export-format parameters &amp; options]
+  (validation/check-public-sharing-enabled)
+  (let [card-id (api/check-404 (t2/select-one-pk :model/Card :public_uuid uuid, :archived false))]
+    (apply process-query-for-card-with-id card-id export-format parameters options)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/card/:uuid/query&quot;
+  &quot;Fetch a publicly-accessible Card an return query results as well as `:card` information. Does not require auth
+   credentials. Public sharing must be enabled.&quot;
+  [{:keys [uuid]} :- [:map
+                      [:uuid ms/UUIDString]]
+   {:keys [parameters]} :- [:map
+                            [:parameters {:optional true} [:maybe ms/JSONString]]]]
+  (process-query-for-card-with-public-uuid uuid :api (json/decode+kw parameters)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/card/:uuid/query/:export-format&quot;
+  &quot;Fetch a publicly-accessible Card and return query results in the specified format. Does not require auth
+  credentials. Public sharing must be enabled.&quot;
+  [{:keys [uuid export-format]} :- [:map
+                                    [:uuid          ms/UUIDString]
+                                    [:export-format api.dataset/ExportFormat]]
+   {:keys [parameters format_rows pivot_results]} :- [:map
+                                                      [:format_rows   {:default false} :boolean]
+                                                      [:pivot_results {:default false} :boolean]
+                                                      [:parameters    {:optional true} [:maybe ms/JSONString]]]]
+  (process-query-for-card-with-public-uuid
+   uuid
+   export-format
+   (json/decode+kw parameters)
+   :constraints nil
+   :middleware {:process-viz-settings? true
+                :js-int-to-string?     false
+                :format-rows?          format_rows
+                :pivot?                pivot_results}))</pre></td></tr><tr><td class="docs"><p>----------------------------------------------- Public Dashboards ------------------------------------------------</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>The only keys for an action that should be visible to the general public.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private action-public-keys
+  #{:name
+    :id
+    :database_id ;; needed to check if the database has actions enabled on the frontend
+    :visualization_settings
+    :parameters})</pre></td></tr><tr><td class="docs"><p>Returns a public version of <code>action</code>, removing all data that should not be visible to the general public.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- public-action
+  [action]
+  (let [hidden-parameter-ids (-&gt;&gt; (get-in action [:visualization_settings :fields])
+                                  vals
+                                  (keep (fn [x]
+                                          (when (true? (:hidden x))
+                                            (:id x))))
+                                  set)]
+    (-&gt; action
+        (update :parameters (fn [parameters]
+                              (remove #(contains? hidden-parameter-ids (:id %)) parameters)))
+        (update-in [:visualization_settings :fields] (fn [fields]
+                                                       (m/remove-keys hidden-parameter-ids fields)))
+        (select-keys action-public-keys))))</pre></td></tr><tr><td class="docs"><p>Return a public Dashboard matching key-value <code>conditions</code>, removing all columns that should not be visible to the
+general public. Throws a 404 if the Dashboard doesn't exist.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn public-dashboard
+  [&amp; conditions]
+  {:pre [(even? (count conditions))]}
+  (binding [params/*ignore-current-user-perms-and-return-all-field-values* true
+            params/*field-id-context* (atom params/empty-field-id-context)]
+    (-&gt; (api/check-404 (apply t2/select-one [:model/Dashboard :name :description :id :parameters :auto_apply_filters :width], :archived false, conditions))
+        (t2/hydrate [:dashcards :card :series :dashcard/action] :tabs :param_values :param_fields)
+        api.dashboard/add-query-average-durations
+        (update :dashcards (fn [dashcards]
+                             (for [dashcard dashcards]
+                               (-&gt; (select-keys dashcard [:id :card :card_id :dashboard_id :series :col :row :size_x :dashboard_tab_id
+                                                          :size_y :parameter_mappings :visualization_settings :action])
+                                   (update :card remove-card-non-public-columns)
+                                   (update :series (fn [series]
+                                                     (for [series series]
+                                                       (remove-card-non-public-columns series))))
+                                   (m/update-existing :action public-action))))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- dashboard-with-uuid [uuid] (public-dashboard :public_uuid uuid))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/dashboard/:uuid&quot;
+  &quot;Fetch a publicly-accessible Dashboard. Does not require auth credentials. Public sharing must be enabled.&quot;
+  [{:keys [uuid]} :- [:map
+                      [:uuid ms/UUIDString]]]
+  (validation/check-public-sharing-enabled)
+  (u/prog1 (dashboard-with-uuid uuid)
+    (events/publish-event! :event/dashboard-read {:object-id (:id &lt;&gt;), :user-id api/*current-user-id*})))</pre></td></tr><tr><td class="docs"><p>Return the results of running a query for Card with <code>card-id</code> belonging to Dashboard with <code>dashboard-id</code> via
+<code>dashcard-id</code>. <code>card-id</code>, <code>dashboard-id</code>, and <code>dashcard-id</code> are all required; other parameters are optional:</p>
+
+<ul>
+<li><code>parameters</code>    - MBQL query parameters, either already parsed or as a serialized JSON string</li>
+<li><code>export-format</code> - <code>:api</code> (default format with metadata), <code>:json</code> (results only), <code>:csv</code>, or <code>:xslx</code>. Default: <code>:api</code></li>
+<li><code>qp</code>            - QP function to run the query with. Default [[qp/process-query]] + [[qp/userland-context]]</li>
+</ul>
+
+<p>Throws a 404 immediately if the Card isn't part of the Dashboard. Returns a <code>StreamingResponse</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn process-query-for-dashcard
+  {:arglists '([&amp; {:keys [dashboard-id card-id dashcard-id export-format parameters] :as options}])}
+  [&amp; {:keys [export-format parameters qp]
+      :or   {qp            qp.card/process-query-for-card-default-qp
+             export-format :api}
+      :as   options}]
+  (let [options (merge
+                 {:context     :public-dashboard
+                  :constraints (qp.constraints/default-query-constraints)}
+                 options
+                 {:parameters    (cond-&gt; parameters
+                                   (string? parameters) json/decode+kw)
+                  :export-format export-format
+                  :qp            qp
+                  :make-run      process-query-for-card-with-id-run-fn})]
+    ;; Run this query with full superuser perms. We don't want the various perms checks failing because there are no
+    ;; current user perms; if this Dashcard is public you're by definition allowed to run it without a perms check
+    ;; anyway
+    (request/as-admin
+      (m/mapply qp.dashboard/process-query-for-dashcard options))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/dashboard/:uuid/dashcard/:dashcard-id/card/:card-id&quot;
+  &quot;Fetch the results for a Card in a publicly-accessible Dashboard. Does not require auth credentials. Public
+   sharing must be enabled.&quot;
+  [{:keys [uuid dashcard-id card-id]} :- [:map
+                                          [:uuid        ms/UUIDString]
+                                          [:dashcard-id ms/PositiveInt]
+                                          [:card-id     ms/PositiveInt]]
+   {:keys [parameters]} :- [:map
+                            [:parameters {:optional true} [:maybe ms/JSONString]]]]
+  (validation/check-public-sharing-enabled)
+  (api/check-404 (t2/select-one-pk :model/Card :id card-id :archived false))
+  (let [dashboard-id (api/check-404 (t2/select-one-pk :model/Dashboard :public_uuid uuid, :archived false))]
+    (u/prog1 (process-query-for-dashcard
+              :dashboard-id  dashboard-id
+              :card-id       card-id
+              :dashcard-id   dashcard-id
+              :export-format :api
+              :parameters    parameters)
+      (events/publish-event! :event/card-read {:object-id card-id, :user-id api/*current-user-id*, :context :dashboard}))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post [&quot;/dashboard/:uuid/dashcard/:dashcard-id/card/:card-id/:export-format&quot;
+                               :export-format api.dataset/export-format-regex]
+  &quot;Fetch the results of running a publicly-accessible Card belonging to a Dashboard and return the data in one of the
+  export formats. Does not require auth credentials. Public sharing must be enabled.&quot;
+  [{:keys [uuid dashcard-id card-id export-format]} :- [:map
+                                                        [:uuid          ms/UUIDString]
+                                                        [:dashcard-id   ms/PositiveInt]
+                                                        [:card-id       ms/PositiveInt]
+                                                        [:export-format (into [:enum] api.dataset/export-formats)]]
+   _query-parameters
+   {:keys [format_rows pivot_results parameters]} :- [:map
+                                                      [:parameters    {:optional true} [:maybe
+                                                                                        {:decode/api
+                                                                                         (fn [x]
+                                                                                           (cond-&gt; x
+                                                                                             (string? x) json/decode+kw))}
+                                                                                        [:sequential :map]]]
+                                                      [:format_rows   {:default false} ms/BooleanValue]
+                                                      [:pivot_results {:default false} ms/BooleanValue]]]
+  (validation/check-public-sharing-enabled)
+  (api/check-404 (t2/select-one-pk :model/Card :id card-id :archived false))
+  (let [dashboard-id (api/check-404 (t2/select-one-pk :model/Dashboard :public_uuid uuid, :archived false))]
+    (u/prog1 (process-query-for-dashcard
+              :dashboard-id  dashboard-id
+              :card-id       card-id
+              :dashcard-id   dashcard-id
+              :export-format export-format
+              :parameters    parameters
+              :constraints   nil
+              :middleware    {:process-viz-settings? true
+                              :format-rows?          format_rows
+                              :pivot?                pivot_results}))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/dashboard/:uuid/dashcard/:dashcard-id/execute&quot;
+  &quot;Fetches the values for filling in execution parameters. Pass PK parameters and values to select.&quot;
+  [{:keys [uuid dashcard-id]} :- [:map
+                                  [:uuid        ms/UUIDString]
+                                  [:dashcard-id ms/PositiveInt]]
+   {:keys [parameters]} :- [:map
+                            [:parameters ms/JSONString]]]
+  (validation/check-public-sharing-enabled)
+  (api/check-404 (t2/select-one-pk :model/Dashboard :public_uuid uuid :archived false))
+  (actions/fetch-values
+   (api/check-404 (actions/dashcard-&gt;action dashcard-id))
+   (json/decode parameters)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(def ^:private dashcard-execution-throttle (throttle/make-throttler :dashcard-id :attempts-threshold 5000))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/dashboard/:uuid/dashcard/:dashcard-id/execute&quot;
+  &quot;Execute the associated Action in the context of a `Dashboard` and `DashboardCard` that includes it.
+
+   `parameters` should be the mapped dashboard parameters with values.&quot;
+  [{:keys [uuid dashcard-id]} :- [:map
+                                  [:uuid        ms/UUIDString]
+                                  [:dashcard-id ms/PositiveInt]]
+   _query-params
+   {:keys [parameters], :as _body} :- [:map
+                                       [:parameters {:optional true} [:maybe [:map-of :keyword :any]]]]]
+  (let [throttle-message (try
+                           (throttle/check dashcard-execution-throttle dashcard-id)
+                           nil
+                           (catch ExceptionInfo e
+                             (get-in (ex-data e) [:errors :dashcard-id])))
+        throttle-time (when throttle-message
+                        (second (re-find #&quot;You must wait ([0-9]+) seconds&quot; throttle-message)))]
+    (if throttle-message
+      (cond-&gt; {:status 429
+               :body throttle-message}
+        throttle-time (assoc :headers {&quot;Retry-After&quot; throttle-time}))
+      (do
+        (validation/check-public-sharing-enabled)
+        (let [dashboard-id (api/check-404 (t2/select-one-pk :model/Dashboard :public_uuid uuid, :archived false))]
+          ;; Run this query with full superuser perms. We don't want the various perms checks
+          ;; failing because there are no current user perms; if this Dashcard is public
+          ;; you're by definition allowed to run it without a perms check anyway
+          (request/as-admin
+            ;; Undo middleware string-&gt;keyword coercion
+            (actions/execute-dashcard! dashboard-id dashcard-id (update-keys parameters name))))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/oembed&quot;
+  &quot;oEmbed endpoint used to retreive embed code and metadata for a (public) Metabase URL.&quot;
+  [_route-params
+   {:keys [url maxheight maxwidth]}
+   :- [:map
+       [:url       ms/NonBlankString]
+       [:format    {:optional true} [:maybe
+                                     {:description (str &quot;The format param is not used by the API, but is required as&quot;
+                                                        &quot; part of the oEmbed spec: http://oembed.com/#section2 just&quot;
+                                                        &quot; return an error if `format` is specified and it's anything&quot;
+                                                        &quot; other than `json`.&quot;)}
+                                     [:enum &quot;json&quot;]]]
+       [:maxheight {:default default-embed-max-height} pos-int?]
+       [:maxwidth  {:default default-embed-max-width}  pos-int?]]]
+  {:version &quot;1.0&quot;
+   :type    &quot;rich&quot;
+   :width   maxwidth
+   :height  maxheight
+   :html    (embed/iframe url maxwidth maxheight)})</pre></td></tr><tr><td class="docs"><p>----------------------------------------------- Public Action ------------------------------------------------</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/action/:uuid&quot;
+  &quot;Fetch a publicly-accessible Action. Does not require auth credentials. Public sharing must be enabled.&quot;
+  [{:keys [uuid]} :- [:map
+                      [:uuid ms/UUIDString]]]
+  (validation/check-public-sharing-enabled)
+  (let [action (api/check-404 (actions/select-action :public_uuid uuid :archived false))]
+    (actions/check-actions-enabled! action)
+    (public-action action)))</pre></td></tr><tr><td class="docs"><p>+----------------------------------------------------------------------------------------------------------------+
+|                                        FieldValues, Search, Remappings                                         |
++----------------------------------------------------------------------------------------------------------------+</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>-------------------------------------------------- Field Values --------------------------------------------------</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Get the IDs of all Fields referenced by an MBQL <code>query</code> (not including any parameters).</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- query-&gt;referenced-field-ids
+  [query]
+  (lib.util.match/match (:query query) [:field id _] id))</pre></td></tr><tr><td class="docs"><p>Return a set of all Field IDs referenced by <code>card</code>, in both the MBQL query itself and in its parameters ('template
+tags').</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- card-&gt;referenced-field-ids
+  [card]
+  (set (concat (query-&gt;referenced-field-ids (:dataset_query card))
+               (params/card-&gt;template-tag-field-ids card))))</pre></td></tr><tr><td class="docs"><p>Check to make sure the query for Card with <code>card-id</code> references Field with <code>field-id</code>. Otherwise, or if the Card
+cannot be found, throw an Exception.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- check-field-is-referenced-by-card
+  [field-id card-id]
+  (let [card                 (api/check-404 (t2/select-one [:model/Card :dataset_query] :id card-id))
+        referenced-field-ids (card-&gt;referenced-field-ids card)]
+    (api/check-404 (contains? referenced-field-ids field-id))))</pre></td></tr><tr><td class="docs"><p>Check whether a search Field is allowed to be used in conjunction with another Field. A search Field is allowed if
+<em>any</em> of the following conditions is true:</p>
+
+<ul>
+<li><code>search-field-id</code> and <code>field-id</code> are both the same Field</li>
+<li><code>search-field-id</code> is equal to the other Field's Dimension's <code>human-readable-field-id</code></li>
+<li>field is a <code>:type/PK</code> Field and search field is a <code>:type/Name</code> Field belonging to the same Table.</li>
+</ul>
+
+<p>If none of these conditions are met, you are not allowed to use the search field in combination with the other
+field, and an 400 exception will be thrown.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- check-search-field-is-allowed
+  [field-id search-field-id]
+  {:pre [(integer? field-id) (integer? search-field-id)]}
+  (api/check-400
+   (or (= field-id search-field-id)
+       (t2/exists? :model/Dimension :field_id field-id, :human_readable_field_id search-field-id)
+       ;; just do a couple small queries to figure this out, we could write a fancy query to join Field against itself
+       ;; and do this in one but the extra code complexity isn't worth it IMO
+       (when-let [table-id (t2/select-one-fn :table_id :model/Field :id field-id, :semantic_type (mdb.query/isa :type/PK))]
+         (t2/exists? :model/Field :id search-field-id, :table_id table-id, :semantic_type (mdb.query/isa :type/Name))))))</pre></td></tr><tr><td class="docs"><p>Check that <code>field-id</code> belongs to a Field that is used as a parameter in a Dashboard with <code>dashboard-id</code>, or throw a
+404 Exception.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- check-field-is-referenced-by-dashboard
+  [field-id dashboard-id]
+  (let [dashboard       (-&gt; (t2/select-one :model/Dashboard :id dashboard-id)
+                            api/check-404
+                            (t2/hydrate [:dashcards :card]))
+        param-field-ids (params/dashcards-&gt;param-field-ids (:dashcards dashboard))]
+    (api/check-404 (contains? param-field-ids field-id))))</pre></td></tr><tr><td class="docs"><p>Return the FieldValues for a Field with <code>field-id</code> that is referenced by Card with <code>card-id</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn card-and-field-id-&gt;values
+  [card-id field-id]
+  (check-field-is-referenced-by-card field-id card-id)
+  (api.field/field-&gt;values (t2/select-one :model/Field :id field-id)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/card/:uuid/field/:field-id/values&quot;
+  &quot;Fetch FieldValues for a Field that is referenced by a public Card.&quot;
+  [{:keys [uuid field-id]} :- [:map
+                               [:uuid     ms/UUIDString]
+                               [:field-id ms/PositiveInt]]]
+  (validation/check-public-sharing-enabled)
+  (let [card-id (t2/select-one-pk :model/Card :public_uuid uuid, :archived false)]
+    (card-and-field-id-&gt;values card-id field-id)))</pre></td></tr><tr><td class="docs"><p>Return the FieldValues for a Field with <code>field-id</code> that is referenced by Card with <code>card-id</code> which itself is present
+in Dashboard with <code>dashboard-id</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn dashboard-and-field-id-&gt;values
+  [dashboard-id field-id]
+  (check-field-is-referenced-by-dashboard field-id dashboard-id)
+  (api.field/field-&gt;values (t2/select-one :model/Field :id field-id)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/dashboard/:uuid/field/:field-id/values&quot;
+  &quot;Fetch FieldValues for a Field that is referenced by a Card in a public Dashboard.&quot;
+  [{:keys [uuid field-id]} :- [:map
+                               [:uuid     ms/UUIDString]
+                               [:field-id ms/PositiveInt]]]
+  (validation/check-public-sharing-enabled)
+  (let [dashboard-id (api/check-404 (t2/select-one-pk :model/Dashboard :public_uuid uuid, :archived false))]
+    (dashboard-and-field-id-&gt;values dashboard-id field-id)))</pre></td></tr><tr><td class="docs"><p>--------------------------------------------------- Searching ----------------------------------------------------</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Wrapper for <code>metabase.api.field/search-values</code> for use with public/embedded Cards. See that functions
+documentation for a more detailed explanation of exactly what this does.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn search-card-fields
+  [card-id field-id search-id value limit]
+  (check-field-is-referenced-by-card field-id card-id)
+  (check-search-field-is-allowed field-id search-id)
+  (api.field/search-values (t2/select-one :model/Field :id field-id) (t2/select-one :model/Field :id search-id) value limit))</pre></td></tr><tr><td class="docs"><p>Wrapper for <code>metabase.api.field/search-values</code> for use with public/embedded Dashboards. See that functions
+documentation for a more detailed explanation of exactly what this does.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn search-dashboard-fields
+  [dashboard-id field-id search-id value limit]
+  (check-field-is-referenced-by-dashboard field-id dashboard-id)
+  (check-search-field-is-allowed field-id search-id)
+  (api.field/search-values (t2/select-one :model/Field :id field-id) (t2/select-one :model/Field :id search-id) value limit))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/card/:uuid/field/:field-id/search/:search-field-id&quot;
+  &quot;Search for values of a Field that is referenced by a public Card.&quot;
+  [{:keys [uuid field-id search-field-id]} :- [:map
+                                               [:uuid            ms/UUIDString]
+                                               [:field-id        ms/PositiveInt]
+                                               [:search-field-id ms/PositiveInt]]
+   {:keys [value limit]} :- [:map
+                             [:value ms/NonBlankString]
+                             [:limit {:optional true} [:maybe ms/PositiveInt]]]]
+  (validation/check-public-sharing-enabled)
+  (let [card-id (t2/select-one-pk :model/Card :public_uuid uuid, :archived false)]
+    (search-card-fields card-id field-id search-field-id value limit)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/dashboard/:uuid/field/:field-id/search/:search-field-id&quot;
+  &quot;Search for values of a Field that is referenced by a Card in a public Dashboard.&quot;
+  [{:keys [uuid field-id search-field-id]} :- [:map
+                                               [:uuid            ms/UUIDString]
+                                               [:field-id        ms/PositiveInt]
+                                               [:search-field-id ms/PositiveInt]]
+   {:keys [value limit]} :- [:map
+                             [:value ms/NonBlankString]
+                             [:limit {:optional true} [:maybe ms/PositiveInt]]]]
+  (validation/check-public-sharing-enabled)
+  (let [dashboard-id (api/check-404 (t2/select-one-pk :model/Dashboard :public_uuid uuid, :archived false))]
+    (search-dashboard-fields dashboard-id field-id search-field-id value limit)))</pre></td></tr><tr><td class="docs"><p>--------------------------------------------------- Remappings ---------------------------------------------------</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- field-remapped-values [field-id remapped-field-id, ^String value-str]
+  (let [field          (api/check-404 (t2/select-one :model/Field :id field-id))
+        remapped-field (api/check-404 (t2/select-one :model/Field :id remapped-field-id))]
+    (check-search-field-is-allowed field-id remapped-field-id)
+    (api.field/remapped-value field remapped-field (api.field/parse-query-param-value-for-field field value-str))))</pre></td></tr><tr><td class="docs"><p>Return the reampped Field values for a Field referenced by a <em>Card</em>. This explanation is almost useless, so see the
+one in <code>metabase.api.field/remapped-value</code> if you would actually like to understand what is going on here.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn card-field-remapped-values
+  [card-id field-id remapped-field-id, ^String value-str]
+  (check-field-is-referenced-by-card field-id card-id)
+  (field-remapped-values field-id remapped-field-id value-str))</pre></td></tr><tr><td class="docs"><p>Return the reampped Field values for a Field referenced by a <em>Dashboard</em>. This explanation is almost useless, so see
+the one in <code>metabase.api.field/remapped-value</code> if you would actually like to understand what is going on here.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn dashboard-field-remapped-values
+  [dashboard-id field-id remapped-field-id, ^String value-str]
+  (check-field-is-referenced-by-dashboard field-id dashboard-id)
+  (field-remapped-values field-id remapped-field-id value-str))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/card/:uuid/field/:field-id/remapping/:remapped-id&quot;
+  &quot;Fetch remapped Field values. This is the same as `GET /api/field/:id/remapping/:remapped-id`, but for use with public
+  Cards.&quot;
+  [{:keys [uuid field-id remapped-id]} :- [:map
+                                           [:uuid        ms/UUIDString]
+                                           [:field-id    ms/PositiveInt]
+                                           [:remapped-id ms/PositiveInt]]
+   {:keys [value]} :- [:map
+                       [:value ms/NonBlankString]]]
+  (validation/check-public-sharing-enabled)
+  (let [card-id (api/check-404 (t2/select-one-pk :model/Card :public_uuid uuid, :archived false))]
+    (card-field-remapped-values card-id field-id remapped-id value)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/dashboard/:uuid/field/:field-id/remapping/:remapped-id&quot;
+  &quot;Fetch remapped Field values. This is the same as `GET /api/field/:id/remapping/:remapped-id`, but for use with public
+  Dashboards.&quot;
+  [{:keys [uuid field-id remapped-id]} :- [:map
+                                           [:uuid        ms/UUIDString]
+                                           [:field-id    ms/PositiveInt]
+                                           [:remapped-id ms/PositiveInt]]
+   {:keys [value]} :- [:map
+                       [:value ms/NonBlankString]]]
+  (validation/check-public-sharing-enabled)
+  (let [dashboard-id (t2/select-one-pk :model/Dashboard :public_uuid uuid, :archived false)]
+    (dashboard-field-remapped-values dashboard-id field-id remapped-id value)))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------ Param Values -------------------------------------------------</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/card/:uuid/params/:param-key/values&quot;
+  &quot;Fetch values for a parameter on a public card.&quot;
+  [{:keys [uuid param-key]} :- [:map
+                                [:uuid      ms/UUIDString]
+                                [:param-key ms/NonBlankString]]]
+  (validation/check-public-sharing-enabled)
+  (let [card (t2/select-one :model/Card :public_uuid uuid, :archived false)]
+    (request/as-admin
+      (api.card/param-values card param-key))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/card/:uuid/params/:param-key/search/:query&quot;
+  &quot;Fetch values for a parameter on a public card containing `query`.&quot;
+  [{:keys [uuid param-key query]} :- [:map
+                                      [:uuid      ms/UUIDString]
+                                      [:param-key ms/NonBlankString]
+                                      [:query     ms/NonBlankString]]]
+  (validation/check-public-sharing-enabled)
+  (let [card (t2/select-one :model/Card :public_uuid uuid, :archived false)]
+    (request/as-admin
+      (api.card/param-values card param-key query))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/dashboard/:uuid/params/:param-key/values&quot;
+  &quot;Fetch filter values for dashboard parameter `param-key`.&quot;
+  [{:keys [uuid param-key]} :- [:map
+                                [:uuid      ms/UUIDString]
+                                [:param-key ms/NonBlankString]]
+   constraint-param-key-&gt;value]
+  (let [dashboard (dashboard-with-uuid uuid)]
+    (request/as-admin
+      (binding [qp.perms/*param-values-query* true]
+        (api.dashboard/param-values dashboard param-key constraint-param-key-&gt;value)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/dashboard/:uuid/params/:param-key/search/:query&quot;
+  &quot;Fetch filter values for dashboard parameter `param-key`, containing specified `query`.&quot;
+  [{:keys [uuid param-key query]} :- [:map
+                                      [:uuid      ms/UUIDString]
+                                      [:param-key ms/NonBlankString]
+                                      [:query     ms/NonBlankString]]
+   constraint-param-key-&gt;value]
+  (let [dashboard (dashboard-with-uuid uuid)]
+    (request/as-admin
+      (binding [qp.perms/*param-values-query* true]
+        (api.dashboard/param-values dashboard param-key constraint-param-key-&gt;value query)))))</pre></td></tr><tr><td class="docs"><p>----------------------------------------------------- Pivot Tables -----------------------------------------------</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>TODO -- why do these endpoints START with <code>/pivot/</code> whereas the version in Dash</p>
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/pivot/card/:uuid/query&quot;
+  &quot;Fetch a publicly-accessible Card an return query results as well as `:card` information. Does not require auth
+   credentials. Public sharing must be enabled.&quot;
+  [{:keys [uuid]} :- [:map
+                      [:uuid ms/UUIDString]]
+   {:keys [parameters]} :- [:map
+                            [:parameters {:optional true} [:maybe ms/JSONString]]]]
+  (process-query-for-card-with-public-uuid uuid :api (json/decode+kw parameters)
+                                           :qp qp.pivot/run-pivot-query))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/pivot/dashboard/:uuid/dashcard/:dashcard-id/card/:card-id&quot;
+  &quot;Fetch the results for a Card in a publicly-accessible Dashboard. Does not require auth credentials. Public
+  sharing must be enabled.&quot;
+  [{:keys [uuid dashcard-id card-id]} :- [:map
+                                          [:uuid        ms/UUIDString]
+                                          [:card-id     ms/PositiveInt]
+                                          [:dashcard-id ms/PositiveInt]]
+   {:keys [parameters]} :- [:map
+                            [:parameters {:optional true} [:maybe ms/JSONString]]]]
+  (validation/check-public-sharing-enabled)
+  (api/check-404 (t2/select-one-pk :model/Card :id card-id :archived false))
+  (let [dashboard-id (api/check-404 (t2/select-one-pk :model/Dashboard :public_uuid uuid, :archived false))]
+    (u/prog1 (process-query-for-dashcard
+              :dashboard-id  dashboard-id
+              :card-id       card-id
+              :dashcard-id   dashcard-id
+              :export-format :api
+              :parameters    parameters
+              :qp            qp.pivot/run-pivot-query)
+      (events/publish-event! :event/card-read {:object-id card-id, :user-id api/*current-user-id*, :context :dashboard}))))</pre></td></tr><tr><td class="docs"><p>Rate limit at 10 actions per 1000 ms on a per action basis.
+ The goal of rate limiting should be to prevent very obvious abuse, but it should
+ be relatively lax so we don't annoy legitimate users.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private action-execution-throttle
+  (throttle/make-throttler :action-uuid
+                           :attempts-threshold 10
+                           :initial-delay-ms 1000
+                           :attempt-ttl-ms 1000
+                           :delay-exponent 1))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/action/:uuid/execute&quot;
+  &quot;Execute the Action.
+
+   `parameters` should be the mapped dashboard parameters with values.&quot;
+  [{:keys [uuid]} :- [:map
+                      [:uuid ms/UUIDString]]
+   _query-params
+   {:keys [parameters], :as _body} :- [:map
+                                       [:parameters {:optional true} [:maybe [:map-of :keyword any?]]]]]
+  (let [throttle-message (try
+                           (throttle/check action-execution-throttle uuid)
+                           nil
+                           (catch ExceptionInfo e
+                             (get-in (ex-data e) [:errors :action-uuid])))
+        throttle-time (when throttle-message
+                        (second (re-find #&quot;You must wait ([0-9]+) seconds&quot; throttle-message)))]
+    (if throttle-message
+      (cond-&gt; {:status 429
+               :body   throttle-message}
+        throttle-time (assoc :headers {&quot;Retry-After&quot; throttle-time}))
+      (do
+        (validation/check-public-sharing-enabled)
+        ;; Run this query with full superuser perms. We don't want the various perms checks
+        ;; failing because there are no current user perms; if this Dashcard is public
+        ;; you're by definition allowed to run it without a perms check anyway
+        (request/as-admin
+          (let [action (api/check-404 (actions/select-action :public_uuid uuid :archived false))]
+            (analytics/track-event! :snowplow/action
+                                    {:event     :action-executed
+                                     :source    :public_form
+                                     :type      (:type action)
+                                     :action_id (:id action)})
+            ;; Undo middleware string-&gt;keyword coercion
+            (actions/execute-action! action (update-keys parameters name))))))))</pre></td></tr><tr><td class="docs"><p>----------------------------------------- Route Definitions &amp; Complaints -----------------------------------------</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>TODO - why don't we just make these routes have a bit of middleware that includes the
+<code>validation/check-public-sharing-enabled</code> check in each of them? That way we don't need to remember to include the line in
+every single endpoint definition here? Wouldn't that be 100x better?!</p>
+
+<p>TODO - also a smart person would probably just parse the UUIDs automatically in middleware as appropriate for
+<code>/dashboard</code> vs <code>/card</code></p>
+</td><td class="codes"></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
