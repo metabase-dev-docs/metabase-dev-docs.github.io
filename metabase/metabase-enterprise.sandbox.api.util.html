@@ -2879,22 +2879,19 @@ net.brehaut.ClojureTools = (function (SH) {
 This is done by checking whether any <em>other</em> group provides <code>:unrestricted</code> access to the sandboxed table (without
 its own sandbox). If so, we don't enforce the sandbox.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- enforce-sandbox?
-  [user-group-ids group-id-&gt;sandboxes {:as _sandbox :keys [table_id] {:keys [db_id]} :table}]
+  [{:as _sandbox :keys [table_id] {:keys [db_id]} :table} user-group-ids group-id-&gt;sandboxes group-id-&gt;impersonations]
   ;; If any *other* non-sandboxed groups the user is in provide unrestricted view-data access to the table, we don't
   ;; enforce the sandbox.
-  (let [groups-to-exclude
-        ;; Don't check permissions of other groups which also define sandboxes on the relevant table. The fact that
-        ;; there is a conflict between sandboxes will cause a QP error later on when trying to run queries, so this
-        ;; isn't a valid sandboxing state anyway.
-        (reduce-kv (fn [excluded-group-ids group-id sandboxes]
-                     (if (some #(= (:table_id %) table_id) sandboxes)
-                       (conj excluded-group-ids group-id)
-                       excluded-group-ids))
-                   #{}
-                   group-id-&gt;sandboxes)
+  (let [sandboxed-groups (into #{} (for [[group-id sandboxes] group-id-&gt;sandboxes
+                                         :when (some #(= (:table_id %) table_id) sandboxes)]
+                                     group-id))
+        impersonated-groups (into #{} (for [[group-id impersonations] group-id-&gt;impersonations
+                                            :when (some #(= (:db_id %) db_id) impersonations)]
+                                        group-id))
+        groups-to-exclude (set/union sandboxed-groups impersonated-groups)
         groups-to-check (set/difference user-group-ids groups-to-exclude)]
     (if (seq groups-to-check)
-      (not (data-perms/groups-have-permission-for-table? (set/difference user-group-ids groups-to-exclude)
+      (not (data-perms/groups-have-permission-for-table? groups-to-check
                                                          :perms/view-data
                                                          :unrestricted
                                                          db_id
@@ -2917,19 +2914,35 @@ for the duration of a request in [[metabase.permissions.models.data-permissions/
                                               :where [:and
                                                       [:= :pgm.user_id user-id]]})
                                   :table)
+        impersonations-with-group-ids (t2/select :model/ConnectionImpersonation
+                                                 :group_id [:in user-group-ids])
+        group-id-&gt;impersonations (-&gt;&gt; impersonations-with-group-ids
+                                      (group-by :group_id))
         group-id-&gt;sandboxes (-&gt;&gt; sandboxes-with-group-ids
                                  (group-by :group_id)
                                  (m/map-vals (fn [sandboxes]
                                                (-&gt;&gt; sandboxes
                                                     (filter :table_id)
                                                     (into #{})))))]
-    (filter #(enforce-sandbox? user-group-ids group-id-&gt;sandboxes %)
+    (filter #(enforce-sandbox? % user-group-ids group-id-&gt;sandboxes group-id-&gt;impersonations)
             (reduce set/union #{} (vals group-id-&gt;sandboxes)))))</pre></td></tr><tr><td class="docs"><p>Given collection of table-ids, return the sandboxes that should be enforced for the current user on any of the tables. A
 sandbox is not enforced if the user is in a different permissions group that grants full access to the table.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn enforced-sandboxes-for-tables
   [table-ids]
   (let [enforced-sandboxes-for-user @data-perms/*sandboxes-for-user*]
-    (filter #((set table-ids) (:table_id %)) enforced-sandboxes-for-user)))</pre></td></tr><tr><td class="docs"><p>Returns true if the currently logged in user has any enforced sandboxes. Throws an exception if no current user is
+    (filter #((set table-ids) (:table_id %)) enforced-sandboxes-for-user)))</pre></td></tr><tr><td class="docs"><p>Returns true if the currently logged in user has any enforced sandboxes for the provided database. Throws an
+exception if no current user is bound.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn sandboxed-user-for-db?
+  [database-id]
+  (when-not *is-superuser?*
+    (if *current-user-id*
+      (let [sandboxes (t2/hydrate (seq @data-perms/*sandboxes-for-user*) :table)]
+        (some #(= (get-in % [:table :db_id]) database-id)
+              sandboxes))
+     ;; If no *current-user-id* is bound we can't check for sandboxes, so we should throw in this case to avoid
+     ;; returning `false` for users who should actually be sandboxes.
+      (throw (ex-info (str (tru &quot;No current user found&quot;))
+                      {:status-code 403})))))</pre></td></tr><tr><td class="docs"><p>Returns true if the currently logged in user has any enforced sandboxes. Throws an exception if no current user is
 bound.</p>
 </td><td class="codes"><pre class="brush: clojure">(defenterprise sandboxed-user?
   :feature :sandboxes
