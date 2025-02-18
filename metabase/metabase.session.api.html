@@ -3006,7 +3006,13 @@ plaintext token is only sent in the password reset email to the user in question
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private forgot-password-throttlers
   {:email      (throttle/make-throttler :email :attempts-threshold 3 :attempt-ttl-ms 1000)
-   :ip-address (throttle/make-throttler :email :attempts-threshold 50)})</pre></td></tr><tr><td class="docs">
+   :ip-address (throttle/make-throttler :email :attempts-threshold 50)})</pre></td></tr><tr><td class="docs"><p>Disable password reset for all users created with SSO logins, unless those Users were created with Google SSO
+in which case disable reset for them as long as the Google SSO feature is enabled.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- password-reset-disabled?
+  [sso-source]
+  (if (and (= sso-source :google) (not (public-settings/sso-enabled?)))
+    (public-settings/google-auth-enabled?)
+    (some? sso-source)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- forgot-password-impl
   [email]
   (future
@@ -3016,8 +3022,9 @@ plaintext token is only sent in the password reset email to the user in question
                (t2/select-one [:model/User :id :sso_source :is_active]
                               :%lower.email
                               (u/lower-case-en email))]
-      (if (some? sso-source)
-        ;; If user uses any SSO method to log in, no need to generate a reset token
+      (if (password-reset-disabled? sso-source)
+        ;; If user uses any SSO method to log in, no need to generate a reset token. Some cases for Google SSO
+        ;; are exempted see `password-reset-allowed?`
         (messages/send-password-reset-email! email sso-source nil is-active?)
         (let [reset-token        (user/set-password-reset-token! user-id)
               password-reset-url (str (public-settings/site-url) &quot;/auth/reset_password/&quot; reset-token)]
