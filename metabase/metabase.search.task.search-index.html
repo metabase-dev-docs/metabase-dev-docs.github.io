@@ -2879,7 +2879,7 @@ net.brehaut.ClojureTools = (function (SH) {
   (:import
    (java.time Instant)
    (java.util Date)
-   (org.quartz DisallowConcurrentExecution JobExecutionException)))</pre></td></tr><tr><td class="docs">
+   (org.quartz DisallowConcurrentExecution JobExecutionContext)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private init-stem &quot;metabase.task.search-index.init&quot;)
 (def ^:private reindex-stem &quot;metabase.task.search-index.reindex&quot;)
@@ -2924,10 +2924,10 @@ net.brehaut.ClojureTools = (function (SH) {
       (catch Exception e
         (analytics/inc! :metabase-search/index-error)
         (throw e)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- update-index! []
+</td><td class="codes"><pre class="brush: clojure">(defn- update-index! [^JobExecutionContext ctx]
   (when (search/supports-index?)
     (log/info &quot;Starting Realtime Search Index Update worker&quot;)
-    (try
+    (task/rerun-on-error ctx
       (while true
         (try
           (let [batch    (search/get-next-batch! Long/MAX_VALUE 100)
@@ -2940,10 +2940,7 @@ net.brehaut.ClojureTools = (function (SH) {
               (log/debugf &quot;Indexed search entries in %.0fms %s&quot; duration (sort-by (comp - val) report))))
           (catch Exception e
             (analytics/inc! :metabase-search/index-error)
-            (throw e))))
-      (catch Exception e
-        (log/error e &quot;Updating search index failed&quot;)
-        (throw (JobExecutionException. &quot;Updating search index failed&quot; e true))))))</pre></td></tr><tr><td class="docs"><p>Ensure a Search Index exists</p>
+            (throw e)))))))</pre></td></tr><tr><td class="docs"><p>Ensure a Search Index exists</p>
 </td><td class="codes"><pre class="brush: clojure">(jobs/defjob 
   SearchIndexInit [_ctx]
   (init!))</pre></td></tr><tr><td class="docs"><p>Populate a new Search Index</p>
@@ -2952,8 +2949,8 @@ net.brehaut.ClojureTools = (function (SH) {
   SearchIndexReindex [_ctx]
   (reindex!))</pre></td></tr><tr><td class="docs"><p>Keep Search Index updated</p>
 </td><td class="codes"><pre class="brush: clojure">(jobs/defjob 
-  SearchIndexUpdate [_ctx]
-  (update-index!))</pre></td></tr><tr><td class="docs">
+  SearchIndexUpdate [ctx]
+  (update-index! ctx))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod task/init! ::SearchIndexInit [_]
   (let [job (jobs/build
              (jobs/of-type SearchIndexInit)

@@ -2876,7 +2876,6 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.premium-features.core :as premium-features :refer [defenterprise]]
    [metabase.query-processor :as qp]
    [metabase.task :as task]
-   [metabase.util :as u]
    [metabase.util.log :as log]
    [toucan2.core :as t2])
   (:import
@@ -2902,7 +2901,13 @@ net.brehaut.ClojureTools = (function (SH) {
 This is best-effort; we try each query once and discard failures.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- submit-refresh-task-async!
   [refresh-task-fn]
-  (.submit ^ExecutorService @pool ^Callable refresh-task-fn))</pre></td></tr><tr><td class="docs"><p>Returns a function that serially reruns queries based on <code>refresh-defs</code>, and discards the results. Each refresh
+  (.submit ^ExecutorService @pool ^Callable refresh-task-fn))</pre></td></tr><tr><td class="docs"><p>Returns a reducing function that discards result rows</p>
+</td><td class="codes"><pre class="brush: clojure">(defn discarding-rff
+  [metadata]
+  (fn discarding-rf
+    ([] {:data metadata})
+    ([result] result)
+    ([result _row] result)))</pre></td></tr><tr><td class="docs"><p>Returns a function that serially reruns queries based on <code>refresh-defs</code>, and discards the results. Each refresh
 definition contains a card-id, an optional dashboard-id, and a list of queries to rerun.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- refresh-task
   [refresh-defs]
@@ -2922,7 +2927,8 @@ definition contains a card-id, an optional dashboard-id, and a list of queries t
                 {:executed-by  nil
                  :context      :cache-refresh
                  :card-id      card-id
-                 :dashboard-id dashboard-id}))
+                 :dashboard-id dashboard-id})
+               discarding-rff)
               (catch Exception e
                 (log/debugf &quot;Error refreshing cache for card %s: %s&quot; card-id (ex-message e))))))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- duration-ago
@@ -2987,10 +2993,11 @@ selects the 10 most common queries for each card ID that we should rerun.</p>
 to re-run them before the cache has been refreshed. </p>
 </td><td class="codes"><pre class="brush: clojure">(defn- clear-caches-for-queries!
   [queries]
-  (t2/delete! :model/QueryCache :query_hash [:in (map :cache-hash queries)]))</pre></td></tr><tr><td class="docs">
+  (t2/delete! :model/QueryCache :query_hash [:in (map :cache-hash queries)]))</pre></td></tr><tr><td class="docs"><p>Detects caches with strategy=duration that are eligible for refreshing, and returns a count of the refresh jobs that
+were generated (i.e. the number of different cards refreshed, with each card potentially having multiple queries).</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- maybe-refresh-duration-caches!
   []
-  (when-let [queries (seq (duration-queries-to-rerun))]
+  (if-let [queries (seq (duration-queries-to-rerun))]
     (let [refresh-defs (-&gt;&gt; queries
                             (group-by (juxt :card-id :dashboard-id))
                             (map (fn [[[card-id dashboard-id] queries]]
@@ -3001,7 +3008,9 @@ to re-run them before the cache has been refreshed. </p>
       (clear-caches-for-queries! queries)
       (if *run-cache-refresh-async*
         (submit-refresh-task-async! task)
-        (task)))))</pre></td></tr><tr><td class="docs"><p>HoneySQL query for finding the the base query definition we should run for a card ID (i.e. the unparameterized
+        (task))
+      (count refresh-defs))
+    0))</pre></td></tr><tr><td class="docs"><p>HoneySQL query for finding the the base query definition we should run for a card ID (i.e. the unparameterized
 query).</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- scheduled-base-query-to-rerun-honeysql
   [card-id]
@@ -3091,22 +3100,32 @@ variants) so that fresh results are cached.</p>
     (-&gt; (.getFireTimeAfter cron (t/java-date now))
         (t/offset-date-time (t/zone-offset)))))</pre></td></tr><tr><td class="docs"><p>Update <code>invalidated_at</code> for every cache config with <code>:schedule</code> strategy, and maybe rerun cached queries
 for both <code>:schedule</code> and <code>:duration</code> caches if preemptive caching is enabled.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- refresh-cache-configs!
+</td><td class="codes"><pre class="brush: clojure">(defenterprise refresh-cache-configs!
+  :feature :none
   []
   (let [now (t/offset-date-time)
-        invalidated-count
-        (count
-         (for [{:keys [id config refresh_automatically] :as cache-config} (select-ready-to-run :schedule)]
-           (u/prog1 (t2/update! :model/CacheConfig
-                                {:id id}
-                                {:next_run_at    (calc-next-run (:schedule config) now)
-                                 :invalidated_at now})
-             (when (and (premium-features/enable-preemptive-caching?)
-                        refresh_automatically)
-               (refresh-schedule-cache! cache-config)))))]
-    (when (premium-features/enable-preemptive-caching?)
-      (maybe-refresh-duration-caches!))
-    invalidated-count))</pre></td></tr><tr><td class="docs"><p>Refresh 'schedule' caches</p>
+        schedule-caches-to-invalidate (select-ready-to-run :schedule)
+        schedule-refresh-count
+        (reduce
+         (fn [refreshed-count {:keys [id config refresh_automatically] :as cache-config}]
+           (t2/update! :model/CacheConfig
+                       {:id id}
+                       {:next_run_at    (calc-next-run (:schedule config) now)
+                        :invalidated_at now})
+           (if (and (premium-features/enable-preemptive-caching?) refresh_automatically)
+             (do
+               (refresh-schedule-cache! cache-config)
+               (inc refreshed-count))
+             refreshed-count))
+         0
+         schedule-caches-to-invalidate)
+        duration-refresh-count
+        (if (premium-features/enable-preemptive-caching?)
+          (maybe-refresh-duration-caches!)
+          0)]
+    {:schedule-invalidated (count schedule-caches-to-invalidate)
+     :schedule-refreshed   schedule-refresh-count
+     :duration-refreshed   duration-refresh-count}))</pre></td></tr><tr><td class="docs"><p>Refresh 'schedule' caches</p>
 </td><td class="codes"><pre class="brush: clojure">(jobs/defjob ^{org.quartz.DisallowConcurrentExecution true
                :doc                                   }
   Cache [_ctx]
