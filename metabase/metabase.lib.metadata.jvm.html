@@ -2873,16 +2873,16 @@ net.brehaut.ClojureTools = (function (SH) {
    ^{:clj-kondo/ignore [:discouraged-namespace]}
    [metabase.driver :as driver]
    [metabase.lib.metadata.cached-provider :as lib.metadata.cached-provider]
-   [metabase.lib.metadata.ident :as lib.metadata.ident]
    [metabase.lib.metadata.invocation-tracker :as lib.metadata.invocation-tracker]
    [metabase.lib.metadata.protocols :as lib.metadata.protocols]
    [metabase.lib.schema.id :as lib.schema.id]
    [metabase.lib.schema.metadata :as lib.schema.metadata]
    [metabase.models.interface :as mi]
+   [metabase.models.serialization :as serdes]
    [metabase.models.setting :as setting]
    [metabase.util :as u]
-   [metabase.util.log :as log]
    [metabase.util.malli :as mu]
+   [metabase.util.memoize :as u.memo]
    [metabase.util.snake-hating-map :as u.snake-hating-map]
    [methodical.core :as methodical]
    [potemkin :as p]
@@ -2895,19 +2895,12 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- qualified-key? [k]
   (or (qualified-keyword? k)
-      (str/includes? k &quot;.&quot;)))</pre></td></tr><tr><td class="docs"><p>Calculating the kebab-case version of a key every time is pretty slow (even with the LRU
-caching [[u/->kebab-case-en]] has), since the keys here are static and finite we can just memoize them forever and
+      (str/includes? k &quot;.&quot;)))</pre></td></tr><tr><td class="docs"><p>Calculating the kebab-case version of a key every time is pretty slow (even with the LRU caching
+[[u/->kebab-case-en]] has), since the keys here are static and finite we can just memoize them forever and
 get a nice performance boost.</p>
-
-<p>we spent a lot of time messing around with different ways of doing this and this seems to be the fastest. See
-https://metaboat.slack.com/archives/C04CYTEL9N2/p1702671632956539 -- Cam</p>
-</td><td class="codes"><pre class="brush: clojure">(let [cache      (java.util.concurrent.ConcurrentHashMap.)
-      mapping-fn (reify java.util.function.Function
-                   (apply [_this k]
-                     (u/-&gt;kebab-case-en k)))]
-  (defn- memoized-kebab-key
-    [k]
-    (.computeIfAbsent cache k mapping-fn)))</pre></td></tr><tr><td class="docs"><p>Convert a (presumably) Toucan 2 instance of an application database model with <code>snake_case</code> keys to a MLv2 style
+</td><td class="codes"><pre class="brush: clojure">(def ^{:private true
+       :arglists '([k])} memoized-kebab-key
+  (u.memo/fast-memo u/-&gt;kebab-case-en))</pre></td></tr><tr><td class="docs"><p>Convert a (presumably) Toucan 2 instance of an application database model with <code>snake_case</code> keys to a MLv2 style
 metadata instance with <code>:lib/type</code> and <code>kebab-case</code> keys.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn instance-&gt;metadata
   [instance metadata-type]
@@ -2952,7 +2945,6 @@ metadata instance with <code>:lib/type</code> and <code>kebab-case</code> keys.<
   (instance-&gt;metadata table :metadata/table))</pre></td></tr><tr><td class="docs"><p>Field</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(derive :metadata/column :model/Field)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private ^:dynamic *table-idents* nil)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2.model/resolve-model :metadata/column
   [model]
   (t2/resolve-model :model/Dimension) ; for side-effects
@@ -3018,14 +3010,15 @@ metadata instance with <code>:lib/type</code> and <code>kebab-case</code> keys.<
                  [:= :values/type [:inline &quot;full&quot;]]]]}))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(t2/define-after-select :metadata/column
   [field]
-  (let [field          (instance-&gt;metadata field :metadata/column)
+  (let [entity-id      (serdes/backfill-entity-id field)
+        field          (instance-&gt;metadata field :metadata/column)
         dimension-type (some-&gt; (:dimension/type field) keyword)]
     (merge
      (dissoc field
+             :table
              :dimension/human-readable-field-id :dimension/id :dimension/name :dimension/type
              :values/human-readable-values :values/values)
-     (when-let [prefix (get *table-idents* (:table-id field))]
-       {:ident (lib.metadata.ident/ident-for-field prefix field)})
+     {:ident entity-id}
      (when (and (= dimension-type :external)
                 (:dimension/human-readable-field-id field))
        {:lib/external-remap {:lib/type :metadata.column.remapping/external
@@ -3165,11 +3158,10 @@ metadata instance with <code>:lib/type</code> and <code>kebab-case</code> keys.<
 </td><td class="codes"><pre class="brush: clojure">(defn- metadatas-for-table [metadata-type table-id]
   (case metadata-type
     :metadata/column
-    (into [] (lib.metadata.ident/attach-idents #(get *table-idents* %))
-          (t2/select :metadata/column
-                     :table_id        table-id
-                     :active          true
-                     :visibility_type [:not-in #{&quot;sensitive&quot; &quot;retired&quot;}]))
+    (t2/select :metadata/column
+               :table_id        table-id
+               :active          true
+               :visibility_type [:not-in #{&quot;sensitive&quot; &quot;retired&quot;}])
     :metadata/metric
     (t2/select :metadata/metric :table_id table-id, :source_card_id [:= nil], :type :metric, :archived false)
     :metadata/segment
@@ -3178,43 +3170,16 @@ metadata instance with <code>:lib/type</code> and <code>kebab-case</code> keys.<
   (case metadata-type
     :metadata/metric
     (t2/select :metadata/metric :source_card_id card-id, :type :metric, :archived false)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- database-name [database-id atom-db-name]
-  (if-let [db-name @atom-db-name]
-    db-name
-    (reset! atom-db-name (:name (database database-id)))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- table-idents [db-name tbls]
-  (into {} (comp (filter identity)
-                 (map (juxt :id #(lib.metadata.ident/table-prefix db-name %))))
-        tbls))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- ensure-table-idents [table-idents-atom db-name table-ids]
-  (let [id-&gt;ident (or @table-idents-atom {})]
-    (or (when-let [missing-ids (not-empty (into #{} (remove id-&gt;ident) table-ids))]
-          (log/debugf &quot;Fetching tables for their idents: %s&quot; (pr-str missing-ids))
-          (let [tbls (t2/select :metadata/table :id [:in missing-ids])]
-            (swap! table-idents-atom merge (table-idents db-name tbls))))
-        id-&gt;ident)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- attach-idents [table-idents-atom db-name columns]
-  (let [table-ids (into #{} (map :table-id) columns)
-        id-&gt;ident (ensure-table-idents table-idents-atom db-name table-ids)]
-    (lib.metadata.ident/attach-idents id-&gt;ident columns)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(p/deftype+ UncachedApplicationDatabaseMetadataProvider [database-id db-name-atom table-idents-atom]
+</td><td class="codes"><pre class="brush: clojure">(p/deftype+ UncachedApplicationDatabaseMetadataProvider [database-id]
   lib.metadata.protocols/MetadataProvider
   (database [_this]
-    (let [db (database database-id)]
-      (reset! db-name-atom (:name db))
-      db))
+    (database database-id))
   (metadatas [_this metadata-type ids]
-    (let [ms (metadatas database-id metadata-type ids)]
-      (cond-&gt;&gt; ms
-        (= metadata-type :metadata/column) (attach-idents table-idents-atom (database-name database-id db-name-atom)))))
+    (metadatas database-id metadata-type ids))
   (tables [_this]
-    (let [tbls (tables database-id)]
-      (swap! table-idents-atom merge (table-idents (database-name database-id db-name-atom) tbls))
-      tbls))
+    (tables database-id))
   (metadatas-for-table [_this metadata-type table-id]
-    (ensure-table-idents table-idents-atom (database-name database-id db-name-atom) [table-id])
-    (binding [*table-idents* @table-idents-atom]
-      (metadatas-for-table metadata-type table-id)))
+    (metadatas-for-table metadata-type table-id))
   (metadatas-for-card [_this metadata-type card-id]
     (metadatas-for-card metadata-type card-id))
   (setting [_this setting-name]
@@ -3232,7 +3197,7 @@ I couldn't resist the Java naming, <code>foo-provider-factory-strategy-bean</cod
 scoped caching, to allow reuse of <code>MetadataProvider</code>s across the life of an API request.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- application-database-metadata-provider-factory
   [database-id]
-  (-&gt; (-&gt;UncachedApplicationDatabaseMetadataProvider database-id (atom nil) (atom {}))
+  (-&gt; (-&gt;UncachedApplicationDatabaseMetadataProvider database-id)
       lib.metadata.cached-provider/cached-metadata-provider
       lib.metadata.invocation-tracker/invocation-tracker-provider))</pre></td></tr><tr><td class="docs"><p>Bind this to a <code>(atom (clojure.core.cache/basic-cache-factory {}))</code> or similar cache-atom, and
 [[application-database-metadata-provider]] will use it for caching the <code>MetadataProvider</code> for each <code>database-id</code>

@@ -3071,16 +3071,40 @@ uses this because it needs reproducible <code>:entity_id</code>s that differ fro
       (u/generate-nano-id (identity-hash entity))))</pre></td></tr><tr><td class="docs"><p>Returns true if s is a valid identity hash string.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn identity-hash?
   [s]
-  (boolean (re-matches #&quot;^[0-9a-fA-F]{8}$&quot; s)))</pre></td></tr><tr><td class="docs"><p>Returns a function which accepts an entity and returns the identity hash of
+  (boolean (re-matches #&quot;^[0-9a-fA-F]{8}$&quot; s)))</pre></td></tr><tr><td class="docs"><h2>Memoizing `hydrated-hash`</h2>
+
+<p>Hashing a Field requires its Table; hashing a Table requires its Database.
+Letting each of those hit the appdb for every Field lookup (when it lacks an <code>entity_id</code>) is too costly,
+so we cache any that have to be looked up right here.</p>
+
+<p>Memory use is not a serious concern here, for two reasons:
+1. This is caching the <code>hydrated-hash</code> lookups, so it doesn't cache Fields but only Tables and Databases.
+2. This is called only when [[backfill-entity-id]] needs to generate an <code>entity_id</code> by hashing. Once the background
+   job populates that column everywhere, this will always be empty.</p>
+
+<p>NOTE: To support Metabase upgrades where the new <code>entity_id</code>s might still be blank, this code will have to live on.
+But in practice once <code>entity_id</code>s are populated this cache will never be needed.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private hydrated-hash-cache
+  (atom {}))</pre></td></tr><tr><td class="docs"><p>Returns a function which accepts an entity and returns the identity hash of
  the value of the hydrated property under key k.</p>
 
 <p>This is a helper for writing [[hash-fields]] implementations.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn hydrated-hash
-  [k]
-  (fn [entity]
-    (or
-     (some-&gt; entity (t2/hydrate k) (get k) identity-hash)
-     &quot;&lt;none&gt;&quot;)))</pre></td></tr><tr><td class="docs"><h1>Serdes paths and <tt>:serdes/meta</tt></h1>
+  ([k]
+   (fn [entity]
+     (or
+      (some-&gt; entity (t2/hydrate k) (get k) identity-hash)
+      &quot;&lt;none&gt;&quot;)))
+  ([hydration-key cache-key]
+   (let [inner-fn (hydrated-hash hydration-key)]
+     (fn [entity]
+       (let [the-key (cache-key entity)
+             cached  (swap! hydrated-hash-cache
+                            (fn [cache]
+                              (cond-&gt; cache
+                                (-&gt; cache hydration-key (get the-key) not)
+                                (assoc-in [hydration-key the-key] (delay (inner-fn entity))))))]
+         (-&gt; cached hydration-key (get the-key) deref))))))</pre></td></tr><tr><td class="docs"><h1>Serdes paths and <tt>:serdes/meta</tt></h1>
 
 <p>The Clojure maps from extraction and ingestion always include a special key <code>:serdes/meta</code> giving some information
 about the serialized entity. The value is always a vector of maps that give a "path" to the entity. This is <strong>not</strong>

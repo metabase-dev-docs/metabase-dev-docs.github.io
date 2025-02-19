@@ -2894,6 +2894,7 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.util :as u]
    [metabase.util.i18n :as i18n]
    [metabase.util.malli :as mu]
+   [metabase.util.number :as u.number]
    [metabase.util.time :as u.time]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(doseq [tag [:and :or]]
   (lib.hierarchy/derive tag ::compound))</pre></td></tr><tr><td class="docs">
@@ -2921,6 +2922,9 @@ generating the suggested name for a query.</p>
      :or  (i18n/tru &quot;or&quot;))
    (for [clause subclauses]
      (lib.metadata.calculation/display-name query stage-number clause style))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- -&gt;maybe-bigint
+  [x]
+  (clojure.core/or (when (string? x) (u.number/parse-bigint x)) x))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/display-name-method ::varargs
   [query stage-number expr style]
   (let [-&gt;display-name #(lib.metadata.calculation/display-name query stage-number % style)
@@ -2938,6 +2942,7 @@ generating the suggested name for a query.</p>
                        (temporal? a)
                        (lib.util/clause? a)
                        (clojure.core/contains? units (:temporal-unit (second a)))))))
+        -&gt;number-display-name #(-&gt; % -&gt;maybe-bigint -&gt;display-name)
         -&gt;unbucketed-display-name #(-&gt; %
                                        (update 1 dissoc :temporal-unit)
                                        -&gt;display-name)
@@ -2946,7 +2951,6 @@ generating the suggested name for a query.</p>
                            :temporal-unit
                            lib.temporal-bucket/describe-temporal-unit
                            u/lower-case-en)
-
         -&gt;unit {:get-hour :hour-of-day
                 :get-month :month-of-year
                 :get-quarter :quarter-of-year}]
@@ -2999,7 +3003,7 @@ generating the suggested name for a query.</p>
                 (-&gt; f -&gt;unit lib.temporal-bucket/describe-temporal-unit u/lower-case-en))
 
       [(_ :guard #{:= :in}) _ (a :guard numeric?) b]
-      (i18n/tru &quot;{0} is equal to {1}&quot; (-&gt;display-name a) (-&gt;display-name b))
+      (i18n/tru &quot;{0} is equal to {1}&quot; (-&gt;display-name a) (-&gt;number-display-name b))
 
       [(_ :guard #{:= :in}) _ (a :guard (unit-is lib.schema.temporal-bucketing/datetime-truncation-units)) (b :guard string?)]
       (i18n/tru &quot;{0} is {1}&quot; (-&gt;unbucketed-display-name a) (u.time/format-relative-date-range b 0 (:temporal-unit (second a)) nil nil {:include-current true}))
@@ -3011,7 +3015,7 @@ generating the suggested name for a query.</p>
       (i18n/tru &quot;{0} is on {1}&quot; (-&gt;display-name a) (-&gt;temporal-name a b))
 
       [(_ :guard #{:!= :not-in}) _ (a :guard numeric?) b]
-      (i18n/tru &quot;{0} is not equal to {1}&quot; (-&gt;display-name a) (-&gt;display-name b))
+      (i18n/tru &quot;{0} is not equal to {1}&quot; (-&gt;display-name a) (-&gt;number-display-name b))
 
       [(_ :guard #{:!= :not-in}) _ (a :guard (unit-is :day-of-week)) (b :guard (some-fn int? string?))]
       (i18n/tru &quot;{0} excludes {1}&quot; (-&gt;unbucketed-display-name a) (inflections/plural (-&gt;temporal-name a b)))
@@ -3093,6 +3097,7 @@ generating the suggested name for a query.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/display-name-method ::binary
   [query stage-number expr style]
   (let [-&gt;display-name #(lib.metadata.calculation/display-name query stage-number % style)
+        -&gt;number-display-name #(-&gt; % -&gt;maybe-bigint -&gt;display-name)
         -&gt;temporal-name #(u.time/format-unit % nil)
         temporal? #(lib.util/original-isa? % :type/Temporal)]
     (lib.util.match/match-one expr
@@ -3100,22 +3105,23 @@ generating the suggested name for a query.</p>
       (i18n/tru &quot;{0} is before {1}&quot;                   (-&gt;display-name x) (-&gt;temporal-name y))
 
       [:&lt; _ x y]
-      (i18n/tru &quot;{0} is less than {1}&quot;                (-&gt;display-name x) (-&gt;display-name y))
+      (i18n/tru &quot;{0} is less than {1}&quot;                (-&gt;number-display-name x) (-&gt;number-display-name y))
 
       [:&lt;= _ x y]
-      (i18n/tru &quot;{0} is less than or equal to {1}&quot;    (-&gt;display-name x) (-&gt;display-name y))
+      (i18n/tru &quot;{0} is less than or equal to {1}&quot;    (-&gt;number-display-name x) (-&gt;number-display-name y))
 
       [:&gt; _ (x :guard temporal?) (y :guard string?)]
       (i18n/tru &quot;{0} is after {1}&quot;                    (-&gt;display-name x) (-&gt;temporal-name y))
 
       [:&gt; _ x y]
-      (i18n/tru &quot;{0} is greater than {1}&quot;             (-&gt;display-name x) (-&gt;display-name y))
+      (i18n/tru &quot;{0} is greater than {1}&quot;             (-&gt;number-display-name x) (-&gt;number-display-name y))
 
       [:&gt;= _ x y]
-      (i18n/tru &quot;{0} is greater than or equal to {1}&quot; (-&gt;display-name x) (-&gt;display-name y)))))</pre></td></tr><tr><td class="docs">
+      (i18n/tru &quot;{0} is greater than or equal to {1}&quot; (-&gt;number-display-name x) (-&gt;number-display-name y)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/display-name-method :between
   [query stage-number expr style]
   (let [-&gt;display-name #(lib.metadata.calculation/display-name query stage-number % style)
+        -&gt;number-display-name #(-&gt; % -&gt;maybe-bigint -&gt;display-name)
         -&gt;unbucketed-display-name #(-&gt; %
                                        (update 1 dissoc :temporal-unit)
                                        -&gt;display-name)]
@@ -3145,9 +3151,9 @@ generating the suggested name for a query.</p>
 
       [:between _ x y z]
       (i18n/tru &quot;{0} is between {1} and {2}&quot;
-                (-&gt;display-name x)
-                (-&gt;display-name y)
-                (-&gt;display-name z)))))</pre></td></tr><tr><td class="docs">
+                (-&gt;number-display-name x)
+                (-&gt;number-display-name y)
+                (-&gt;number-display-name z)))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod lib.metadata.calculation/display-name-method :during
   [query stage-number [_tag _opts expr value unit] style]
   (let [-&gt;display-name #(lib.metadata.calculation/display-name query stage-number % style)]
