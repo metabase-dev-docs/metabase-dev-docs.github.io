@@ -2984,13 +2984,18 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defmethod prometheus/known-labels :metabase-notification/send-ok [_] payload-labels)
 (defmethod prometheus/known-labels :metabase-notification/send-error [_] payload-labels)
 (defmethod prometheus/known-labels :metabase-notification/channel-send-ok [_] payload-channel-labels)
-(defmethod prometheus/known-labels :metabase-notification/channel-send-error [_] payload-channel-labels)</pre></td></tr><tr><td class="docs"><p>Send the notification to all handlers synchronously. Do not use this directly, use <em>send-notification!</em> instead.</p>
+(defmethod prometheus/known-labels :metabase-notification/channel-send-error [_] payload-channel-labels)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- time-since-trigger-time
+  [notification-info]
+  (some-&gt; notification-info meta :notification/triggered-at-ns u/since-ms))</pre></td></tr><tr><td class="docs"><p>Send the notification to all handlers synchronously. Do not use this directly, use <em>send-notification!</em> instead.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn send-notification-sync!
   [{:keys [id payload_type] :as notification-info} :- notification.payload/Notification]
   (u/with-timer-ms
     ;; TODO: write a hook for this
     #_{:clj-kondo/ignore [:unresolved-symbol]}
     [duration-ms-fn]
+    (when-let [wait-time (time-since-trigger-time notification-info)]
+      (prometheus/observe! :metabase-notification/wait-duration-ms {:payload-type payload_type} (u/since-ms wait-time)))
     (try
       (log/infof &quot;[Notification %d] Sending&quot; id)
       (prometheus/inc! :metabase-notification/concurrent-tasks)
@@ -3028,6 +3033,8 @@ net.brehaut.ClojureTools = (function (SH) {
       (finally
         (prometheus/dec! :metabase-notification/concurrent-tasks)))
     (prometheus/observe! :metabase-notification/send-duration-ms {:payload-type payload_type} (duration-ms-fn))
+    (when-let [total-time (time-since-trigger-time notification-info)]
+      (prometheus/observe! :metabase-notification/total-duration-ms {:payload-type payload_type} (u/since-ms total-time)))
     nil))</pre></td></tr><tr><td class="docs"><p>Send a notification asynchronously.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn send-notification-async!
   [notification :- notification.payload/Notification]
