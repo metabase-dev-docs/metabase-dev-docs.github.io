@@ -3841,11 +3841,42 @@ that make up the primary key. Currently only a single primary key is supported.<
   {:added &quot;0.49.0&quot;, :arglists '([driver db-id table-name column-definitions &amp; args])}
   dispatch-on-initialized-driver
   :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Alter columns given by <code>column-definitions</code> to a table named <code>table-name</code>. If the table doesn't exist it will throw an error.
-Currently we do not currently support changing the the primary key, or take any guidance on how to coerce values.</p>
+Currently, we do not currently support changing the primary key, or take any guidance on how to coerce values.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti alter-columns!
-  {:added &quot;0.49.0&quot;, :arglists '([driver db-id table-name column-definitions])}
+  {:added &quot;0.49.0&quot;
+   :arglists '([driver db-id table-name column-definitions])
+   :deprecated &quot;0.54.0&quot;}
   dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Returns the set of syncable schemas in the database (as strings).</p>
+  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Alter columns given by <code>column-definitions</code> to a table named <code>table-name</code>. If the table doesn't exist it will throw an error.
+Currently, we do not currently support changing the primary key.</p>
+
+<p>Used to change the types of columns when appending to or replacing uploads with a new .csv that infers a different type.</p>
+
+<p><code>column-definitions</code> should be supplied as a map of column-name keyword to column type.
+e.g. <code>{:my-column [:varchar 255]}</code></p>
+
+<p>Note: column types may be supplied as honeysql vectors (e.g. <code>[:varchar 255]</code>) or a raw string.
+Both should be handled by implementations.</p>
+
+<p>Options:</p>
+
+<ul>
+<li><code>:old-types</code>: a map of the existing column definitions, e.g <code>{:my-column [:bigint]}</code>
+Can be useful to infer an expression to convert old values to the new type
+where the database engine does not support it natively.
+Implementations are free to ignore this parameter if they cannot do anything with it.</li>
+</ul>
+
+<p>Replaces <code>alter-columns!</code> that was previously used for the same purpose in versions &lt; <code>0.54.0</code></p>
+</td><td class="codes"><pre class="brush: clojure">(defmulti alter-table-columns!
+  {:added &quot;0.54.0&quot;, :arglists '([driver db-id table-name column-definitions &amp; opts])}
+  dispatch-on-initialized-driver
+  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>used for compatibility with drivers only implementing alter-columns!
+remove once alter-columns! is deleted (v0.57+)</p>
+</td><td class="codes"><pre class="brush: clojure">#_{:clj-kondo/ignore [:deprecated-var]}
+(defmethod alter-table-columns! ::driver
+  [driver db-id table-name column-definitions &amp; _opts]
+  (alter-columns! driver db-id table-name column-definitions))</pre></td></tr><tr><td class="docs"><p>Returns the set of syncable schemas in the database (as strings).</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti syncable-schemas
   {:added &quot;0.47.0&quot;, :arglists '([driver database])}
   dispatch-on-initialized-driver
@@ -3861,7 +3892,36 @@ for additional options. Sample values:</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti upload-type-&gt;database-type
   {:changelog-test/ignore true, :added &quot;0.47.0&quot;, :arglists '([driver upload-type])}
   dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Returns true if the driver should create an auto-incrementing primary key column when appending CSV data to an existing
+  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs"><p>Returns a mapping of which types a column can be implicitly relaxed to, based on the content of appended values.
+In the context of uploads, this permits certain appends or replacements of an existing csv table
+to change column types with <code>alter-table-columns!</code>.</p>
+
+<p>e.g. <code>{:metabase.upload/int #{:metabase.upload/float}}</code> would allow int columns to be migrated to floats.
+If we require a relaxation which is not allowed here, we will reject the corresponding file.</p>
+
+<p>It is expected that the returned map is transitively closed.
+If type A can be relaxed to B, and B can be relaxed to C, then A must also explicitly list C as a valid relaxation.
+This is to avoid situations where promotions are reachable but require additional user effort,
+such as filtering and re-uploading csv files.</p>
+
+<p>e.g.</p>
+
+<p>Valid (transitively closed):
+{:metabase.upload/int #{:metabase.upload/float}
+ :metabase.upload/boolean #{:metabase.upload/int, :metabase.upload/float}}
+Since boolean -> int and int -> float, we also include boolean -> float.</p>
+
+<p>Invalid (not transitively closed):
+{:metabase.upload/int #{:metabase.upload/float}
+ :metabase.upload/boolean #{:metabase.upload/int}}
+This would reject a boolean -> float transition, despite boolean reaching float through int.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmulti allowed-promotions
+  {:added &quot;0.54.0&quot;, :arglists '([driver])}
+  dispatch-on-uninitialized-driver
+  :hierarchy #'hierarchy)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod allowed-promotions ::driver [_]
+  ;; for compatibility with older drivers, in which this promotion was assumed
+  {:metabase.upload/int #{:metabase.upload/float}})</pre></td></tr><tr><td class="docs"><p>Returns true if the driver should create an auto-incrementing primary key column when appending CSV data to an existing
 upload table. This is because we want to add auto-pk columns for drivers that supported uploads before auto-pk columns
 were introduced by metabase#36249. It should return false if the driver supported the uploads feature in version 48 or later.</p>
 </td><td class="codes"><pre class="brush: clojure">(defmulti create-auto-pk-with-append-csv?

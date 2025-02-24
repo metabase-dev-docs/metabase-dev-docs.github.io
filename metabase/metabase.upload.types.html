@@ -2944,13 +2944,7 @@ consistent implementations for our type inference, parsing, and relaxation.</p>
 This maps implicitly defines the abstract types, by mapping them each to a default concretion.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private abstract-&gt;concrete
   {::*boolean-int*  ::boolean
-   ::*float-or-int* ::float})</pre></td></tr><tr><td class="docs"><p>A mapping of which types a column can be implicitly relaxed to, based on the content of appended values.
-If we require a relaxation which is not allowlisted here, we will reject the corresponding file.</p>
-
-<p>TODO: the set of allowed promotions should be driver-specific, because not all drivers support coercions between all
-types e.g. redshift does not allow coercions except between text types</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private allowed-promotions
-  {::int #{::float}})</pre></td></tr><tr><td class="docs"><p>A mapping of which value types should be coerced to the given existing type, rather than triggering promotion.</p>
+   ::*float-or-int* ::float})</pre></td></tr><tr><td class="docs"><p>A mapping of which value types should be coerced to the given existing type, rather than triggering promotion.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private column-type-&gt;coercible-value-types
   {::int #{::*float-or-int*}})</pre></td></tr><tr><td class="docs"><p>Can values of the given type be coerced to the given existing column type, in a lossless fashion?</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- coerce?
@@ -3082,12 +3076,21 @@ Numbers are assumed to use separators corresponding to the locale defined in the
   (let [relax (partial relax-type (settings-&gt;type-&gt;check settings))]
     (fn [value-types row]
       ;; It's important to realize this lazy sequence, because otherwise we can build a huge stack and overflow.
-      (vec (u/map-all relax value-types row)))))</pre></td></tr><tr><td class="docs">
+      (vec (u/map-all relax value-types row)))))</pre></td></tr><tr><td class="docs"><p>Before a type has been concretized, values have more degrees of freedom for relaxation.</p>
+
+<p>e.g. The type given for '1' would be <em>boolean-or-int</em>, which can relax into an int if a '2' is encountered.</p>
+
+<p>If we are appending or replacing a previous .csv, we no longer know how the existing values were encoded.
+Therefore, this mapping allows us to give a type the 'the benefit of the doubt'
+and assume relaxations that might have been available given all possible encodings.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:private column-type-&gt;abstract
+  {::boolean ::*boolean-int*})</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn column-types-from-rows :- [:sequential (into [:enum] column-types)]
   &quot;Given the types of the existing columns (if there are any), and rows to be added, infer the best supporting types.&quot;
   [settings existing-types rows]
-  (-&gt;&gt; (reduce (type-relaxer settings) existing-types rows)
-       (u/map-all concretize existing-types)))</pre></td></tr><tr><td class="docs"><p>Returns the most specific upload type for the given base type.</p>
+  (let [current-types (mapv #(column-type-&gt;abstract % %) existing-types)]
+    (-&gt;&gt; (reduce (type-relaxer settings) current-types rows)
+         (u/map-all concretize existing-types))))</pre></td></tr><tr><td class="docs"><p>Returns the most specific upload type for the given base type.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn base-type-&gt;upload-type
   [base-type]
   (when base-type
@@ -3101,12 +3104,12 @@ Numbers are assumed to use separators corresponding to the locale defined in the
       :type/Date                   ::date
       :type/Text                   ::text)))</pre></td></tr><tr><td class="docs"><p>Are we allowed to promote a column's schema from <code>current-type</code> to <code>inferred-type</code>?</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- promotable?
-  [current-type inferred-type]
-  (when-let [allowed? (allowed-promotions current-type)]
+  [current-type inferred-type allowed-promotions]
+  (when-let [allowed? (get allowed-promotions current-type)]
     (allowed? inferred-type)))</pre></td></tr><tr><td class="docs"><p>Given the <code>current-type</code> of a column, and an <code>inferred-type</code> for new values to be added, return its new type.
 This assumes we have already coerced the new values down to the existing type, if possible.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn new-type
-  [current-type inferred-type]
+  [current-type inferred-type allowed-promotions]
   (cond
     ;; No restriction on new columns
     (nil? current-type) inferred-type
@@ -3114,7 +3117,7 @@ This assumes we have already coerced the new values down to the existing type, i
     (= current-type inferred-type) current-type
     :else
     ;; Keep the existing type unless a promotion is allowed.
-    (if (promotable? current-type inferred-type)
+    (if (promotable? current-type inferred-type allowed-promotions)
       inferred-type
       current-type)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
