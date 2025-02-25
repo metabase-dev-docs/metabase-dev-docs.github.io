@@ -3136,23 +3136,32 @@ Collection.</p>
     (cond
       (and first-name last-name) (trs &quot;{0} {1}''s Personal Collection&quot; first-name last-name)
       :else                      (trs &quot;{0}''s Personal Collection&quot; (or first-name last-name email)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn user-&gt;personal-collection-names :- ms/Map
+  &quot;Come up with a nice name for the Personal Collection for the passed `user-or-ids`.
+  Returns a map of user-id -&gt; name&quot;
+  [user-or-ids user-or-site]
+  (into {} (when-let [ids (seq (filter some? (map u/the-id user-or-ids)))]
+             (t2/select-pk-&gt;fn #(format-personal-collection-name (:first_name %) (:last_name %) (:email %) user-or-site)
+                               [:model/User :first_name :last_name :email :id]
+                               :id [:in ids]))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn user-&gt;personal-collection-name :- ms/NonBlankString
-  &quot;Come up with a nice name for the Personal Collection for `user-or-id`.&quot;
+  &quot;Calls `user-&gt;personal-collection-names` for a single user-id and returns the name&quot;
   [user-or-id user-or-site]
-  (let [{first-name :first_name
-         last-name  :last_name
-         email      :email} (t2/select-one ['User :first_name :last_name :email]
-                                           :id (u/the-id user-or-id))]
-    (format-personal-collection-name first-name last-name email user-or-site)))</pre></td></tr><tr><td class="docs"><p>For Personal collection, we make sure the collection's name and slug is translated to user's locale
+  (first (vals (user-&gt;personal-collection-names [user-or-id] user-or-site))))</pre></td></tr><tr><td class="docs"><p>Like <code>personal-collection-with-ui-details</code>, but for a sequence of collections and returns a sequence of modified collections</p>
+</td><td class="codes"><pre class="brush: clojure">(defn personal-collections-with-ui-details
+  [collections]
+  (let [collection-names (user-&gt;personal-collection-names (filter some? (map :personal_owner_id collections)) :user)]
+    (map (fn [{:keys [personal_owner_id] :as collection}]
+           (if-not personal_owner_id
+             collection
+             (let [collection-name (get collection-names personal_owner_id)]
+               (assoc collection
+                      :name collection-name
+                      :slug (u/slugify collection-name))))) collections)))</pre></td></tr><tr><td class="docs"><p>For Personal collection, we make sure the collection's name and slug is translated to user's locale
 This is only used for displaying purposes, For insertion or updating  the name, use site's locale instead</p>
 </td><td class="codes"><pre class="brush: clojure">(defn personal-collection-with-ui-details
-  [{:keys [personal_owner_id] :as collection}]
-  (if-not personal_owner_id
-    collection
-    (let [collection-name (user-&gt;personal-collection-name personal_owner_id :user)]
-      (assoc collection
-             :name collection-name
-             :slug (u/slugify collection-name)))))</pre></td></tr><tr><td class="docs"><p>Schema for a Collection instance that has a valid <code>:location</code>, and a <code>:personal_owner_id</code> key <em>present</em> (but not
+  [collection]
+  (first (personal-collections-with-ui-details [collection])))</pre></td></tr><tr><td class="docs"><p>Schema for a Collection instance that has a valid <code>:location</code>, and a <code>:personal_owner_id</code> key <em>present</em> (but not
 neccesarily non-nil).</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:private CollectionWithLocationAndPersonalOwnerID
   [:map
