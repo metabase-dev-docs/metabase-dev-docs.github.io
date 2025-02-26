@@ -2869,9 +2869,10 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.query-processor.middleware.limit
   (:require
    [metabase.legacy-mbql.util :as mbql.u]
-   [metabase.public-settings :as public-settings]
-   [metabase.query-processor.interface :as qp.i]
-   [metabase.query-processor.util :as qp.util]))</pre></td></tr><tr><td class="docs"><p>Pre-processing</p>
+   [metabase.models.setting :as setting]
+   [metabase.query-processor.util :as qp.util]
+   [metabase.util :as u]
+   [metabase.util.i18n :refer [deferred-tru]]))</pre></td></tr><tr><td class="docs"><p>Pre-processing</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Returns the value of the disable-max-results? option in this query.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn disable-max-results?
   [query]
@@ -2883,24 +2884,52 @@ net.brehaut.ClojureTools = (function (SH) {
   (cond-&gt; query
     (and (= query-type :query)
          (qp.util/query-without-aggregations-or-limits? query))
-    (update :query assoc :limit max-rows, ::original-limit original-limit)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- xlsx-export?
-  [&amp; {info :info}]
-  (let [context (:context info)]
-    (= context :xlsx-download)))</pre></td></tr><tr><td class="docs"><p>Given a <code>query</code>, return the max rows that should be returned. This is either:
+    (update :query assoc :limit max-rows, ::original-limit original-limit)))</pre></td></tr><tr><td class="docs"><p>Maximum number of rows the QP should ever return.</p>
+
+<p>This is coming directly from the max rows allowed by Excel for now ...
+https://support.office.com/en-nz/article/Excel-specifications-and-limits-1672b34d-7043-467e-8e27-269d656771c3</p>
+
+<p>This is actually one less than the number of rows allowed by Excel, since we have a header row. See #13585 for more
+details.</p>
+</td><td class="codes"><pre class="brush: clojure">(def absolute-max-results
+  1048575)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(setting/defsetting attachment-row-limit
+  (deferred-tru &quot;Row limit in file attachments excluding the header.&quot;)
+  :visibility :internal
+  :export?    true
+  :type       :positive-integer)</pre></td></tr><tr><td class="docs"><p>Minimum download row limit. Using dynamic so we can rebind in tests</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *minimum-download-row-limit*
+  absolute-max-results)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(setting/defsetting download-row-limit
+  (deferred-tru &quot;Row limit in file exports excluding the header. Enforces 1048575 excluding header as minimum. xlsx downloads are inherently limited to 1048575 rows even if this limit is higher.&quot;)
+  :visibility :internal
+  :export?    true
+  :type       :positive-integer
+  :getter     (fn []
+                (let [limit (setting/get-value-of-type :positive-integer :download-row-limit)]
+                  (if (nil? limit)
+                    limit
+                    (max limit *minimum-download-row-limit*)))))</pre></td></tr><tr><td class="docs"><p>Given a <code>query</code>, return the max rows that should be returned. This is the minimum of:
 1. the output of [[metabase.legacy-mbql.util/query->max-rows-limit]] when called on the given query
-2. the value of <code>pubic-settings/download-row-limit</code>
-   a. if it is less than [[metabase.query-processor.interface/absolute-max-results]] or
-   b. if it is greater and the export is NOT xlsx otherwise,
-3. [[metabase.query-processor.interface/absolute-max-results]] (a constant, non-nil backstop value)</p>
+2. the value of <code>public-settings/download-row-limit</code> if this is for a download
+3. the value of <code>public-settings/attachment-row-limit</code> if this is for a dashboard subscription</p>
+
+<p>If those three values are not set we fall back to [[metabase.query-processor.limit/absolute-max-results]],
+which is also the maximum row count allowed for xlsx downloads due to Excel sheet constraints.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn determine-query-max-rows
   [query]
   (when-not (disable-max-results? query)
-    (cond-&gt; (or (mbql.u/query-&gt;max-rows-limit query)
-                (public-settings/download-row-limit)
-                qp.i/absolute-max-results)
-      (xlsx-export? query)
-      (min qp.i/absolute-max-results))))</pre></td></tr><tr><td class="docs"><p>Pre-processing middleware. Add default <code>:limit</code> to MBQL queries without any aggregations.</p>
+    (let [context (-&gt; query :info :context)
+          download-context? #{:csv-download :json-download :xlsx-download}
+          attachment-context? #{:dashboard-subscription :pulse}
+          download-limit (when (download-context? context) (download-row-limit))
+          attachment-limit (when (attachment-context? context) (attachment-row-limit))
+          res (u/safe-min (mbql.u/query-&gt;max-rows-limit query)
+                          download-limit
+                          attachment-limit)]
+      (if (= context :xlsx-download)
+        (u/safe-min res absolute-max-results)
+        (or res absolute-max-results)))))</pre></td></tr><tr><td class="docs"><p>Pre-processing middleware. Add default <code>:limit</code> to MBQL queries without any aggregations.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn add-default-limit
   [query]
   (if-let [max-rows (determine-query-max-rows query)]

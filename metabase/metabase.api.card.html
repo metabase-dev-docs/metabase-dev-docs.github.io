@@ -3247,13 +3247,34 @@ Use <code>fetch-compatible-series</code> for that.</p>
     (when-not (lib/can-save (dataset-query-&gt;query dataset-query) card-type)
       (throw (ex-info (tru &quot;Card of type {0} is invalid, cannot be saved.&quot; (clojure.core/name card-type))
                       {:type        card-type
-                       :status-code 400})))))</pre></td></tr><tr><td class="docs">
+                       :status-code 400})))))</pre></td></tr><tr><td class="docs"><p>Given a body from the <code>POST</code> endpoint to create a card, returns the <code>collection_id</code> that the card will be placed in.
+Because creating a Dashboard Question does not require specifying a <code>collection_id</code> (it's inferred from the
+<code>dashboard_id</code>), this may be different from the <code>collection_id</code>. Normally if you don't specify a <code>collection_id</code>
+that means we put it in the root collection (<code>nil</code> id), but if you specify a <code>dashboard_id</code> we'll need to look it
+up.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- actual-collection-id
+  [body]
+  (let [[_ collection-id :as specified-collection-id?] (find body :collection_id)
+        ;; unlike collection_id, `dashboard_id=null` isn't different than not specifying it at all.
+        dashboard-id (:dashboard_id body)
+        dashboard-id-&gt;collection-id #(t2/select-one-fn :collection_id [:model/Dashboard :collection_id] %)]
+    (cond
+      ;; you specified both - they must match
+      (and specified-collection-id? dashboard-id)
+      (let [dashboard-collection-id (dashboard-id-&gt;collection-id dashboard-id)]
+        (api/check-400 (= collection-id dashboard-collection-id)
+                       (tru &quot;Mismatch detected between Dashboard''s `collection_id` ({0}) and `collection_id` ({1})&quot;
+                            dashboard-collection-id
+                            collection-id))
+        collection-id)
+      specified-collection-id? collection-id
+      dashboard-id (dashboard-id-&gt;collection-id dashboard-id)
+      :else nil)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/&quot;
   &quot;Create a new `Card`. Card `type` can be `question`, `metric`, or `model`.&quot;
   [_route-params
    _query-params
-   {collection-id :collection_id
-    query         :dataset_query
+   {query         :dataset_query
     card-type     :type
     :as           body} :- [:map
                             [:name                   ms/NonBlankString]
@@ -3275,8 +3296,10 @@ Use <code>fetch-compatible-series</code> for that.</p>
   (check-if-card-can-be-saved query card-type)
   ;; check that we have permissions to run the query that we're trying to save
   (card/check-run-permissions-for-query query)
-  ;; check that we have permissions for the collection we're trying to save this card to, if applicable
-  (collection/check-write-perms-for-collection collection-id)
+  ;; check that we have permissions for the collection we're trying to save this card to, if applicable.
+  ;; if a `dashboard-id` is specified, check permissions on the *dashboard's* collection ID.
+  (collection/check-write-perms-for-collection
+   (actual-collection-id body))
   (let [body (cond-&gt; body
                (string? (:type body)) (update :type keyword))]
     (-&gt; (card/create-card! body @api/*current-user*)
@@ -3327,7 +3350,18 @@ enabled.</p>
    [:cache_ttl              {:optional true} [:maybe ms/PositiveInt]]
    [:collection_preview     {:optional true} [:maybe :boolean]]
    [:dashboard_id           {:optional true} [:maybe ms/PositiveInt]]
-   [:dashboard_tab_id       {:optional true} [:maybe ms/PositiveInt]]])</pre></td></tr><tr><td class="docs"><p>Updates a card - impl</p>
+   [:dashboard_tab_id       {:optional true} [:maybe ms/PositiveInt]]])</pre></td></tr><tr><td class="docs"><p><code>card-updates</code> may contain either or both of a <code>collection_id</code> and a <code>dashboard_id</code>.
+If either one is set, let's validate that they match using <code>actual-collection-id</code> and make sure that the
+<code>card-updates</code> contains the updated <code>collection_id</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- maybe-populate-collection-id
+  [card-before-update card-updates]
+  (let [collection-id (when (or (contains? card-updates :collection_id)
+                                (contains? card-updates :dashboard_id))
+                        (actual-collection-id card-updates))]
+    (cond-&gt; card-updates
+      (or (api/column-will-change? :dashboard_id card-before-update card-updates)
+          (api/column-will-change? :collection_id card-before-update card-updates))
+      (assoc :collection_id collection-id))))</pre></td></tr><tr><td class="docs"><p>Updates a card - impl</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn update-card!
   [id :- ms/PositiveInt
    {:keys [dataset_query
@@ -3342,7 +3376,9 @@ enabled.</p>
         (throw (ex-info (ex-message e) (assoc (ex-data e) :status-code 400))))))
   (let [card-before-update     (t2/hydrate (api/write-check :model/Card id)
                                            [:moderation_reviews :moderator_details])
-        card-updates           (api/updates-with-archived-directly card-before-update card-updates)
+        card-updates           (maybe-populate-collection-id
+                                card-before-update
+                                (api/updates-with-archived-directly card-before-update card-updates))
         is-model-after-update? (if (nil? type)
                                  (card/model? card-before-update)
                                  (card/model? card-updates))]
