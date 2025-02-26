@@ -2871,10 +2871,17 @@ net.brehaut.ClojureTools = (function (SH) {
 - more than one handlers where each handler has a channel, optionally a template, and more than one recpients.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.models.notification
   (:require
+   [malli.core :as mc]
    [medley.core :as m]
+   [metabase.channel.models.channel :as models.channel]
+   [metabase.models.audit-log :as audit-log]
    [metabase.models.interface :as mi]
+   [metabase.models.util.spec-update :as models.u.spec-update]
+   [metabase.permissions.core :as perms]
+   [metabase.premium-features.core :as premium-features]
    [metabase.util :as u]
    [metabase.util.malli :as mu]
+   [metabase.util.malli.registry :as mr]
    [metabase.util.malli.schema :as ms]
    [methodical.core :as methodical]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
@@ -2882,11 +2889,13 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/table-name :model/Notification             [_model] :notification)
 (methodical/defmethod t2/table-name :model/NotificationSubscription [_model] :notification_subscription)
 (methodical/defmethod t2/table-name :model/NotificationHandler      [_model] :notification_handler)
-(methodical/defmethod t2/table-name :model/NotificationRecipient    [_model] :notification_recipient)</pre></td></tr><tr><td class="docs">
+(methodical/defmethod t2/table-name :model/NotificationRecipient    [_model] :notification_recipient)
+(methodical/defmethod t2/table-name :model/NotificationCard         [_model] :notification_card)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(doseq [model [:model/Notification
                :model/NotificationSubscription
                :model/NotificationHandler
-               :model/NotificationRecipient]]
+               :model/NotificationRecipient
+               :model/NotificationCard]]
   (doto model
     (derive :metabase/model)
     (derive (if (= model :model/NotificationSubscription)
@@ -2914,7 +2923,28 @@ net.brehaut.ClojureTools = (function (SH) {
    #(group-by :notification_id
               (t2/select :model/NotificationSubscription :notification_id [:in (map :id notifications)]))
    :id
-   {:default nil}))</pre></td></tr><tr><td class="docs">
+   {:default []}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/batched-hydrate [:default :payload]
+  &quot;Batch hydration payloads for a list of Notifications.&quot;
+  [_model k notifications]
+  (let [payload-type-&gt;ids        (u/group-by :payload_type :payload_id
+                                             conj #{}
+                                             notifications)
+        payload-type+id-&gt;payload (into {}
+                                       (for [[payload-type payload-ids] payload-type-&gt;ids]
+                                         (case payload-type
+                                           :notification/card
+                                           (let [notification-cards (t2/hydrate
+                                                                     (t2/select :model/NotificationCard
+                                                                                :id [:in payload-ids])
+                                                                     :card)]
+                                             (into {} (for [nc notification-cards]
+                                                        [[:notification/card (:id nc)] nc])))
+                                           {[payload-type nil] nil})))]
+    (for [notification notifications]
+      (assoc notification k
+             (get payload-type+id-&gt;payload [(:payload_type notification)
+                                            (:payload_id notification)])))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/batched-hydrate [:model/Notification :handlers]
   &quot;Batch hydration NotificationHandlers for a list of Notifications&quot;
   [_model k notifications]
@@ -2923,15 +2953,72 @@ net.brehaut.ClojureTools = (function (SH) {
    #(group-by :notification_id
               (t2/select :model/NotificationHandler :notification_id [:in (map :id notifications)]))
    :id
-   {:default nil}))</pre></td></tr><tr><td class="docs">
+   {:default []}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::Notification
+  [:merge
+   [:map
+    [:payload_type (ms/enum-decode-keyword notification-types)]]
+   [:multi {:dispatch (comp keyword :payload_type)}
+    [:notification/system-event
+     [:map
+      [:payload_id {:optional true} nil?]]]
+    [:notification/card
+     [:map
+      ;; optional during creation
+      [:payload_id {:optional true} int?]
+      [:creator_id {:optional true} int?]]]
+    [:notification/testing :any]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- validate-notification
+  [notification]
+  (mu/validate-throw ::Notification notification))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(t2/define-before-insert :model/Notification
+  [instance]
+  (validate-notification instance)
+  instance)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- update-subscription-trigger!
+  [&amp; args]
+  (apply (requiring-resolve 'metabase.task.notification/update-subscription-trigger!) args))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- delete-trigger-for-subscription!
   [&amp; args]
   (apply (requiring-resolve 'metabase.task.notification/delete-trigger-for-subscription!) args))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(t2/define-before-update :model/Notification
+  [instance]
+  (validate-notification instance)
+  (when-let [unallowed-key (some #{:payload_type :payload_id :creator_id} (keys (t2/changes instance)))]
+    (throw (ex-info (format &quot;Update %s is not allowed.&quot; (name unallowed-key))
+                    {:status-code 400
+                     :changes     (t2/changes instance)})))
+  (when (contains? (t2/changes instance) :active)
+    (let [subscriptions (t2/select :model/NotificationSubscription
+                                   :notification_id (:id instance)
+                                   :type :notification-subscription/cron)]
+      (doseq [subscription subscriptions]
+        (if (:active instance)
+          (update-subscription-trigger! subscription)
+          (delete-trigger-for-subscription! (:id subscription))))))
+  instance)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(t2/define-before-delete :model/Notification
   [instance]
-  (doseq [subscription-ids (t2/select-pks-set :model/NotificationSubscription :notification_id (:id instance))]
-    (delete-trigger-for-subscription! subscription-ids))
-  instance)</pre></td></tr><tr><td class="docs"><p>------------------------------------------------------------------------------------------------;;
+  (doseq [subscription-id (t2/select-pks-set :model/NotificationSubscription
+                                             :notification_id (:id instance)
+                                             :type :notification-subscription/cron)]
+    (delete-trigger-for-subscription! subscription-id))
+  (when-let [payload-id (:payload_id instance)]
+    (t2/delete! (case (:payload_type instance)
+                  :notification/card
+                  :model/NotificationCard)
+                payload-id))
+  instance)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod audit-log/model-details :model/Notification
+  [{:keys [subscriptions handlers] :as fully-hydrated-notification} _event-type]
+  (merge
+   (select-keys fully-hydrated-notification [:id :payload_type :payload_id :creator_id :active])
+   {:subscriptions (map #(dissoc % :id :created_at) subscriptions)
+    :handlers      (map (fn [handler]
+                          (merge (select-keys [:id :channel_type :channel_id :template_id :active]
+                                              handler)
+                                 {:recipients (map #(select-keys % [:id :type :user_id :permissions_group_id :details]) (:recipients handler))}))
+                        handlers)}))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------------------------------------------------------;;
                               :model/NotificationSubscription                                   ;;
 ------------------------------------------------------------------------------------------------;;</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
@@ -2941,30 +3028,26 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(t2/deftransforms :model/NotificationSubscription
   {:type       (mi/transform-validator mi/transform-keyword (partial mi/assert-enum subscription-types))
    :event_name (mi/transform-validator mi/transform-keyword (partial mi/assert-namespaced &quot;event&quot;))})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private NotificationSubscription
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::NotificationSubscription
+  &quot;Schema for :model/NotificationSubscription.&quot;
   [:merge [:map
-           [:type            (apply ms/enum-keywords-and-strings subscription-types)]]
+           [:type (ms/enum-decode-keyword subscription-types)]]
    [:multi {:dispatch (comp keyword :type)}
     [:notification-subscription/system-event
      [:map
-      [:type                           [:enum :notification-subscription/system-event]]
       [:event_name                     [:or :keyword :string]]
       [:cron_schedule {:optional true} nil?]]]
     [:notification-subscription/cron
      [:map
-      [:type                           [:enum :notification-subscription/cron]]
       [:cron_schedule                  :string]
       [:event_name    {:optional true} nil?]]]]])</pre></td></tr><tr><td class="docs"><p>Validate a NotificationSubscription.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- validate-subscription
   [subscription]
-  (mu/validate-throw NotificationSubscription subscription))</pre></td></tr><tr><td class="docs">
+  (mu/validate-throw ::NotificationSubscription subscription))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(t2/define-before-insert :model/NotificationSubscription
   [instance]
   (validate-subscription instance)
   instance)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- update-subscription-trigger!
-  [&amp; args]
-  (apply (requiring-resolve 'metabase.task.notification/update-subscription-trigger!) args))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(t2/define-after-insert :model/NotificationSubscription
   [instance]
   (update-subscription-trigger! instance)
@@ -2983,23 +3066,25 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(t2/deftransforms :model/NotificationHandler
   {:channel_type (mi/transform-validator mi/transform-keyword (partial mi/assert-namespaced &quot;channel&quot;))})</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/batched-hydrate [:model/NotificationHandler :channel]
+</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/batched-hydrate [:default :channel]
   &quot;Batch hydration Channels for a list of NotificationHandlers&quot;
   [_model k notification-handlers]
   (mi/instances-with-hydrated-data
    notification-handlers k
-   #(t2/select-fn-&gt;fn :id identity :model/Channel
-                      :id [:in (map :channel_id notification-handlers)]
-                      :active true)
+   #(when-let [channel-ids (seq (keep :channel_id notification-handlers))]
+      (t2/select-fn-&gt;fn :id identity :model/Channel
+                        :id [:in channel-ids]
+                        :active true))
    :channel_id
    {:default nil}))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/batched-hydrate [:model/NotificationHandler :template]
+</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/batched-hydrate [:default :template]
   &quot;Batch hydration ChannelTemplates for a list of NotificationHandlers&quot;
   [_model k notification-handlers]
   (mi/instances-with-hydrated-data
    notification-handlers k
-   #(t2/select-fn-&gt;fn :id identity :model/ChannelTemplate
-                      :id [:in (map :template_id notification-handlers)])
+   #(when-let [template-ids (seq (keep :template_id notification-handlers))]
+      (t2/select-fn-&gt;fn :id identity :model/ChannelTemplate
+                        :id [:in template-ids]))
    :template_id
    {:default nil}))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/batched-hydrate [:model/NotificationHandler :recipients]
@@ -3009,20 +3094,22 @@ net.brehaut.ClojureTools = (function (SH) {
    notification-handlers
    k
    #(group-by :notification_handler_id
-              (let [recipients       (t2/select :model/NotificationRecipient
-                                                :notification_handler_id [:in (map :id notification-handlers)])
-                    type-&gt;recipients (group-by :type recipients)]
-                (-&gt; type-&gt;recipients
-                    (m/update-existing :notification-recipient/user
-                                       (fn [recipients]
-                                         (t2/hydrate recipients :user)))
-                    (m/update-existing :notification-recipient/group
-                                       (fn [recipients]
-                                         (t2/hydrate recipients [:permissions_group :members])))
-                    vals
-                    flatten)))
+              (t2/select :model/NotificationRecipient
+                         :notification_handler_id [:in (map :id notification-handlers)]))
    :id
    {:default []}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(methodical/defmethod t2/batched-hydrate [:default :recipients-detail]
+  &quot;Batch hydration of details (user, group members) for NotificationRecipients&quot;
+  [_model _k recipients]
+  (-&gt; (group-by :type recipients)
+      (m/update-existing :notification-recipient/user
+                         (fn [recipients]
+                           (t2/hydrate recipients :user)))
+      (m/update-existing :notification-recipient/group
+                         (fn [recipients]
+                           (t2/hydrate recipients [:permissions_group :members])))
+      vals
+      flatten))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- cross-check-channel-type-and-template-type
   [notification-handler]
   (when-let [template-id (:template_id notification-handler)]
@@ -3033,14 +3120,26 @@ net.brehaut.ClojureTools = (function (SH) {
                         {:status        400
                          :channel-type  channel-type
                          :template-type template-type}))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::NotificationHandler
+  [:map
+   ;; optional during insertion
+   [:notification_id {:optional true}       ms/PositiveInt]
+   [:channel_type    {:decode/json keyword} [:fn #(= &quot;channel&quot; (-&gt; % keyword namespace))]]
+   [:channel_id      {:optional true}       [:maybe ms/PositiveInt]]
+   [:template_id     {:optional true}       [:maybe ms/PositiveInt]]
+   [:active          {:optional true}       [:maybe :boolean]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- validate-notification-handler
+  [notification-handler]
+  (mu/validate-throw ::NotificationHandler notification-handler))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(t2/define-before-insert :model/NotificationHandler
   [instance]
   (cross-check-channel-type-and-template-type instance)
+  (validate-notification-handler instance)
   instance)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(t2/define-before-update :model/NotificationHandler
   [instance]
-  (when (or (contains? (t2/changes instance) :channel_id)
-            (contains? (t2/changes instance) :template_id))
+  (validate-notification-handler instance)
+  (when (some #{:channel_id :template_id :channel_type} (-&gt; instance t2/changes keys))
     (cross-check-channel-type-and-template-type instance)
     instance))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------------------------------------------------------;;
                                   :model/NotificationRecipient                                  ;;
@@ -3049,16 +3148,17 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(def ^:private notification-recipient-types
   #{:notification-recipient/user
     :notification-recipient/group
-    :notification-recipient/external-email
+    :notification-recipient/raw-value
     :notification-recipient/template})</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(t2/deftransforms :model/NotificationRecipient
   {:type    (mi/transform-validator mi/transform-keyword (partial mi/assert-enum notification-recipient-types))
-   :details mi/transform-json})</pre></td></tr><tr><td class="docs"><p>Schema for :model/NotificationRecipient.</p>
-</td><td class="codes"><pre class="brush: clojure">(def NotificationRecipient
+   :details mi/transform-json})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::NotificationRecipient
+  &quot;Schema for :model/NotificationRecipient.&quot;
   [:merge [:map
-           [:type (into [:enum] notification-recipient-types)]
-           [:notification_handler_id ms/PositiveInt]]
-   [:multi {:dispatch :type}
+           [:type (ms/enum-decode-keyword notification-recipient-types)]
+           [:notification_handler_id {:optional true} ms/PositiveInt]]
+   [:multi {:dispatch (comp keyword :type)}
     [:notification-recipient/user
      [:map
       [:user_id                               ms/PositiveInt]
@@ -3069,10 +3169,10 @@ net.brehaut.ClojureTools = (function (SH) {
       [:permissions_group_id                  ms/PositiveInt]
       [:user_id              {:optional true} [:fn nil?]]
       [:details              {:optional true} [:fn empty?]]]]
-    [:notification-recipient/external-email
+    [:notification-recipient/raw-value
      [:map
       [:details                               [:map {:closed true}
-                                               [:email ms/Email]]]
+                                               [:value :any]]]
       [:user_id              {:optional true} [:fn nil?]]
       [:permissions_group_id {:optional true} [:fn nil?]]]]
     [:notification-recipient/template
@@ -3084,7 +3184,7 @@ net.brehaut.ClojureTools = (function (SH) {
       [:permissions_group_id {:optional true} [:fn nil?]]]]]])</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- check-valid-recipient
   [recipient]
-  (mu/validate-throw NotificationRecipient recipient))</pre></td></tr><tr><td class="docs">
+  (mu/validate-throw ::NotificationRecipient recipient))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(t2/define-before-insert :model/NotificationRecipient
   [instance]
   (check-valid-recipient instance)
@@ -3093,9 +3193,114 @@ net.brehaut.ClojureTools = (function (SH) {
   [instance]
   (check-valid-recipient instance)
   instance)</pre></td></tr><tr><td class="docs"><p>------------------------------------------------------------------------------------------------;;
+                                    :model/NotificationCard                                     ;;
+------------------------------------------------------------------------------------------------;;</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Set of valid send conditions for NotificationCard.</p>
+</td><td class="codes"><pre class="brush: clojure">(def card-subscription-send-conditions
+  #{:has_result
+    :goal_above
+    :goal_below})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(t2/deftransforms :model/NotificationCard
+  {:send_condition (mi/transform-validator mi/transform-keyword (partial mi/assert-enum card-subscription-send-conditions))})</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::NotificationCard
+  &quot;Schema for :model/NotificationCard.&quot;
+  [:map
+   [:card_id                         ms/PositiveInt]
+   [:card           {:optional true} [:maybe :map]]
+   [:send_condition {:optional true} (ms/enum-decode-keyword card-subscription-send-conditions)]
+   [:send_once      {:optional true} :boolean]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(t2/define-before-insert :model/NotificationCard
+  [instance]
+  (merge {:send_condition :has_result
+          :send_once      false}
+         instance))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------------------------------------------------------;;
+                                        Permissions                                             ;;
+------------------------------------------------------------------------------------------------;;</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>Check if the current user can read the payload of a notification.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn current-user-can-read-payload?
+  [notification]
+  (case (:payload_type notification)
+    :notification/card
+    (mi/can-read? :model/Card (-&gt; notification :payload :card_id))
+    :notification/system-event
+    (mi/superuser?)
+    :notification/testing
+    true))</pre></td></tr><tr><td class="docs"><p>Check if the current user is a recipient of a notification.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn current-user-is-recipient?
+  [notification]
+  (-&gt;&gt; (:handlers (t2/hydrate notification [:handlers :recipients]))
+       (mapcat :recipients)
+       (map :user_id)
+       distinct
+       (some #{(mi/current-user-id)})
+       boolean))</pre></td></tr><tr><td class="docs"><p>Check if the current user is the creator of a notification.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn current-user-is-creator?
+  [notification]
+  (= (:creator_id notification) (mi/current-user-id)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod mi/can-read? :model/Notification
+  ([notification]
+   (or
+    (mi/superuser?)
+    (current-user-is-creator? notification)
+    (current-user-is-recipient? notification)))
+  ([_ pk]
+   (mi/can-read? (t2/select-one :model/Notification pk))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod mi/can-create? :model/Notification
+  [_ notification]
+  (or (mi/superuser?)
+      (and (current-user-can-read-payload? notification)
+           ;; if advanced-permissions is enabled, we require users to have subscription permissions
+           (or (not (premium-features/has-feature? :advanced-permissions))
+               (perms/current-user-has-application-permissions? :subscription)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defmethod mi/can-update? :model/Notification
+  [instance _changes]
+  (or
+   (mi/superuser?)
+   (and
+    (current-user-is-creator? instance)
+    ;; if advanced-permissions is enabled, we require users to have subscription permissions
+    ;; and is the owner of the notification and can read the payload
+    (or
+     (not (premium-features/has-feature? :advanced-permissions))
+     (perms/current-user-has-application-permissions? :subscription))
+    (current-user-can-read-payload? instance))))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------------------------------------------------------;;
                                         Public APIs                                             ;;
 ------------------------------------------------------------------------------------------------;;</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Find all active notifications for a given event.</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::FullyHydratedNotification
+  &quot;Fully hydrated notification.&quot;
+  [:merge
+   ::Notification
+   [:map
+    [:creator       {:optional true} [:maybe :map]]
+    [:subscriptions {:optional true} [:sequential ::NotificationSubscription]]
+    [:handlers      {:optional true} [:sequential [:merge
+                                                   ::NotificationHandler
+                                                   [:map
+                                                    [:template   {:optional true} [:maybe ::models.channel/ChannelTemplate]]
+                                                    [:channel    {:optional true} [:maybe ::models.channel/Channel]]
+                                                    [:recipients {:optional true} [:sequential ::NotificationRecipient]]]]]]]
+   [:multi {:dispatch (comp keyword :payload_type)}
+    [:notification/card [:map
+                         [:payload ::NotificationCard]]]
+    [::mc/default       :any]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn hydrate-notification :- [:or ::FullyHydratedNotification [:sequential ::FullyHydratedNotification]]
+  &quot;Fully hydrate notifictitons.&quot;
+  [notification-or-notifications]
+  (t2/hydrate notification-or-notifications
+              :creator
+              :payload
+              :subscriptions
+              [:handlers :channel :template [:recipients :recipients-detail]]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mu/defn notifications-for-card :- [:sequential ::FullyHydratedNotification]
+  &quot;Find all active card notifications for a given card-id.&quot;
+  [card-id :- pos-int?]
+  (hydrate-notification (t2/select :model/Notification
+                                   :active true
+                                   :payload_type :notification/card
+                                   :payload_id [:in {:select [:id]
+                                                     :from   [:notification_card]
+                                                     :where  [:= :card_id card-id]}])))</pre></td></tr><tr><td class="docs"><p>Find all active notifications for a given event.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn notifications-for-event
   [event-name]
   (t2/select :model/Notification
@@ -3110,18 +3315,55 @@ Return the created notification.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn create-notification!
   [notification subscriptions handlers+recipients]
   (t2/with-transaction [_conn]
-    (let [instance (t2/insert-returning-instance! :model/Notification notification)
-          id       (:id instance)]
+    (let [payload-id      (case (:payload_type notification)
+                            (:notification/system-event :notification/testing)
+                            nil
+                            :notification/card
+                            (t2/insert-returning-pk! :model/NotificationCard (:payload notification)))
+          notification    (-&gt; notification
+                              (assoc :payload_id payload-id)
+                              (dissoc :payload))
+          instance        (t2/insert-returning-instance! :model/Notification notification)
+          notification-id (:id instance)]
       (when (seq subscriptions)
-        (t2/insert! :model/NotificationSubscription (map #(assoc % :notification_id id) subscriptions)))
+        (t2/insert! :model/NotificationSubscription (map #(assoc % :notification_id notification-id) subscriptions)))
       (doseq [handler handlers+recipients]
         (let [recipients (:recipients handler)
               handler    (-&gt; handler
                              (dissoc :recipients)
-                             (assoc :notification_id id))
+                             (assoc :notification_id notification-id))
               handler-id (t2/insert-returning-pk! :model/NotificationHandler handler)]
           (t2/insert! :model/NotificationRecipient (map #(assoc % :notification_handler_id handler-id) recipients))))
-      instance)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+      instance)))</pre></td></tr><tr><td class="docs"><p>Spec for updating a notification.</p>
+</td><td class="codes"><pre class="brush: clojure">(models.u.spec-update/define-spec notification-update-spec
+  {:model        :model/Notification
+   :compare-cols [:active]
+   :extra-cols   [:payload_type :internal_id :payload_id]
+   :nested-specs {:payload       {:model        :model/NotificationCard
+                                  :compare-cols [:send_condition :send_once]
+                                  :extra-cols   [:card_id]}
+                  :subscriptions {:model        :model/NotificationSubscription
+                                  :fk-column    :notification_id
+                                  :compare-cols [:notification_id :type :event_name :cron_schedule]
+                                  :multi-row?   true}
+                  :handlers      {:model        :model/NotificationHandler
+                                  :fk-column    :notification_id
+                                  :compare-cols [:notification_id :channel_type :channel_id :template_id :active]
+                                  :multi-row?   true
+                                  :nested-specs {:recipients {:model        :model/NotificationRecipient
+                                                              :fk-column    :notification_handler_id
+                                                              :compare-cols [:notification_handler_id :type :user_id :permissions_group_id :details]
+                                                              :multi-row?   true}}}}})</pre></td></tr><tr><td class="docs"><p>Update an existing notification with <code>new-notification</code>.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn update-notification!
+  [existing-notification new-notification]
+  (models.u.spec-update/do-update! existing-notification new-notification notification-update-spec))</pre></td></tr><tr><td class="docs"><p>Unsubscribe a user from a notification.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn unsubscribe-user!
+  [notification-id user-id]
+  (t2/delete! :model/NotificationRecipient
+              :user_id user-id
+              :notification_handler_id [:in {:select [:id]
+                                             :from   [:notification_handler]
+                                             :where  [:= :notification_id notification-id]}]))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

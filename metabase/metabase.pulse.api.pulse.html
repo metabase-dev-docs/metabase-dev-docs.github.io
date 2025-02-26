@@ -2874,6 +2874,7 @@ see [[metabase.pulse.api.unsubscribe]].</p>
    [clojure.set :refer [difference]]
    [hiccup.core :refer [html]]
    [hiccup.page :refer [html5]]
+   [medley.core :as m]
    [metabase.api.common :as api]
    [metabase.api.common.validation :as validation]
    [metabase.api.macros :as api.macros]
@@ -2889,8 +2890,6 @@ see [[metabase.pulse.api.unsubscribe]].</p>
    [metabase.permissions.core :as perms]
    [metabase.plugins.classloader :as classloader]
    [metabase.premium-features.core :as premium-features]
-   ^{:clj-kondo/ignore [:deprecated-namespace]}
-   [metabase.pulse.api.alert :as api.alert]
    [metabase.pulse.models.pulse :as models.pulse]
    [metabase.pulse.models.pulse-channel :as pulse-channel]
    [metabase.pulse.send :as pulse.send]
@@ -2906,7 +2905,10 @@ see [[metabase.pulse.api.unsubscribe]].</p>
 </td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(when config/ee-available?
   (classloader/require 'metabase-enterprise.sandbox.api.util
-                       'metabase-enterprise.advanced-permissions.common))</pre></td></tr><tr><td class="docs"><p>If the current user is sandboxed, remove all Metabase users from the <code>pulses</code> recipient lists that are not the user
+                       'metabase-enterprise.advanced-permissions.common))</pre></td></tr><tr><td class="docs"><p>Get email channel from an alert.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn email-channel
+  [alert]
+  (m/find-first #(= :email (keyword (:channel_type %))) (:channels alert)))</pre></td></tr><tr><td class="docs"><p>If the current user is sandboxed, remove all Metabase users from the <code>pulses</code> recipient lists that are not the user
 themselves. Recipients that are plain email addresses are preserved.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- maybe-filter-pulses-recipients
   [pulses]
@@ -3029,7 +3031,7 @@ merge in recipients that are Metabase users, not raw email addresses, which thes
   (if (perms/sandboxed-or-impersonated-user?)
     (let [recipients-to-add (filter
                              (fn [{id :id}] (and id (not= id api/*current-user-id*)))
-                             (:recipients (api.alert/email-channel pulse-before-update)))]
+                             (:recipients (email-channel pulse-before-update)))]
       (assoc pulse-updates :channels
              (for [channel (:channels pulse-updates)]
                (if (= &quot;email&quot; (:channel_type channel))
@@ -3063,8 +3065,8 @@ merge in recipients that are Metabase users, not raw email addresses, which thes
     ;; if advanced-permissions is enabled, only superuser or non-admin with subscription permission can
     ;; update pulse's recipients
     (when (premium-features/enable-advanced-permissions?)
-      (let [to-add-recipients (difference (set (map :id (:recipients (api.alert/email-channel pulse-updates))))
-                                          (set (map :id (:recipients (api.alert/email-channel pulse-before-update)))))
+      (let [to-add-recipients (difference (set (map :id (:recipients (email-channel pulse-updates))))
+                                          (set (map :id (:recipients (email-channel pulse-before-update)))))
             current-user-has-application-permissions?
             (and (premium-features/enable-advanced-permissions?)
                  (resolve 'metabase-enterprise.advanced-permissions.common/current-user-has-application-permissions?))

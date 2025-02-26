@@ -2893,6 +2893,8 @@ changing behaviour.</p>
    [metabase.config :as config]
    [metabase.db.connection :as mdb.connection]
    [metabase.db.custom-migrations.metrics-v2 :as metrics-v2]
+   [metabase.db.custom-migrations.pulse-to-notification :as pulse-to-notification]
+   [metabase.db.custom-migrations.util :as custom-migrations.util]
    [metabase.plugins.classloader :as classloader]
    [metabase.task.bootstrap]
    [metabase.util.date-2 :as u.date]
@@ -3956,8 +3958,8 @@ date. In that (rare) case we will be conservative and not add the sample content
  cause timeouts.</p>
 </td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *create-sample-content*
   true)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(define-migration CreateSampleContent
-  ;; Does nothing. This is left in so we do not alter the liquibase migration history. See: [[CreateSampleContentV2]].)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(define-migration CreateSampleContent)</pre></td></tr><tr><td class="docs"><p>Does nothing. This is left in so we do not alter the liquibase migration history. See: [[CreateSampleContentV2]].</p>
+</td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- replace-temporals [v]
   (if (isa? (type v) java.time.temporal.Temporal)
     :%now
@@ -4068,45 +4070,26 @@ date. In that (rare) case we will be conservative and not add the sample content
 </td><td class="codes"></td></tr><tr><td class="docs"><hr />
 </td><td class="codes"></td></tr><tr><td class="docs"><p>This was renamed to TruncateAuditTables, so we need to delete the old job &amp; trigger</p>
 </td><td class="codes"><pre class="brush: clojure">(define-migration DeleteTruncateAuditLogTask
-  (classloader/the-classloader)
-  (set-jdbc-backend-properties!)
-  (let [scheduler (qs/initialize)]
-    (qs/start scheduler)
+  (custom-migrations.util/with-temp-schedule! [scheduler]
     (qs/delete-trigger scheduler (triggers/key &quot;metabase.task.truncate-audit-log.trigger&quot;))
-    (qs/delete-job scheduler (jobs/key &quot;metabase.task.truncate-audit-log.job&quot;))
-    (qs/shutdown scheduler)))</pre></td></tr><tr><td class="docs">
+    (qs/delete-job scheduler (jobs/key &quot;metabase.task.truncate-audit-log.job&quot;))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(define-migration DeleteSendPulsesTask
-  (classloader/the-classloader)
-  (set-jdbc-backend-properties!)
-  (let [scheduler (qs/initialize)]
-    (qs/start scheduler)
+  (custom-migrations.util/with-temp-schedule! [scheduler]
     (qs/delete-trigger scheduler (triggers/key &quot;metabase.task.send-pulses.trigger&quot;))
-    (qs/delete-job scheduler (jobs/key &quot;metabase.task.send-pulses.job&quot;))
-    (qs/shutdown scheduler)))</pre></td></tr><tr><td class="docs"><p>If someone upgraded to 50, then downgrade to 49, the send-pulse triggers will run into an error state due to
+    (qs/delete-job scheduler (jobs/key &quot;metabase.task.send-pulses.job&quot;))))</pre></td></tr><tr><td class="docs"><p>If someone upgraded to 50, then downgrade to 49, the send-pulse triggers will run into an error state due to
 jobclass not found. And when they migrate up to 50 again, these triggers will not be triggered because it's in
 an error state. See https://www.quartz-scheduler.org/api/1.8.6/org/quartz/Trigger.html#STATE_ERROR
 So we need to delete this on migrate down, so when they migrate up, the triggers will be recreated.</p>
 </td><td class="codes"><pre class="brush: clojure">(define-reversible-migration DeleteSendPulseTaskOnDowngrade
   (log/info &quot;No forward migration for DeleteSendPulseTaskOnDowngrade&quot;)
-  (do
-    (classloader/the-classloader)
-    (set-jdbc-backend-properties!)
-    (let [scheduler (qs/initialize)]
-      (qs/start scheduler)
-      (qs/delete-job scheduler (jobs/key &quot;metabase.task.send-pulses.send-pulse.job&quot;))
-      (qs/shutdown scheduler))))</pre></td></tr><tr><td class="docs"><p>The InitSendPulseTriggers is a migration in disguise, it runs once per instance
+  (custom-migrations.util/with-temp-schedule! [scheduler]
+    (qs/delete-job scheduler (jobs/key &quot;metabase.task.send-pulses.send-pulse.job&quot;))))</pre></td></tr><tr><td class="docs"><p>The InitSendPulseTriggers is a migration in disguise, it runs once per instance
 To make sure when someone migrate up -> migrate down -> migrate up again, this job is re-run
 on the second migrate up.</p>
 </td><td class="codes"><pre class="brush: clojure">(define-reversible-migration DeleteInitSendPulseTriggersOnDowngrade
   (log/info &quot;No forward migration for DeleteInitSendPulseTriggersOnDowngrade&quot;)
-  (do
-    (classloader/the-classloader)
-    (set-jdbc-backend-properties!)
-    (let [scheduler (qs/initialize)]
-      (qs/start scheduler)
-     ;; delete the job will also delete all of its triggers
-      (qs/delete-job scheduler (jobs/key &quot;metabase.task.send-pulses.init-send-pulse-triggers.job&quot;))
-      (qs/shutdown scheduler))))</pre></td></tr><tr><td class="docs"><p>when card display is area or bar,
+  (custom-migrations.util/with-temp-schedule! [scheduler]
+    (qs/delete-job scheduler (jobs/key &quot;metabase.task.send-pulses.init-send-pulse-triggers.job&quot;))))</pre></td></tr><tr><td class="docs"><p>when card display is area or bar,
 1. set the display key to :stackable.stack_display value OR leave it the same
 2. when series settings exist, remove the diplay key from each map in the series_settings list</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
@@ -4476,7 +4459,19 @@ key.</p>
                                  [:like :visualization_settings &quot;%[\&quot;dimension\&quot;%&quot;]]})))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(define-reversible-migration AddStageNumberToVizSettingsParameterMappingTargets
   (add-stage-numbers-to-viz-settings-parameter-mapping-targets)
-  (remove-stage-numbers-from-viz-settings-parameter-mapping-targets))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+  (remove-stage-numbers-from-viz-settings-parameter-mapping-targets))</pre></td></tr><tr><td class="docs"><p>Migrate alerts to notifications
+on migrate up:
+- migrate alerts from pulse table to notification table
+- delete all the send pulse triggers
+- And then on startup new send notification triggers are created by running [[metabase.task.notification/InitNotificationTriggers]]
+  job once. This job is idempotent
+on migrate down:
+- we delete all the notifications
+- delete the [[metabase.task.send-pulses/InitSendPulseTriggers]] job so that when instance startup, this job is run
+  again so that it iterates all existing alerts and re-creates the send pulse triggers. This job is idempotent</p>
+</td><td class="codes"><pre class="brush: clojure">(define-reversible-migration MigrateAlertToNotification
+  (pulse-to-notification/migrate-alerts!)
+  (pulse-to-notification/remove-init-send-pulse-trigger!))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

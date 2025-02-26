@@ -2865,405 +2865,224 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.channel.email.messages" name="metabase.channel.email.messages"><h1 class="project-name">metabase.channel.email.messages</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>Convenience functions for sending templated email messages.  Each function here should represent a single email.
- NOTE: we want to keep this about email formatting, so don't put heavy logic here RE: building data for emails.</p>
-
-<p>NOTE: This namespace is deprecated, all of these emails will soon be converted to System Email Notifications.</p>
-</td><td class="codes"><pre class="brush: clojure">(ns metabase.channel.email.messages
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.api.notification" name="metabase.api.notification"><h1 class="project-name">metabase.api.notification</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>/api/notification endpoints</p>
+</td><td class="codes"><pre class="brush: clojure">(ns metabase.api.notification
   (:require
-   [buddy.core.codecs :as codecs]
-   [clojure.string :as str]
-   [java-time.api :as t]
+   [clojure.data :refer [diff]]
+   [honey.sql.helpers :as sql.helpers]
    [medley.core :as m]
+   [metabase.api.common :as api]
+   [metabase.api.macros :as api.macros]
    [metabase.channel.email :as email]
-   [metabase.channel.render.core :as channel.render]
-   [metabase.channel.template.core :as channel.template]
-   [metabase.db.query :as mdb.query]
-   [metabase.driver :as driver]
-   [metabase.lib.util :as lib.util]
-   [metabase.models.collection :as collection]
-   [metabase.permissions.core :as perms]
-   [metabase.premium-features.core :as premium-features]
-   [metabase.public-settings :as public-settings]
-   [metabase.query-processor.timezone :as qp.timezone]
+   [metabase.channel.email.messages :as messages]
+   [metabase.events :as events]
+   [metabase.models.interface :as mi]
+   [metabase.models.notification :as models.notification]
+   [metabase.notification.core :as notification]
    [metabase.util :as u]
-   [metabase.util.cron :as u.cron]
-   [metabase.util.date-2 :as u.date]
-   [metabase.util.encryption :as encryption]
-   [metabase.util.i18n :as i18n :refer [trs tru]]
-   [metabase.util.json :as json]
-   [metabase.util.log :as log]
-   [metabase.util.malli :as mu]
-   [metabase.util.urls :as urls]
-   [toucan2.core :as t2])
-  (:import
-   (java.time LocalTime)
-   (java.time.format DateTimeFormatter)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Return the user configured application name, or Metabase translated
-via trs if a name isn't configured.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn app-name-trs
-  []
-  (or (public-settings/application-name)
-      (trs &quot;Metabase&quot;)))</pre></td></tr><tr><td class="docs"><p>Return the URL for the application logo. If the logo is the default, return a URL to the Metabase logo.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn logo-url
-  []
-  (let [url (public-settings/application-logo-url)]
-    (cond
-      (= url &quot;app/assets/img/logo.svg&quot;) &quot;http://static.metabase.com/email_logo.png&quot;
-      :else nil)))</pre></td></tr><tr><td class="docs"><p>NOTE: disabling whitelabeled URLs for now since some email clients don't render them correctly
-We need to extract them and embed as attachments like we do in metabase.channel.render.image-bundle
-(data-uri-svg? url)               (themed-image-url url color)
-:else                             url</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Return a CSS style string for a button with the given color.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn button-style
-  [color]
-  (str &quot;display: inline-block; &quot;
-       &quot;box-sizing: border-box; &quot;
-       &quot;padding: 0.5rem 1.375rem; &quot;
-       &quot;font-size: 1.063rem; &quot;
-       &quot;font-weight: bold; &quot;
-       &quot;text-decoration: none; &quot;
-       &quot;cursor: pointer; &quot;
-       &quot;color: #fff; &quot;
-       &quot;border: 1px solid &quot; color &quot;; &quot;
-       &quot;background-color: &quot; color &quot;; &quot;
-       &quot;border-radius: 4px;&quot;))</pre></td></tr><tr><td class="docs"><p>Various Context Helper Fns. Used to build Stencil template context</p>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Context that is used across multiple email templates, and that is the same for all emails</p>
-</td><td class="codes"><pre class="brush: clojure">(defn common-context
-  []
-  {:applicationName           (public-settings/application-name)
-   :applicationColor          (channel.render/primary-color)
-   :applicationLogoUrl        (logo-url)
-   :buttonStyle               (button-style (channel.render/primary-color))
-   :colorTextLight            channel.render/color-text-light
-   :colorTextMedium           channel.render/color-text-medium
-   :colorTextDark             channel.render/color-text-dark
-   :siteUrl                   (public-settings/site-url)})</pre></td></tr><tr><td class="docs"><h3>Public Interface</h3>
-</td><td class="codes"></td></tr><tr><td class="docs"><p>Return a sequence of email addresses for all Admin users.</p>
-
-<p>The first recipient will be the site admin (or oldest admin if unset), which is the address that should be used in
-<code>mailto</code> links (e.g., for the new user to email with any questions).</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- all-admin-recipients
-  []
-  (concat (when-let [admin-email (public-settings/admin-email)]
-            [admin-email])
-          (t2/select-fn-set :email 'User, :is_superuser true, :is_active true, {:order-by [[:id :asc]]})))</pre></td></tr><tr><td class="docs"><p>Send an email to the <code>invitor</code> (the Admin who invited <code>new-user</code>) letting them know <code>new-user</code> has joined.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn send-user-joined-admin-notification-email!
-  [new-user &amp; {:keys [google-auth?]}]
-  {:pre [(map? new-user)]}
-  (let [recipients (all-admin-recipients)]
-    (email/send-message!
-     {:subject      (str (if google-auth?
-                           (trs &quot;{0} created a {1} account&quot; (:common_name new-user) (app-name-trs))
-                           (trs &quot;{0} accepted their {1} invite&quot; (:common_name new-user) (app-name-trs))))
-      :recipients   recipients
-      :message-type :html
-      :message      (channel.template/render &quot;metabase/channel/email/user_joined_notification.hbs&quot;
-                                             (merge (common-context)
-                                                    {:logoHeader        true
-                                                     :joinedUserName    (or (:first_name new-user) (:email new-user))
-                                                     :joinedViaSSO      google-auth?
-                                                     :joinedUserEmail   (:email new-user)
-                                                     :joinedDate        (t/format &quot;EEEE, MMMM d&quot; (t/zoned-date-time)) ; e.g. &quot;Wednesday, July 13&quot;.
-                                                     :adminEmail        (first recipients)
-                                                     :joinedUserEditUrl (str (public-settings/site-url) &quot;/admin/people&quot;)}))})))</pre></td></tr><tr><td class="docs"><p>Format and send an email informing the user how to reset their password.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn send-password-reset-email!
-  [email sso-source password-reset-url is-active?]
-  {:pre [(u/email? email)
-         ((some-fn string? nil?) password-reset-url)]}
-  (let [google-sso? (= :google sso-source)
-        message-body (channel.template/render
-                      &quot;metabase/channel/email/password_reset.hbs&quot;
-                      (merge (common-context)
-                             {:emailType        &quot;password_reset&quot;
-                              :google           google-sso?
-                              :nonGoogleSSO     (and (not google-sso?) (some? sso-source))
-                              :passwordResetUrl password-reset-url
-                              :logoHeader       true
-                              :isActive         is-active?
-                              :adminEmail       (public-settings/admin-email)
-                              :adminEmailSet    (boolean (public-settings/admin-email))}))]
-    (email/send-message!
-     {:subject      (trs &quot;[{0}] Password Reset Request&quot; (app-name-trs))
-      :recipients   [email]
-      :message-type :html
-      :message      message-body})))</pre></td></tr><tr><td class="docs"><p>Format and send an email informing the user that this is the first time we've seen a login from this device. Expects
-login history information as returned by [[metabase.login-history.models.login-history/human-friendly-infos]].</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn send-login-from-new-device-email!
-  [{user-id :user_id, :keys [timestamp], :as login-history} :- [:map [:user_id pos-int?]]]
-  (let [user-info    (or (t2/select-one ['User [:first_name :first-name] :email :locale] :id user-id)
-                         (throw (ex-info (tru &quot;User {0} does not exist&quot; user-id)
-                                         {:user-id user-id, :status-code 404})))
-        user-locale  (or (:locale user-info) (i18n/site-locale))
-        timestamp    (u.date/format-human-readable timestamp user-locale)
-        context      (merge (common-context)
-                            {:first-name (:first-name user-info)
-                             :device     (:device_description login-history)
-                             :location   (:location login-history)
-                             :timestamp  timestamp})
-        message-body (channel.template/render &quot;metabase/channel/email/login_from_new_device.hbs&quot;
-                                              context)]
-    (email/send-message!
-     {:subject      (trs &quot;We''ve Noticed a New {0} Login, {1}&quot; (app-name-trs) (:first-name user-info))
-      :recipients   [(:email user-info)]
-      :message-type :html
-      :message      message-body})))</pre></td></tr><tr><td class="docs"><p>Find emails for users that have an interest in monitoring the database.
- If oss that means admin users.
- If ee that also means users with monitoring and details permissions.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- admin-or-ee-monitoring-details-emails
-  [database-id]
-  (let [monitoring (perms/application-perms-path :monitoring)
-        user-ids-with-monitoring (when (premium-features/enable-advanced-permissions?)
-                                   (-&gt;&gt; {:select   [:pgm.user_id]
-                                         :from     [[:permissions_group_membership :pgm]]
-                                         :join     [[:permissions_group :pg] [:= :pgm.group_id :pg.id]]
-                                         :where    [:and
-                                                    [:exists {:select [1]
-                                                              :from [[:permissions :p]]
-                                                              :where [:and
-                                                                      [:= :p.group_id :pg.id]
-                                                                      [:= :p.object monitoring]]}]]
-                                         :group-by [:pgm.user_id]}
-                                        mdb.query/query
-                                        (mapv :user_id)))
-        user-ids (filter
-                  #(perms/user-has-permission-for-database? % :perms/manage-database :yes database-id)
-                  user-ids-with-monitoring)]
-    (into
-     []
-     (distinct)
-     (concat
-      (all-admin-recipients)
-      (when (seq user-ids)
-        (t2/select-fn-set :email :model/User {:where [:and
-                                                      [:= :is_active true]
-                                                      [:in :id user-ids]]}))))))</pre></td></tr><tr><td class="docs"><p>Format and send an email informing the user about errors in the persistent model refresh task.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn send-persistent-model-error-email!
-  [database-id persisted-infos trigger]
-  {:pre [(seq persisted-infos)]}
-  (let [database (:database (first persisted-infos))
-        emails (admin-or-ee-monitoring-details-emails database-id)
-        timezone (some-&gt; database qp.timezone/results-timezone-id t/zone-id)
-        context {:database-name (:name database)
-                 :errors
-                 (for [[idx persisted-info] (m/indexed persisted-infos)
-                       :let [card (:card persisted-info)
-                             collection (or (:collection card)
-                                            (collection/root-collection-with-ui-details nil))]]
-                   {:is-not-first (not= 0 idx)
-                    :error (:error persisted-info)
-                    :card-id (:id card)
-                    :card-name (:name card)
-                    :collection-name (:name collection)
-                    ;; February 1, 2022, 3:10 PM
-                    :last-run-at (t/format &quot;MMMM d, yyyy, h:mm a z&quot; (t/zoned-date-time (:refresh_begin persisted-info) timezone))
-                    :last-run-trigger trigger
-                    :card-url (urls/card-url (:id card))
-                    :collection-url (urls/collection-url (:id collection))
-                    :caching-log-details-url (urls/tools-caching-details-url (:id persisted-info))})}
-        message-body (channel.template/render &quot;metabase/channel/email/persisted-model-error.hbs&quot;
-                                              (merge (common-context) context))]
-    (when (seq emails)
-      (email/send-message!
-       {:subject      (trs &quot;[{0}] Model cache refresh failed for {1}&quot; (app-name-trs) (:name database))
-        :recipients   (vec emails)
-        :message-type :html
-        :message      message-body}))))</pre></td></tr><tr><td class="docs"><p>Format and send an email to the system admin following up on the installation.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn send-follow-up-email!
-  [email]
-  {:pre [(u/email? email)]}
-  (let [context (merge (common-context)
-                       {:emailType    &quot;notification&quot;
-                        :logoHeader   true
-                        :heading      (trs &quot;We hope you''ve been enjoying Metabase.&quot;)
-                        :callToAction (trs &quot;Would you mind taking a quick 5 minute survey to tell us how it’s going?&quot;)
-                        :link         &quot;https://metabase.com/feedback/active&quot;})
-        email {:subject      (trs &quot;[{0}] Tell us how things are going.&quot; (app-name-trs))
-               :recipients   [email]
-               :message-type :html
-               :message      (channel.template/render &quot;metabase/channel/email/follow_up_email.hbs&quot; context)}]
-    (email/send-message! email)))</pre></td></tr><tr><td class="docs"><p>Format and send an email to a creator with a link to a survey. If a [[blob]] is included, it will be turned into json
-and then base64 encoded.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn send-creator-sentiment-email!
-  [{:keys [email first_name]} blob]
-  {:pre [(u/email? email)]}
-  (let [encoded-info    (when blob
-                          (-&gt; blob
-                              json/encode
-                              .getBytes
-                              codecs/bytes-&gt;b64-str))
-        context (merge (common-context)
-                       {:emailType  &quot;notification&quot;
-                        :logoHeader true
-                        :first-name first_name
-                        :link       (cond-&gt; &quot;https://metabase.com/feedback/creator&quot;
-                                      encoded-info (str &quot;?context=&quot; encoded-info))}
-                       (when-not (premium-features/is-hosted?)
-                         {:self-hosted (public-settings/site-url)}))
-        message {:subject      &quot;Metabase would love your take on something&quot;
-                 :recipients   [email]
-                 :message-type :html
-                 :message      (channel.template/render &quot;metabase/channel/email/creator_sentiment_email.hbs&quot; context)}]
-    (email/send-message! message)))</pre></td></tr><tr><td class="docs"><p>Generates hash to allow for non-users to unsubscribe from pulses/subscriptions.</p>
-
-<p>Deprecated: only used for dashboard subscriptions for now, should be migrated to <code>generate-notification-unsubscribe-hash</code>
-once we migrate all the dashboard subscriptions to the new notification system.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn generate-pulse-unsubscribe-hash
-  [pulse-id email]
-  (codecs/bytes-&gt;hex
-   (encryption/validate-and-hash-secret-key
-    (json/encode {:salt     (public-settings/site-uuid-for-unsubscribing-url)
-                  :email    email
-                  :pulse-id pulse-id}))))</pre></td></tr><tr><td class="docs"><p>Generates hash to allow for non-users to unsubscribe from notifications.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn generate-notification-unsubscribe-hash
-  [notification-id email]
-  (codecs/bytes-&gt;hex
-   (encryption/validate-and-hash-secret-key
-    (json/encode {:salt            (public-settings/site-uuid-for-unsubscribing-url)
-                  :email           email
-                  :notification-id notification-id}))))</pre></td></tr><tr><td class="docs"><p>Given an <code>alert</code> return a keyword representing what kind of goal needs to be met.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn pulse-&gt;alert-condition-kwd
-  [{:keys [alert_above_goal alert_condition] :as _alert}]
-  (if (= &quot;goal&quot; alert_condition)
-    (if (true? alert_above_goal)
-      :meets
-      :below)
-    :rows))</pre></td></tr><tr><td class="docs"><p>Alerts only have a single card, so the alerts API accepts a <code>:card</code> key, while pulses have <code>:cards</code>. Depending on
-whether the data comes from the alert API or pulse tasks, the card could be under <code>:card</code> or <code>:cards</code></p>
-</td><td class="codes"><pre class="brush: clojure">(defn- first-card
-  [alert]
-  (or (:card alert)
-      (first (:cards alert))))</pre></td></tr><tr><td class="docs"><p>Template context that is applicable to all alert templates, including alert management templates
-(e.g. the subscribed/unsubscribed emails)</p>
-</td><td class="codes"><pre class="brush: clojure">(defn common-alert-context
-  ([alert]
-   (common-alert-context alert nil))
-  ([alert alert-condition-map]
-   (let [{card-id :id, card-name :name} (first-card alert)]
-     (merge (common-context)
-            {:emailType                 &quot;alert&quot;
-             :questionName              card-name
-             :questionURL               (urls/card-url card-id)
-             :sectionStyle              (channel.render/section-style)}
-            (when alert-condition-map
-              {:alertCondition (get alert-condition-map (pulse-&gt;alert-condition-kwd alert))})))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- schedule-hour-text
-  [{hour :schedule_hour}]
-  (.format (LocalTime/of hour 0)
-           (DateTimeFormatter/ofPattern &quot;h a&quot;)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- schedule-day-text
-  [{day :schedule_day}]
-  (get {&quot;sun&quot; &quot;Sunday&quot;
-        &quot;mon&quot; &quot;Monday&quot;
-        &quot;tue&quot; &quot;Tuesday&quot;
-        &quot;wed&quot; &quot;Wednesday&quot;
-        &quot;thu&quot; &quot;Thursday&quot;
-        &quot;fri&quot; &quot;Friday&quot;
-        &quot;sat&quot; &quot;Saturday&quot;}
-       day))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- schedule-timezone
-  []
-  (or (driver/report-timezone) &quot;UTC&quot;))</pre></td></tr><tr><td class="docs"><p>Given cron notification subscription return a human-readable description of the schedule.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn notification-card-schedule-text
-  [{:keys [cron_schedule type] :as _subscription}]
-  (when (= :notification-subscription/cron type)
-    ;; TODO consider using https://github.com/grahamar/cron-parser
-    (let [schedule (u.cron/cron-string-&gt;schedule-map cron_schedule)]
-      (case (keyword (:schedule_type schedule))
-        :hourly
-        &quot;Run hourly&quot;
-        :daily
-        (format &quot;Run daily at %s %s&quot;
-                (schedule-hour-text schedule)
-                (schedule-timezone))
-        :weekly
-        (format &quot;Run weekly on %s at %s %s&quot;
-                (schedule-day-text schedule)
-                (schedule-hour-text schedule)
-                (schedule-timezone))))))</pre></td></tr><tr><td class="docs"><p>Sends an email on a background thread, returning a future.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- send-email!
-  ([recipients subject template-path template-context]
-   (send-email! recipients subject template-path template-context false))
-  ([recipients subject template-path template-context bcc?]
-   (when (seq recipients)
-     (future
-       (try
-         (email/send-email-retrying!
-          {:recipients   recipients
-           :message-type :html
-           :subject      subject
-           :message      (channel.template/render template-path template-context)
-           :bcc?         bcc?})
-         (catch Exception e
-           (log/errorf e &quot;Failed to send message to '%s' with subject '%s'&quot; (str/join &quot;, &quot; recipients) subject)))))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- template-path [template-name]
-  (str &quot;metabase/channel/email/&quot; template-name &quot;.hbs&quot;))</pre></td></tr><tr><td class="docs"><p>Paths to the templates for all of the alerts emails</p>
-</td><td class="codes"><pre class="brush: clojure">(def ^:private you-unsubscribed-template   (template-path &quot;notification_card_unsubscribed&quot;))
-(def ^:private removed-template            (template-path &quot;notification_card_you_were_removed&quot;))
-(def ^:private added-template              (template-path &quot;notification_card_you_were_added&quot;))
-(def ^:private changed-stopped-template    (template-path &quot;card_notification_changed_stopped&quot;))
-(def ^:private archived-template           (template-path &quot;card_notification_archived&quot;))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- username
-  [user]
-  (-&gt;&gt; [(:first_name user) (:last_name user)]
+   [metabase.util.malli.schema :as ms]
+   [toucan2.core :as t2]
+   [toucan2.realize :as t2.realize]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs"><p>Get a notification by id.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn get-notification
+  [id]
+  (-&gt; (t2/select-one :model/Notification id)
+      api/check-404
+      models.notification/hydrate-notification))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- card-notification?
+  [notification]
+  (= :notification/card (:payload_type notification)))</pre></td></tr><tr><td class="docs"><p>List notifications. See <code>GET /</code> for parameters.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn list-notifications
+  [{:keys [creator_id creator_or_recipient_id recipient_id card_id payload_type include_inactive legacy-active legacy-user-id]}]
+  (-&gt;&gt; (t2/reducible-select :model/Notification
+                            (cond-&gt; {:select-distinct [:notification.*]}
+                              creator_id
+                              (sql.helpers/where [:= :notification.creator_id creator_id])
+                              recipient_id
+                              (-&gt; (sql.helpers/left-join
+                                   :notification_handler [:= :notification_handler.notification_id :notification.id])
+                                  (sql.helpers/left-join
+                                   :notification_recipient [:= :notification_recipient.notification_handler_id :notification_handler.id])
+                                  (sql.helpers/where [:= :notification_recipient.user_id recipient_id]))
+                              creator_or_recipient_id
+                              (-&gt; (sql.helpers/left-join
+                                   :notification_handler [:= :notification_handler.notification_id :notification.id])
+                                  (sql.helpers/left-join
+                                   :notification_recipient [:= :notification_recipient.notification_handler_id :notification_handler.id])
+                                  (sql.helpers/where [:or [:= :notification_recipient.user_id creator_or_recipient_id]
+                                                      [:= :notification.creator_id creator_or_recipient_id]]))
+                              card_id
+                              (-&gt; (sql.helpers/left-join
+                                   :notification_card
+                                   [:and
+                                    [:= :notification_card.id :notification.payload_id]
+                                    [:= :notification.payload_type &quot;notification/card&quot;]])
+                                  (sql.helpers/where [:= :notification_card.card_id card_id]))
+                              (and (nil? legacy-active) (not (true? include_inactive)))
+                              (sql.helpers/where [:= :notification.active true])
+                              payload_type
+                              (sql.helpers/where [:= :notification.payload_type (u/qualified-name payload_type)])
+                              ;; legacy-active and legacy-user-id only used by alert api, will be removed soon
+                              (some? legacy-active)
+                              (sql.helpers/where [:= :notification.active legacy-active])
+                              legacy-user-id
+                              (-&gt; (sql.helpers/left-join
+                                   :notification_handler [:= :notification_handler.notification_id :notification.id])
+                                  (sql.helpers/left-join
+                                   :notification_recipient [:= :notification_recipient.notification_handler_id :notification_handler.id])
+                                  (sql.helpers/where [:or
+                                                      [:= :notification_recipient.user_id legacy-user-id]
+                                                      [:= :notification.creator_id legacy-user-id]]))))
+       (into [] (comp
+                 (map t2.realize/realize)
+                 (filter mi/can-read?)))
+       models.notification/hydrate-notification))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/&quot;
+  &quot;List notifications.
+  - `creator_id`: if provided returns only notifications created by this user
+  - `recipient_id`: if provided returns only notification that has recipient_id as a recipient
+  - `creator_or_recipient_id`: if provided returns only notification that has user_id as creator or recipient
+  - `card_id`: if provided returns only notification that has card_id as payload&quot;
+  [_route-params
+   {:keys [creator_id creator_or_recipient_id recipient_id card_id include_inactive payload_type]} :-
+   [:map
+    [:creator_id              {:optional true} ms/PositiveInt]
+    [:recipient_id            {:optional true} ms/PositiveInt]
+    [:creator_or_recipient_id {:optional true} ms/PositiveInt]
+    [:card_id                 {:optional true} ms/PositiveInt]
+    [:include_inactive        {:optional true} ms/BooleanValue]
+    [:pyaload_type            {:optional true} [:maybe (into [:enum] models.notification/notification-types)]]]]
+  (list-notifications {:creator_id              creator_id
+                       :recipient_id            recipient_id
+                       :creator_or_recipient_id creator_or_recipient_id
+                       :card_id                 card_id
+                       :include_inactive        include_inactive
+                       :payload_type            payload_type}))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :get &quot;/:id&quot;
+  &quot;Get a notification by id.&quot;
+  [{:keys [id]} :- [:map [:id ms/PositiveInt]]]
+  (-&gt; (get-notification id)
+      api/read-check))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- all-email-recipients [notification]
+  (-&gt;&gt; (:handlers notification)
+       (filter #(= :channel/email ((comp keyword :channel_type) %)))
+       (mapcat :recipients)
+       (filter #(#{:notification-recipient/user :notification-recipient/raw-value} ((comp keyword :type) %)))
+       (map (fn [recipient]
+              (if (= :notification-recipient/user ((comp keyword :type) recipient))
+                (or (-&gt; recipient :user :email) (t2/select-one-fn :email :model/User (:user_id recipient)))
+                (-&gt; recipient :details :value))))
        (remove nil?)
-       (str/join &quot; &quot;)))</pre></td></tr><tr><td class="docs"><p>Send an email to <code>who-unsubscribed</code> letting them know they've unsubscribed themselves from <code>notification</code></p>
-</td><td class="codes"><pre class="brush: clojure">(defn send-you-unsubscribed-notification-card-email!
-  [notification unsubscribed-emails]
-  (send-email! unsubscribed-emails &quot;You unsubscribed from an alert&quot; you-unsubscribed-template notification true))</pre></td></tr><tr><td class="docs"><p>Send an email to <code>removed-users</code> letting them know <code>admin</code> has removed them from <code>notification</code></p>
-</td><td class="codes"><pre class="brush: clojure">(defn send-you-were-removed-notification-card-email!
-  [notification removed-emails actor]
-  (send-email! removed-emails &quot;You’ve been unsubscribed from an alert&quot; removed-template (assoc notification :actor_name (username actor)) true))</pre></td></tr><tr><td class="docs"><p>Send an email to <code>added-users</code> letting them know <code>admin-adder</code> has added them to <code>notification</code></p>
-</td><td class="codes"><pre class="brush: clojure">(defn send-you-were-added-card-notification-email!
-  [notification added-user-emails adder]
-  (let [subject (format &quot;%s added you to an alert&quot; (username adder))]
-    (send-email! added-user-emails subject added-template notification true)))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private not-working-subject &quot;One of your alerts has stopped working&quot;)</pre></td></tr><tr><td class="docs"><p>Email to notify users when a card associated to their alert has been archived</p>
-</td><td class="codes"><pre class="brush: clojure">(defn send-alert-stopped-because-archived-email!
-  [card recipient-emails archiver]
-  (send-email! recipient-emails not-working-subject archived-template
-               {:card card
-                :actor archiver}
-               true))</pre></td></tr><tr><td class="docs"><p>Email to notify users when a card associated to their alert changed in a way that invalidates their alert</p>
-</td><td class="codes"><pre class="brush: clojure">(defn send-alert-stopped-because-changed-email!
-  [card recipient-emails archiver]
-  (send-email! recipient-emails not-working-subject changed-stopped-template
-               {:card card
-                :actor archiver}
-               true))</pre></td></tr><tr><td class="docs"><p>Email dashboard and subscription creators information about a broken subscription due to bad parameters</p>
-</td><td class="codes"><pre class="brush: clojure">(defn send-broken-subscription-notification!
-  [{:keys [dashboard-id dashboard-name pulse-creator dashboard-creator affected-users bad-parameters]}]
-  (let [{:keys [siteUrl] :as context} (common-context)]
-    (email/send-message!
-     :subject (trs &quot;Subscription to {0} removed&quot; dashboard-name)
-     :recipients (distinct (map :email [pulse-creator dashboard-creator]))
-     :message-type :html
-     :message (channel.template/render
-               &quot;metabase/channel/email/broken_subscription_notification.hbs&quot;
-               (merge context
-                      {:dashboardName            dashboard-name
-                       :badParameters            (map
-                                                  (fn [{:keys [value] :as param}]
-                                                    (cond-&gt; param
-                                                      (coll? value)
-                                                      (update :value #(lib.util/join-strings-with-conjunction
-                                                                       (i18n/tru &quot;or&quot;)
-                                                                       %))))
-                                                  bad-parameters)
-                       :affectedUsers            (map
-                                                  (fn [{:keys [notification-type] :as m}]
-                                                    (cond-&gt; m
-                                                      notification-type
-                                                      (update :notification-type name)))
-                                                  (into
-                                                   [{:notification-type :email
-                                                     :recipient         (:common_name dashboard-creator)
-                                                     :role              &quot;Dashboard Creator&quot;}
-                                                    {:notification-type :email
-                                                     :recipient         (:common_name pulse-creator)
-                                                     :role              &quot;Subscription Creator&quot;}]
-                                                   (map #(assoc % :role &quot;Subscriber&quot;) affected-users)))
-                       :dashboardUrl             (format &quot;%s/dashboard/%s&quot; siteUrl dashboard-id)})))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+       set))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- send-you-were-added-card-notification-email! [notification]
+  (when (email/email-configured?)
+    (let [current-user? #{(:email @api/*current-user*)}]
+      (when-let [recipients-except-creator (-&gt;&gt; (all-email-recipients notification)
+                                                (remove current-user?)
+                                                seq)]
+        (messages/send-you-were-added-card-notification-email!
+         (update notification :payload t2/hydrate :card) recipients-except-creator @api/*current-user*)))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/&quot;
+  &quot;Create a new notification, return the created notification.&quot;
+  [_route _query body :- ::models.notification/FullyHydratedNotification]
+  (api/create-check :model/Notification body)
+  (let [notification (models.notification/hydrate-notification
+                      (models.notification/create-notification!
+                       (-&gt; body
+                           (assoc :creator_id api/*current-user-id*)
+                           (dissoc :handlers :subscriptions))
+                       (:subscriptions body)
+                       (:handlers body)))]
+    (when (card-notification? notification)
+      (send-you-were-added-card-notification-email! notification))
+    (events/publish-event! :event/notification-create {:object notification :user-id api/*current-user-id*})
+    notification))</pre></td></tr><tr><td class="docs"><p>Send notification emails based on changes between updated and existing notification</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- notify-notification-updates!
+  [updated-notification existing-notification]
+  (when (email/email-configured?)
+    (let [was-active?  (:active existing-notification)
+          is-active?   (:active updated-notification)
+          current-user @api/*current-user*
+          old-emails   (all-email-recipients existing-notification)
+          new-emails   (all-email-recipients updated-notification)
+          notification (update existing-notification :payload t2/hydrate :card)]
+      (cond
+        ;; Notification was just archived - notify all users they were unsubscribed
+        (and was-active? (not is-active?))
+        (messages/send-you-were-removed-notification-card-email! notification old-emails current-user)
+        ;; Notification was just unarchived - notify all users they were added
+        (and (not was-active?) is-active?)
+        (messages/send-you-were-added-card-notification-email! notification new-emails @api/*current-user*)
+        (not= old-emails new-emails)
+        (let [[removed-recipients added-recipients _] (diff old-emails new-emails)]
+          (when (seq removed-recipients)
+            (messages/send-you-were-removed-notification-card-email! notification removed-recipients current-user))
+          (when (seq added-recipients)
+            (messages/send-you-were-added-card-notification-email! notification added-recipients @api/*current-user*)))))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :put &quot;/:id&quot;
+  &quot;Update a notification, can also update its subscriptions, handlers.
+  Return the updated notification.&quot;
+  [{:keys [id]} :- [:map [:id ms/PositiveInt]]
+   _query
+   body :- ::models.notification/FullyHydratedNotification]
+  (let [existing-notification (get-notification id)]
+    (api/update-check existing-notification body)
+    (models.notification/update-notification! existing-notification body)
+    (when (card-notification? existing-notification)
+      (notify-notification-updates! body existing-notification))
+    (u/prog1 (get-notification id)
+      (events/publish-event! :event/notification-update {:object          &lt;&gt;
+                                                         :previous-object existing-notification
+                                                         :user-id         api/*current-user-id*}))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/:id/send&quot;
+  &quot;Send a notification by id.&quot;
+  [{:keys [id]} :- [:map [:id ms/PositiveInt]]
+   _query
+   {:keys [handler_ids]} :- [:map [:handler_ids {:optional true} [:sequential ms/PositiveInt]]]]
+  (let [notification (get-notification id)]
+    (api/read-check notification)
+    (cond-&gt; notification
+      (seq handler_ids)
+      (update :handlers (fn [handlers] (filter (comp (set handler_ids) :id) handlers)))
+
+      true
+      (notification/send-notification! :notification/sync? true))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- promote-to-t2-instance
+  [notification]
+  (-&gt;  (t2/instance :model/Notification notification)
+       (m/update-existing :handlers #(map (fn [x]
+                                            (-&gt; (t2/instance :model/NotificationHandler x)
+                                                (m/update-existing :channel (fn [c] (t2/instance :model/Channel) c))
+                                                (m/update-existing :template (fn [t] (t2/instance :model/ChannelTemplate) t))
+                                                (m/update-existing :recipients (fn [recipients] (map (fn [r] (t2/instance :model/NotificationRecipient r)) recipients)))))
+                                          %))
+       (m/update-existing :subscriptions #(map (fn [x] (t2/instance :model/NotificationSubscription x)) %))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/send&quot;
+  &quot;Send an unsaved notification.&quot;
+  [_route _query body :- ::models.notification/FullyHydratedNotification]
+  (api/create-check :model/Notification body)
+  (-&gt; body
+      (assoc :creator_id api/*current-user-id*)
+      promote-to-t2-instance
+      (notification/send-notification! :notification/sync? true)))</pre></td></tr><tr><td class="docs"><p>Unsubscribe a user from a notification.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn unsubscribe-user!
+  [notification-id user-id]
+  (let [notification (get-notification notification-id)]
+    (api/check-403 (models.notification/current-user-is-recipient? notification))
+    (models.notification/unsubscribe-user! notification-id user-id)
+    (u/prog1 (get-notification notification-id)
+      (when (card-notification? &lt;&gt;)
+        (u/ignore-exceptions
+          (messages/send-you-unsubscribed-notification-card-email!
+           (update &lt;&gt; :payload t2/hydrate :card)
+           [(:email @api/*current-user*)])))
+      (events/publish-event! :event/notification-unsubscribe {:object {:id notification-id}
+                                                              :user-id api/*current-user-id*}))))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(api.macros/defendpoint :post &quot;/:id/unsubscribe&quot;
+  &quot;Unsubscribe current user from a notification.&quot;
+  [{:keys [id]} :- [:map [:id ms/PositiveInt]]]
+  (unsubscribe-user! id api/*current-user-id*)
+  api/generic-204-no-content)</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

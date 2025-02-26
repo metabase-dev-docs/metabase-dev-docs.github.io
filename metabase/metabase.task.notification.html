@@ -2892,7 +2892,11 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defn- send-notification-trigger-key
   ^TriggerKey [subscription-id]
   (triggers/key (format &quot;metabase.task.notification.trigger.subscription.%d&quot;
-                        subscription-id)))</pre></td></tr><tr><td class="docs"><p>Build a Quartz Trigger for <code>database</code> and <code>task-info</code> if a schedule exists.</p>
+                        subscription-id)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- send-notification-trigger-key-&gt;subscription-id
+  [trigger-key]
+  (when-let [[_ m] (re-matches #&quot;metabase\.task\.notification\.trigger\.subscription\.(\d+)&quot; (str trigger-key))]
+    (parse-long m)))</pre></td></tr><tr><td class="docs"><p>Build a Quartz Trigger for <code>database</code> and <code>task-info</code> if a schedule exists.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- build-trigger
   ^CronTrigger [subscription-id cron-schedule]
   (triggers/build
@@ -2943,31 +2947,72 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defn- send-notification*
   [subscription-id]
   (let [subscription    (t2/select-one :model/NotificationSubscription subscription-id)
-        notification-id (:notification_id subscription)]
-    (try
-      (log/infof &quot;Sending notification %d for subscription %d&quot; notification-id subscription-id)
-      (task-history/with-task-history {:task         &quot;notification-trigger&quot;
-                                       :task_details {:trigger_type                 :notification-subscription/cron
-                                                      :notification_subscription_id subscription-id
-                                                      :cron_schedule                (:cron_schedule subscription)
-                                                      :notification_ids             [notification-id]}}
-        (notification/send-notification! (t2/select-one :model/Notification notification-id)))
-      (log/infof &quot;Sent notification %d for subscription %d&quot; notification-id subscription-id)
-      (catch Exception e
-        (log/errorf e &quot;Failed to send notification %d for subscription %d&quot; notification-id subscription-id)
-        (throw e)))))</pre></td></tr><tr><td class="docs"><p>Triggers that send a notification for a subscription.</p>
+        notification-id (:notification_id subscription)
+        notification (t2/select-one :model/Notification notification-id)]
+    (cond
+      (:active notification)
+      (try
+        (log/infof &quot;Sending notification %d for subscription %d&quot; notification-id subscription-id)
+        (task-history/with-task-history {:task         &quot;notification-trigger&quot;
+                                         :task_details {:trigger_type                 :notification-subscription/cron
+                                                        :notification_subscription_id subscription-id
+                                                        :cron_schedule                (:cron_schedule subscription)
+                                                        :notification_ids             [notification-id]}}
+          (notification/send-notification! notification :notification/sync? true))
+        (log/infof &quot;Sent notification %d for subscription %d&quot; notification-id subscription-id)
+        (catch Exception e
+          (log/errorf e &quot;Failed to send notification %d for subscription %d&quot; notification-id subscription-id)
+          (throw e)))
+      (nil? notification)
+      (do
+        (log/warnf &quot;Skipping and deleting trigger for subscription %d because it does not exist.&quot; subscription-id)
+        (delete-trigger-for-subscription! subscription-id))
+      (not (:active notification))
+      (do
+        (log/warnf &quot;Skipping and deleting trigger for subscription %d because the notification is deactivated&quot; subscription-id)
+        (delete-trigger-for-subscription! subscription-id)))))</pre></td></tr><tr><td class="docs"><p>Update the timezone of all SendPulse triggers if the report timezone changes.</p>
+
+<p>called in [driver/report-timezone] setter</p>
+</td><td class="codes"><pre class="brush: clojure">(defn update-send-notification-triggers-timezone!
+  []
+  (let [triggers     (-&gt; send-notification-job-key task/job-info :triggers)
+        new-timezone (send-notification-timezone)
+        subscription-id-&gt;cron (t2/select-fn-&gt;fn :id :cron_schedule :model/NotificationSubscription :type :notification-subscription/cron)]
+    (doseq [trigger triggers
+            :when (not= new-timezone (:timezone trigger))] ; skip if timezone is the same
+      (let [trigger-key     (:key trigger)
+            subscription-id (send-notification-trigger-key-&gt;subscription-id trigger-key)]
+        (log/infof &quot;Updating timezone of trigger %s to %s. Was: %s&quot; trigger-key new-timezone (:timezone trigger))
+        (task/reschedule-trigger! (build-trigger subscription-id (get subscription-id-&gt;cron subscription-id)))))))</pre></td></tr><tr><td class="docs"><p>Triggers that send a notification for a subscription.</p>
 </td><td class="codes"><pre class="brush: clojure">(jobs/defjob 
   SendNotification
   [context]
   (let [{:strs [subscription-id]} (qc/from-job-data context)]
-    (send-notification* subscription-id)))</pre></td></tr><tr><td class="docs">
+    (send-notification* subscription-id)))</pre></td></tr><tr><td class="docs"><p>Find all notification subscriptions with cron schedules and create a trigger for each.</p>
+
+<p>  Context: We've migrated alerts from pulse to notifications, see the <code>v53.2024-12-12T08:05:00</code> migration.
+  This job is needed to create triggers for all existing notification subscriptions.
+  Will only run once when Metabase starts up.</p>
+</td><td class="codes"><pre class="brush: clojure">(jobs/defjob
+  InitNotificationTriggers
+  [_context]
+  (run! update-subscription-trigger! (t2/reducible-select :model/NotificationSubscription)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod task/init! ::SendNotifications [_]
-  (let [send-notification-job (jobs/build
-                               (jobs/with-identity send-notification-job-key)
-                               (jobs/with-description &quot;Send Notification&quot;)
-                               (jobs/of-type SendNotification)
-                               (jobs/store-durably))]
-    (task/add-job! send-notification-job)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+  (let [send-notification-job              (jobs/build
+                                            (jobs/with-identity send-notification-job-key)
+                                            (jobs/with-description &quot;Send Notification&quot;)
+                                            (jobs/of-type SendNotification)
+                                            (jobs/store-durably))
+        init-notification-triggers-job     (jobs/build
+                                            (jobs/of-type InitNotificationTriggers)
+                                            (jobs/with-identity (jobs/key &quot;metabase.task.notification.init-notification-triggers.job&quot;))
+                                            (jobs/store-durably))
+        init-notification-triggers-trigger (triggers/build
+                                            (triggers/with-identity (triggers/key &quot;metabase.task.notification.init-notification-triggers.trigger&quot;))
+                                            ;; run only once per MB instance (like a migration)
+                                            (triggers/start-now))]
+    (task/add-job! send-notification-job)
+    (task/schedule-task! init-notification-triggers-job init-notification-triggers-trigger)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

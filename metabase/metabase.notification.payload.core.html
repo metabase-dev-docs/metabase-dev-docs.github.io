@@ -2873,22 +2873,25 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.notification.payload.execute :as notification.payload.execute]
    [metabase.public-settings :as public-settings]
    [metabase.util.malli :as mu]
+   [metabase.util.malli.registry :as mr]
    [metabase.util.malli.schema :as ms]
    [potemkin :as p]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(p/import-vars
  [notification.payload.execute
-  process-virtual-dashcard])</pre></td></tr><tr><td class="docs"><p>Schema for the notification.</p>
-</td><td class="codes"><pre class="brush: clojure">(def Notification
+  process-virtual-dashcard])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::Notification
+  &quot;Schema for the notification.&quot;
   ;; TODO: how do we make this schema closed after :merge?
   [:merge #_{:closed true}
    [:map
-    [:payload_type                  (into [:enum] models.notification/notification-types)]
+    [:payload_type                   (into [:enum] models.notification/notification-types)]
     ;; allow unsaved notification to be sent
-    [:id           {:optional true} [:maybe ms/PositiveInt]]
-    [:active       {:optional true} :boolean]
-    [:created_at   {:optional true} :any]
-    [:updated_at   {:optional true} :any]]
+    [:id            {:optional true} [:maybe ms/PositiveInt]]
+    [:active        {:optional true} :boolean]
+    [:created_at    {:optional true} :any]
+    [:updated_at    {:optional true} :any]
+    [:subscriptions {:optional true} [:sequential ::models.notification/NotificationSubscription]]]
    [:multi {:dispatch :payload_type}
     ;; system event is a bit special in that part of the payload comes from the event itself
     [:notification/system-event
@@ -2900,18 +2903,8 @@ net.brehaut.ClojureTools = (function (SH) {
         [:event_info  [:maybe :map]]]]]]
     [:notification/card
      [:map
-      ;; replacement of pulse
-      [:alert      [:map
-                    [:card_id                           ms/PositiveInt]
-                    [:schedule                          :map]
-                    [:alert_condition  {:optional true} [:enum &quot;rows&quot; &quot;goal&quot;]]
-                    [:alert_above_goal {:optional true} [:maybe ms/BooleanValue]]
-                    [:alert_first_only {:optional true} [:maybe ms/BooleanValue]]
-                    [:include_csv      {:optional true} [:maybe ms/BooleanValue]]
-                    [:include_xls      {:optional true} [:maybe ms/BooleanValue]]
-                    [:format_rows      {:optional true} [:maybe ms/BooleanValue]]
-                    [:pivot_results    {:optional true} [:maybe ms/BooleanValue]]]]
-      [:creator_id ms/PositiveInt]]]
+      [:payload    {:optional true} ::models.notification/NotificationCard]
+      [:creator_id                  ms/PositiveInt]]]
     [:notification/dashboard
      [:map
       [:creator_id ms/PositiveInt]
@@ -2928,8 +2921,9 @@ net.brehaut.ClojureTools = (function (SH) {
                        [:format_rows   {:optional true} [:maybe ms/BooleanValue]]
                        [:pivot_results {:optional true} [:maybe ms/BooleanValue]]]]]]]]]
     ;; for testing only
-    [:notification/testing :map]]])</pre></td></tr><tr><td class="docs"><p>Schema for the notification payload.</p>
-</td><td class="codes"><pre class="brush: clojure">(def NotificationPayload
+    [:notification/testing :map]]])</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(mr/def ::NotificationPayload
+  &quot;Schema for the notification payload.&quot;
   ;; TODO: how do we make this schema closed after :merge?
   [:merge
    [:map
@@ -2948,7 +2942,7 @@ net.brehaut.ClojureTools = (function (SH) {
     [:notification/dashboard
      [:map
       [:payload [:map
-                 [:dashboard_parts             [:sequential notification.payload.execute/Part]]
+                 [:dashboard_parts             [:sequential ::notification.payload.execute/Part]]
                  [:dashboard                   :map]
                  [:dashboard_subscription      :map]
                  [:style                       :map]
@@ -2956,10 +2950,11 @@ net.brehaut.ClojureTools = (function (SH) {
     [:notification/card
      [:map
       [:payload [:map
-                 [:card_part [:maybe notification.payload.execute/Part]]
-                 [:card      :map]
-                 [:style     :map]
-                 [:alert     :map]]]]]
+                 [:card_part         [:maybe ::notification.payload.execute/Part]]
+                 [:card              :map]
+                 [:style             :map]
+                 [:notification_card ::models.notification/NotificationCard]
+                 [:subscriptions     [:sequential ::models.notification/NotificationSubscription]]]]]]
     [:notification/testing   :map]]])</pre></td></tr><tr><td class="docs"><p>Return the URL for the application logo. If the logo is the default, return a URL to the Metabase logo.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- logo-url
   []
@@ -2996,9 +2991,9 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defmulti payload
   {:arglists '([notification-info])}
   :payload_type)</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(mu/defn notification-payload :- NotificationPayload
+</td><td class="codes"><pre class="brush: clojure">(mu/defn notification-payload :- ::NotificationPayload
   &quot;Realize notification-info with :context and :payload.&quot;
-  [notification :- Notification]
+  [notification :- ::Notification]
   (assoc (select-keys notification [:payload_type])
          :creator (t2/select-one [:model/User :id :first_name :last_name :email] (:creator_id notification))
          :payload (payload notification)

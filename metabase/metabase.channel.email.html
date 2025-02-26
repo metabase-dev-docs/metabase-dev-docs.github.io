@@ -3026,7 +3026,7 @@ Provided so you can swap this out with an "inbox" for test purposes.</p>
   [:and
    [:map {:closed true}
     [:subject      :string]
-    [:recipients   [:sequential ms/Email]]
+    [:recipients   [:or [:sequential ms/Email] [:set ms/Email]]]
     [:message-type [:enum :text :html :attachments]]
     [:message      [:or :string [:sequential :map]]]
     [:bcc?         {:optional true} [:maybe :boolean]]]
@@ -3039,18 +3039,19 @@ Provided so you can swap this out with an "inbox" for test purposes.</p>
 does not catch and swallow thrown exceptions, it will bubble up. Should prefer to use [[send-email-retrying!]] unless
 the caller has its own retry logic.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn send-message-or-throw!
-  [{:keys [subject recipients message-type message] :as email}]
+  [{:keys [subject recipients message-type message bcc?] :as _email}]
   (try
     (when-not (email-smtp-host)
       (throw (ex-info (tru &quot;SMTP host is not set.&quot;) {:cause :smtp-host-not-set})))
     ;; Now send the email
-    (let [to-type (if (:bcc? email) :bcc :to)]
+    (let [to-type (if bcc? :bcc :to)]
       (send-email! (smtp-settings)
                    (merge
                     {:from    (if-let [from-name (email-from-name)]
                                 (str from-name &quot; &lt;&quot; (email-from-address) &quot;&gt;&quot;)
                                 (email-from-address))
-                     to-type  recipients
+                     ;; FIXME: postal doesn't accept recipients if it's a set, need to fix this from upstream
+                     to-type  (seq recipients)
                      :subject subject
                      :body    (case message-type
                                 :attachments message
