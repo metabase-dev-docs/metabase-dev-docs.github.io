@@ -2878,7 +2878,6 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.api.macros :as api.macros]
    [metabase.api.query-metadata :as api.query-metadata]
    [metabase.events :as events]
-   [metabase.lib.convert :as lib.convert]
    [metabase.lib.core :as lib]
    [metabase.lib.metadata.jvm :as lib.metadata.jvm]
    [metabase.lib.types.isa :as lib.types.isa]
@@ -2951,14 +2950,17 @@ net.brehaut.ClojureTools = (function (SH) {
        (filter (fn [card] (some #{model-id} (-&gt; card :dataset_query query/collect-card-ids))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- cards-for-segment-or-metric
   [model-type model-id]
-  (-&gt;&gt; (t2/select :model/Card (merge order-by-name
-                                     {:where [:like :dataset_query (str &quot;%&quot; (name model-type) &quot;%&quot; model-id &quot;%&quot;)]}))
-       ;; now check if the segment/metric with model-id really occurs in a filter/aggregation expression
-       (filter (fn [card]
-                 (when-let [query (some-&gt; card :dataset_query lib.convert/-&gt;pMBQL)]
-                   (case model-type
-                     :segment (lib/uses-segment? query model-id)
-                     :metric  (lib/uses-metric? query model-id)))))))</pre></td></tr><tr><td class="docs">
+  (lib.metadata.jvm/with-metadata-provider-cache
+    (-&gt;&gt; (t2/select :model/Card (merge order-by-name
+                                       {:where [:like :dataset_query (str &quot;%&quot; (name model-type) &quot;%&quot; model-id &quot;%&quot;)]}))
+         ;; now check if the segment/metric with model-id really occurs in a filter/aggregation expression
+         (filter (fn [card]
+                   (when-let [legacy-query (some-&gt; card :dataset_query)]
+                     (let [mp    (lib.metadata.jvm/application-database-metadata-provider (:database_id card))
+                           query (lib/query mp legacy-query)]
+                       (case model-type
+                         :segment (lib/uses-segment? query model-id)
+                         :metric  (lib/uses-metric? query model-id)))))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod cards-for-filter-option* :using_metric
   [_filter-option model-id]
   (cards-for-segment-or-metric :metric model-id))</pre></td></tr><tr><td class="docs">

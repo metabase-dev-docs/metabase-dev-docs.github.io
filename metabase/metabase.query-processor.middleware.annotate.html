@@ -2877,7 +2877,6 @@ net.brehaut.ClojureTools = (function (SH) {
    [metabase.legacy-mbql.schema :as mbql.s]
    [metabase.legacy-mbql.util :as mbql.u]
    [metabase.lib.binning :as lib.binning]
-   [metabase.lib.convert :as lib.convert]
    [metabase.lib.core :as lib]
    [metabase.lib.metadata :as lib.metadata]
    [metabase.lib.metadata.calculation :as lib.metadata.calculation]
@@ -3160,49 +3159,49 @@ will see.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- mlv2-query [inner-query]
   (qp.store/cached [:mlv2-query (hash inner-query)]
     (try
-      (lib/query
+      (lib/query-from-legacy-inner-query
        (qp.store/metadata-provider)
-       (lib.convert/-&gt;pMBQL (lib.convert/legacy-query-from-inner-query
-                             (:id (lib.metadata/database (qp.store/metadata-provider)))
-                             (mbql.normalize/normalize-fragment [:query] inner-query))))
+       (:id (lib.metadata/database (qp.store/metadata-provider)))
+       (mbql.normalize/normalize-fragment [:query] inner-query))
       (catch Throwable e
         (throw (ex-info (tru &quot;Error converting query to pMBQL: {0}&quot; (ex-message e))
                         {:inner-query inner-query, :type qp.error-type/qp}
-                        e))))))</pre></td></tr><tr><td class="docs"><p>Return appropriate column metadata for an <code>:aggregation</code> clause.</p>
-</td><td class="codes"><pre class="brush: clojure">(mu/defn- col-info-for-aggregation-clause
-  ;; `clause` is normally an aggregation clause but this function can call itself recursively; see comments by the
-  ;; `match` pattern for field clauses below
-  [inner-query :- :map
-   clause]
-  (let [mlv2-clause (lib.convert/-&gt;pMBQL clause)]
-    ;; for some mystery reason it seems like the annotate code uses `:long` style display names when something appears
-    ;; inside an aggregation clause, e.g.
-    ;;
-    ;;    Distinct values of Category → Name
-    ;;
-    ;; but `:default` style names when they appear on their own or in breakouts, e.g.
-    ;;
-    ;;    Name
-    ;;
-    ;; why is this the case? Who knows! But that's the old pre-MLv2 behavior. I think we should try to fix it, but it's
-    ;; probably going to involve updating a ton of tests that encode the old behavior.
-    (binding [lib.metadata.calculation/*display-name-style* :long]
-      (-&gt; (lib/metadata (mlv2-query inner-query) -1 mlv2-clause)
-          (update-keys u/-&gt;snake_case_en)
-          (dissoc :lib/type)))))</pre></td></tr><tr><td class="docs">
+                        e))))))</pre></td></tr><tr><td class="docs"><p>Return appropriate (legacy) column metadata for the <code>:aggregation</code> clauses of this legacy inner query, in order.</p>
+</td><td class="codes"><pre class="brush: clojure">(mu/defn- col-info-for-aggregation-clauses
+  [inner-query]
+  ;; for some mystery reason it seems like the annotate code uses `:long` style display names when something appears
+  ;; inside an aggregation clause, e.g.
+  ;;
+  ;;    Distinct values of Category → Name
+  ;;
+  ;; but `:default` style names when they appear on their own or in breakouts, e.g.
+  ;;
+  ;;    Name
+  ;;
+  ;; why is this the case? Who knows! But that's the old pre-MLv2 behavior. I think we should try to fix it, but it's
+  ;; probably going to involve updating a ton of tests that encode the old behavior.
+  (when (seq (:aggregation inner-query))
+    (let [query (mlv2-query inner-query)]
+      (binding [lib.metadata.calculation/*display-name-style* :long]
+        (for [agg-metadata (lib/aggregations-metadata query -1)]
+          (-&gt; (m/remove-keys #(= &quot;lib&quot; (namespace %)) agg-metadata)
+              (update-keys u/-&gt;snake_case_en)))))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(def ^:private LegacyInnerQuery
   [:and
    :map
    [:fn
     {:error/message &quot;legacy inner-query with :source-table or :source-query&quot;}
-    (some-fn :source-table :source-query)]])</pre></td></tr><tr><td class="docs">
+    (some-fn :source-table :source-query)]])</pre></td></tr><tr><td class="docs"><p>TODO: This function is janky, and converts isolated legacy aggregations and expressions into pMBQL.
+The right approach here is to adjust the annotate middleware to ensure that all aggregations and expressions
+already have the right column names present in their options. Then this function can be deprecated, and replaced
+with another helper (probably in the driver or MBQL utils?) that grabs the :name for a clause from its options.</p>
 </td><td class="codes"><pre class="brush: clojure">(mu/defn aggregation-name :- ::lib.schema.common/non-blank-string
   &quot;Return an appropriate aggregation name/alias *used inside a query* for an `:aggregation` subclause (an aggregation
   or expression). Takes an options map as schema won't support passing keypairs directly as a varargs.
   These names are also used directly in queries, e.g. in the equivalent of a SQL `AS` clause.&quot;
   [inner-query :- LegacyInnerQuery
    ag-clause]
-  (lib/column-name (mlv2-query inner-query) (lib.convert/-&gt;pMBQL ag-clause)))</pre></td></tr><tr><td class="docs"><p>----------------------------------------- Putting it all together (MBQL) -----------------------------------------</p>
+  (lib/column-name (mlv2-query inner-query) (lib/-&gt;pMBQL ag-clause)))</pre></td></tr><tr><td class="docs"><p>----------------------------------------- Putting it all together (MBQL) -----------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defn- check-correct-number-of-columns-returned [returned-mbql-columns results]
   (let [expected-count (count returned-mbql-columns)
@@ -3225,13 +3224,13 @@ will see.</p>
     (assoc (col-info-for-field-clause inner-query field)
            :source :fields)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn- cols-for-ags-and-breakouts
-  [{aggregations :aggregation, breakouts :breakout, :as inner-query} :- :map]
+  [{breakouts :breakout, :as inner-query} :- :map]
   (concat
    (for [breakout breakouts]
      (assoc (col-info-for-field-clause inner-query breakout)
             :source :breakout))
-   (for [[i aggregation] (m/indexed aggregations)]
-     (assoc (col-info-for-aggregation-clause inner-query aggregation)
+   (for [[i aggregation] (m/indexed (col-info-for-aggregation-clauses inner-query))]
+     (assoc aggregation
             :source            :aggregation
             :field_ref         [:aggregation i]
             :aggregation_index i))))</pre></td></tr><tr><td class="docs"><p>Return results metadata about the expected columns in an 'inner' MBQL query.</p>

@@ -2875,10 +2875,12 @@ net.brehaut.ClojureTools = (function (SH) {
    [medley.core :as m]
    [metabase.driver :as driver]
    [metabase.legacy-mbql.normalize :as mbql.normalize]
-   [metabase.lib.convert :as lib.convert]
+   [metabase.lib.core :as lib]
+   [metabase.lib.metadata.jvm :as lib.metadata.jvm]
    [metabase.lib.schema.expression :as lib.schema.expression]
    [metabase.lib.schema.util :as lib.schema.util]
    [metabase.query-processor.schema :as qp.schema]
+   [metabase.query-processor.store :as qp.store]
    [metabase.util :as u]
    [metabase.util.json :as json]
    [metabase.util.malli :as mu]))</pre></td></tr><tr><td class="docs">
@@ -2953,6 +2955,10 @@ producing different hashes.)</p>
       true                 lib.schema.util/indexed-order-bys
       true                 lib.schema.util/remove-randomized-idents
       true                 walk-query-sort-maps)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- -&gt;metadata-provider [legacy-query]
+  (if (qp.store/initialized?)
+    (qp.store/metadata-provider)
+    (lib.metadata.jvm/application-database-metadata-provider (:database legacy-query))))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(mu/defn query-hash :- bytes?
   &quot;Return a 256-bit SHA3 hash of `query` as a key for the cache. (This is returned as a byte array.)&quot;
   ^bytes [query :- [:maybe :map]]
@@ -2961,10 +2967,12 @@ producing different hashes.)</p>
                 ;; Expression type check supression is necessary because coerced fields in `query` may not have
                 ;; `:effective-type` populated. That's the case during call to this function in
                 ;; `process-userland-query-middleware` that occurs before normalization.
+                ;; TODO: This is an unfortunate leak of lib internals but I can't see a clean way to fix it.
                 (binding [lib.schema.expression/*suppress-expression-type-check?* true]
-                  (cond-&gt; query
-                    (#{&quot;query&quot; &quot;native&quot;} (:type query)) (#(lib.convert/-&gt;pMBQL (mbql.normalize/normalize %)))
-                    (#{:query :native} (:type query))   lib.convert/-&gt;pMBQL))
+                  (case (:type query)
+                    (&quot;query&quot; &quot;native&quot;) (lib/query (-&gt;metadata-provider query) (mbql.normalize/normalize query))
+                    (:query :native)   (lib/query (-&gt;metadata-provider query) query)
+                    query))
                 (catch Throwable e
                   (throw (ex-info &quot;Error hashing query. Is this a valid query?&quot;
                                   {:query query}
