@@ -2912,9 +2912,12 @@ net.brehaut.ClojureTools = (function (SH) {
       ;; We want to fire the trigger once even if the previous triggers  missed
      (cron/with-misfire-handling-instruction-fire-and-proceed)))
    ;; higher than sync
-   (triggers/with-priority 6)))</pre></td></tr><tr><td class="docs"><p>Update the trigger for a notification subscription if it exists and needs to be updated.</p>
+   (triggers/with-priority 6)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- create-new-trigger!
+  [{:keys [id cron_schedule] :as _notification-subscription}]
+  (task/add-trigger! (build-trigger id cron_schedule)))</pre></td></tr><tr><td class="docs"><p>Update the trigger for a notification subscription if it exists and needs to be updated.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn update-subscription-trigger!
-  [{:keys [id type cron_schedule] :as _notification-subscription}]
+  [{:keys [id type cron_schedule] :as notification-subscription}]
   (let [existing-trigger (first (task/existing-triggers send-notification-job-key (send-notification-trigger-key id)))]
     (cond
      ;; delete trigger if type changes
@@ -2931,12 +2934,12 @@ net.brehaut.ClojureTools = (function (SH) {
       (not existing-trigger)
       (do
         (log/infof &quot;Creating new trigger for subscription %d with schedule %s&quot; id cron_schedule)
-        (task/add-trigger! (build-trigger id cron_schedule)))
+        (create-new-trigger! notification-subscription))
       (not= cron_schedule (:schedule existing-trigger))
       (do
         (log/infof &quot;Rescheduling trigger for subscription %d from %s to %s&quot; id (:schedule existing-trigger) cron_schedule)
         (task/delete-trigger! (-&gt; existing-trigger :key triggers/key))
-        (task/add-trigger! (build-trigger id cron_schedule)))
+        (create-new-trigger! notification-subscription))
       :else
       (log/infof &quot;No changes to trigger for subscription %d&quot; id))))</pre></td></tr><tr><td class="docs"><p>Delete the trigger for a notification subscription.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn delete-trigger-for-subscription!
@@ -2988,15 +2991,20 @@ net.brehaut.ClojureTools = (function (SH) {
   SendNotification
   [context]
   (let [{:strs [subscription-id]} (qc/from-job-data context)]
-    (send-notification* subscription-id)))</pre></td></tr><tr><td class="docs"><p>Find all notification subscriptions with cron schedules and create a trigger for each.</p>
+    (send-notification* subscription-id)))</pre></td></tr><tr><td class="docs"><p>Initialize all notification subscription triggers.</p>
 
-<p>  Context: We've migrated alerts from pulse to notifications, see the <code>v53.2024-12-12T08:05:00</code> migration.
-  This job is needed to create triggers for all existing notification subscriptions.
-  Will only run once when Metabase starts up.</p>
+<p>Called when starting the instance.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn init-send-notification-triggers!
+  []
+  (assert (task/scheduler) &quot;Scheduler must be started before initializing SendPulse triggers&quot;)
+  (task/delete-all-triggers-of-job! send-notification-job-key)
+  (run! create-new-trigger! (t2/reducible-select :model/NotificationSubscription :type :notification-subscription/cron)))</pre></td></tr><tr><td class="docs"><p>Find all notification subscriptions with cron schedules and create a trigger for each.
+  Run once on startup.</p>
 </td><td class="codes"><pre class="brush: clojure">(jobs/defjob
   InitNotificationTriggers
   [_context]
-  (run! update-subscription-trigger! (t2/reducible-select :model/NotificationSubscription)))</pre></td></tr><tr><td class="docs">
+  (log/info &quot;Initializing SendNotification triggers&quot;)
+  (init-send-notification-triggers!))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod task/init! ::SendNotifications [_]
   (let [send-notification-job              (jobs/build
                                             (jobs/with-identity send-notification-job-key)
@@ -3009,7 +3017,7 @@ net.brehaut.ClojureTools = (function (SH) {
                                             (jobs/store-durably))
         init-notification-triggers-trigger (triggers/build
                                             (triggers/with-identity (triggers/key &quot;metabase.task.notification.init-notification-triggers.trigger&quot;))
-                                            ;; run only once per MB instance (like a migration)
+                                            ;; run once on startup
                                             (triggers/start-now))]
     (task/add-job! send-notification-job)
     (task/schedule-task! init-notification-triggers-job init-notification-triggers-trigger)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;

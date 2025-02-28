@@ -3000,13 +3000,13 @@ and send the pulse to both channels. </p>
   SendPulse
   [context]
   (let [{:strs [pulse-id channel-ids]} (qc/from-job-data context)]
-    (send-pulse!* pulse-id channel-ids)))</pre></td></tr><tr><td class="docs"><p>------------------------------------------------ Job: InitSendPulseTriggers ----------------------------------------------------</p>
-</td><td class="codes"></td></tr><tr><td class="docs">
+    (send-pulse!* pulse-id channel-ids)))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(declare update-send-pulse-trigger-if-needed!)</pre></td></tr><tr><td class="docs"><p>Update send pulse triggers for all active pulses.
 Called once when Metabase starts up to create triggers for all existing PulseChannels</p>
-</td><td class="codes"><pre class="brush: clojure">(defn init-send-pulse-triggers!
+</td><td class="codes"><pre class="brush: clojure">(defn init-dashboard-subscription-triggers!
   []
-  (log/info &quot;Initializing SendPulse triggers&quot;)
+  (assert (task/scheduler) &quot;Scheduler must be started before initializing SendPulse triggers&quot;)
+  (task/delete-all-triggers-of-job! send-pulse-job-key)
   (let [trigger-slot-&gt;pc-ids (as-&gt; (t2/select :model/PulseChannel
                                               {:select    [:pc.*]
                                                :from      [[:pulse_channel :pc]]
@@ -3014,29 +3014,15 @@ Called once when Metabase starts up to create triggers for all existing PulseCha
                                                            [:report_dashboard :d] [:= :p.dashboard_id :d.id]]
                                                :where     [:and
                                                            [:= :pc.enabled true]
-                                                           [:or
-                                                            ;; alerts
-                                                            [:= :p.dashboard_id nil]
-                                                            ;; if dashboard subscriptions, make sure it's not archived
-                                                            [:= :d.archived false]]]})
+                                                           ;; only do this for dashboard subscriptions, alert has been
+                                                           ;; migrated to notifications
+                                                           [:not= :p.dashboard_id nil]
+                                                           [:= :d.archived false]]})
                                    results
                                (group-by #(select-keys % [:pulse_id :schedule_type :schedule_day :schedule_hour :schedule_frame]) results)
                                (update-vals results #(map :id %)))]
     (doseq [[{:keys [pulse_id] :as schedule-map} pc-ids] trigger-slot-&gt;pc-ids]
-      (update-send-pulse-trigger-if-needed! pulse_id schedule-map :add-pc-ids (set pc-ids)))))</pre></td></tr><tr><td class="docs"><p>Find all active pulse Channels, group them by pulse-id and schedule time and create a trigger for each.</p>
-
-<p>  This is basically a migration in disguise to move from the old SendPulses job to the new SendPulse job.</p>
-
-<p>  Context: prior to this, SendPulses is a single job that runs hourly and send all Pulses that are scheduled for that
-  hour.
-  Since that's inefficient and we want to be able to send pulses in parallel, we changed it so that each PulseChannel
-  of the same schedule will have its own SendPulse trigger.
-  During this transition, we need to schedule all the SendPulse triggers for existing PulseChannels, so we have this job
-  that run once on Metabase startup to do that.</p>
-</td><td class="codes"><pre class="brush: clojure">(jobs/defjob
-  InitSendPulseTriggers
-  [_context]
-  (init-send-pulse-triggers!))</pre></td></tr><tr><td class="docs"><p>--------------------------------------------- Helpers -------------------------------------------</p>
+      (update-send-pulse-trigger-if-needed! pulse_id schedule-map :add-pc-ids (set pc-ids)))))</pre></td></tr><tr><td class="docs"><p>--------------------------------------------- Helpers -------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs"><p>Update send pulse trigger of a pulse for a specific schedule map with new pulse channel ids.</p>
 
 <p>Send Pulse triggers are grouped by pulse id and schedule time, meaning PulseChannels of a Pulse that scheduled
@@ -3083,7 +3069,13 @@ This function will updates the corresponding trigger if PulseChannels changes.</
       (do
         (log/infof &quot;Updating Send Pulse trigger %s for pulse %d with new pc-ids: %s, was: %s &quot; trigger-key pulse-id new-pc-ids existing-pc-ids)
         (task/delete-trigger! trigger-key)
-        (task/add-trigger! (send-pulse-trigger pulse-id schedule-map new-pc-ids (send-trigger-timezone)))))))</pre></td></tr><tr><td class="docs"><p>-------------------------------------------------- Task init ------------------------------------------------</p>
+        (task/add-trigger! (send-pulse-trigger pulse-id schedule-map new-pc-ids (send-trigger-timezone)))))))</pre></td></tr><tr><td class="docs"><p>Find all active Dashboard Subscriptino channels, group them by pulse-id and schedule time and create a trigger for each.
+  Do this every startup to make sure all active pulse channels are triggered correctly.</p>
+</td><td class="codes"><pre class="brush: clojure">(jobs/defjob
+  InitSendPulseTriggers
+  [_context]
+  (log/info &quot;Initializing SendPulse triggers for dashboard subscriptions&quot;)
+  (init-dashboard-subscription-triggers!))</pre></td></tr><tr><td class="docs"><p>-------------------------------------------------- Task init ------------------------------------------------</p>
 </td><td class="codes"></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(defmethod task/init! ::SendPulses [_]
   (let [send-pulse-job (jobs/build
@@ -3096,8 +3088,8 @@ This function will updates the corresponding trigger if PulseChannels changes.</
                         (jobs/with-identity (jobs/key &quot;metabase.task.send-pulses.init-send-pulse-triggers.job&quot;))
                         (jobs/store-durably))
         init-trigger   (triggers/build
+                        ;; run once on startup
                         (triggers/with-identity (triggers/key &quot;metabase.task.send-pulses.init-send-pulse-triggers.trigger&quot;))
-                        ;; run only once per MB instance (like a migration)
                         (triggers/start-now))]
     (task/add-job! send-pulse-job)
     (task/schedule-task! init-job init-trigger)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;

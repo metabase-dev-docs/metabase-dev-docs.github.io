@@ -2869,10 +2869,6 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.db.custom-migrations.pulse-to-notification
   (:require
    [clojure.string :as str]
-   [clojurewerkz.quartzite.jobs :as jobs]
-   [clojurewerkz.quartzite.scheduler :as qs]
-   [clojurewerkz.quartzite.triggers :as triggers]
-   [metabase.db.custom-migrations.util :as custom-migrations.util]
    [metabase.util.json :as json]
    [toucan2.core :as t2]))</pre></td></tr><tr><td class="docs"><p>Build a cron string from key-value pair parts.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- cron-string
@@ -2942,16 +2938,10 @@ Return the created notification.</p>
                                       (t2/select :pulse_channel_recipient :pulse_channel_id [:in (map :id pcs)]))]
       (map (fn [pc]
              (assoc pc :recipients (get pc-id-&gt;recipients (:id pc))))
-           pcs))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(defn- send-pulse-trigger-key
-  [pulse-id schedule-map]
-  (triggers/key (format &quot;metabase.task.send-pulse.trigger.%d.%s&quot;
-                        pulse-id (-&gt; schedule-map
-                                     schedule-map-&gt;cron-string
-                                     (str/replace &quot; &quot; &quot;_&quot;)))))</pre></td></tr><tr><td class="docs"><p>Create a new notification with <code>subsciptions</code>.
+           pcs))))</pre></td></tr><tr><td class="docs"><p>Create a new notification with <code>subsciptions</code>.
 Return the created notifications.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn- alert-&gt;notification!
-  [scheduler pulse]
+  [pulse]
   (let [pulse-id   (:id pulse)
         pcs        (hydrate-recipients (t2/select :pulse_channel :pulse_id pulse-id :enabled true))
         ;; alerts have one pulse-card, but to be safe we select the latest one by id
@@ -3003,21 +2993,14 @@ Return the created notifications.</p>
                                      {:channel_type &quot;channel/http&quot;
                                       :channel_id    (:channel_id pc)})))
                                 pcs)]
-         (qs/delete-trigger scheduler (send-pulse-trigger-key pulse-id pc))
          (create-notification! notification subscriptions handlers))))))</pre></td></tr><tr><td class="docs"><p>Migrate alerts from <code>pulse</code> to <code>notification</code>.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn migrate-alerts!
   []
   #_{:clj-kondo/ignore [:unresolved-symbol]}
-  (custom-migrations.util/with-temp-schedule! [scheduler]
-    (run! #(alert-&gt;notification! scheduler %)
-          (t2/reducible-query {:select [:*]
-                               :from   [:pulse]
-                               :where  [:and [:in :alert_condition [&quot;rows&quot; &quot;goal&quot;]] [:not :archived]]}))))</pre></td></tr><tr><td class="docs"><p>Remove the init-send-pulse-triggers.trigger from the scheduler so that it can run again.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn remove-init-send-pulse-trigger!
-  []
-  (custom-migrations.util/with-temp-schedule! [scheduler]
-    (qs/delete-job scheduler (jobs/key &quot;metabase.task.send-pulses.init-send-pulse-triggers.job&quot;))
-    (qs/delete-trigger scheduler (triggers/key &quot;metabase.task.send-pulses.init-send-pulse-triggers.trigger&quot;))))</pre></td></tr><tr><td class="docs">
+  (run! alert-&gt;notification!
+        (t2/reducible-query {:select [:*]
+                             :from   [:pulse]
+                             :where  [:and [:in :alert_condition [&quot;rows&quot; &quot;goal&quot;]] [:not :archived]]})))</pre></td></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(comment
   (t2/delete! :model/Notification)
   (migrate-alerts!)
