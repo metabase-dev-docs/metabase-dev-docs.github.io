@@ -2904,28 +2904,29 @@ for the duration of a request in [[metabase.permissions.models.data-permissions/
 </td><td class="codes"><pre class="brush: clojure">(defenterprise enforced-sandboxes-for-user
   :feature :sandboxes
   [user-id]
-  (let [user-group-ids           (user/group-ids user-id)
-        sandboxes-with-group-ids (t2/hydrate
-                                  (t2/select :model/GroupTableAccessPolicy
-                                             {:select [[:pgm.group_id :group_id]
-                                                       [:s.*]]
-                                              :from [[:permissions_group_membership :pgm]]
-                                              :left-join [[:sandboxes :s] [:= :s.group_id :pgm.group_id]]
-                                              :where [:and
-                                                      [:= :pgm.user_id user-id]]})
-                                  :table)
-        impersonations-with-group-ids (t2/select :model/ConnectionImpersonation
-                                                 :group_id [:in user-group-ids])
-        group-id-&gt;impersonations (-&gt;&gt; impersonations-with-group-ids
-                                      (group-by :group_id))
-        group-id-&gt;sandboxes (-&gt;&gt; sandboxes-with-group-ids
-                                 (group-by :group_id)
-                                 (m/map-vals (fn [sandboxes]
-                                               (-&gt;&gt; sandboxes
-                                                    (filter :table_id)
-                                                    (into #{})))))]
-    (filter #(enforce-sandbox? % user-group-ids group-id-&gt;sandboxes group-id-&gt;impersonations)
-            (reduce set/union #{} (vals group-id-&gt;sandboxes)))))</pre></td></tr><tr><td class="docs"><p>Given collection of table-ids, return the sandboxes that should be enforced for the current user on any of the tables. A
+  (when user-id
+    (let [user-group-ids           (user/group-ids user-id)
+          sandboxes-with-group-ids (t2/hydrate
+                                    (t2/select :model/GroupTableAccessPolicy
+                                               {:select [[:pgm.group_id :group_id]
+                                                         [:s.*]]
+                                                :from [[:permissions_group_membership :pgm]]
+                                                :left-join [[:sandboxes :s] [:= :s.group_id :pgm.group_id]]
+                                                :where [:and
+                                                        [:= :pgm.user_id user-id]]})
+                                    :table)
+          impersonations-with-group-ids (t2/select :model/ConnectionImpersonation
+                                                   :group_id [:in user-group-ids])
+          group-id-&gt;impersonations (-&gt;&gt; impersonations-with-group-ids
+                                        (group-by :group_id))
+          group-id-&gt;sandboxes (-&gt;&gt; sandboxes-with-group-ids
+                                   (group-by :group_id)
+                                   (m/map-vals (fn [sandboxes]
+                                                 (-&gt;&gt; sandboxes
+                                                      (filter :table_id)
+                                                      (into #{})))))]
+      (filter #(enforce-sandbox? % user-group-ids group-id-&gt;sandboxes group-id-&gt;impersonations)
+              (reduce set/union #{} (vals group-id-&gt;sandboxes))))))</pre></td></tr><tr><td class="docs"><p>Given collection of table-ids, return the sandboxes that should be enforced for the current user on any of the tables. A
 sandbox is not enforced if the user is in a different permissions group that grants full access to the table.</p>
 </td><td class="codes"><pre class="brush: clojure">(defn enforced-sandboxes-for-tables
   [table-ids]

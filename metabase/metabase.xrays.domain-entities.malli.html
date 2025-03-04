@@ -2867,118 +2867,25 @@ net.brehaut.ClojureTools = (function (SH) {
 })(SyntaxHighlighter);
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.xrays.domain-entities.malli" name="metabase.xrays.domain-entities.malli"><h1 class="project-name">metabase.xrays.domain-entities.malli</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.xrays.domain-entities.malli
-  (:refer-clojure :exclude [defn])
   (:require
-   [malli.instrument]
-   [net.cgrand.macrovich :as macros]))</pre></td></tr><tr><td class="docs"><p>Generates an accessor, given the symbol and path to the value.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro -define-getter
-  [sym path]
-  `(clojure.core/defn ~(vary-meta sym assoc :export true)
-     ~(str &quot;Accessor for `&quot; path &quot;`.&quot;)
-     [obj#]
-     (get-in obj# ~path)))</pre></td></tr><tr><td class="docs"><p>Incoming converter for the replacement value. <code>identity</code> in CLJ.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro -define-converter
-  [schema path in-sym]
-  `(def ~in-sym
-     ~(macros/case
-        :cljs `(-&gt; ~schema
-                   (metabase.xrays.domain-entities.malli/schema-for-path ~path)
-                   metabase.xrays.domain-entities.converters/incoming)
-        :clj  `identity)))</pre></td></tr><tr><td class="docs"><p>Generates a setter. Prefixes the symbol with <code>with-</code>, ie. <code>with-foo-bar</code>.
-<code>in-sym</code> is the name of the incoming converter defined by [[-define-converter]].
-Calls that converter on the new value before <code>assoc</code>ing it in.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro -define-setter
-  [sym path in-sym]
-  `(clojure.core/defn ~(vary-meta (symbol (str &quot;with-&quot; (name sym)))
-                                  assoc :export true)
-     ~(str &quot;Updater for `&quot; path &quot;`.&quot;)
-     [obj# new-value#]
-     (assoc-in obj# ~path (~in-sym new-value#))))</pre></td></tr><tr><td class="docs"><p>Generates the outgoing converter from CLJS data structures to vanilla JS objects.
-Generates nothing in CLJ mode.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro -define-js-converter
-  [schema path out-sym]
-  (macros/case
-    :cljs `(def ~out-sym
-             (metabase.xrays.domain-entities.converters/outgoing
-              (metabase.xrays.domain-entities.malli/schema-for-path ~schema ~path)))))</pre></td></tr><tr><td class="docs"><p>Generates a getter that converts back to a JS object, in CLJS.
-Generates nothing in CLJ.
-<code>sym</code> is the main symbol, eg. <code>foo-bar</code>. <code>out-sym</code> is the outgoing converter defined by
-[[-define-js-converter]], eg. <code>foo-bar-&gt;</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro -define-js-returning-getter
-  [sym path out-sym]
-  (macros/case
-    :cljs `(clojure.core/defn ~(vary-meta (symbol (str (name sym) &quot;-js&quot;))
-                                          assoc :export true)
-             ~(str &quot;Fetches `&quot; path &quot;` and converts it to plain JS.&quot;)
-             [obj#]
-             (~out-sym (~sym obj#)))))</pre></td></tr><tr><td class="docs"><p>Generates the getter, setter and necessary JS&lt;->CLJS converters for a single <code>sym</code> and <code>path</code> pair.</p>
-
-<p>In CLJ, this generates the getter, setter and a dummy incoming converter that is just <code>identity</code>.</p>
-
-<p>In CLJS, generates the getter and setter, real converters in both directions, and a getter that returns
-vanilla JS objects instead of CLJS data.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro -define-getter-and-setter
-  [schema sym path]
-  (let [in-sym  (vary-meta (symbol (str &quot;-&gt;&quot; (name sym)))
-                           assoc :private true)
-        out-sym (vary-meta (symbol (str (name sym) &quot;-&gt;&quot;))
-                           assoc :private true)]
-    `(do
-       (-define-getter ~sym ~path)
-       (-define-converter ~schema ~path ~in-sym)
-       (-define-setter ~sym ~path ~in-sym)
-       (-define-js-converter ~schema ~path ~out-sym)
-       (-define-js-returning-getter ~sym ~path ~out-sym))))</pre></td></tr><tr><td class="docs"><p>Generates an accessor (<code>get-in</code>) and updater (<code>assoc-in</code>) for each specified path.</p>
-
-<p>For example:
-```
-(define-getters-and-setters Question
-  dataset-query [:card :dataset-query]
-  cache-ttl     [:card :cache-ttl])
-```
-will generate:
-```
-(mu/defn ^:export dataset-query :- DatasetQuery
-  "Accessor for [:card :dataset-query]."
-  [obj :- Question]
-  (get-in obj [:card :dataset-query]))</p>
-
-<p>;; This converter is always defined, but it's <code>identity</code> in CLJ.
-;; Note that it's safe to call these converters even if the incoming data is already CLJS.
-;; This is what's generated in CLJS:
-(def ^:private ->dataset-query
-  (converters/incoming DatasetQuery))</p>
-
-<p>(mu/defn ^:export with-dataset-query :- Question
-  "Updater for [:card :dataset-query]."
-  [obj :- Question new-value :- DatasetQuery]
-  (assoc-in obj [:card :dataset-query] (->dataset-query new-value)))</p>
-
-<p>;; This converter is only generated in CLJS.
-(def ^:private dataset-query->
-  (converters/outgoing Question))</p>
-
-<p>;; This function is also only generated in CLJS.
-(mu/defn ^:export dataset-query-js :- :any
-  "Fetches <code>[:card :dataset-query]</code> and converts it to plain JS."
-  [obj :- Question]
-  (dataset-query-> (dataset-query obj)))</p>
-
-<p>;; ... and the same five things generated for cache-ttl and any other args.
-```</p>
-
-<p>You provide the schema for the parent object; the macro will examine that schema to determine the
-schema for the field being fetched or updated. The updater's name gets prefixed with <code>with-</code>, and the
-JS-returning getter suffixed with <code>-js</code>.</p>
-
-<p>The converters are private and intended to be internal to the macros. Since they only depend on the
-schema it's more efficient to compute them once and reuse them.</p>
-</td><td class="codes"><pre class="brush: clojure">(defmacro define-getters-and-setters
-  [schema sym path &amp; more]
-  `(do
-     (-define-getter-and-setter ~schema ~sym ~path)
-     ~(when (seq more)
-        `(define-getters-and-setters ~schema ~@more))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+   [malli.core :as mc]
+   [malli.util :as mut]
+   [metabase.xrays.domain-entities.converters])
+  (:require-macros [metabase.xrays.domain-entities.malli]))</pre></td></tr><tr><td class="docs"><p>Given a schema and a <em>value path</em> (as opposed to a <em>schema path</em>), finds the schema for that
+path. Throws if there are multiple such paths and those paths have different schemas.</p>
+</td><td class="codes"><pre class="brush: clojure">(clojure.core/defn schema-for-path
+  [schema path]
+  (let [paths (-&gt; schema mc/schema (mut/in-&gt;paths path))]
+    (cond
+      (empty? paths)      (throw (ex-info &quot;Path does not match schema&quot; {:schema schema :path path}))
+      (= (count paths) 1) (mut/get-in schema (first paths))
+      :else (let [child-schemas (map #(mut/get-in schema %) paths)]
+              (if (apply = child-schemas)
+                (first child-schemas)
+                (throw (ex-info &quot;Value path has multiple schema paths, with different schemas&quot;
+                                {:schema        schema
+                                 :paths         paths
+                                 :child-schemas child-schemas})))))))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack

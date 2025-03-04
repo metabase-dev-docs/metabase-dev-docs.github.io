@@ -2865,45 +2865,274 @@ net.brehaut.ClojureTools = (function (SH) {
     build_tree: build_tree
   };
 })(SyntaxHighlighter);
-</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.util.i18n" name="metabase.util.i18n"><h1 class="project-name">metabase.util.i18n</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>ClojureScript implementation of i18n <code>tru</code> macros and the like.</p>
+</script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.util.i18n" name="metabase.util.i18n"><h1 class="project-name">metabase.util.i18n</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs"><p>i18n functionality.</p>
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.util.i18n
   (:require
-   [&quot;ttag&quot; :as ttag]
-   [clojure.string :as str])
-  (:require-macros
-   [metabase.util.i18n]))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(comment metabase.util.i18n/keep-me
-         ttag/keep-me)</pre></td></tr><tr><td class="docs"><p>Converts <code>''</code> to <code>'</code> inside the string; that's <code>java.text.MessageFormat</code> escaping that isn't needed in JS.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn- escape-format-string
-  [format-string]
-  (str/replace format-string #&quot;''&quot; &quot;'&quot;))</pre></td></tr><tr><td class="docs"><p>Format an i18n <code>format-string</code> with <code>args</code> with a translated string in the user locale.</p>
+   [clojure.string :as str]
+   [clojure.walk :as walk]
+   [metabase.util.i18n.impl :as i18n.impl]
+   [metabase.util.json :as json]
+   [metabase.util.log :as log]
+   [net.cgrand.macrovich :as macros]
+   [potemkin :as p]
+   [potemkin.types :as p.types])
+  (:import
+   (java.text MessageFormat)
+   (java.util Locale)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(set! *warn-on-reflection* true)</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(p/import-vars
+ [i18n.impl
+  available-locale?
+  fallback-locale
+  locale
+  normalized-locale-string
+  translate])</pre></td></tr><tr><td class="docs"><p>Bind this to a string, keyword, or <code>Locale</code> to set the locale for the current User. To get the locale we should
+<em>use</em>, use the <code>user-locale</code> function instead.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *user-locale*
+  nil)</pre></td></tr><tr><td class="docs"><p>Bind this to a string, keyword to override the value returned by <code>site-locale</code>. For testing purposes,
+such as when swapping out an application database temporarily, when the setting table may not even exist.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^:dynamic *site-locale-override*
+  nil)</pre></td></tr><tr><td class="docs"><p>The default locale string for this Metabase installation. Normally this is the value of the <code>site-locale</code> Setting,
+which is also a string.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn site-locale-string
+  []
+  (or *site-locale-override*
+      (i18n.impl/site-locale-from-setting)
+      &quot;en&quot;))</pre></td></tr><tr><td class="docs"><p>Locale string we should <em>use</em> for the current User (e.g. <code>tru</code> messages) -- <code>*user-locale*</code> if bound, otherwise the
+system locale as a string.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn user-locale-string
+  []
+  (or *user-locale*
+      (site-locale-string)))</pre></td></tr><tr><td class="docs"><p>The default locale for this Metabase installation. Normally this is the value of the <code>site-locale</code> Setting.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn site-locale
+  ^Locale []
+  (locale (site-locale-string)))</pre></td></tr><tr><td class="docs"><p>Locale we should <em>use</em> for the current User (e.g. <code>tru</code> messages) -- <code>*user-locale*</code> if bound, otherwise the system
+locale.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn user-locale
+  ^Locale []
+  (locale (user-locale-string)))</pre></td></tr><tr><td class="docs"><p>Returns all locale abbreviations and their full names</p>
+</td><td class="codes"><pre class="brush: clojure">(defn available-locales-with-names
+  []
+  (for [locale-name (i18n.impl/available-locale-names)]
+    ;; Abbreviation must be normalized or the language picker will show incorrect saved value
+    ;; because the locale is normalized before saving (metabase#15657, metabase#16654)
+    [(normalized-locale-string locale-name) (.getDisplayName (locale locale-name))]))</pre></td></tr><tr><td class="docs"><p>Translate a string with the System locale.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- translate-site-locale
+  [format-string args pluralization-opts]
+  (let [translated (translate (site-locale) format-string args pluralization-opts)]
+    (log/tracef &quot;Translated %s for site locale %s -&gt; %s&quot;
+                (pr-str format-string) (pr-str (site-locale-string)) (pr-str translated))
+    translated))</pre></td></tr><tr><td class="docs"><p>Translate a string with the current User's locale.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- translate-user-locale
+  [format-string args pluralization-opts]
+  (let [translated (translate (user-locale) format-string args pluralization-opts)]
+    (log/tracef &quot;Translating %s for user locale %s (site locale %s) -&gt; %s&quot;
+                (pr-str format-string) (pr-str (user-locale-string))
+                (pr-str (site-locale-string)) (pr-str translated))
+    translated))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(p.types/defrecord+ UserLocalizedString [format-string args pluralization-opts]
+  Object
+  (toString [_]
+    (translate-user-locale format-string args pluralization-opts)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(p.types/defrecord+ SiteLocalizedString [format-string args pluralization-opts]
+  Object
+  (toString [_]
+    (translate-site-locale format-string args pluralization-opts)))</pre></td></tr><tr><td class="docs"><p>Write a UserLocalizedString or SiteLocalizedString to the <code>json-generator</code>. This is intended for
+<code>json/add-encoder</code>. Ideally we'd implement those protocols directly as it's faster, but currently that doesn't
+work with Cheshire</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- localized-to-json
+  [localized-string json-generator]
+  (json/write-string json-generator (str localized-string)))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(json/add-encoder UserLocalizedString localized-to-json)
+(json/add-encoder SiteLocalizedString localized-to-json)</pre></td></tr><tr><td class="docs"><p>Schema for user and system localized string instances</p>
+</td><td class="codes"><pre class="brush: clojure">(def LocalizedString
+  (letfn [(instance-of [^Class klass]
+            [:fn
+             {:error/message (str &quot;instance of &quot; (.getCanonicalName klass))}
+             (partial instance? klass)])]
+    [:or
+     (instance-of UserLocalizedString)
+     (instance-of SiteLocalizedString)]))</pre></td></tr><tr><td class="docs">
+</td><td class="codes"><pre class="brush: clojure">(defn- valid-str-form?
+  [str-form]
+  (and
+   (= (first str-form) 'str)
+   (every? string? (rest str-form))))</pre></td></tr><tr><td class="docs"><p>Make sure the right number of args were passed to <code>trs</code>/<code>tru</code> and related forms during macro expansion.</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- validate-number-of-args
+  [format-string-or-str args]
+  (let [format-string              (cond
+                                     (string? format-string-or-str) format-string-or-str
+                                     (valid-str-form? format-string-or-str) (apply str (rest format-string-or-str))
+                                     :else (assert false &quot;The first arg to (deferred-)trs/tru must be a String or a valid `str` form with String arguments!&quot;))
+        message-format             (MessageFormat. format-string)
+        ;; number of {n} placeholders in format string including any you may have skipped. e.g. &quot;{0} {2}&quot; -&gt; 3
+        expected-num-args-by-index (count (.getFormatsByArgumentIndex message-format))
+        ;; number of {n} placeholders in format string *not* including ones you make have skipped. e.g. &quot;{0} {2}&quot; -&gt; 2
+        expected-num-args          (count (.getFormats message-format))
+        actual-num-args            (count args)]
+    (assert (= expected-num-args expected-num-args-by-index)
+            (format &quot;(deferred-)trs/tru with format string %s is missing some {} placeholders. Expected %s. Did you skip any?&quot;
+                    (pr-str (.toPattern message-format))
+                    (str/join &quot;, &quot; (map (partial format &quot;{%d}&quot;) (range expected-num-args-by-index)))))
+    (assert (= expected-num-args actual-num-args)
+            (str (format &quot;(deferred-)trs/tru with format string %s expects %d args, got %d.&quot;
+                         (pr-str (.toPattern message-format)) expected-num-args actual-num-args)
+                 &quot; Did you forget to escape a single quote?&quot;))))</pre></td></tr><tr><td class="docs"><p>Similar to <code>tru</code> but creates a <code>UserLocalizedString</code> instance so that conversion to the correct locale can be delayed
+until it is needed. The user locale comes from the browser, so conversion to the localized string needs to be 'late
+bound' and only occur when the user's locale is in scope.</p>
 
-<p>The strings are formatted in <code>java.test.MessageFormat</code> style. That's used directly in JVM Clojure, but in CLJS we have
-to adapt to ttag, which doesn't have the same escaping rules.
-- 'xyz' single quotes wrap literal text which should not be interpolated, and could contain literal '{0}'.
-- A literal single quote is written with two single quotes: <code>''</code>
-The first part is not supported at all. <code>''</code> is converted to a single <code>'</code>.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn js-i18n
+<p>The first argument can be a format string, or a valid <code>str</code> form with all string arguments. The latter can be used to
+split a long string over multiple lines.</p>
+
+<p>Calling <code>str</code> on the results of this invocation will lookup the translated version of the string.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro deferred-tru
+  {:style/indent [:form]}
+  [format-string-or-str &amp; args]
+  (validate-number-of-args format-string-or-str args)
+  `(UserLocalizedString. ~format-string-or-str ~(vec args) {}))</pre></td></tr><tr><td class="docs"><p>Similar to <code>trs</code> but creates a <code>SiteLocalizedString</code> instance so that conversion to the correct locale can be
+delayed until it is needed. This is needed as the system locale from the JVM can be overridden/changed by a setting.</p>
+
+<p>The first argument can be a format string, or a valid <code>str</code> form with all string arguments. The latter can be used to
+split a long string over multiple lines.</p>
+
+<p>Calling <code>str</code> on the results of this invocation will lookup the translated version of the string.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro deferred-trs
+  {:style/indent [:form]}
   [format-string &amp; args]
-  (let [strings (-&gt; format-string
-                    escape-format-string
-                    (str/split #&quot;\{\d+\}&quot;))]
-    (apply ttag/t (clj-&gt;js strings) (clj-&gt;js args))))</pre></td></tr><tr><td class="docs">
-</td><td class="codes"><pre class="brush: clojure">(def ^:private re-param-zero #&quot;\{0\}&quot;)</pre></td></tr><tr><td class="docs"><p>Format an i18n <code>format-string</code> with the appropriate plural form based on the value <code>n</code>.
- Allows <code>n</code> to be interpolated into the string using {0}.</p>
-</td><td class="codes"><pre class="brush: clojure">(defn js-i18n-n
+  (validate-number-of-args format-string args)
+  `(SiteLocalizedString. ~format-string ~(vec args) {}))</pre></td></tr><tr><td class="docs"><p>Ensures that <code>trs</code>/<code>tru</code> isn't called prematurely, during compilation.</p>
+</td><td class="codes"><pre class="brush: clojure">(def ^String ^{:arglists '([&amp; args])} str*
+  (if *compile-files*
+    (fn [&amp; _]
+      (throw (Exception. &quot;Premature i18n string lookup. Is there a top-level call to `trs` or `tru`?&quot;)))
+    str))</pre></td></tr><tr><td class="docs"><p>Applies <code>str</code> to <code>deferred-tru</code>'s expansion.</p>
+
+<p>The first argument can be a format string, or a valid <code>str</code> form with all string arguments. The latter can be used to
+split a long string over multiple lines.</p>
+
+<p>Prefer this over <code>deferred-tru</code>. Use <code>deferred-tru</code> only in code executed at compile time, or where <code>str</code> is manually
+applied to the result.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro tru-clj
+  {:style/indent [:form]}
+  [format-string-or-str &amp; args]
+  `(str* (deferred-tru ~format-string-or-str ~@args)))</pre></td></tr><tr><td class="docs"><p>Applies <code>str</code> to <code>deferred-trs</code>'s expansion.</p>
+
+<p>The first argument can be a format string, or a valid <code>str</code> form with all string arguments. The latter can be used to
+split a long string over multiple lines.</p>
+
+<p>Prefer this over <code>deferred-trs</code>. Use <code>deferred-trs</code> only in code executed at compile time, or where <code>str</code> is manually
+applied to the result.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro trs-clj
+  {:style/indent [:form]}
+  [format-string-or-str &amp; args]
+  `(str* (deferred-trs ~format-string-or-str ~@args)))</pre></td></tr><tr><td class="docs"><p>Make sure that <code>trsn</code>/<code>trun</code> and related forms have valid format strings, with most one placeholder (for n)</p>
+</td><td class="codes"><pre class="brush: clojure">(defn- validate-n
+  [format-string format-string-pl]
+  (assert (and (string? format-string) (string? format-string-pl))
+          &quot;The first and second args to (deferred-)trsn/trun must be Strings!&quot;)
+  (let [validate (fn [format-string]
+                   (let [message-format    (MessageFormat. format-string)
+                         ;; number of {n} placeholders in format string including any you may have skipped. e.g. &quot;{0} {2}&quot; -&gt; 3
+                         num-args-by-index (count (.getFormatsByArgumentIndex message-format))
+                         ;; number of {n} placeholders in format string *not* including ones you make have skipped. e.g. &quot;{0} {2}&quot; -&gt; 2
+                         num-args          (count (.getFormats message-format))]
+                     (assert (and (&lt;= num-args-by-index 1) (&lt;= num-args 1))
+                             (format &quot;(deferred-)trsn/trun only supports a single {0} placeholder for the value `n`&quot;))))]
+    (validate format-string)
+    (validate format-string-pl)))</pre></td></tr><tr><td class="docs"><p>Similar to <code>deferred-tru</code> but chooses the appropriate singular or plural form based on the value of <code>n</code>.</p>
+
+<p>The first argument should be the singular form; the second argument should be the plural form, and the third argument
+should be <code>n</code>. <code>n</code> can be interpolated into the translated string using the <code>{0}</code> placeholder syntax, but no
+additional placeholders are supported.</p>
+
+<p>  (deferred-trun "{0} table" "{0} tables" n)</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro deferred-trun
   [format-string format-string-pl n]
-  (let [format-string-esc (escape-format-string format-string)
-        strings           (str/split format-string-esc re-param-zero)
-        strings           (if (= (count strings) 1)
-                            [format-string-esc &quot;&quot;]
-                            strings)
-        has-n?            (re-find #&quot;.*\{0\}.*&quot; format-string-esc)]
-    (ttag/ngettext (ttag/msgid (clj-&gt;js strings) (if has-n? n &quot;&quot;))
-                   (-&gt; format-string-pl
-                       escape-format-string
-                       (str/replace re-param-zero (str n)))
-                   n)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
+  (validate-n format-string format-string-pl)
+  `(UserLocalizedString. ~format-string ~[n] ~{:n n :format-string-pl format-string-pl}))</pre></td></tr><tr><td class="docs"><p>Similar to <code>tru</code> but chooses the appropriate singular or plural form based on the value of <code>n</code>.</p>
+
+<p>The first argument should be the singular form; the second argument should be the plural form, and the third argument
+should be <code>n</code>. <code>n</code> can be interpolated into the translated string using the <code>{0}</code> placeholder syntax, but no
+additional placeholders are supported.</p>
+
+<p>  (trun "{0} table" "{0} tables" n)</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro trun-clj
+  [format-string format-string-pl n]
+  `(str* (deferred-trun ~format-string ~format-string-pl ~n)))</pre></td></tr><tr><td class="docs"><p>Similar to <code>deferred-trs</code> but chooses the appropriate singular or plural form based on the value of <code>n</code>.</p>
+
+<p>The first argument should be the singular form; the second argument should be the plural form, and the third argument
+should be <code>n</code>. <code>n</code> can be interpolated into the translated string using the <code>{0}</code> placeholder syntax, but no
+additional placeholders are supported.</p>
+
+<p>  (deferred-trsn "{0} table" "{0} tables" n)</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro deferred-trsn
+  [format-string format-string-pl n]
+  (validate-n format-string format-string-pl)
+  `(SiteLocalizedString. ~format-string ~[n] ~{:n n :format-string-pl format-string-pl}))</pre></td></tr><tr><td class="docs"><p>Similar to <code>trs</code> but chooses the appropriate singular or plural form based on the value of <code>n</code>.</p>
+
+<p>The first argument should be the singular form; the second argument should be the plural form, and the third argument
+should be <code>n</code>. <code>n</code> can be interpolated into the translated string using the <code>{0}</code> placeholder syntax, but no
+additional placeholders are supported.</p>
+
+<p>  (trsn "{0} table" "{0} tables" n)</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro trsn-clj
+  [format-string format-string-pl n]
+  `(str* (deferred-trsn ~format-string ~format-string-pl ~n)))</pre></td></tr><tr><td class="docs"><p>Returns true if <code>x</code> is a system or user localized string instance</p>
+</td><td class="codes"><pre class="brush: clojure">(defn localized-string?
+  [x]
+  (boolean (some #(instance? % x) [UserLocalizedString SiteLocalizedString])))</pre></td></tr><tr><td class="docs"><p>Walks the datastructure <code>x</code> and converts any localized strings to regular string</p>
+</td><td class="codes"><pre class="brush: clojure">(defn localized-strings-&gt;strings
+  [x]
+  (walk/postwalk (fn [node]
+                   (cond-&gt; node
+                     (localized-string? node) str))
+                 x))</pre></td></tr><tr><td class="docs"><p>Clojure/ClojureScript macros</p>
+</td><td class="codes"></td></tr><tr><td class="docs"><p>i18n a string with the user's locale. Format string will be translated to the user's locale when the form is eval'ed.
+Placeholders should use <code>gettext</code> format e.g. <code>{0}</code>, <code>{1}</code>, and so forth.</p>
+
+<p>  (tru "Number of cans: {0}" 2)</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro tru
+  {:style/indent [:form]}
+  [format-string &amp; args]
+  (macros/case
+    :clj
+    `(tru-clj ~format-string ~@args)
+    :cljs
+    `(js-i18n ~format-string ~@args)))</pre></td></tr><tr><td class="docs"><p>i18n a string with the site's locale, when called from Clojure. Format string will be translated to the site's
+locale when the form is eval'ed. Placeholders should use <code>gettext</code> format e.g. <code>{0}</code>, <code>{1}</code>, and so forth.</p>
+
+<p>  (trs "Number of cans: {0}" 2)</p>
+
+<p>NOTE: When called from ClojureScript, this function behaves identically to <code>tru</code>. The originating JS callsite must
+temporarily override the locale used by ttag using the <code>withInstanceLocalization</code> wrapper function.</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro trs
+  {:style/indent [:form]}
+  [format-string &amp; args]
+  (macros/case
+    :clj
+    `(trs-clj ~format-string ~@args)
+    :cljs
+    `(js-i18n ~format-string ~@args)))</pre></td></tr><tr><td class="docs"><p>i18n a string with both singular and plural forms, using the current user's locale. The appropriate plural form will
+be returned based on the value of <code>n</code>. <code>n</code> can be interpolated into the format strings using the <code>{0}</code>
+syntax. (Other placeholders are not supported).</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro trun
+  {:style/indent [:form]}
+  [format-string format-string-pl n]
+  (macros/case
+    :clj
+    `(trun-clj ~format-string ~format-string-pl ~n)
+    :cljs
+    `(js-i18n-n ~format-string ~format-string-pl ~n)))</pre></td></tr><tr><td class="docs"><p>i18n a string with both singular and plural forms, using the site's locale. The appropriate plural form will be
+returned based on the value of <code>n</code>. <code>n</code> can be interpolated into the format strings using the <code>{0}</code> syntax. (Other
+placeholders are not supported).</p>
+</td><td class="codes"><pre class="brush: clojure">(defmacro trsn
+  {:style/indent [:form]}
+  [format-string format-string-pl n]
+  (macros/case
+    :clj
+    `(trsn-clj ~format-string ~format-string-pl ~n)
+    :cljs
+    `(js-i18n-n ~format-string ~format-string-pl ~n)))</pre></td></tr><tr><td class="spacer docs">&nbsp;</td><td class="codes" /></tr></table><div class="footer">Generated by <a href="https://github.com/clj-commons/marginalia">Marginalia</a>.&nbsp;&nbsp;Syntax highlighting provided by Alex Gorbatchev's <a href="http://alexgorbatchev.com/SyntaxHighlighter/">SyntaxHighlighter</a></div><script type="text/javascript">SyntaxHighlighter.defaults['gutter'] = false;
 SyntaxHighlighter.all();
 
 // hackity hack
