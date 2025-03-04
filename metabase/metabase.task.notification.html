@@ -2868,6 +2868,7 @@ net.brehaut.ClojureTools = (function (SH) {
 </script><title>Metabase -- Marginalia</title></head><body><table><tr><td class="docs"><div class="docs-header"><a class="anchor" href="#metabase.task.notification" name="metabase.task.notification"><h1 class="project-name">metabase.task.notification</h1><a class="toc-link" href="toc.html">toc</a></a></div></td><td class="codes" /></tr><tr><td class="docs">
 </td><td class="codes"><pre class="brush: clojure">(ns metabase.task.notification
   (:require
+   [clojure.data :refer [diff]]
    [clojurewerkz.quartzite.conversion :as qc]
    [clojurewerkz.quartzite.jobs :as jobs]
    [clojurewerkz.quartzite.schedule.cron :as cron]
@@ -2997,8 +2998,16 @@ net.brehaut.ClojureTools = (function (SH) {
 </td><td class="codes"><pre class="brush: clojure">(defn init-send-notification-triggers!
   []
   (assert (task/scheduler) &quot;Scheduler must be started before initializing SendPulse triggers&quot;)
-  (task/delete-all-triggers-of-job! send-notification-job-key)
-  (run! create-new-trigger! (t2/reducible-select :model/NotificationSubscription :type :notification-subscription/cron)))</pre></td></tr><tr><td class="docs"><p>Find all notification subscriptions with cron schedules and create a trigger for each.
+  ;; Get all existing triggers and subscription IDs
+  (let [existing-triggers                  (:triggers (task/job-info send-notification-job-key))
+        existing-triggers-subscription-ids (map #(get-in % [:data &quot;subscription-id&quot;]) existing-triggers)
+        subscription-id-&gt;cron              (t2/select-pk-&gt;fn identity :model/NotificationSubscription :type :notification-subscription/cron)
+        db-subscription-ids                (keys subscription-id-&gt;cron)
+        [to-delete to-create _to-skip]     (diff existing-triggers-subscription-ids db-subscription-ids)]
+    (doseq [subscription-id to-delete]
+      (delete-trigger-for-subscription! subscription-id))
+    (doseq [subscription-id to-create]
+      (create-new-trigger! (get subscription-id-&gt;cron subscription-id)))))</pre></td></tr><tr><td class="docs"><p>Find all notification subscriptions with cron schedules and create a trigger for each.
   Run once on startup.</p>
 </td><td class="codes"><pre class="brush: clojure">(jobs/defjob
   InitNotificationTriggers
